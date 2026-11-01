@@ -947,4 +947,52 @@ mod tests {
         check_buildings(&w);
         assert!(diagonal(&w) > 0);
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// チャンクの境目のまわりで、斜めを含む道路を引く・消す・分ける、区画を塗る、時間を進めるを
+        /// 任意に並べても、毎回、増分の候補が全体から作り直したものと一致し、建物が網と食い違わない。
+        #[test]
+        fn lot_fronts_match_a_full_rebuild_across_chunk_borders(
+            edits in proptest::collection::vec(
+                (0_u8..6, 0_usize..4, -8_i64..8, -8_i64..8, -1_i64..=1, -1_i64..=1, 1_i64..10),
+                1..24,
+            )
+        ) {
+            let mut w = World::new(0);
+            w.money = Money(1_000_000_000);
+            // 間口のマスと、道路の側の 2 マスが別のチャンクに分かれるよう、境目の角のまわりを使う。
+            let corners = [(0, 0), (64, 0), (0, 64), (64, 64)];
+            for (op, c, dx, dy, sx, sy, len) in edits {
+                let (x, y) = (corners[c].0 + dx, corners[c].1 + dy);
+                match op {
+                    0 => {
+                        let area = rect((x, y), (x + len / 3, y + len / 3));
+                        w.apply(&Command::Bulldoze { area });
+                    }
+                    1 => {
+                        let zone = [None, Some(ZoneKind::Residential), Some(ZoneKind::Industrial)]
+                            [(sx + 1) as usize];
+                        w.apply(&Command::PaintZone {
+                            area: rect((x - len, y - len), (x + len, y + len)),
+                            zone,
+                        });
+                    }
+                    2 => run(&mut w, GROWTH_INTERVAL),
+                    _ if (sx, sy) != (0, 0) => {
+                        // 斜めを多めに引く。縦横の道路を引くと、斜めの区間を分けることもある。
+                        let (sx, sy) = if op == 3 && sx * sy == 0 { (sx | 1, sy | 1) } else { (sx, sy) };
+                        w.apply(&Command::BuildRoad {
+                            from: TilePos::new(x, y),
+                            to: TilePos::new(x + sx * len, y + sy * len),
+                            kind: RoadKind::Small,
+                        });
+                    }
+                    _ => {}
+                }
+                check_buildings(&w);
+            }
+        }
+    }
 }
