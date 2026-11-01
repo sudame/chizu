@@ -24,11 +24,19 @@ pub struct Scratch {
     parent: Vec<u32>,
     closed: Vec<bool>,
     heap: BinaryHeap<Reverse<(u64, u64, u32)>>,
+    /// 配列を作り直した回数。
+    allocations: u32,
 }
 
 impl Scratch {
+    /// 配列を作り直した回数。グラフの頂点の数が変わるたびに増える。
+    pub fn allocations(&self) -> u32 {
+        self.allocations
+    }
+
     fn reset(&mut self, n: usize) {
         if self.seen.len() != n || self.stamp == u32::MAX {
+            self.allocations = self.allocations.saturating_add(1);
             self.seen = vec![0; n];
             self.dist = vec![0; n];
             self.parent = vec![0; n];

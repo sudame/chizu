@@ -91,9 +91,11 @@ fn departures(net: &Network, n: NodeId, mode: LaneMode) -> Vec<LinkId> {
         .collect()
 }
 
-/// 曲がり先 `to` に進めるか。車は行き止まりでだけ折り返せる。歩行者はどこでも折り返せる。
-fn may_turn(from: LinkId, to: LinkId, out_count: usize) -> bool {
-    from.segment != to.segment || from.mode == LaneMode::Sidewalk || out_count == 1
+/// ノード `n` で、`from` から曲がり先 `to` に進めるか。車は行き止まりでだけ折り返せる。
+/// ただし「外の世界」ノードは出入りする所なので、車はそこで折り返さない。歩行者はどこでも折り返せる。
+fn may_turn(net: &Network, n: NodeId, from: LinkId, to: LinkId, out_count: usize) -> bool {
+    let dead_end = out_count == 1 && !net.node(n).expect("ノードがない").outside;
+    from.segment != to.segment || from.mode == LaneMode::Sidewalk || dead_end
 }
 
 impl Graph {
@@ -123,9 +125,10 @@ impl Graph {
         let mut edges = Vec::new();
         edge_start.push(0);
         for l in &links {
-            let out = departures(net, link_ends(net, *l).1, mode);
+            let node = link_ends(net, *l).1;
+            let out = departures(net, node, mode);
             for to in &out {
-                if may_turn(*l, *to, out.len()) {
+                if may_turn(net, node, *l, *to, out.len()) {
                     let to = links.binary_search(to).expect("グラフにないリンク");
                     edges.push(Edge {
                         to: u32::try_from(to).expect("頂点が u32 に収まらない"),
@@ -210,7 +213,10 @@ pub fn connectors(net: &Network) -> Vec<Connector> {
             let node = link_ends(net, from).1;
             let next = departures(net, node, mode);
             let from_lanes: Vec<LaneId> = net.link_lanes(from).collect();
-            for to in next.iter().filter(|t| may_turn(from, **t, next.len())) {
+            for to in next
+                .iter()
+                .filter(|t| may_turn(net, node, from, **t, next.len()))
+            {
                 let to_lanes: Vec<LaneId> = net.link_lanes(*to).collect();
                 let last_from = from_lanes.len() - 1;
                 let last_to = to_lanes.len() - 1;

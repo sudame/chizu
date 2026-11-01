@@ -70,11 +70,19 @@ pub fn city_grid_100k() -> Network {
 
 /// `count` 人ぶんの、家から職場への車の通勤の依頼。
 ///
-/// 家はすべての車のリンクから一様に選ぶ。職場は車のリンクの 1/10 に集まっているとし、そこから一様に選ぶ。
+/// 家はすべての車のリンクから一様に選ぶ。職場は車のリンクの約 1/10 に集まっているとし、そこから一様に選ぶ。
+/// 職場のリンクは 1 本ずつ 1/10 の確率で選ぶので、区間の向きに片寄らない。
 pub fn commute_requests(seed: u64, net: &Network, count: u32) -> Vec<RouteRequest> {
     let links: Vec<LinkId> = net.links().filter(|l| l.mode == LaneMode::Car).collect();
     let len = u32::try_from(links.len()).expect("リンクが多すぎる");
-    let offices: Vec<LinkId> = links.iter().copied().step_by(10).collect();
+    let mut offices: Vec<LinkId> = (0_u64..)
+        .zip(&links)
+        .filter(|(i, _)| rng(seed, RngPurpose::JobAssignment, *i, Tick(1)).chance(1, 10))
+        .map(|(_, l)| *l)
+        .collect();
+    if offices.is_empty() {
+        offices.extend(links.first());
+    }
     let office_len = u32::try_from(offices.len()).expect("リンクが多すぎる");
     (0..count)
         .map(|i| {
@@ -91,6 +99,7 @@ pub fn commute_requests(seed: u64, net: &Network, count: u32) -> Vec<RouteReques
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chizu_core::Dir;
     use chizu_core::routing::{AstarRouter, Router};
 
     #[test]
@@ -101,6 +110,11 @@ mod tests {
         assert_eq!(reqs, commute_requests(1, &n, 500));
         let routes = AstarRouter::new(&n).route_batch(&reqs);
         assert!(routes.iter().all(Option::is_some));
+        let forward = reqs.iter().filter(|r| r.to.dir == Dir::Forward).count();
+        assert!(
+            (150..350).contains(&forward),
+            "職場の向きが片寄った {forward}"
+        );
     }
     use chizu_core::state_hash_of;
 

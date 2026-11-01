@@ -180,6 +180,27 @@ fn cars_reach_the_outside_by_the_highway_and_pedestrians_do_not() {
 }
 
 #[test]
+fn cars_do_not_turn_back_at_the_outside() {
+    // 輪の道路に短い高速道路と、遠い行き止まりの枝がつながっている。
+    let mut n = Network::new();
+    n.add_highway(TilePos::new(0, 0), TilePos::new(-2, 0));
+    road(&mut n, (0, 0), (10, 0), RoadKind::Small);
+    road(&mut n, (10, 0), (10, 10), RoadKind::Small);
+    road(&mut n, (10, 10), (0, 10), RoadKind::Small);
+    road(&mut n, (0, 10), (0, 0), RoadKind::Small);
+    road(&mut n, (10, 10), (10, 30), RoadKind::Small);
+    let east = link(&n, (0, 0), (10, 0), LaneMode::Car);
+    let west = link(&n, (10, 0), (0, 0), LaneMode::Car);
+    let r = find(&n, east, west).unwrap();
+    let highway = link(&n, (0, 0), (-2, 0), LaneMode::Car).segment;
+    assert!(r.links.iter().all(|l| l.segment != highway), "{r:?}");
+    assert!(
+        r.links
+            .contains(&link(&n, (10, 30), (10, 10), LaneMode::Car))
+    );
+}
+
+#[test]
 fn every_lane_is_connected_at_the_node_it_reaches() {
     let mut n = Network::new();
     road(&mut n, (0, 0), (10, 0), RoadKind::Large);
@@ -254,6 +275,32 @@ fn batch_returns_results_in_request_order_and_reuses_them() {
     router.rebuild(&n);
     assert_eq!((router.band(), router.cached()), (1, 0));
     assert_eq!(router.route_batch(&reqs), got);
+}
+
+#[test]
+fn mixed_modes_do_not_reallocate_the_scratch() {
+    // 高速道路があると、車と歩行者でグラフの頂点の数が違う。
+    let mut n = grid(4);
+    n.add_highway(TilePos::new(0, 0), TilePos::new(-20, 0));
+    let router = AstarRouter::new(&n);
+    assert_ne!(
+        router.graph(LaneMode::Car).vertex_count(),
+        router.graph(LaneMode::Sidewalk).vertex_count()
+    );
+    let mut reqs: Vec<RouteRequest> = n
+        .links()
+        .map(|l| RouteRequest {
+            from: l,
+            to: l,
+            mode: l.mode,
+        })
+        .collect();
+    reqs.sort();
+    let mut s = Scratches::default();
+    for r in &reqs {
+        router.solve(r, &mut s);
+    }
+    assert_eq!((s.car.allocations(), s.walk.allocations()), (1, 1));
 }
 
 #[cfg(feature = "parallel")]

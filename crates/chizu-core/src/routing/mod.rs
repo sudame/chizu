@@ -44,6 +44,22 @@ pub trait Router {
     fn route_batch(&mut self, requests: &[RouteRequest]) -> Vec<Option<Arc<Route>>>;
 }
 
+/// 手段ごとの作業領域。車と歩行者でグラフの頂点の数が違うので、手段が替わるたびに作り直さないよう 1 組ずつ持つ。
+#[derive(Clone, Debug, Default)]
+struct Scratches {
+    car: Scratch,
+    walk: Scratch,
+}
+
+impl Scratches {
+    fn get(&mut self, mode: LaneMode) -> &mut Scratch {
+        match mode {
+            LaneMode::Car => &mut self.car,
+            LaneMode::Sidewalk => &mut self.walk,
+        }
+    }
+}
+
 /// A* で解き、`(出発のリンク, 着くリンク, 手段)` ごとに結果を覚える方式。時間帯は覚える範囲を区切る。
 #[derive(Clone, Debug)]
 pub struct AstarRouter {
@@ -86,8 +102,8 @@ impl AstarRouter {
         self.cache.len()
     }
 
-    fn solve(&self, r: &RouteRequest, s: &mut Scratch) -> Option<Arc<Route>> {
-        astar(self.graph(r.mode), r.from, r.to, s).map(Arc::new)
+    fn solve(&self, r: &RouteRequest, s: &mut Scratches) -> Option<Arc<Route>> {
+        astar(self.graph(r.mode), r.from, r.to, s.get(r.mode)).map(Arc::new)
     }
 }
 
@@ -120,11 +136,11 @@ impl Router for AstarRouter {
         #[cfg(feature = "parallel")]
         let solved: Vec<_> = misses
             .par_iter()
-            .map_init(Scratch::default, |s, r| this.solve(r, s))
+            .map_init(Scratches::default, |s, r| this.solve(r, s))
             .collect();
         #[cfg(not(feature = "parallel"))]
         let solved: Vec<_> = {
-            let mut s = Scratch::default();
+            let mut s = Scratches::default();
             misses.iter().map(|r| this.solve(r, &mut s)).collect()
         };
         self.cache.extend(misses.into_iter().zip(solved));
