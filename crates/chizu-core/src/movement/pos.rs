@@ -68,12 +68,25 @@ impl SidewalkPos {
 
     /// 歩道のリンク `link` の、始まりから `offset` の位置。リンクがなければ `None`。
     pub fn on_link(net: &Network, link: LinkId, offset: LaneOffset) -> Option<SidewalkPos> {
+        (link.mode == LaneMode::Sidewalk)
+            .then(|| Self::on_any_link(net, link, offset))
+            .flatten()
+    }
+
+    /// 歩道か車のリンク `link` の、始まりから `offset` の位置。車のリンクの位置は、同じ区間の
+    /// 同じ向きの歩道の位置と同じ表し方になる。
+    pub fn on_any_link(net: &Network, link: LinkId, offset: LaneOffset) -> Option<SidewalkPos> {
         let (start, step, len) = link_geometry(net, link)?;
-        (link.mode == LaneMode::Sidewalk && offset <= len).then(|| Self::along(start, step, offset))
+        (offset <= len).then(|| Self::along(start, step, offset))
     }
 
     /// いまの網の上で、この位置を通る歩道のリンクと、その始まりからの距離。歩道がなければ `None`。
     pub fn resolve(&self, net: &Network) -> Option<(LinkId, LaneOffset)> {
+        self.resolve_on(net, LaneMode::Sidewalk)
+    }
+
+    /// いまの網の上で、この位置を通る `mode` のリンクと、その始まりからの距離。
+    pub fn resolve_on(&self, net: &Network, mode: LaneMode) -> Option<(LinkId, LaneOffset)> {
         let next = shift(self.tile, self.step, 1);
         let per = step_mm(self.step);
         if self.along.0 > per {
@@ -95,9 +108,9 @@ impl SidewalkPos {
                 let link = LinkId {
                     segment: *s,
                     dir,
-                    mode: LaneMode::Sidewalk,
+                    mode,
                 };
-                seg.kind.has_sidewalks().then_some(())?;
+                (mode == LaneMode::Car || seg.kind.has_sidewalks()).then_some(())?;
                 let steps = match dir {
                     Dir::Forward => k,
                     Dir::Backward => line.len - k,
