@@ -62,28 +62,51 @@ fn check_spacing(trips: &Trips) {
 }
 
 #[test]
-fn a_car_accelerates_to_the_limit_and_stops_at_the_destination() {
+fn a_car_accelerates_to_the_limit_and_slows_down_to_the_destination() {
     let mut n = Network::new();
-    road(&mut n, (0, 0), (100, 0), RoadKind::Small);
+    n.add_highway(TilePos::new(0, 0), TilePos::new(200, 0));
     let mut c = Cars::new(n);
-    let id = c.drive(at(0, 0, (1, 0), 0), at(89, 0, (1, 0), 8_000));
-    // 時速 40km の道路で、1 tick に 2,500mm/tick ずつ速くし、着く位置でちょうど止まる。
-    let (mut pos, mut v, mut ticks) = (0_i32, 0_i32, 0);
-    while pos < 720_000 {
-        v = (v + CAR_ACCEL).min(11_111).min(720_000 - pos);
-        pos += v;
+    let id = c.drive(at(0, 0, (1, 0), 0), at(150, 0, (1, 0), 0));
+    // 時速 100km まで、1 tick に 2,500mm/tick ずつ速くする。
+    let mut speeds = vec![0];
+    let mut arrived = false;
+    for _ in 0..400 {
+        if c.step().contains(&id) {
+            arrived = true;
+            break;
+        }
+        speeds.push(c.trips.get(id).unwrap().speed().0);
+    }
+    assert!(arrived);
+    assert_eq!(&speeds[1..4], [2_500, 5_000, 7_500]);
+    assert!(speeds.contains(&27_778));
+    // 着く位置の手前で、減速の上限を超えずに速さを落とす。
+    for w in speeds.windows(2) {
+        assert!(w[0] - w[1] <= CAR_DECEL, "{w:?}");
+    }
+}
+
+#[test]
+fn a_car_behind_a_stopped_car_slows_down_gradually() {
+    // 時速 100km で、200m 先に止まった車がある。最高速度からでも 1 tick では止まらず、
+    // 減速の上限を守って、前の車の 7m 手前までに止まる。
+    let leader = LaneOffset(200_000);
+    let (mut pos, mut v) = (0_i64, 27_778_i64);
+    let mut ticks = 0;
+    while v > 0 || ticks == 0 {
+        let me = LaneOffset(u32::try_from(pos).unwrap());
+        let room = i64::from(leader.0) - i64::from(CAR_LENGTH + MIN_GAP) - pos;
+        let next = (v + i64::from(CAR_ACCEL))
+            .min(27_778)
+            .min(car::safe_speed(me, leader, MmPerTick::ZERO))
+            .min(room)
+            .max(0);
+        assert!(v - next <= i64::from(CAR_DECEL), "{v} から {next}");
+        (pos, v) = (pos + next, next);
         ticks += 1;
     }
-    for t in 1..=ticks {
-        let arrived = c.step();
-        assert_eq!(arrived.contains(&id), t == ticks, "{t}");
-        if t == 3 {
-            assert_eq!(c.trips.get(id).unwrap().speed(), MmPerTick(7_500));
-        }
-        if t == 10 {
-            assert_eq!(c.trips.get(id).unwrap().speed(), MmPerTick(11_111));
-        }
-    }
+    assert!(ticks > 5);
+    assert!(pos <= i64::from(leader.0 - CAR_LENGTH - MIN_GAP));
 }
 
 #[test]
@@ -115,18 +138,24 @@ fn a_car_waits_at_the_node_until_the_next_lane_has_room() {
     let y = c.drive(at(10, 0, (1, 0), 1_000), at(29, 0, (1, 0), 0));
     let first = c.trips.get(x).unwrap().link();
     c.step();
-    // y は 3,500mm まで進んだだけなので、x は入れずにリンクの終わりで止まる。
+    // y がまだ近いので、x はリンクの終わりを越えずに止まって待つ。
     let tx = c.trips.get(x).unwrap();
     assert_eq!(
         (tx.link(), tx.offset(), tx.speed()),
-        (first, LaneOffset(80_000), MmPerTick::ZERO)
+        (first, LaneOffset(79_000), MmPerTick::ZERO)
     );
-    assert_eq!(c.trips.get(y).unwrap().offset(), LaneOffset(3_500));
-    c.step();
-    // y が 8,500mm まで進み、x は y の 7,000mm 後ろの 1,500mm に入る。
-    let tx = c.trips.get(x).unwrap();
-    assert_ne!(tx.link(), first);
-    assert_eq!(tx.offset(), LaneOffset(1_500));
+    let mut entered = None;
+    for t in 2..10 {
+        c.step();
+        let tx = c.trips.get(x).unwrap();
+        if tx.link() != first {
+            entered = Some(t);
+            break;
+        }
+        assert!(tx.offset() <= LaneOffset(80_000));
+    }
+    assert!(entered.is_some(), "空いても入らない");
+    let _ = y;
 }
 
 #[test]
@@ -163,10 +192,26 @@ fn lane_choice_prefers_lanes_that_reach_the_turn_after() {
     let mut conn: Vec<Connector> = mid_lanes.iter().map(|l| c(node(10, 0), from, *l)).collect();
     conn.push(c(node(20, 0), mid_lanes[2], north_lane));
     conn.sort();
-    let got = car::choose_lane(&n, &conn, from, node(10, 0), mid, Some(north));
+    let got = car::choose_lane(
+        &n,
+        &conn,
+        &car::LaneState::default(),
+        from,
+        node(10, 0),
+        mid,
+        Some(north),
+    );
     assert_eq!(got, mid_lanes[2]);
     // 曲がり先へつながる車線がなければ、番号の小さい車線に入る。
-    let got = car::choose_lane(&n, &conn[..3], from, node(10, 0), mid, Some(north));
+    let got = car::choose_lane(
+        &n,
+        &conn[..3],
+        &car::LaneState::default(),
+        from,
+        node(10, 0),
+        mid,
+        Some(north),
+    );
     assert_eq!(got, mid_lanes[0]);
 }
 
@@ -265,4 +310,89 @@ fn car_positions_resolve_on_the_car_link_of_the_same_side() {
         (walk.segment, Dir::Backward, LaneMode::Car)
     );
     assert_eq!(off, woff);
+}
+
+#[test]
+fn a_car_entering_behind_a_held_car_keeps_its_distance() {
+    // 短いリンク A の先の C の入口に車がいて、A の終わりの車が待たされているところへ、B から車が入る。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0), RoadKind::Small);
+    road(&mut n, (10, 0), (11, 0), RoadKind::Small);
+    road(&mut n, (11, 0), (30, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    c.drive(at(11, 0, (1, 0), 500), at(29, 0, (1, 0), 0));
+    c.drive(at(10, 0, (1, 0), 7_000), at(29, 0, (1, 0), 0));
+    c.drive(at(9, 0, (1, 0), 7_900), at(29, 0, (1, 0), 0));
+    let mut arrived = 0;
+    for _ in 0..60 {
+        arrived += c.step().len();
+    }
+    assert_eq!(arrived, 3);
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+    #[test]
+    fn queues_at_an_intersection_keep_their_distance(
+        west in proptest::collection::btree_set(0_i64..9, 0..9),
+        north in proptest::collection::btree_set(0_i64..9, 0..9),
+        along in 0_u32..1_000,
+    ) {
+        // 西と北から来た車が、交差点で東へ合流する。
+        let mut n = Network::new();
+        road(&mut n, (0, 0), (10, 0), RoadKind::Small);
+        road(&mut n, (10, 0), (12, 0), RoadKind::Small);
+        road(&mut n, (12, 0), (30, 0), RoadKind::Small);
+        road(&mut n, (10, -10), (10, 0), RoadKind::Small);
+        let mut c = Cars::new(n);
+        let dest = at(29, 0, (1, 0), 0);
+        let mut drives: Vec<_> = west.iter().map(|x| (at(*x, 0, (1, 0), along), dest)).collect();
+        drives.extend(north.iter().map(|y| (at(10, y - 10, (0, 1), along), dest)));
+        let ids = c.trips.spawn_drives(&c.net, &mut c.router, &drives, Tick::ZERO);
+        proptest::prop_assert!(ids.iter().all(Option::is_some));
+        let mut arrived = 0;
+        for _ in 0..200 {
+            arrived += c.step().len();
+        }
+        proptest::prop_assert_eq!(arrived, drives.len());
+    }
+}
+
+#[test]
+fn cars_use_more_than_the_first_lane_on_large_roads() {
+    let mut n = Network::new();
+    for i in 0..=3 {
+        road(&mut n, (0, i * 12), (36, i * 12), RoadKind::Large);
+        road(&mut n, (i * 12, 0), (i * 12, 36), RoadKind::Large);
+    }
+    let mut c = Cars::new(n);
+    let drives: Vec<_> = (0..90_i64)
+        .map(|k| {
+            (
+                at(k % 36, 12 * (k % 3), (1, 0), 0),
+                at(36, (k * 5) % 36, (0, 1), 0),
+            )
+        })
+        .collect();
+    let ids = c
+        .trips
+        .spawn_drives(&c.net, &mut c.router, &drives, Tick::ZERO);
+    assert!(ids.iter().all(Option::is_some));
+    let mut used = std::collections::BTreeSet::new();
+    for _ in 0..60 {
+        c.step();
+        for (_, t) in c
+            .trips
+            .iter()
+            .filter(|(_, t)| t.route().links[0] != t.link())
+        {
+            let k = c
+                .net
+                .link_lanes(t.link())
+                .position(|l| l == t.lane())
+                .unwrap();
+            used.insert(k);
+        }
+    }
+    assert!(used.len() >= 2, "移ったあとの車線 {used:?}");
 }
