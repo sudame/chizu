@@ -2,6 +2,7 @@
 
 pub mod command_input;
 pub mod movers;
+pub mod save;
 pub mod sim;
 pub mod snapshot;
 
