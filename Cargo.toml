@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/chizu-cli", "crates/chizu-core", "crates/chizu-scenario", "crates/chizu-wasm"]
+members = [
+  "crates/chizu-bench-wasm",
+  "crates/chizu-cli",
+  "crates/chizu-core",
+  "crates/chizu-scenario",
+  "crates/chizu-wasm",
+]
 
 [workspace.package]
 edition = "2024"
@@ -8,6 +14,13 @@ publish = false
 
 [profile.release]
 overflow-checks = true
+
+# WASM のビルドだけに使う。WASM が速く小さくなる。決めた理由は docs/design.md の 7.3 にある。
+# ネイティブのベンチと CI のビルドが遅くならないように、release には入れない
+[profile.wasm-release]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
 
 # ゴールデンのテストは毎 tick 状態ハッシュをとるので、テストも最適化して回す。
 # dev の profile なので、overflow-checks と debug-assertions は有効なままである。

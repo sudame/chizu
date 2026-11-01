@@ -27,6 +27,8 @@ pub enum RngPurpose {
     DailySchedule = 5,
     /// 外部接続の幹線の生成。
     TrunkLine = 6,
+    /// 幸福度の低い世帯が街を出ていく。
+    Emigration = 7,
 }
 
 const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;

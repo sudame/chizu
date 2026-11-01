@@ -8,6 +8,8 @@ use chizu_core::{
 };
 use chizu_core::{LaneOffset, SidewalkPos};
 
+pub mod perf;
+
 pub use chizu_core::citizens::MAX_HOUSEHOLD_SIZE;
 
 /// 種 `seed` から `count` 人の合成の住民と世帯を作る。
@@ -47,7 +49,7 @@ pub fn serviced_grid_city(seed: u64) -> World {
 
 /// 開始地点を中心とする (2 × `radius` + 1) 四方のチャンクの格子の街。
 fn grid_city(seed: u64, radius: i32, serviced: bool) -> World {
-    let mut w = World::new_with_money(seed, Money(1_000_000_000));
+    let mut w = World::new_with_money(seed, Money(1_000_000_000)).with_unlimited_land();
     for ring in 2..=radius {
         for cy in -ring..=ring {
             for cx in -ring..=ring {

@@ -3,6 +3,8 @@
 //! 建物は区画の上に、需要に応じて自然に建ち、時間がたつと段階が上がる。建つ・育つ処理は
 //! `world::growth` にある。ここには表と、大きさと段階から決まる値だけを置く。
 
+use std::collections::BTreeSet;
+
 use crate::command::ZoneKind;
 use crate::id::{BuildingId, Slots};
 use crate::network::LinkId;
@@ -70,6 +72,11 @@ impl Building {
         };
         (self.tile_count() * per_four_tiles * u64::from(self.level)).div_ceil(4)
     }
+
+    /// 駐車場の台数。1 マスに段階の数だけ停められる。
+    pub fn parking_spaces(&self) -> u64 {
+        self.tile_count() * u64::from(self.level)
+    }
 }
 
 impl StateHash for Building {
@@ -97,9 +104,30 @@ impl StateHash for Building {
 pub struct Buildings {
     slots: Slots,
     rows: Vec<Option<Building>>,
+    /// `front` の (y, x) で引く索引。行から作り直せるので状態ハッシュには入れない。
+    by_front: BTreeSet<(i64, i64, BuildingId)>,
 }
 
 impl Buildings {
+    /// `front` が `area` の中にある建物を、`front` の (y, x) の順に返す。
+    pub fn fronts_in(&self, area: TileRect) -> impl Iterator<Item = BuildingId> + '_ {
+        let (lo, hi) = (
+            BuildingId {
+                index: 0,
+                generation: 0,
+            },
+            BuildingId {
+                index: u32::MAX,
+                generation: u16::MAX,
+            },
+        );
+        (area.min.y..=area.max.y).flat_map(move |y| {
+            self.by_front
+                .range((y, area.min.x, lo)..=(y, area.max.x, hi))
+                .map(|k| k.2)
+        })
+    }
+
     pub fn get(&self, id: BuildingId) -> Option<&Building> {
         if !self.slots.contains(id.index, id.generation) {
             return None;
@@ -132,6 +160,8 @@ impl Buildings {
 
     pub(crate) fn insert(&mut self, b: Building) -> BuildingId {
         let ((index, generation), fresh) = self.slots.alloc();
+        self.by_front
+            .insert((b.front.y, b.front.x, BuildingId { index, generation }));
         if fresh {
             self.rows.push(Some(b));
         } else {
@@ -144,7 +174,9 @@ impl Buildings {
         if !self.slots.release(id.index, id.generation) {
             return None;
         }
-        self.rows[id.slot()].take()
+        let b = self.rows[id.slot()].take()?;
+        self.by_front.remove(&(b.front.y, b.front.x, id));
+        Some(b)
     }
 
     /// 区画の種類ごとの、世帯の数と職場の数の合計。
@@ -176,6 +208,17 @@ pub struct ZoneTotals {
 /// 街の外から住みたい人が来る、いつもある需要。空き家が埋まっていれば、街はこの需要で育ち続ける。
 pub const BASE_RESIDENTIAL_DEMAND: i64 = 30;
 
+/// 住宅の需要に幸福度を効かせる強さ。平均の幸福度と中立の値との差をこの数で割って足す。
+const HAPPINESS_DEMAND_DIVISOR: i64 = 4;
+
+/// 住宅の需要のうち、幸福度から来る分。平均の幸福度が中立より高ければ正、低ければ負である。
+pub fn happiness_pull(happiness: u8) -> i64 {
+    let neutral = i64::from(crate::happiness::total(
+        crate::citizens::HappinessParts::NEUTRAL,
+    ));
+    crate::round::div_floor(i64::from(happiness) - neutral, HAPPINESS_DEMAND_DIVISOR)
+}
+
 /// 働き手がいないうちから、工業が建ち始めるための需要。
 const BASE_INDUSTRIAL_DEMAND: i64 = 10;
 
@@ -202,6 +245,8 @@ pub struct CityStats {
     pub filled: [u64; 4],
     /// 区画の種類ごとの、塗られていて建てる空きがあるか、建物があるか。
     pub zoned: [bool; 4],
+    /// 家のある住民の幸福度（[`crate::happiness::total`]）の平均。家のある住民がいなければ中立の値である。
+    pub happiness: u8,
 }
 
 impl CityStats {
@@ -223,7 +268,8 @@ impl CityStats {
 /// 区画の種類ごとの需要。正なら建物が建つ。添え字は [`ZoneKind::index`]。
 ///
 /// CS2 にならい、次のように決める。どれも差の式なので、街が釣り合えば 0 のまわりに収まる。
-/// - 住宅：いつもある需要に、働き口の空きを足し、空き家の 2 倍と職のない住民の 1/4 を引く。
+/// - 住宅：いつもある需要に、働き口の空きと幸福度の分（[`happiness_pull`]）を足し、空き家の 2 倍と
+///   職のない住民の 1/4 を引く。
 /// - 商業：住民の数の 1/[`CITIZENS_PER_SHOP_JOB`] が買い物に要る職場で、いまの商業の職場との差。
 /// - 工業とオフィス：働く年齢の住民のうち、商業で働かない人に要る職場を、塗られている区画の間で分けたものと、
 ///   いまの職場との差。両方が塗られていれば決まった割合で、片方だけならその区画にすべてを割り当てる。
@@ -252,7 +298,9 @@ pub fn demand(s: &CityStats) -> [i64; 4] {
     let office = other_jobs - industry;
     let w = |z: ZoneKind| n(s.workplaces[z.index()]);
     [
-        BASE_RESIDENTIAL_DEMAND + vacant_jobs - 2 * vacant_homes - jobless_quarter,
+        BASE_RESIDENTIAL_DEMAND + vacant_jobs + happiness_pull(s.happiness)
+            - 2 * vacant_homes
+            - jobless_quarter,
         n(shop_jobs) - w(ZoneKind::Commercial),
         BASE_INDUSTRIAL_DEMAND + n(industry) - w(ZoneKind::Industrial),
         n(office) - w(ZoneKind::Office),
@@ -268,6 +316,7 @@ mod tests {
             citizens: 1_000,
             working_age: 600,
             zoned,
+            happiness: 50,
             ..CityStats::default()
         }
     }

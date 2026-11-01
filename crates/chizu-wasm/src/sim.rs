@@ -10,11 +10,11 @@ use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::zone::{ZONE_DEPTH, near_road};
 use chizu_core::{
     ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
-    Layer, Line, SegmentKind, ServiceKind, StateHasher, TerrainTiles, TilePos, TileRect, TileUse,
-    World, terrain,
+    Layer, Line, SegmentKind, ServiceKind, StateHasher, TerrainTiles, Tick, TilePos, TileRect,
+    TileUse, World, terrain,
 };
 
-use crate::snapshot::{Header, TripleBuffer};
+use crate::snapshot::{Header, Mover, TripleBuffer};
 
 pub struct Sim {
     world: World,
@@ -25,6 +25,15 @@ pub struct Sim {
     reports: Vec<Report>,
     /// 道路網が変わって、区画を塗れるマスが変わりうるチャンクに足していく数。画面向けの版に混ぜる。
     near_road_changes: BTreeMap<ChunkCoord, u32>,
+    /// 移動体を描く範囲。画面だけが決め、中核には渡さない。`None` なら移動体を書かない。
+    mover_view: Option<TileRect>,
+    /// 最後に集めた移動体と、その基準のチャンク。
+    movers: Vec<Mover>,
+    movers_base: ChunkCoord,
+    /// `movers` を集めたときの（tick、記録の件数、範囲、記録に入らない操作の回数）。どれも変わらなければ集め直さない。
+    movers_key: Option<(Tick, usize, Option<TileRect>, u32)>,
+    /// 記録に入らない操作（開発用の道具）をした回数。1 回でもあれば、記録を再生しても同じ状態にならない。
+    unrecorded_ops: u32,
     /// 建物の表の版の控え。`(記録の件数, 建つ・育つが走った回数, 版)` で、前の 2 つが変わったときだけ計算し直す。
     buildings_version: Cell<Option<(usize, u64, f64)>>,
 }
@@ -50,6 +59,11 @@ impl Sim {
             snapshot: TripleBuffer::new(),
             reports: Vec::new(),
             near_road_changes: BTreeMap::new(),
+            mover_view: None,
+            movers: Vec::new(),
+            movers_base: ChunkCoord::default(),
+            movers_key: None,
+            unrecorded_ops: 0,
             buildings_version: Cell::new(None),
         }
     }
@@ -240,6 +254,45 @@ impl Sim {
         out
     }
 
+    pub fn set_mover_view(&mut self, view: Option<TileRect>) {
+        self.mover_view = view.filter(|v| v.is_ordered());
+    }
+
+    /// 開発用に、記録に入れずに歩く人を出す。出せた人数を返す。
+    /// 出せなくても経路探索の作り直しなどで状態が変わりうるので、記録に入らない操作として数える。
+    pub fn spawn_dev_walks(&mut self, from: TilePos, to: TilePos, count: u32) -> u32 {
+        self.unrecorded_ops = self.unrecorded_ops.saturating_add(1);
+        crate::movers::spawn_dev_walks(&mut self.world, from, to, count)
+    }
+
+    /// 記録に入らない操作をしたか。したなら、記録を再生しても同じ状態にならない。
+    pub fn has_unrecorded_ops(&self) -> bool {
+        self.unrecorded_ops > 0
+    }
+
+    /// 見える範囲の移動体を集め直す。tick、記録、範囲、記録に入らない操作のどれも変わっていなければ前の結果を使う。
+    fn collect_movers(&mut self) {
+        let key = (
+            self.world.tick(),
+            self.log.len(),
+            self.mover_view,
+            self.unrecorded_ops,
+        );
+        if self.movers_key == Some(key) {
+            return;
+        }
+        self.movers_key = Some(key);
+        match self.mover_view {
+            Some(v) => {
+                self.movers_base = crate::movers::visible_movers(&self.world, v, &mut self.movers);
+            }
+            None => {
+                self.movers.clear();
+                self.movers_base = ChunkCoord::default();
+            }
+        }
+    }
+
     /// 建物の表の版。建物が建つ、消える、段階が上がるたびに変わる。表の状態ハッシュの下位 52 ビットを使う。
     /// 施設も、建物の供給の有無も含む。
     ///
@@ -322,7 +375,12 @@ impl Sim {
     }
 
     /// いまの状態を三重バッファに書く。
+    ///
+    /// 設計書 2.1 は最高速では移動体を送らないとするが、粗い計算が入るまではどの速度でも細かい計算で
+    /// 移動体が動くので、どの速度でも送る。
     pub fn publish(&mut self) {
+        self.collect_movers();
+        let base = self.movers_base;
         let tick = self.world.tick();
         let time = GameTime::at(tick);
         let header = Header {
@@ -333,8 +391,10 @@ impl Sim {
             population: 0,
             speed: self.world.speed().multiplier(),
             paused: self.paused,
+            base_cx: base.cx,
+            base_cy: base.cy,
         };
-        self.snapshot.publish(&header, &[]);
+        self.snapshot.publish(&header, &self.movers);
     }
 }
 
@@ -362,6 +422,7 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::ZoneUnchanged => "変わるマスがない",
         DenyReason::Occupied => "ほかの施設か道路がある",
         DenyReason::NoRoadAccess => "道路に面していない",
+        DenyReason::NoChunkSlot => "買える土地の枠がない。人口が増えると枠が増える",
     }
 }
 
@@ -392,7 +453,7 @@ fn encode_terrain(terrain: &TerrainTiles) -> Vec<u8> {
 mod tests {
     use super::*;
     use chizu_core::command::MAX_TAX_PERMILLE;
-    use chizu_core::{Chunk, RoadKind, SimSpeed, Tick, ZoneKind};
+    use chizu_core::{Chunk, RoadKind, SimSpeed, ZoneKind};
 
     fn has_water(sim: &Sim, coord: ChunkCoord) -> bool {
         sim.chunk_tiles(coord).iter().any(|t| t & TILE_WATER != 0)
@@ -884,5 +945,35 @@ mod tests {
         sim.set_paused(false);
         sim.advance(5);
         assert_eq!(sim.world().tick(), Tick(5));
+    }
+
+    #[test]
+    fn dev_walks_mark_unrecorded_ops_and_refresh_movers() {
+        let mut sim = Sim::new(1);
+        sim.submit(Command::BuildRoad {
+            from: TilePos::new(0, 10),
+            to: TilePos::new(30, 10),
+            kind: RoadKind::Small,
+        })
+        .unwrap();
+        sim.set_mover_view(Some(TileRect {
+            min: TilePos::new(-64, -64),
+            max: TilePos::new(127, 127),
+        }));
+        sim.publish();
+        assert!(sim.movers.is_empty());
+        assert!(!sim.has_unrecorded_ops());
+        // 止めたまま出しても、tick は変わらないが集め直す。
+        sim.set_paused(true);
+        assert_eq!(
+            sim.spawn_dev_walks(TilePos::new(2, 10), TilePos::new(25, 10), 5),
+            5
+        );
+        assert!(sim.has_unrecorded_ops());
+        sim.publish();
+        assert_eq!(sim.movers.len(), 5);
+        sim.set_mover_view(None);
+        sim.publish();
+        assert!(sim.movers.is_empty());
     }
 }

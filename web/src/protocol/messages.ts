@@ -60,6 +60,8 @@ export const TILE_ZONABLE = 1 << 2;
 export const TILE_ZONE_SHIFT = 3;
 
 export type ChunkCoordMessage = { cx: number; cy: number };
+export type TileMessage = { x: number; y: number };
+export type MoverArea = { minX: number; minY: number; maxX: number; maxY: number };
 
 /** Worker から送るチャンクの中身。tiles は 1 マス 1 バイトを行ごとに並べたもので、移譲して送る。 */
 export type ChunkData = {
@@ -88,7 +90,15 @@ export type MainToWorker =
    * visible はいま見えているチャンクを先に送ってほしい順に並べたもの。
    * forgotten は前の view のあとに画面が捨てたチャンクで、Worker は次に見えたときに送り直す。
    */
-  | { kind: "view"; visible: ChunkCoordMessage[]; forgotten: ChunkCoordMessage[] }
+  | {
+      kind: "view";
+      visible: ChunkCoordMessage[];
+      forgotten: ChunkCoordMessage[];
+      /** 移動体を求めるマスの範囲（両端を含む）。null なら移動体を書かない。 */
+      movers: MoverArea | null;
+    }
+  /** 開発用に、記録に入れずに歩く人を出す。from と to はマスの座標。 */
+  | { kind: "dev-spawn-walks"; from: TileMessage; to: TileMessage; count: number }
   /** 画面に出すデータレイヤー。送るたびに、見えているチャンクの値を送り直してもらう。 */
   | { kind: "layers"; active: LayerCode[] };
 
@@ -134,6 +144,8 @@ export type WorkerToMain =
    * 記録する前に受け付けなかったコマンドには seq がない。
    */
   | { kind: "outcome"; id: number; seq?: number; outcome: Outcome; reason?: string }
+  /** dev-spawn-walks で出せた人数。 */
+  | { kind: "dev-spawned"; count: number }
   | { kind: "error"; message: string };
 
 function isChunkData(value: unknown): value is ChunkData {
@@ -209,6 +221,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "feedback":
       return typeof v.state === "string" && v.commands instanceof ArrayBuffer;
+    case "dev-spawned":
+      return Number.isInteger(v.count);
     case "service-probe":
       return (
         typeof v.service === "string" &&

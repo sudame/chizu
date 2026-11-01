@@ -35,5 +35,10 @@ harness = false
 name = "car_tick"
 harness = false
 
+[[bench]]
+name = "perf"
+harness = false
+
 [dev-dependencies]
 criterion = "0.8.2"
+rayon = "1.11"

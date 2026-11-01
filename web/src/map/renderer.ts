@@ -5,6 +5,7 @@ import { CHUNK_SIDE, TILE_WATER, TILE_ZONABLE, TILE_ZONE_SHIFT } from "../protoc
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { chunkKey, type StoredChunk } from "./chunk-sync.ts";
 import { LayerOverlay } from "./layers.ts";
+import { MoverLayer } from "./movers.ts";
 import { RoadLayer } from "./roads.ts";
 
 const VERTEX = `#version 300 es
@@ -90,6 +91,8 @@ export class MapRenderer {
   readonly roads: RoadLayer;
   /** データレイヤー。道路と建物の上に重ねて描く。 */
   readonly layers: LayerOverlay;
+  /** 移動体。道路の上に重ねて描く。 */
+  readonly movers: MoverLayer;
   readonly #textures = new Map<string, Texture>();
   readonly #u: Record<
     "offset" | "size" | "viewport" | "tiles" | "owned" | "zonable",
@@ -131,6 +134,7 @@ export class MapRenderer {
     gl.bindVertexArray(null);
     this.roads = new RoadLayer(gl, (v, f) => link(gl, v, f));
     this.layers = new LayerOverlay(gl, (v, f) => link(gl, v, f));
+    this.movers = new MoverLayer(gl, (v, f) => link(gl, v, f));
   }
 
   /** チャンクのテクスチャを作るか、中身を書き換える。 */

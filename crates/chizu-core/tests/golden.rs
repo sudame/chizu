@@ -12,9 +12,9 @@
 use std::path::PathBuf;
 
 use chizu_core::{
-    ChunkCoord, Command, CommandLog, DenyReason, LaneOffset, RecordedCommand, ReplayStats,
-    RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed, StateHasher, Tick, TilePos, TileRect,
-    World, ZoneKind, replay, rng,
+    Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneMode, LaneOffset, Money,
+    RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed,
+    StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind, replay, rng,
 };
 
 /// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
@@ -38,6 +38,17 @@ struct Scenario {
     seed: u64,
     ticks: u64,
     log: CommandLog,
+    /// 始めたときの所持金。`None` なら決まった初期値である。
+    money: Option<Money>,
+}
+
+impl Scenario {
+    fn start(&self) -> World {
+        match self.money {
+            Some(m) => World::new_with_money(self.seed, m),
+            None => World::new(self.seed),
+        }
+    }
 }
 
 fn scenarios() -> Vec<Scenario> {
@@ -47,36 +58,63 @@ fn scenarios() -> Vec<Scenario> {
             seed: 42,
             ticks: 2 * chizu_core::TICKS_PER_DAY,
             log: clock_and_commands(),
+            money: None,
         },
         Scenario {
             name: "land_purchase",
             seed: 42,
             ticks: 600,
             log: land_purchase(),
+            money: None,
         },
         Scenario {
             name: "road_network",
             seed: 42,
             ticks: 400,
             log: road_network(42),
+            money: None,
         },
         Scenario {
             name: "zoning",
             seed: 42,
             ticks: 300,
             log: zoning(),
+            money: None,
         },
         Scenario {
             name: "growth",
             seed: 42,
             ticks: 3_600,
             log: growth(),
+            money: None,
         },
         Scenario {
             name: "utilities",
             seed: 42,
             ticks: 7_200 + 1_200,
             log: utilities(),
+            money: None,
+        },
+        Scenario {
+            name: "economy",
+            seed: 42,
+            ticks: 2 * chizu_core::TICKS_PER_DAY,
+            log: economy(),
+            money: None,
+        },
+        Scenario {
+            name: "commute",
+            seed: 42,
+            ticks: COMMUTE_TICKS,
+            log: commute(),
+            money: None,
+        },
+        Scenario {
+            name: "land_slots",
+            seed: 42,
+            ticks: 2 * TICKS_PER_DAY + 600,
+            log: land_slots(),
+            money: Some(Money(10_000_000)),
         },
     ]
 }
@@ -287,6 +325,232 @@ fn utilities() -> CommandLog {
     log
 }
 
+/// 住宅と工業の通りに人が住み、途中で工業の税率を上げる記録。
+fn economy() -> CommandLog {
+    let mut log = street_city();
+    log.record(
+        Tick(4_000),
+        Command::SetTaxRate {
+            zone: ZoneKind::Industrial,
+            permille: 250,
+        },
+    )
+    .unwrap();
+    log
+}
+
+/// 通勤のシナリオを回す長さ。2 日目の朝の通勤が終わる 11 時までである。
+const COMMUTE_TICKS: u64 = TICKS_PER_DAY + TICKS_PER_DAY * 11 / 24;
+
+/// 住宅の帯の近くと遠くに工業の帯を塗った通りの記録。近くの職場へは歩き、遠くの職場へは車で通う。
+fn commute() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let rect = |a: (i64, i64), b: (i64, i64)| {
+        TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1))
+    };
+    // 通りの両端を、北側の通りでつないで輪にする。
+    let corners = [(-40, 0), (100, 0), (100, 20), (-40, 20), (-40, 0)];
+    for w in corners.windows(2) {
+        rec(
+            1,
+            Command::BuildRoad {
+                from: TilePos::new(w[0].0, w[0].1),
+                to: TilePos::new(w[1].0, w[1].1),
+                kind: RoadKind::Small,
+            },
+        );
+    }
+    for (area, zone) in [
+        (rect((-20, -6), (20, -1)), ZoneKind::Residential),
+        (rect((-40, -6), (-22, -1)), ZoneKind::Industrial),
+        (rect((60, -6), (100, -1)), ZoneKind::Industrial),
+    ] {
+        rec(
+            2,
+            Command::PaintZone {
+                area,
+                zone: Some(zone),
+            },
+        );
+    }
+    for c in connect_to_outside(42, 0, -40, 100) {
+        rec(3, c);
+    }
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, -37),
+        (ServiceKind::WaterPump, -33),
+    ] {
+        rec(
+            3,
+            Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, 1),
+                rotation: 0,
+            },
+        );
+    }
+    log
+}
+
+/// 通勤のシナリオで、朝に住民が歩きと車の両方で職場へ向かい、着いたら職場にいることを確かめる。
+/// 移動している住民は、住民の表の `trip` と移動の主体の両方から互いを指す。
+#[test]
+fn commuters_walk_and_drive_to_work_in_the_morning() {
+    let log = commute();
+    let mut world = World::new(42);
+    let (mut walking, mut driving) = (0, 0);
+    for _ in 0..COMMUTE_TICKS {
+        replay(&mut world, &log, 1);
+        let trips = world.trips();
+        for (id, t) in trips.iter() {
+            let Some(c) = trips.commuter(id) else {
+                continue;
+            };
+            let row = world
+                .population()
+                .citizen(c.citizen)
+                .expect("移動している住民がいない");
+            assert_eq!(row.trip, Some(id));
+            match t.mode() {
+                LaneMode::Car => driving += 1,
+                LaneMode::Sidewalk => walking += 1,
+            }
+        }
+        let p = world.population();
+        for id in p.citizen_ids() {
+            if let Some(t) = p.citizen(id).unwrap().trip {
+                assert_eq!(world.trips().commuter(t).map(|c| c.citizen), Some(id));
+            }
+        }
+    }
+    assert!(walking > 0 && driving > 0, "歩き {walking}、車 {driving}");
+    let p = world.population();
+    // 朝のあとに職場が決まり、翌朝に出発する住民は数えない。
+    let workers = p
+        .citizen_ids()
+        .map(|id| p.citizen(id).unwrap())
+        .filter(|r| r.workplace.is_some())
+        .filter(|r| r.schedule.next != Activity::Work || r.schedule.depart_at.is_none())
+        .count();
+    assert!(workers > 0, "誰も働いていない");
+    assert!(
+        world.citizens_at_work() * 10 >= workers * 9,
+        "朝に職場へ着かない：{} / {workers}",
+        world.citizens_at_work()
+    );
+}
+
+/// 通勤のシナリオを 20 日回しても、駐車場に停めてある車が増え続けない。停めてある車はどれも、
+/// 住民が自分の車として覚えている 1 台で、停めてある台数は住民の数を超えない。
+#[test]
+fn parked_cars_do_not_pile_up_over_days() {
+    let log = commute();
+    let mut world = World::new(42);
+    let mut by_day = Vec::new();
+    for day in 1..=20 {
+        replay(&mut world, &log, TICKS_PER_DAY);
+        let parked: u64 = world.trips().lots().map(|(_, l)| u64::from(l.parked)).sum();
+        let p = world.population();
+        let owned = p
+            .citizen_ids()
+            .filter_map(|id| world.trips().parked_car(id))
+            .filter(|b| world.buildings().get(*b).is_some())
+            .count() as u64;
+        assert_eq!(parked, owned, "{day} 日目：持ち主のいない車が停めてある");
+        assert!(
+            parked <= p.citizen_count() as u64,
+            "{day} 日目：{parked} 台"
+        );
+        by_day.push(parked);
+    }
+    let early = by_day[4..10].iter().max().copied().unwrap();
+    let late = by_day[14..].iter().max().copied().unwrap();
+    assert!(early > 0, "車が停められていない {by_day:?}");
+    assert!(
+        late * 4 <= early * 5,
+        "停めてある台数が増え続ける {by_day:?}"
+    );
+}
+
+/// 始めたときの枠のぶんだけチャンクを買い、次の 1 つは枠で断られ、
+/// 人口がマイルストーンに届いたあとに同じチャンクを買える記録。所持金は多めにして始める。
+fn land_slots() -> CommandLog {
+    let mut log = street_city();
+    // 住宅が電気と水道で頭打ちにならないよう、工業の側に発電所と浄水場を足す。
+    let place = |kind, x| Command::PlaceBuilding {
+        kind,
+        at: TilePos::new(x, 1),
+        rotation: 0,
+    };
+    for x in [-40, -36] {
+        log.record(Tick(4), place(ServiceKind::PowerPlant, x))
+            .unwrap();
+    }
+    for x in [-32, -30, -28] {
+        log.record(Tick(4), place(ServiceKind::WaterPump, x))
+            .unwrap();
+    }
+    let buy = |cx| Command::BuyChunk {
+        coord: ChunkCoord::new(cx, -1),
+    };
+    for cx in 2..=8 {
+        log.record(Tick(10), buy(cx)).unwrap();
+    }
+    log.record(Tick(2 * TICKS_PER_DAY), buy(8)).unwrap();
+    log
+}
+
+/// 住宅と工業の通りに、電気と水道を引き、外の世界とつないだ記録。
+fn street_city() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let rect = |a: (i64, i64), b: (i64, i64)| {
+        TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1))
+    };
+    rec(
+        1,
+        Command::BuildRoad {
+            from: TilePos::new(-40, 0),
+            to: TilePos::new(40, 0),
+            kind: RoadKind::Small,
+        },
+    );
+    for (area, zone) in [
+        (rect((-30, -6), (40, -1)), ZoneKind::Residential),
+        (rect((-40, 1), (40, 6)), ZoneKind::Industrial),
+    ] {
+        rec(
+            2,
+            Command::PaintZone {
+                area,
+                zone: Some(zone),
+            },
+        );
+    }
+    for c in connect_to_outside(42, 0, -40, 40) {
+        rec(3, c);
+    }
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, -37),
+        (ServiceKind::WaterPump, -33),
+    ] {
+        rec(
+            3,
+            Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, -1),
+                rotation: 2,
+            },
+        );
+    }
+    log
+}
+
 /// 土地を買い進める記録。買える場合と、買った土地・離れた土地・角だけで接する土地・
 /// 所持金の不足で却下される場合を混ぜる。
 fn land_purchase() -> CommandLog {
@@ -366,11 +630,15 @@ fn clock_and_commands() -> CommandLog {
 
 /// 再生して、状態ハッシュの列を `.hash` の形式の文字列で返す。
 fn checkpoints(seed: u64, log: &CommandLog, ticks: u64) -> String {
-    checkpoints_and_world(seed, log, ticks).0
+    checkpoints_from(World::new(seed), log, ticks).0
 }
 
 fn checkpoints_and_world(seed: u64, log: &CommandLog, ticks: u64) -> (String, World) {
-    let mut world = World::new(seed);
+    checkpoints_from(World::new(seed), log, ticks)
+}
+
+/// `world` から再生する [`checkpoints`]。
+fn checkpoints_from(mut world: World, log: &CommandLog, ticks: u64) -> (String, World) {
     let mut digest = StateHasher::new();
     digest.write(&world.state_hash());
     let mut out = String::new();
@@ -527,6 +795,47 @@ fn utilities_supply_only_the_connected_street() {
     }
 }
 
+/// 枠の記録が、始めたときの枠を使い切って断られ、マイルストーンのあとに買えることを確かめる。
+#[test]
+fn land_slots_open_with_the_milestone() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "land_slots")
+        .unwrap();
+    let mut world = s.start();
+    let stats = replay(&mut world, &s.log, 11);
+    assert_denied_by(&stats, &[(DenyReason::NoChunkSlot, 1)]);
+    assert_eq!(world.milestone(), 0);
+    assert!(!world.is_owned(ChunkCoord::new(8, -1)));
+    let stats = replay(&mut world, &s.log, s.ticks - 11);
+    assert_eq!(stats.denied, 0, "{:?}", stats.denied_by);
+    assert!(world.milestone() >= 1, "{} 人", world.housed_citizens());
+    assert!(world.is_owned(ChunkCoord::new(8, -1)));
+}
+
+/// 財政の記録が、税収と維持費の精算を通っていることを確かめる。
+#[test]
+fn economy_settles_every_hour() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "economy")
+        .unwrap();
+    let mut world = World::new(s.seed);
+    let stats = replay(&mut world, &s.log, 7_000);
+    let f = world.finances();
+    assert!(world.population().citizen_count() > 0);
+    assert!(f.taxes[ZoneKind::Residential.index()].0 > 0, "{f:?}");
+    assert!(f.taxes[ZoneKind::Industrial.index()].0 > 0, "{f:?}");
+    assert!(f.road_upkeep.0 > 0 && f.facility_upkeep.iter().all(|m| m.0 > 0));
+    assert_eq!(stats.denied, 0);
+    // 精算の tick を進めると、その tick の終わりの 1 日の見込みのおよそ 1/24 だけ所持金が動く。
+    replay(&mut world, &s.log, 200);
+    let money = world.money().0;
+    replay(&mut world, &s.log, 1);
+    let (moved, net) = (world.money().0 - money, world.finances().net().0);
+    assert!((moved * 24 - net).abs() <= 24, "{moved} × 24 と {net}");
+}
+
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
 }
@@ -543,7 +852,7 @@ fn golden_hashes_match() {
         let rec_path = dir.join(format!("{}.rec", s.name));
         let hash_path = dir.join(format!("{}.hash", s.name));
         let encoded = s.log.encode();
-        let got = checkpoints(s.seed, &s.log, s.ticks);
+        let got = checkpoints_from(s.start(), &s.log, s.ticks).0;
 
         if updating() {
             std::fs::write(&rec_path, &encoded).unwrap();
@@ -559,7 +868,7 @@ fn golden_hashes_match() {
         // 保存した記録を読み戻して再生しても、同じ結果になる。
         let decoded = CommandLog::decode(&stored).unwrap();
         assert_eq!(
-            checkpoints(s.seed, &decoded, s.ticks),
+            checkpoints_from(s.start(), &decoded, s.ticks).0,
             got,
             "{}: 読み戻した記録で結果が変わった",
             s.name
@@ -584,8 +893,8 @@ fn golden_hashes_match() {
 fn replaying_twice_gives_the_same_hash() {
     for s in scenarios() {
         assert_eq!(
-            checkpoints(s.seed, &s.log, s.ticks),
-            checkpoints(s.seed, &s.log, s.ticks),
+            checkpoints_from(s.start(), &s.log, s.ticks).0,
+            checkpoints_from(s.start(), &s.log, s.ticks).0,
             "{}",
             s.name
         );
@@ -726,9 +1035,13 @@ fn walking_golden() {
         end.trips().len()
     );
     assert_eq!(walking_checkpoints(SEED, TICKS).0, got);
-    let path = golden_dir().join("walking.hash");
+    compare_golden("walking", &got);
+}
+
+fn compare_golden(name: &str, got: &str) {
+    let path = golden_dir().join(format!("{name}.hash"));
     if updating() {
-        std::fs::write(&path, &got).unwrap();
+        std::fs::write(&path, got).unwrap();
         return;
     }
     let expected = std::fs::read_to_string(&path)
@@ -737,4 +1050,75 @@ fn walking_golden() {
         expected, got,
         "意図した変更なら CHIZU_UPDATE_GOLDEN=1 cargo test -p chizu-core --test golden で書き直す"
     );
+}
+
+/// 車の記録を再生し、状態ハッシュの列と、作った移動の数、終わりの世界を返す。建物が建ったあと、
+/// 決まった tick ごとに種から選んだ建物どうしを車で行き来させる。途中で道路を消し、建物も消える。
+/// 毎 tick、停めてある台数と押さえた台数の和が駐車場の台数を超えず、押さえた台数がその駐車場へ
+/// 向かう主体の数と同じで、駐車場が建っている建物にだけあることを確かめる。
+fn driving_checkpoints(seed: u64, ticks: u64) -> (String, u32, World) {
+    let log = growth();
+    let mut world = World::new(seed);
+    let mut digest = StateHasher::new();
+    let mut out = String::new();
+    let mut spawned = 0;
+    for _ in 0..ticks {
+        let t = world.tick().0;
+        if (1_200..2_000).contains(&t) && t.is_multiple_of(4) {
+            let ids: Vec<BuildingId> = world.buildings().iter().map(|(id, _)| id).collect();
+            let len = u32::try_from(ids.len()).unwrap();
+            for k in 0..3 {
+                let mut r = rng(seed, RngPurpose::DailySchedule, k, Tick(t));
+                let (a, b) = (ids[r.below(len) as usize], ids[r.below(len) as usize]);
+                spawned += u32::from(world.spawn_drive(a, b).is_some());
+            }
+        }
+        replay(&mut world, &log, 1);
+        let mut heading = std::collections::BTreeMap::<BuildingId, u32>::new();
+        for (_, t) in world.trips().iter() {
+            if let Some(b) = t
+                .parking_lot()
+                .filter(|b| world.buildings().get(*b).is_some())
+            {
+                *heading.entry(b).or_default() += 1;
+            }
+        }
+        for (id, lot) in world.trips().lots() {
+            let b = world
+                .buildings()
+                .get(id)
+                .expect("消えた建物に駐車場が残った");
+            assert!(u64::from(lot.parked + lot.reserved) <= b.parking_spaces());
+            assert_eq!(lot.reserved, heading.remove(&id).unwrap_or(0), "{id:?}");
+        }
+        assert!(
+            heading.is_empty(),
+            "押さえた空きが数えられていない {heading:?}"
+        );
+        let h = world.state_hash();
+        digest.write(&h);
+        let t = world.tick().0;
+        if t.is_multiple_of(250) || t == ticks {
+            out.push_str(&format!("{t} {h:016x} {:016x}\n", digest.finish()));
+        }
+    }
+    (out, spawned, world)
+}
+
+#[test]
+fn driving_golden() {
+    const SEED: u64 = 42;
+    const TICKS: u64 = 2_600;
+    let (got, spawned, end) = driving_checkpoints(SEED, TICKS);
+    assert!(spawned > 300, "作れた移動が少ない {spawned}");
+    // 朝の通勤の移動は数えない。
+    let left = end
+        .trips()
+        .iter()
+        .filter(|(id, _)| end.trips().commuter(*id).is_none())
+        .count();
+    assert!(left < 30, "着かずに残った移動が多い {left}");
+    assert!(end.trips().lots().any(|(_, l)| l.parked > 0));
+    assert_eq!(driving_checkpoints(SEED, TICKS).0, got);
+    compare_golden("driving", &got);
 }

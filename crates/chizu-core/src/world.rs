@@ -8,12 +8,13 @@ use crate::service::Facility;
 use crate::chunk::{Chunk, Layer, TileUse};
 use crate::citizens::{CitizenChange, CitizenRow, Population};
 use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
-use crate::id::{CitizenId, TripId};
+use crate::happiness::{CitizenContext, update_citizen};
+use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
 use crate::rng::{RngPurpose, mix_words};
 use crate::routing::AstarRouter;
-use crate::schedule::{bucket_at, update_citizen};
+use crate::schedule::bucket_at;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, WORLD_LIMIT, local_index};
 use crate::units::{Mm, Money, Tick, WorldPos};
@@ -81,10 +82,12 @@ pub enum DenyReason {
     Occupied = 11,
     /// 施設の間口が、歩道のある縦か横の道路に面していない。
     NoRoadAccess = 12,
+    /// 買えるチャンクの枠を使い切っている。人口のマイルストーンに届くと枠が増える。
+    NoChunkSlot = 13,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 13] = [
+    pub const ALL: [DenyReason; 14] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -98,6 +101,7 @@ impl DenyReason {
         DenyReason::ZoneUnchanged,
         DenyReason::Occupied,
         DenyReason::NoRoadAccess,
+        DenyReason::NoChunkSlot,
     ];
 
     pub fn index(self) -> usize {
@@ -122,6 +126,12 @@ pub struct World {
     chunks: BTreeMap<ChunkCoord, Chunk>,
     /// 始めてから買ったチャンクの数。最初から買ってあるチャンクは数えない。
     chunks_bought: u32,
+    /// 届いた人口のマイルストーンの段階。
+    milestone: u32,
+    /// マイルストーンによらず、チャンクをいくつでも買える。始める前にだけ決められる。
+    unlimited_land: bool,
+    /// 収支の 1 日あたりの見込みのうち、24 で割り切れずに次の時間へ持ち越した額。`0..24` である。
+    ledger_carry: i64,
     network: Network,
     population: Population,
     buildings: Buildings,
@@ -136,6 +146,8 @@ pub struct World {
     router: RouterSlot,
 }
 
+mod commute;
+pub mod economy;
 pub mod growth;
 pub mod people;
 
@@ -184,6 +196,15 @@ impl World {
         }
     }
 
+    /// 買えるチャンクの枠をなくす。テストとベンチマークで、マイルストーンに届く前に広い土地を買うのに使う。
+    pub fn with_unlimited_land(self) -> World {
+        assert_eq!(self.tick, Tick::ZERO, "始めたあとでは決められない");
+        World {
+            unlimited_land: true,
+            ..self
+        }
+    }
+
     pub fn new(seed: u64) -> World {
         let r = START_CHUNK_RADIUS;
         let chunks = (-r..=r)
@@ -208,6 +229,9 @@ impl World {
             tax_permille: [INITIAL_TAX_PERMILLE; 4],
             chunks,
             chunks_bought: 0,
+            milestone: 0,
+            unlimited_land: false,
+            ledger_carry: 0,
             network,
             population: Population::default(),
             buildings: Buildings::default(),
@@ -458,7 +482,8 @@ impl World {
     /// 網が変わっていたら経路探索を作り直し、通れなくなった移動を探し直す。
     fn sync_router(&mut self) {
         if self.router.router.sync(&self.network) {
-            self.trips.reroute(&self.network, &mut self.router.router);
+            let lost = self.trips.reroute(&self.network, &mut self.router.router);
+            self.end_commutes(lost);
         }
     }
 
@@ -469,6 +494,16 @@ impl World {
         let now = self.tick;
         self.trips
             .spawn(&self.network, &mut self.router.router, from, to, now)
+    }
+
+    /// 建物 `from` から建物 `to` へ、歩く → 車 → 歩く で向かう移動を作る。`spawn_walk` と同じく、
+    /// 住民の予定とつなぐまでの入口にする。行き先の近くがどこも満車か、つながっていなければ `None`。
+    pub fn spawn_drive(&mut self, from: BuildingId, to: BuildingId) -> Option<TripId> {
+        self.sync_router();
+        let now = self.tick;
+        let (net, router) = (&self.network, &mut self.router.router);
+        self.trips
+            .spawn_drive(net, router, &self.buildings, (from, to), now)
     }
 
     /// マスの範囲 `rect` にいる移動体を ID の順に返す。状態は変えない。
@@ -525,12 +560,13 @@ impl World {
             Err(DenyReason::AlreadyOwned)
         } else if !coord.edge_neighbors().any(|n| self.is_owned(n)) {
             Err(DenyReason::NotAdjacent)
+        } else if self.chunks_bought >= self.chunk_slots() {
+            Err(DenyReason::NoChunkSlot)
         } else {
             Ok(())
         }
     }
 
-    // 人口のマイルストーンで買える枠が増える仕組みは、マイルストーンを入れるときに足す。
     fn buy_chunk(&mut self, coord: ChunkCoord) -> ApplyOutcome {
         let price = self.next_chunk_price();
         if let Err(reason) = self.check_buy_chunk(coord) {
@@ -570,6 +606,12 @@ impl World {
         if command.validate().is_err() {
             return ApplyOutcome::Rejected;
         }
+        let outcome = self.apply_valid(command);
+        self.trips.forget_lots(&self.buildings);
+        outcome
+    }
+
+    fn apply_valid(&mut self, command: &Command) -> ApplyOutcome {
         match *command {
             Command::SetSimSpeed { speed } => {
                 self.speed = speed;
@@ -596,16 +638,27 @@ impl World {
     /// 住民の 1 人ぶんの処理を `update` にして 1 tick 進める。
     pub(crate) fn step_with<F>(&mut self, update: F)
     where
-        F: Fn(u64, Tick, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
+        F: Fn(&CitizenContext, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
     {
         self.sync_router();
-        let (seed, tick) = (self.seed, self.tick);
+        let (seed, tick, tax_permille) = (self.seed, self.tick, self.tax_permille);
+        let buildings = &self.buildings;
         self.population
-            .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
+            .update_bucket(bucket_at(tick), |population, id, row| {
+                let ctx = CitizenContext {
+                    seed,
+                    tick,
+                    population,
+                    buildings,
+                    tax_permille,
+                };
+                update(&ctx, id, row)
+            });
         self.update_people();
-        self.trips
-            .step(&self.network, self.router.router.connectors());
+        let ended = self.trips.step(&self.network, &mut self.router.router);
+        self.end_commutes(ended);
         self.grow_buildings();
+        self.update_economy();
         self.tick = tick.next();
     }
 
@@ -626,6 +679,9 @@ impl StateHash for World {
         h.write(&self.tax_permille);
         h.write(&self.chunks);
         h.write(&self.chunks_bought);
+        h.write(&self.milestone);
+        h.write(&self.unlimited_land);
+        h.write(&self.ledger_carry);
         h.write(&self.network);
         h.write(&self.population);
         h.write(&self.trips);
@@ -659,10 +715,11 @@ mod tests {
             | DenyReason::NoZonableTile
             | DenyReason::ZoneUnchanged
             | DenyReason::Occupied
-            | DenyReason::NoRoadAccess => DenyReason::ALL.contains(&r),
+            | DenyReason::NoRoadAccess
+            | DenyReason::NoChunkSlot => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 13);
+        assert_eq!(DenyReason::ALL.len(), 14);
     }
     use crate::command::{MAX_TAX_PERMILLE, NodeId};
 
@@ -1036,6 +1093,7 @@ mod tests {
 
         // 水辺のある土地を買い、水辺のマスを通る道路を引こうとする。
         w.money = Money(1_000_000_000);
+        w.unlimited_land = true;
         let coord = (2..40)
             .map(|cx| ChunkCoord::new(cx, 0))
             .find(|c| {

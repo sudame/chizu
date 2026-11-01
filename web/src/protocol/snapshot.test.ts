@@ -65,6 +65,8 @@ describe("三重バッファ", () => {
       speed: 48,
       paused: true,
       moverCount: 0,
+      baseCx: -3,
+      baseCy: 5,
     });
   });
 

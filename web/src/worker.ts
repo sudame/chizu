@@ -14,6 +14,7 @@ import type {
   ChunkData,
   CommandMessage,
   MainToWorker,
+  MoverArea,
   Outcome,
   WorkerToMain,
 } from "./protocol/messages.ts";
@@ -51,6 +52,11 @@ function sendChunks(sim: Simulation): void {
     { kind: "chunks", chunks },
     chunks.map((c) => c.tiles),
   );
+}
+
+function setMoverView(sim: Simulation, area: MoverArea | null): void {
+  const a = area ?? { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  sim.set_mover_view(a.minX, a.minY, a.maxX, a.maxY, area === null);
 }
 
 // 記録の通し番号から、画面が振った番号を引く
@@ -200,7 +206,16 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         // 送るのはタイマーの側だけにして、1 周期に送る数を CHUNKS_PER_FRAME に抑える
         chunkSync.setView(message.visible, message.forgotten);
         layerSender.setView(message.visible, message.forgotten);
+        setMoverView(sim, message.movers);
         break;
+      case "dev-spawn-walks": {
+        const { from, to, count } = message;
+        reply({
+          kind: "dev-spawned",
+          count: sim.spawn_dev_walks(from.x, from.y, to.x, to.y, count),
+        });
+        break;
+      }
     }
   } catch (error) {
     console.error(`操作を受け付けなかった：${String(error)}`);
