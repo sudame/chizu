@@ -12,7 +12,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{Ends, SidewalkPos, Trip, Trips, car, make_trip, plan};
+use super::{Ends, SidewalkPos, Trip, Trips, car, lane_shift, make_trip, plan};
 use crate::building::{Building, Buildings};
 use crate::id::{BuildingId, TripId};
 use crate::network::{LaneMode, Network};
@@ -354,7 +354,11 @@ impl Trips {
                     ended.push(i);
                     continue;
                 };
-                let departed = self.rows[i].as_ref().expect("着いた主体がない").departed;
+                let old = self.rows[i].as_ref().expect("着いた主体がない");
+                let departed = old.departed;
+                // 歩道から車線へ、車線から歩道へ移るときも、それまで描いていたずれから少しずつ移す。
+                // 車は道路のどちらの側の車線からも出るので、移る幅は道路の幅ほどになりうる。
+                let shown = old.shift_on_leg(net, old.leg as usize);
                 let mut t: Trip = make_trip(net, route, e, to, departed);
                 t.then = then;
                 self.rows[i] = Some(t);
@@ -362,6 +366,11 @@ impl Trips {
                 if let Some(ix) = ix.as_mut() {
                     car::place(&mut self.rows, net, ix, i);
                 }
+                let t = self.rows[i].as_mut().expect("置いた主体がない");
+                t.blend = Some(lane_shift::Blend {
+                    from: shown,
+                    start: t.offset.0,
+                });
             }
         }
         ended

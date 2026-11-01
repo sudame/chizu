@@ -346,3 +346,47 @@ fn building_spots_sit_on_the_road_in_front() {
         assert_eq!(off, LaneOffset(want));
     }
 }
+
+#[test]
+fn the_drawn_shift_slides_between_the_sidewalk_and_either_lane() {
+    // 建物は道路の北側にある。西へ向かう車は建物の側の車線を、東へ向かう車は向こう側の車線を走る。
+    // どちらでも、歩道から車線へ、車線から歩道へ移るときに、描く位置が横に飛ばない。
+    for (from, to) in [(0, 1), (1, 0)] {
+        let (mut s, ids) = Street::new(&[40, 10]);
+        let id = s.drive(ids[from], ids[to]).unwrap();
+        let shown = |s: &Street| {
+            let min = WorldPos::new(Mm(-800_000), Mm(-800_000));
+            let max = WorldPos::new(Mm(800_000), Mm(800_000));
+            s.trips
+                .movers_in(&s.net, min, max)
+                .into_iter()
+                .find(|m| m.id == id)
+                .map(|m| ((m.pos.x.0, m.pos.y.0), (m.shift.0.0, m.shift.1.0), m.mode))
+        };
+        let mut before = shown(&s);
+        let mut modes: Vec<LaneMode> = before.iter().map(|b| b.2).collect();
+        for _ in 0..1_000 {
+            if s.step().contains(&id) {
+                break;
+            }
+            let after = shown(&s);
+            if let (Some((p0, s0, _)), Some((p1, s1, mode))) = (before, after) {
+                let dist = (p1.0 - p0.0).abs().max((p1.1 - p0.1).abs());
+                let dshift = (s1.0 - s0.0).abs().max((s1.1 - s0.1).abs());
+                assert!(
+                    dshift <= 3 * dist + 50,
+                    "{from}->{to}: {dist}mm 進むあいだに、ずれが {dshift}mm 変わった"
+                );
+                if modes.last() != Some(&mode) {
+                    modes.push(mode);
+                }
+            }
+            before = after.or(before);
+        }
+        assert_eq!(
+            modes,
+            [LaneMode::Sidewalk, LaneMode::Car, LaneMode::Sidewalk],
+            "{from}->{to}"
+        );
+    }
+}

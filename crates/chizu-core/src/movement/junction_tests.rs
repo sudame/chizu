@@ -2,6 +2,7 @@ use super::junction::{GIVE_UP, Move, PATIENCE, Rescues};
 use super::*;
 use crate::command::RoadKind;
 use crate::network::Line;
+use crate::tile::TileRect;
 
 fn road(n: &mut Network, from: (i64, i64), to: (i64, i64), kind: RoadKind) {
     let line = Line::between(TilePos::new(from.0, from.1), TilePos::new(to.0, to.1)).unwrap();
@@ -453,4 +454,33 @@ fn a_gridlock_without_junctions_is_rescued() {
     }
     assert!(c.trips.is_empty(), "残った {}", c.trips.len());
     assert!(c.trips.rescues().teleported > 0);
+}
+
+#[test]
+fn a_car_just_past_a_junction_survives_the_removal_of_the_road_behind_it() {
+    // 交差点を抜けたばかりの車の、抜けてきた区間を消す。残りの経路は無事なので探し直されず、
+    // 経路には消えた区間が残る。それでも交差点の中かを調べるところで止まらない。
+    let mut c = Cars::new(crossroads());
+    // 止まった状態から走り出し、ノードをまたいだ tick に 7m より手前に入る位置から出す。
+    let id = c.drive(at(4, 10, (1, 0), 7_000), at(18, 10, (1, 0), 0));
+    while c.trips.get(id).unwrap().leg == 0 {
+        c.step();
+    }
+    assert!(c.trips.get(id).unwrap().offset().0 < CAR_LENGTH + MIN_GAP);
+    c.net
+        .bulldoze(TileRect::from_corners(
+            TilePos::new(7, 10),
+            TilePos::new(7, 10),
+        ))
+        .unwrap();
+    c.router.rebuild(&c.net);
+    assert!(c.trips.reroute(&c.net, &mut c.router).is_empty());
+    let t = c.trips.get(id).unwrap();
+    assert_eq!(t.leg, 1, "探し直された");
+    assert!(c.net.segment(t.route().links[0].segment).is_none());
+    let mut arrived = false;
+    for _ in 0..200 {
+        arrived |= c.step().contains(&id);
+    }
+    assert!(arrived);
 }
