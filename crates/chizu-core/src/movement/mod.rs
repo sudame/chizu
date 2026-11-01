@@ -1,8 +1,12 @@
-//! 移動の主体（`Trips`）と、歩道を歩く移動体の細かい計算。
+//! 移動の主体（`Trips`）と、歩道を歩く人と車線を走る車の細かい計算。
 //!
 //! 移動の主体は、経路と、いまのリンクの上の位置（リンクの始まりからの距離）を持つ。
-//! 1 tick に移動の 1 秒ぶん進み、行き先の出入口に着いたら消える。歩行者どうしはぶつからない。
+//! 1 tick に移動の 1 秒ぶん進み、行き先に着いたら消える。歩行者どうしはぶつからない。
+//! 車は同じ車線の前の車との車間で速さを決め、ノードで次のリンクの車線へ移る。
 
+mod car;
+#[cfg(test)]
+mod car_tests;
 mod pos;
 #[cfg(test)]
 mod tests;
@@ -12,21 +16,29 @@ use std::sync::Arc;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
 pub use pos::SidewalkPos;
 
 use crate::id::{Slots, TripId};
-use crate::network::{LaneMode, LinkId, Network};
+use crate::network::{LaneId, LaneMode, LinkId, Network};
 use crate::routing::{
-    AstarRouter, Route, RouteRequest, Router, Scratch, Toward, WALK_SPEED, one_to_many,
+    AstarRouter, Connector, Route, RouteRequest, Router, Scratch, Toward, WALK_SPEED, one_to_many,
 };
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::TilePos;
-use crate::units::{LaneOffset, Tick, WorldPos};
+use crate::units::{LaneOffset, MmPerTick, Tick, WorldPos};
 
-/// 歩いて移動している主体。
+/// 歩くか車で走って移動している主体。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trip {
+    mode: LaneMode,
     route: Arc<Route>,
+    /// いまいる車線。歩くときは歩道の車線である。
+    lane: LaneId,
+    /// 車の速さ。歩くときは使わない。
+    speed: MmPerTick,
+    /// 出発の位置の車線に空きがなく、車線の上に出るのを待っている車か。
+    waiting: bool,
     /// いま歩いているリンクの、経路の中での番号。
     leg: u32,
     offset: LaneOffset,
@@ -44,6 +56,18 @@ pub struct Trip {
 impl Trip {
     pub fn route(&self) -> &Route {
         &self.route
+    }
+
+    pub fn mode(&self) -> LaneMode {
+        self.mode
+    }
+
+    pub fn lane(&self) -> LaneId {
+        self.lane
+    }
+
+    pub fn speed(&self) -> MmPerTick {
+        self.speed
     }
 
     pub fn link(&self) -> LinkId {
@@ -80,13 +104,17 @@ impl Trip {
             }
             let rest = self.link_len.distance_to(self.offset);
             self.leg += 1;
-            self.enter(net, LaneOffset::START.advance(rest));
+            self.enter(net, LaneOffset::START.advance(rest), None);
         }
     }
 
-    fn enter(&mut self, net: &Network, offset: LaneOffset) {
-        let (start, step, len) = pos::link_geometry(net, self.link()).expect("経路のリンクがない");
-        (self.start, self.step, self.link_len, self.offset) = (start, step, len, offset);
+    /// いまの経路の番号のリンクに入る。車線を指定しなければ、リンクの最初の車線に入る。
+    fn enter(&mut self, net: &Network, offset: LaneOffset, lane: Option<LaneId>) {
+        let link = self.link();
+        let (start, step, len) = pos::link_geometry(net, link).expect("経路のリンクがない");
+        let lane = lane.unwrap_or_else(|| net.link_lanes(link).next().expect("リンクに車線がない"));
+        (self.start, self.step, self.link_len, self.offset, self.lane) =
+            (start, step, len, offset, lane);
     }
 }
 
@@ -104,17 +132,19 @@ pub struct Mover {
     pub pos: WorldPos,
     /// 進む向き。x と y はそれぞれ -1、0、1 のどれかである。
     pub heading: (i8, i8),
+    /// 歩いているなら `Sidewalk`、車なら `Car`。
+    pub mode: LaneMode,
 }
 
-/// 歩道のリンクと、その始まりからの距離。
+/// リンクと、その始まりからの距離。
 type Spot = (LinkId, LaneOffset);
 
 /// 出発の位置と行き先の位置。
 type Ends = (Spot, Spot);
 
-/// 歩道の上の 2 点を結ぶ経路を、まとめて探す。行き先が同じリンクの手前にあるときは、
+/// 手段 `mode` で 2 点を結ぶ経路を、まとめて探す。行き先が同じリンクの手前にあるときは、
 /// 次のリンクへ出て戻ってくる経路にする。
-fn plan(router: &mut AstarRouter, ends: &[Ends]) -> Vec<Option<Arc<Route>>> {
+fn plan(router: &mut AstarRouter, mode: LaneMode, ends: &[Ends]) -> Vec<Option<Arc<Route>>> {
     let behind = |((a, ao), (b, bo)): &Ends| a == b && bo < ao;
     let reqs: Vec<RouteRequest> = ends
         .iter()
@@ -122,11 +152,11 @@ fn plan(router: &mut AstarRouter, ends: &[Ends]) -> Vec<Option<Arc<Route>>> {
         .map(|((a, _), (b, _))| RouteRequest {
             from: *a,
             to: *b,
-            mode: LaneMode::Sidewalk,
+            mode,
         })
         .collect();
     let mut found = router.route_batch(&reqs).into_iter();
-    let g = router.graph(LaneMode::Sidewalk);
+    let g = router.graph(mode);
     let mut s = Scratch::default();
     ends.iter()
         .map(|e| {
@@ -212,27 +242,61 @@ impl Trips {
         walks: &[(SidewalkPos, SidewalkPos)],
         now: Tick,
     ) -> Vec<Option<TripId>> {
+        self.spawn_mode(net, router, LaneMode::Sidewalk, walks, now)
+    }
+
+    /// 車で走る主体をまとめて作り、依頼の順に ID を返す。位置は、同じ区間の同じ向きの車のリンクの上に置く。
+    /// 車は止まった状態で、リンクの最初の車線から走り出す。
+    pub fn spawn_drives(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        drives: &[(SidewalkPos, SidewalkPos)],
+        now: Tick,
+    ) -> Vec<Option<TripId>> {
+        self.spawn_mode(net, router, LaneMode::Car, drives, now)
+    }
+
+    fn spawn_mode(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        mode: LaneMode,
+        walks: &[(SidewalkPos, SidewalkPos)],
+        now: Tick,
+    ) -> Vec<Option<TripId>> {
         router.sync(net);
         let resolved: Vec<Option<Ends>> = walks
             .iter()
-            .map(|(a, b)| Some((a.resolve(net)?, b.resolve(net)?)))
+            .map(|(a, b)| Some((a.resolve_on(net, mode)?, b.resolve_on(net, mode)?)))
             .collect();
         let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
-        let mut routes = plan(router, &ends).into_iter();
+        let mut routes = plan(router, mode, &ends).into_iter();
+        // 車は、出発のリンクの車線のうち車の少ない車線に置く。前の車と重なるなら、その後ろの空いた
+        // 位置まで下げる。どの車線にも空きがなければ、空くまで待たせる。
+        let mut ix = car::LaneIndex::of(&self.rows, None);
         resolved
             .iter()
             .zip(walks)
             .map(|(e, (_, to))| {
                 let e = (*e)?;
                 let route = routes.next().expect("探した経路の数が合わない")?;
-                Some(self.insert(make_trip(net, route, e, *to, now)))
+                let id = self.insert(make_trip(net, route, e, *to, now));
+                if mode == LaneMode::Car {
+                    car::place(&mut self.rows, net, &mut ix, id.slot());
+                }
+                Some(id)
             })
             .collect()
     }
 
-    /// 1 tick 進め、着いた主体を消して、その ID を返す。
-    pub fn step(&mut self, net: &Network) -> Vec<TripId> {
-        let advance = |(i, t): (usize, &mut Option<Trip>)| t.as_mut()?.advance(net).then_some(i);
+    /// 1 tick 進め、着いた主体を消して、その ID の順に返す。`connectors` はノードでの車線のつながりで、
+    /// 車が次のリンクの車線を選ぶのに使う。
+    pub fn step(&mut self, net: &Network, connectors: &[Connector]) -> Vec<TripId> {
+        let advance = |(i, t): (usize, &mut Option<Trip>)| {
+            let t = t.as_mut()?;
+            (t.mode == LaneMode::Sidewalk && t.advance(net)).then_some(i)
+        };
         #[cfg(feature = "parallel")]
         let arrived: Vec<usize> = self
             .rows
@@ -247,6 +311,9 @@ impl Trips {
             .enumerate()
             .filter_map(advance)
             .collect();
+        let mut arrived = arrived;
+        arrived.extend(car::step(&mut self.rows, net, connectors));
+        arrived.sort_unstable();
         arrived
             .into_iter()
             .map(|i| {
@@ -263,31 +330,43 @@ impl Trips {
     /// 経路探索が古い網のままなら、先に作り直す。
     pub fn reroute(&mut self, net: &Network, router: &mut AstarRouter) -> Vec<TripId> {
         router.sync(net);
-        let broken: Vec<(TripId, SidewalkPos, SidewalkPos)> = self
+        let broken: Vec<(TripId, LaneMode, SidewalkPos, SidewalkPos)> = self
             .iter()
             .filter(|(_, t)| {
                 t.route.links[t.leg as usize..]
                     .iter()
                     .any(|l| net.segment(l.segment).is_none())
             })
-            .map(|(id, t)| (id, t.position(), t.dest))
+            .map(|(id, t)| (id, t.mode, t.position(), t.dest))
             .collect();
         let mut lost = Vec::new();
-        let mut found = Vec::new();
-        for (id, at, dest) in broken {
-            match (at.resolve(net), dest.resolve(net)) {
-                (Some(a), Some(b)) => found.push((id, (a, b), dest)),
-                _ => lost.push(id),
-            }
-        }
-        let ends: Vec<_> = found.iter().map(|f| f.1).collect();
-        for ((id, ends, dest), route) in found.into_iter().zip(plan(router, &ends)) {
-            match route {
-                Some(route) => {
-                    let departed = self.get(id).expect("探し直す主体がない").departed;
-                    self.rows[id.slot()] = Some(make_trip(net, route, ends, dest, departed));
+        for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+            let mut found = Vec::new();
+            for (id, _, at, dest) in broken.iter().filter(|b| b.1 == mode) {
+                match (at.resolve_on(net, mode), dest.resolve_on(net, mode)) {
+                    (Some(a), Some(b)) => found.push((*id, (a, b), *dest)),
+                    _ => lost.push(*id),
                 }
-                None => lost.push(id),
+            }
+            let ends: Vec<_> = found.iter().map(|f| f.1).collect();
+            for ((id, ends, dest), route) in found.into_iter().zip(plan(router, mode, &ends)) {
+                let Some(route) = route else {
+                    lost.push(id);
+                    continue;
+                };
+                let old = self.get(id).expect("探し直す主体がない");
+                let (departed, speed, waiting) = (old.departed, old.speed, old.waiting);
+                // 探し直す前の、リンクの中の車線の番号。網が変わると車線の ID も変わるので番号で覚える。
+                let index = net
+                    .link_lanes(old.link())
+                    .position(|l| l == old.lane)
+                    .unwrap_or(0);
+                let mut t = make_trip(net, route, ends, dest, departed);
+                (t.speed, t.waiting) = (speed, waiting);
+                self.rows[id.slot()] = Some(t);
+                if mode == LaneMode::Car && !waiting {
+                    car::keep_lane(&mut self.rows, net, id.slot(), index);
+                }
             }
         }
         lost.sort();
@@ -300,6 +379,7 @@ impl Trips {
     /// ワールド座標の範囲 `[min, max)` にいる移動体を ID の順に返す。
     pub fn movers_in(&self, min: WorldPos, max: WorldPos) -> Vec<Mover> {
         self.iter()
+            .filter(|(_, t)| !t.waiting)
             .filter_map(|(id, t)| {
                 let pos = t.position().world();
                 let inside = (min.x..max.x).contains(&pos.x) && (min.y..max.y).contains(&pos.y);
@@ -307,6 +387,7 @@ impl Trips {
                     id,
                     pos,
                     heading: t.step,
+                    mode: t.mode,
                 })
             })
             .collect()
@@ -320,7 +401,13 @@ fn make_trip(
     dest: SidewalkPos,
     now: Tick,
 ) -> Trip {
+    let mode = route.links[0].mode;
+    let first = route.links[0];
     let mut t = Trip {
+        mode,
+        lane: net.link_lanes(first).next().expect("リンクに車線がない"),
+        speed: MmPerTick::ZERO,
+        waiting: false,
         route,
         leg: 0,
         offset: from,
@@ -331,12 +418,16 @@ fn make_trip(
         dest_offset: to,
         departed: now,
     };
-    t.enter(net, from);
+    t.enter(net, from, None);
     t
 }
 
 impl StateHash for Trip {
     fn write_state(&self, h: &mut StateHasher) {
+        h.write(&(self.mode as u8));
+        h.write(&self.lane);
+        h.write(&self.speed);
+        h.write(&self.waiting);
         h.write_len(self.route.links.len());
         for l in &self.route.links {
             h.write(&l.segment);

@@ -31,5 +31,9 @@ harness = false
 name = "walk_tick"
 harness = false
 
+[[bench]]
+name = "car_tick"
+harness = false
+
 [dev-dependencies]
 criterion = "0.8.2"

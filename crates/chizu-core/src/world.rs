@@ -603,7 +603,8 @@ impl World {
         self.population
             .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
         self.update_people();
-        self.trips.step(&self.network);
+        self.trips
+            .step(&self.network, self.router.router.connectors());
         self.grow_buildings();
         self.tick = tick.next();
     }
