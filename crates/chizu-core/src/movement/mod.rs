@@ -231,7 +231,8 @@ impl Trips {
             .flatten()
     }
 
-    /// 歩く主体をまとめて作り、依頼の順に ID を返す。経路はまとめて探す。
+    /// 歩く主体をまとめて作り、依頼の順に ID を返す。経路はまとめて探す。経路探索が古い網のままなら、
+    /// 先に作り直す。
     pub fn spawn_many(
         &mut self,
         net: &Network,
@@ -262,6 +263,7 @@ impl Trips {
         walks: &[(SidewalkPos, SidewalkPos)],
         now: Tick,
     ) -> Vec<Option<TripId>> {
+        router.sync(net);
         let resolved: Vec<Option<Ends>> = walks
             .iter()
             .map(|(a, b)| Some((a.resolve_on(net, mode)?, b.resolve_on(net, mode)?)))
@@ -316,7 +318,9 @@ impl Trips {
 
     /// 網が変わったあとに呼ぶ。残りの経路に消えたリンクがある主体を、いまの位置から探し直す。
     /// いまの位置か行き先が歩道の上になくなったか、つながらなくなった主体は消し、その ID を返す。
+    /// 経路探索が古い網のままなら、先に作り直す。
     pub fn reroute(&mut self, net: &Network, router: &mut AstarRouter) -> Vec<TripId> {
+        router.sync(net);
         let broken: Vec<(TripId, LaneMode, SidewalkPos, SidewalkPos)> = self
             .iter()
             .filter(|(_, t)| {

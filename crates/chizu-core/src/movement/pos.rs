@@ -68,7 +68,8 @@ impl SidewalkPos {
 
     /// 歩道のリンク `link` の、始まりから `offset` の位置。リンクがなければ `None`。
     pub fn on_link(net: &Network, link: LinkId, offset: LaneOffset) -> Option<SidewalkPos> {
-        (link.mode == LaneMode::Sidewalk)
+        let sidewalk = net.segment(link.segment)?.kind.has_sidewalks();
+        (link.mode == LaneMode::Sidewalk && sidewalk)
             .then(|| Self::on_any_link(net, link, offset))
             .flatten()
     }
