@@ -296,14 +296,24 @@ pub enum TripState {
 
 ### 6.2 測り方
 
-- `chizu-scenario` クレートに、種と人口を渡すと格子状の街（道路、区画、建物、住民）を決定論的に作る関数を置く。テストとベンチマークはこれを共有する。
-- ネイティブのベンチマークは criterion で書く。
-  - `tick_micro_20k`：移動体 2 万体の街で 1 tick
-  - `day_macro_100k`：人口 10 万の街を一括の計算で 1 日
-  - `route_batch_1k`：探索 1,000 件をまとめて解く
-  - `citizen_bucket_100k`：住民データ層の 1 組の更新
-- ブラウザでの測定は、`chizu-wasm` に `bench(scenario, ticks)` を出し、ヘッドレスの Chrome で Worker から呼んで tick/秒を出す。`mise run bench-web` で回す。
-- 共有の CI の機械は速さがぶれるので、CI ではベンチマークをビルドするだけにする。数字は手元で測り、大きな変更の PR には前後の値を書く。
+- `chizu-scenario` クレートに、種から格子状の街を決定論的に作る関数を置く。住民の表は `synthetic_population`、道路の格子は `grid_network` と `city_grid_100k`、区画を塗って建物が建つ街は `zoned_grid_city`、通勤の依頼は `commute_requests` で作る。テストとベンチマークはこれを共有する。
+- ネイティブのベンチマークは `crates/chizu-scenario/benches/` に置き、`mise run bench` で回す。
+  - `citizen_bucket`：住民の表の 1 組の更新（10 万人と 100 万人）
+  - `route_batch`：経路の一括探索（1,000 件と 10 万件、束ねるかどうか、職場の集まり方）
+  - `growth`：建物が建つ街の 1 日と、最悪の 1 tick
+- ブラウザとネイティブを同じ条件で並べる測定は `chizu-scenario` の `perf` モジュールにまとめ、`mise run bench:wasm` で回す。
+  - 1 tick は、`zoned_grid_city` の `World::step` と、住民の表の 1 組の更新である。住民の処理には、乱数を引いて幸福度と出発の予定を書き戻す仮の中身（`perf::rng_write`）を使う。住民の表は `World` の外に持つ。
+  - `day_100k` と `day_1m`：住民 10 万人で 1 日（7,200 tick）、100 万人で 1/10 日を回し、1 tick の平均と最悪を出す。`day_ns` は 1 tick の平均から見積もった 1 日の時間である。
+  - `movers_20k`：`city_grid_100k` で、歩く人と車を 1 万ずつ出して 300 tick 進め、1 tick の平均と最悪を出す。6.1 の等速の場面の目安である。
+  - `route_batch_1k` と `route_batch_100k`：`city_grid_100k` で、職場が車のリンクの約 1/100 に集まった通勤を、覚えた結果がない状態から解く。
+  - `memory_bytes`：始めたとき、`day_100k` のあと、`day_1m` のあとの WASM の線形メモリの大きさ。線形メモリは縮まないので、それまでで最も大きかったときの値になる。
+- WASM の側は `chizu-bench-wasm` クレートから `perf` を呼ぶ。画面のアプリの WASM には入れず、`build:bench-wasm` で `build:wasm` と同じ rustflags とプロファイルでビルドする。
+  - `bench:wasm` は、COOP/COEP のヘッダーをつけて配る小さなサーバーを立て、ヘッドレスの Chrome で開いた Worker から呼ぶ。
+  - rayon のスレッドは 1、4、`navigator.hardwareConcurrency` 本の 3 通りにする。スレッドプールは 1 つのインスタンスで 1 度しか作れないので、スレッド数ごとに Worker を作り直す。
+  - 同じ項目を、ネイティブでも同じスレッド数で回す（`cargo bench -p chizu-scenario --bench perf`）。WASM がネイティブの何倍かかったかを `ratio` に出す。
+  - 結果は、標準出力と `target/bench-wasm.json` に JSON で書く。`mise run bench:wasm -- --wasm-only` ならネイティブは回さない。
+- 粗い計算が入ったら、6.1 の中速と最高速の場面に合わせて `perf` に項目を足す。
+- 共有の CI の機械は速さがぶれるので、CI ではベンチマークをビルドするだけにする。`chizu-bench-wasm` は `lint:wasm` で wasm32 に clippy をかけ、壊れたら落ちるようにする。数字は手元で測り、大きな変更の PR には前後の値を書く。
 
 ## 7. リポジトリの構成
 
@@ -358,7 +368,7 @@ run = "pnpm exec vitest run"
 depends = ["test:rust", "test:wasm", "test:web"]
 ```
 
-ほかに `build`（WASM と Web）、`dev`（Vite の開発サーバー）、`bench`、`bench-web` を置く。
+ほかに `build`（WASM と Web）、`dev`（Vite の開発サーバー）、`bench`、`bench:wasm` を置く。
 
 ### 7.2 CI
 
@@ -376,6 +386,17 @@ depends = ["test:rust", "test:wasm", "test:web"]
 | build | `mise run build` と `cargo bench --no-run` |
 
 Rust のジョブは `~/.cargo` と `target` をキャッシュする。
+
+### 7.3 WASM のビルドの設定
+
+設定は `bench:wasm` の数字を見て決めた。比べるときは、設定ごとにビルドした WASM を順番を入れ替えながら交互に測り、中央値で比べる。
+
+- `--max-memory` は、wasm32 で指せる最大の 4GiB にする。100 万人の街を作ったときの線形メモリは約 140〜160MiB で、1GiB にも収まる。上限を上げるのは、移動体や経路の覚えが増えても上限で止まらないようにするためである。
+  - 共有メモリは、上限の大きさの仮想アドレスを最初に確保する。64 ビットの機械では問題にならない。
+  - iOS の Safari では、上限の大きい共有メモリで `WebAssembly.Memory` が作れなかったという報告がある（WebKit の Bug 255103、上限 2GiB）。iOS で動かすときに確かめる。
+- `target-feature` に `+simd128` を足し、リリースのプロファイルは `lto = "fat"` と `codegen-units = 1` にする。`opt-level` は既定の 3 のままにする。
+  - 負荷の低いときに測ると、両方を入れた WASM は、どちらも入れないものに比べて 1 tick が 1〜3 割速く、大きさが約 2 割小さかった。経路の一括探索は、4 スレッドでは変わらなかった。
+  - simd128 は、主要なブラウザがすべて対応している（Chrome 91、Firefox 89、Safari 16.4 から）。対応していないブラウザでは WASM を読み込めない。スレッドに要る共有メモリは Safari 15.2 から使えるので、Safari 15.2〜16.3 が新たに外れる。
 
 ## 8. テストの方針
 

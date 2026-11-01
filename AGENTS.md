@@ -49,6 +49,7 @@ mise run play          # 遊ぶ用の開発サーバーを立てっぱなしに�
 mise run test:play     # scripts/play.sh の小さな関数を確かめる
 mise run bench         # ネイティブのベンチマーク（criterion）。CI では回さない
 mise run build:bench   # ベンチマークをビルドだけする。CI はこれでベンチが壊れていないかを見る
+mise run bench:wasm    # スレッドつきの WASM をヘッドレスの Chrome で測り、ネイティブと並べた JSON を出す。CI では回さない
 ```
 
 `mise run play` は `~/.cache/chizu-play` に origin を clone し、60 秒ごとに main を見て、進んでいたらビルドし直して立て直す。開いているページは自動で読み直され、右下に配信している版が出る。

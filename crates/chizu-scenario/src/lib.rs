@@ -8,6 +8,8 @@ use chizu_core::{
 };
 use chizu_core::{LaneOffset, SidewalkPos};
 
+pub mod perf;
+
 pub use chizu_core::citizens::MAX_HOUSEHOLD_SIZE;
 
 /// 種 `seed` から `count` 人の合成の住民と世帯を作る。
