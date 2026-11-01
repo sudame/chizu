@@ -6,6 +6,7 @@ import {
   formatRate,
   formatSigned,
   isDeficit,
+  PendingRates,
   parseFinance,
   steppedRate,
   summaryText,
@@ -119,5 +120,50 @@ describe("finance のメッセージ", () => {
     expect(SAMPLE).toHaveLength(FINANCE_LENGTH);
     expect(isWorkerToMain({ kind: "finance", values: SAMPLE.slice(1) })).toBe(false);
     expect(isWorkerToMain({ kind: "finance", values: SAMPLE.map(String) })).toBe(false);
+  });
+});
+
+describe("PendingRates", () => {
+  const max = 300;
+
+  it("押した先を表示し、続けて押すと 2 刻み先を求める", () => {
+    const p = new PendingRates();
+    expect(p.press("Residential", 1, 100, max)).toBe(110);
+    // 反映前の finance が届いても、表示は押した先のまま
+    p.receive([100, 100, 100, 100]);
+    expect(p.shown("Residential", 100)).toBe(110);
+    expect(p.press("Residential", 1, 100, max)).toBe(120);
+    // 110 までを反映した finance では、まだ 120 を待つ
+    p.receive([110, 100, 100, 100]);
+    expect(p.shown("Residential", 110)).toBe(120);
+    // 120 が反映されたら忘れる
+    p.receive([120, 100, 100, 100]);
+    expect(p.shown("Residential", 120)).toBe(120);
+    expect(p.press("Residential", -1, 120, max)).toBe(110);
+  });
+
+  it("区画ごとに別々に覚える", () => {
+    const p = new PendingRates();
+    p.press("Commercial", -1, 100, max);
+    expect(p.shown("Residential", 100)).toBe(100);
+    expect(p.shown("Commercial", 100)).toBe(90);
+    p.receive([100, 90, 100, 100]);
+    expect(p.shown("Commercial", 90)).toBe(90);
+  });
+
+  it("端では動かさず、何も覚えない", () => {
+    const p = new PendingRates();
+    expect(p.press("Office", -1, 0, max)).toBeNull();
+    expect(p.press("Office", 1, 300, max)).toBeNull();
+    expect(p.shown("Office", 0)).toBe(0);
+  });
+
+  it("断られたら押した先を捨てて中核の値に戻す", () => {
+    const p = new PendingRates();
+    p.press("Industrial", 1, 100, max);
+    p.press("Office", 1, 100, max);
+    p.reject();
+    expect(p.shown("Industrial", 100)).toBe(100);
+    expect(p.shown("Office", 100)).toBe(100);
   });
 });

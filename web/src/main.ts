@@ -688,6 +688,9 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     if (tool.kind === "service") {
       updatePreview();
     }
+    if (command === "SetTaxRate" && message.outcome !== "Applied") {
+      financePanel.rejected();
+    }
     if (command !== undefined && command !== "SetSimSpeed") {
       showOutcome(command, message.outcome, message.reason);
     }

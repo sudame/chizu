@@ -122,8 +122,48 @@ export function financeRows(finance: Finance): {
   };
 }
 
+/**
+ * 押した先の税率を、中核が反映するまで覚えておく。
+ * 反映前の finance が遅れて届いても表示を戻さず、続けて押したときも古い値から数え直さない。
+ */
+export class PendingRates {
+  private readonly wanted = new Map<TaxZone, number>();
+
+  /** 表示する税率。押した先があればそれ、なければ中核の値。 */
+  shown(zone: TaxZone, received: number): number {
+    return this.wanted.get(zone) ?? received;
+  }
+
+  /** 1 刻み動かした先を覚えて返す。動かせない（端）ときは null。 */
+  press(zone: TaxZone, direction: 1 | -1, received: number, max: number): number | null {
+    const current = this.shown(zone, received);
+    const next = steppedRate(current, direction, max);
+    if (next === current) {
+      return null;
+    }
+    this.wanted.set(zone, next);
+    return next;
+  }
+
+  /** finance が届いた。押した先と一致した区画だけ、反映済みとして忘れる。 */
+  receive(permille: readonly number[]): void {
+    TAX_ZONES.forEach(({ zone }, i) => {
+      if (this.wanted.get(zone) === permille[i]) {
+        this.wanted.delete(zone);
+      }
+    });
+  }
+
+  /** 断られたので、押した先をすべて忘れて中核の値に戻す。 */
+  reject(): void {
+    this.wanted.clear();
+  }
+}
+
 export type FinancePanel = {
   update(finance: Finance): void;
+  /** SetTaxRate が断られたときに呼ぶ。 */
+  rejected(): void;
 };
 
 function make<K extends keyof HTMLElementTagNameMap>(
@@ -153,7 +193,7 @@ export function setupFinance(
     throw new Error("収支のパネルの要素が足りない");
   }
   let latest: Finance | null = null;
-  const wanted = new Map<TaxZone, number>();
+  const pending = new PendingRates();
 
   const taxList = make("div", "", "finance-list");
   const expenseList = make("div", "", "finance-list");
@@ -181,12 +221,10 @@ export function setupFinance(
       if (latest === null) {
         return;
       }
-      const current = wanted.get(zone) ?? latest.permille[i] ?? 0;
-      const next = steppedRate(current, direction, latest.maxPermille);
-      if (next === current) {
+      const next = pending.press(zone, direction, latest.permille[i] ?? 0, latest.maxPermille);
+      if (next === null) {
         return;
       }
-      wanted.set(zone, next);
       rate.textContent = formatRate(next);
       send(taxCommand(zone, next));
     };
@@ -214,42 +252,52 @@ export function setupFinance(
     make("p", "金額は 1 日あたりの見込み。", "finance-note"),
   );
 
+  const render = (finance: Finance) => {
+    const rows = financeRows(finance);
+    summary.textContent = summaryText(finance);
+    root.classList.toggle("deficit", isDeficit(finance));
+    // test:wasm が読む
+    root.dataset.net = String(finance.net);
+    root.dataset.income = String(finance.income);
+    root.dataset.deficit = String(isDeficit(finance));
+    TAX_ZONES.forEach(({ zone }, i) => {
+      const rate = rateLabels[i];
+      if (rate !== undefined) {
+        rate.textContent = formatRate(pending.shown(zone, finance.permille[i] ?? 0));
+      }
+      const amount = amounts[i];
+      if (amount !== undefined) {
+        amount.textContent = rows.taxes[i]?.value ?? "";
+      }
+      const row = taxList.querySelector<HTMLElement>(`[data-zone="${zone}"]`);
+      if (row !== null) {
+        row.dataset.permille = String(finance.permille[i] ?? 0);
+        row.dataset.tax = String(finance.taxes[i] ?? 0);
+      }
+    });
+    rows.expenses.forEach((r, i) => {
+      const value = expenseValues[i];
+      const label = value?.previousElementSibling;
+      if (value !== undefined && label) {
+        label.textContent = r.label;
+        value.textContent = r.value;
+      }
+    });
+    netLabel.textContent = rows.net.label;
+    netValue.textContent = rows.net.value;
+  };
+
   return {
     update(finance) {
       latest = finance;
-      wanted.clear();
-      const rows = financeRows(finance);
-      summary.textContent = summaryText(finance);
-      root.classList.toggle("deficit", isDeficit(finance));
-      // test:wasm が読む
-      root.dataset.net = String(finance.net);
-      root.dataset.income = String(finance.income);
-      root.dataset.deficit = String(isDeficit(finance));
-      TAX_ZONES.forEach(({ zone }, i) => {
-        const rate = rateLabels[i];
-        if (rate !== undefined) {
-          rate.textContent = formatRate(finance.permille[i] ?? 0);
-        }
-        const amount = amounts[i];
-        if (amount !== undefined) {
-          amount.textContent = rows.taxes[i]?.value ?? "";
-        }
-        const row = taxList.querySelector<HTMLElement>(`[data-zone="${zone}"]`);
-        if (row !== null) {
-          row.dataset.permille = String(finance.permille[i] ?? 0);
-          row.dataset.tax = String(finance.taxes[i] ?? 0);
-        }
-      });
-      rows.expenses.forEach((r, i) => {
-        const value = expenseValues[i];
-        const label = value?.previousElementSibling;
-        if (value !== undefined && label) {
-          label.textContent = r.label;
-          value.textContent = r.value;
-        }
-      });
-      netLabel.textContent = rows.net.label;
-      netValue.textContent = rows.net.value;
+      pending.receive(finance.permille);
+      render(finance);
+    },
+    rejected() {
+      pending.reject();
+      if (latest !== null) {
+        render(latest);
+      }
     },
   };
 }
