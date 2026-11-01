@@ -259,9 +259,9 @@ fn movers_report_world_positions_in_the_area() {
             pos: WorldPos::new(Mm(p), Mm(p)),
             heading: (1, 1),
             mode: LaneMode::Sidewalk,
-            // 小さい道路の歩道は、中心線から車線 1 本と歩道の半分、進む向きの左にある。
-            // 斜めなので、2,000mm を √2 で割って 1,414mm ずつ、左（右上）へずれる。
-            shift: (Mm(1_414), Mm(-1_414)),
+            // 小さい道路の歩道は、中心線から車線 1 本と歩道の半分（2,080mm）、進む向きの右にある。
+            // 斜めなので、√2 で割って 1,470mm ずつ、右（左下）へずれる。
+            shift: (Mm(-1_470), Mm(1_470)),
         }]
     );
     let none = w.trips.movers_in(

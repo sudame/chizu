@@ -1,11 +1,17 @@
 // 道路の断面。車線と歩道の数と幅を、区間の種類の番号から求める。
-// 幅は中核の network.rs の LANE_WIDTH_MM と SIDEWALK_WIDTH_MM（1 マス = 8,000mm）と同じにする。
+// 幅は中核の network.rs の SegmentKind::lane_width_mm と sidewalk_width_mm（1 マス = 8,000mm）と同じにする。
+// 道路は 1 マスに収める。半分の幅は小 0.3、中 0.4、大 0.5、高速 0.5 マスで、車線の幅は種類ごとに変わる。
 // 移動体を車線の上に描くずれは中核が求めるので、ここでは道路の線の組み立てにだけ使う。
 
-/** 車線 1 本の幅（マス）。 */
-export const LANE_WIDTH = 0.2;
 /** 歩道 1 本の幅（マス）。 */
-export const SIDEWALK_WIDTH = 0.1;
+export const SIDEWALK_WIDTH = 0.08;
+
+const LANE_WIDTHS: Record<number, number> = { 1: 0.22, 2: 0.16, 3: 0.14, 4: 0.25 };
+
+/** 車線 1 本の幅（マス）。 */
+export function laneWidth(kindCode: number): number {
+  return LANE_WIDTHS[kindCode] ?? 0.22;
+}
 
 /** 区間の種類の番号。chizu-wasm の segment_kind_code と同じ。 */
 export const HIGHWAY_CODE = 4;
@@ -24,12 +30,12 @@ export function hasSidewalks(kindCode: number): boolean {
 
 /** 中心線から道路の端（歩道を含む）までの半分の幅（マス）。 */
 export function roadHalfWidth(kindCode: number): number {
-  return lanesPerSide(kindCode) * LANE_WIDTH + (hasSidewalks(kindCode) ? SIDEWALK_WIDTH : 0);
+  return carriagewayHalfWidth(kindCode) + (hasSidewalks(kindCode) ? SIDEWALK_WIDTH : 0);
 }
 
 /** 中心線から車道の端までの半分の幅（マス）。 */
 export function carriagewayHalfWidth(kindCode: number): number {
-  return lanesPerSide(kindCode) * LANE_WIDTH;
+  return lanesPerSide(kindCode) * laneWidth(kindCode);
 }
 
 export type StripRole = "asphalt" | "sidewalk" | "center" | "divider";
@@ -57,7 +63,7 @@ export function crossSection(kindCode: number): Strip[] {
   strips.push({ role: "center", offset: 0, half: CENTER_LINE_HALF });
   for (let i = 1; i < lanes; i++) {
     for (const side of [-1, 1]) {
-      strips.push({ role: "divider", offset: side * i * LANE_WIDTH, half: DIVIDER_HALF });
+      strips.push({ role: "divider", offset: side * i * laneWidth(kindCode), half: DIVIDER_HALF });
     }
   }
   return strips;
@@ -73,7 +79,7 @@ const DIVIDER_HALF = 0.012;
 export function laneCenter(kindCode: number, index: number): number {
   const lanes = lanesPerSide(kindCode);
   const i = Math.min(Math.max(index, 0), lanes - 1);
-  return (lanes - i - 0.5) * LANE_WIDTH;
+  return (lanes - i - 0.5) * laneWidth(kindCode);
 }
 
 /** 道路の線をこの倍率（1 マスのピクセル数）以上で車線ごとに描く。これより縮小したら 1 本の線にする。 */

@@ -13,7 +13,7 @@ mod commute;
 mod junction;
 #[cfg(test)]
 mod junction_tests;
-mod lane_shift;
+pub(crate) mod lane_shift;
 mod parking;
 #[cfg(test)]
 mod parking_tests;
@@ -67,6 +67,8 @@ pub struct Trip {
     /// いまの区切りが終わったあとにすること。
     then: parking::Then,
     departed: Tick,
+    /// 車線や歩道が変わった直後の、描くずれの移り変わり。描画のためだけの値で、状態ハッシュには入れない。
+    blend: Option<lane_shift::Blend>,
 }
 
 impl Trip {
@@ -104,13 +106,8 @@ impl Trip {
         SidewalkPos::along(self.start, self.step, self.offset)
     }
 
-    /// 描くときに位置へ足す、車線や歩道に寄せるずれ。
-    fn shift(&self, net: &Network) -> (Mm, Mm) {
-        let links = &self.route.links;
-        let leg = self.leg as usize;
-        let Some(&link) = links.get(leg) else {
-            return (Mm::ZERO, Mm::ZERO);
-        };
+    /// リンク `link` のいまの車線のずれ。車線を移る前のずれからの移り変わりは含まない。
+    fn lane_target(&self, net: &Network, link: LinkId) -> (i64, i64) {
         let index = match self.mode {
             LaneMode::Car => net
                 .link_lanes(link)
@@ -118,11 +115,24 @@ impl Trip {
                 .unwrap_or(0),
             LaneMode::Sidewalk => 0,
         };
-        let prev = leg.checked_sub(1).and_then(|p| links.get(p)).copied();
-        lane_shift::shift(net, link, self.step, index, prev, self.offset.0)
+        lane_shift::target(net, link, self.step, index)
     }
 
-    fn last_leg(&self) -> bool {
+    /// 経路の `leg` 番めのリンクの上にいるときの、描くずれ。
+    fn shift_on_leg(&self, net: &Network, leg: usize) -> (i64, i64) {
+        let Some(&link) = self.route.links.get(leg) else {
+            return (0, 0);
+        };
+        lane_shift::blended(self.lane_target(net, link), self.blend, self.offset.0)
+    }
+
+    /// 描くときに位置へ足す、車線や歩道に寄せるずれ。
+    fn shift(&self, net: &Network) -> (Mm, Mm) {
+        let (x, y) = self.shift_on_leg(net, self.leg as usize);
+        (Mm(x), Mm(y))
+    }
+
+        fn last_leg(&self) -> bool {
         self.leg as usize + 1 == self.route.links.len()
     }
 
@@ -144,11 +154,17 @@ impl Trip {
 
     /// いまの経路の番号のリンクに入る。車線を指定しなければ、リンクの最初の車線に入る。
     fn enter(&mut self, net: &Network, offset: LaneOffset, lane: Option<LaneId>) {
+        // 呼ぶ側は `leg` を進めてから呼ぶ。直前のリンクでのずれを、新しいリンクへ移すために覚える。
+        let from = (self.leg > 0).then(|| self.shift_on_leg(net, self.leg as usize - 1));
         let link = self.link();
         let (start, step, len) = pos::link_geometry(net, link).expect("経路のリンクがない");
         let lane = lane.unwrap_or_else(|| net.link_lanes(link).next().expect("リンクに車線がない"));
         (self.start, self.step, self.link_len, self.offset, self.lane) =
             (start, step, len, offset, lane);
+        self.blend = from.map(|from| lane_shift::Blend {
+            from,
+            start: offset.0,
+        });
     }
 }
 
@@ -498,11 +514,19 @@ impl Trips {
                     .link_lanes(old.link())
                     .position(|l| l == old.lane)
                     .unwrap_or(0);
+                // 探し直す前に描いていたずれ。車線や経路が変わっても、そこから少しずつ移す。
+                let shown = old.shift_on_leg(net, old.leg as usize);
                 let mut t = make_trip(net, route, ends, dest, departed);
                 (t.speed, t.waiting, t.waited, t.then) = (speed, waiting, waited, then);
                 self.rows[id.slot()] = Some(t);
                 if mode == LaneMode::Car && !waiting {
                     car::keep_lane(&mut self.rows, net, id.slot(), index);
+                }
+                if let Some(t) = self.rows[id.slot()].as_mut() {
+                    t.blend = Some(lane_shift::Blend {
+                        from: shown,
+                        start: t.offset.0,
+                    });
                 }
             }
         }
@@ -557,6 +581,7 @@ fn make_trip(
         dest_offset: to,
         then: parking::Then::Arrive,
         departed: now,
+        blend: None,
     };
     t.enter(net, from, None);
     t

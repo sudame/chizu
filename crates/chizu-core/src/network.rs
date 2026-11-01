@@ -29,13 +29,6 @@ pub const TILE_MM: i64 = 8_000;
 /// 斜めに 1 マス進む長さ（mm）。8m の √2 倍を mm に丸めた値である。
 pub const DIAGONAL_TILE_MM: i64 = 11_314;
 
-/// 車線 1 本の幅（mm）。画面に道路と移動体を描くための値で、シミュレーションには使わない。
-/// 画面の `web/src/map/lanes.ts` と同じにする。
-pub const LANE_WIDTH_MM: i64 = 1_600;
-
-/// 歩道 1 本の幅（mm）。使い方は [`LANE_WIDTH_MM`] と同じ。
-pub const SIDEWALK_WIDTH_MM: i64 = 800;
-
 /// 1 回のコマンドで引ける道路の長さの上限（マス）。
 pub const MAX_ROAD_TILES: u64 = 1_024;
 
@@ -208,6 +201,23 @@ impl SegmentKind {
 
     pub fn has_sidewalks(self) -> bool {
         matches!(self, SegmentKind::Road(_))
+    }
+
+    /// 画面に描く車線 1 本の幅（mm）。道路が 1 マスに収まり、半分の幅が小 0.3、中 0.4、大 0.5、
+    /// 高速 0.5 マスになるよう、種類ごとに決める。シミュレーションには使わない。
+    /// 画面の `web/src/map/lanes.ts` と同じにする。
+    pub fn lane_width_mm(self) -> i64 {
+        match self {
+            SegmentKind::Road(RoadKind::Small) => 1_760,
+            SegmentKind::Road(RoadKind::Medium) => 1_280,
+            SegmentKind::Road(RoadKind::Large) => 1_120,
+            SegmentKind::Highway => 2_000,
+        }
+    }
+
+    /// 画面に描く歩道 1 本の幅（mm）。歩道のない道路は 0 である。
+    pub fn sidewalk_width_mm(self) -> i64 {
+        if self.has_sidewalks() { 640 } else { 0 }
     }
 
     fn code(self) -> u8 {

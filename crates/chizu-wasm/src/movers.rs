@@ -194,9 +194,9 @@ mod tests {
         assert!(first.iter().all(|m| m.kind == KIND_WALK));
         // 基準のチャンクの原点は (-64, -64) なので、道路の y = 10 のマスは 74 の辺りにある。
         assert!(first.iter().all(|m| (74.0..75.0).contains(&m.y)));
-        // 歩く人は歩道の上にいる。小さい道路の歩道は中心線から 0.25 マス離れ、
-        // 右へ歩く人の左（画面の上）にある。
-        assert!(first.iter().all(|m| m.y == 74.25));
+        // 歩く人は歩道の上にいる。小さい道路の歩道は中心線から 0.26 マス離れ、
+        // 東へ歩く人の右（画面の下）にある。
+        assert!(first.iter().all(|m| (m.y - 74.76).abs() < 0.001));
         for _ in 0..20 {
             w.step();
         }

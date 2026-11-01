@@ -650,6 +650,18 @@ mod tests {
                 ),
                 "{b:?}"
             );
+            // 出入口の歩道を歩く人は、画面でも建物の側の歩道に描かれる。
+            let net = w.network();
+            let line = net.segment_line(b.entrance.segment).unwrap();
+            let sign = if b.entrance.dir == Dir::Forward { 1 } else { -1 };
+            let step = (line.step.0 as i8 * sign, line.step.1 as i8 * sign);
+            let lateral = crate::movement::lane_shift::lateral_mm(net, b.entrance, 0);
+            let (dx, dy) = crate::movement::lane_shift::left_of(step, lateral);
+            // 建物は道路から `toward_road` の反対にある。
+            assert!(
+                dx * b.toward_road.0 + dy * b.toward_road.1 < 0,
+                "歩道が建物と反対側に描かれる {b:?}"
+            );
             if is_diagonal(b.toward_road) {
                 let (w, h) = crate::zone::rect_size(b.area).unwrap();
                 assert!(w == h && w <= DIAGONAL_LOT_SIDE, "{b:?}");

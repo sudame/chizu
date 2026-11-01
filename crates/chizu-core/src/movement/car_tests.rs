@@ -424,8 +424,12 @@ fn mover_shifts_follow_the_lane_each_car_runs_in() {
             // 横のずれは中心線に直交し、左側通行で、車線の番号が小さいほど端（中心線から遠い）にある。
             assert_eq!(m.shift.0, Mm(0));
             let side = if m.heading.0 > 0 { -1 } else { 1 };
-            if t.leg == 0 || i64::from(t.offset().0) >= lane_shift::BLEND_MM {
-                assert_eq!(m.shift.1, Mm(side * (4_000 - 1_600 * k as i64)));
+            let settled = t
+                .blend
+                .is_none_or(|b| i64::from(t.offset().0) >= i64::from(b.start) + lane_shift::BLEND_MM);
+            if settled {
+                // 大きい道路の車線は 1,120mm 幅で、端の車線の中心は中心線から 2,800mm にある。
+                assert_eq!(m.shift.1, Mm(side * (2_800 - 1_120 * k as i64)));
             }
         }
     }
@@ -518,4 +522,53 @@ fn a_car_slows_down_before_a_slower_road() {
     for w in speeds.windows(2) {
         assert!(w[0] - w[1] <= CAR_DECEL, "{w:?}");
     }
+}
+
+/// 範囲の中の移動体の、中心線の上の位置とずれ。
+fn drawn(c: &Cars) -> std::collections::BTreeMap<crate::id::TripId, ((i64, i64), (i64, i64))> {
+    let min = WorldPos::new(Mm(-800_000), Mm(-800_000));
+    let max = WorldPos::new(Mm(800_000), Mm(800_000));
+    c.trips
+        .movers_in(&c.net, min, max)
+        .into_iter()
+        .map(|m| (m.id, ((m.pos.x.0, m.pos.y.0), (m.shift.0.0, m.shift.1.0))))
+        .collect()
+}
+
+#[test]
+fn lane_shifts_follow_the_travelled_distance_across_road_kinds_and_turns() {
+    // 大きい道路から小さい道路へ移り、2 回曲がる。道路の種類が変わると車線の幅も数も変わる。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (12, 0), RoadKind::Large);
+    road(&mut n, (12, 0), (12, 10), RoadKind::Medium);
+    road(&mut n, (12, 10), (2, 10), RoadKind::Small);
+    road(&mut n, (2, 10), (2, 14), RoadKind::Large);
+    let mut c = Cars::new(n);
+    for k in 0..6_i64 {
+        c.drive(at(1 + k % 2, 0, (1, 0), 0), at(2, 13, (0, 1), 0));
+    }
+    let mut before = drawn(&c);
+    let mut samples = 0_usize;
+    let mut turned = false;
+    for _ in 0..600 {
+        c.step();
+        let after = drawn(&c);
+        for (id, (pos, shift)) in &after {
+            let Some((pos0, shift0)) = before.get(id) else {
+                continue;
+            };
+            let dist = (pos.0 - pos0.0).abs().max((pos.1 - pos0.1).abs());
+            let dshift = (shift.0 - shift0.0).abs().max((shift.1 - shift0.1).abs());
+            // 横のずれの変わり方は、進んだ距離に比べて高々 3 倍である（3m で移りきる）。
+            // 車線が飛べば、進んだ距離が短いときにこれを超える。
+            assert!(
+                dshift <= 3 * dist + 50,
+                "{id:?} が 1 tick に {dist}mm 進むあいだに、ずれが {dshift}mm 変わった"
+            );
+            samples += 1;
+            turned |= c.trips.get(*id).is_some_and(|t| t.leg >= 2);
+        }
+        before = after;
+    }
+    assert!(samples > 100 && turned, "走った車が少ない {samples}");
 }

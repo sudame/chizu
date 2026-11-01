@@ -3,32 +3,41 @@
 //! 移動体の位置は区間の中心線の上にある。画面ではそこに足して、車は走っている車線の中心に、
 //! 歩く人は歩道の上に描く。描画のためだけの値で、状態にも状態ハッシュにも入れない。
 //!
-//! 左側通行なので、車線も歩道も進む向きの左に寄せる。車線の番号は `Network::link_lanes` の
-//! 並びの順で、0 が道路の端にいちばん近い。
+//! 左側通行なので、車は進む向きの左の車線を走る。歩道は進む向きの右にある。建物の出入口の
+//! 歩道（`world/growth.rs` の `frontage`）が、その向きに進む人の右側だからである。
+//! 車線の番号は `Network::link_lanes` の並びの順で、0 が道路の端にいちばん近い。
 
-use super::pos::link_geometry;
-use crate::network::{LANE_WIDTH_MM, LaneMode, LinkId, Network, SIDEWALK_WIDTH_MM};
-use crate::units::Mm;
+use crate::network::{LaneMode, LinkId, Network};
 
-/// 新しいリンクに入ってから、前のリンクでのずれから今のずれへ移りきるまでの距離（mm）。
+/// 新しいリンクに入ってから、前のずれから今のずれへ移りきるまでの距離（mm）。
 /// 交差点で曲がる車や車線を移る車が、横に飛ばないようにする。
 pub const BLEND_MM: i64 = 3_000;
 
-/// リンクの上で、進む向きの左へ中心線から離れる距離（mm）。
-/// 車は `index` 番目の車線の中心、歩く人は歩道の中心までである。
+/// 車線や歩道が変わったときの、変わる前のずれと、変わった位置のリンクの中での距離。
+/// 描画のためだけの値で、状態ハッシュには入れない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Blend {
+    pub from: (i64, i64),
+    pub start: u32,
+}
+
+/// リンクの上で、進む向きの左へ中心線から離れる距離（mm）。右なら負になる。
+/// 車は `index` 番目の車線の中心、歩く人は歩道の中心までである。歩道は右側にある。
 pub fn lateral_mm(net: &Network, link: LinkId, index: usize) -> i64 {
     let Some(segment) = net.segment(link.segment) else {
         return 0;
     };
-    let per_side = i64::from(segment.kind.car_lanes_per_side());
+    let kind = segment.kind;
+    let per_side = i64::from(kind.car_lanes_per_side());
+    let lane = kind.lane_width_mm();
     match link.mode {
         LaneMode::Car => {
             let index = i64::try_from(index)
                 .unwrap_or(i64::MAX)
                 .min((per_side - 1).max(0));
-            (per_side - index) * LANE_WIDTH_MM - LANE_WIDTH_MM / 2
+            (per_side - index) * lane - lane / 2
         }
-        LaneMode::Sidewalk => per_side * LANE_WIDTH_MM + SIDEWALK_WIDTH_MM / 2,
+        LaneMode::Sidewalk => -(per_side * lane + kind.sidewalk_width_mm() / 2),
     }
 }
 
@@ -44,27 +53,19 @@ pub fn left_of(step: (i8, i8), d: i64) -> (i64, i64) {
     }
 }
 
-/// リンク `link` を `step` の向きに `offset` だけ進んだ移動体の、中心線からのずれ。
-/// リンクの始まりの近くでは、直前のリンク `prev` でのずれから少しずつ移す。
-pub fn shift(
-    net: &Network,
-    link: LinkId,
-    step: (i8, i8),
-    index: usize,
-    prev: Option<LinkId>,
-    offset: u32,
-) -> (Mm, Mm) {
-    let cur = left_of(step, lateral_mm(net, link, index));
-    let at = i64::from(offset);
-    let blended = match prev {
-        Some(prev) if at < BLEND_MM => link_geometry(net, prev).map_or(cur, |(_, prev_step, _)| {
-            let before = left_of(prev_step, lateral_mm(net, prev, index));
-            let mix = |b: i64, c: i64| (b * (BLEND_MM - at) + c * at) / BLEND_MM;
-            (mix(before.0, cur.0), mix(before.1, cur.1))
-        }),
-        _ => cur,
+/// リンク `link` を `step` の向きに走る、車線 `index` のずれ。
+pub fn target(net: &Network, link: LinkId, step: (i8, i8), index: usize) -> (i64, i64) {
+    left_of(step, lateral_mm(net, link, index))
+}
+
+/// リンクの始まりから `offset` だけ進んだ所のずれ。`blend` があれば、そこから `target` へ少しずつ移す。
+pub fn blended(target: (i64, i64), blend: Option<Blend>, offset: u32) -> (i64, i64) {
+    let Some(b) = blend else {
+        return target;
     };
-    (Mm(blended.0), Mm(blended.1))
+    let at = (i64::from(offset) - i64::from(b.start)).clamp(0, BLEND_MM);
+    let mix = |from: i64, to: i64| (from * (BLEND_MM - at) + to * at) / BLEND_MM;
+    (mix(b.from.0, target.0), mix(b.from.1, target.1))
 }
 
 #[cfg(test)]
@@ -74,9 +75,9 @@ mod tests {
     use crate::network::{Dir, Line};
     use crate::tile::TilePos;
 
-    fn build(kind: RoadKind, from: (i64, i64), to: (i64, i64)) -> (Network, LinkId, LinkId) {
+    fn build(kind: RoadKind) -> (Network, LinkId, LinkId) {
         let mut n = Network::new();
-        let line = Line::between(TilePos::new(from.0, from.1), TilePos::new(to.0, to.1)).unwrap();
+        let line = Line::between(TilePos::new(0, 0), TilePos::new(5, 0)).unwrap();
         n.build_road(&line, kind).unwrap();
         let (segment, _) = n.segments().next().unwrap();
         let link = |dir, mode| LinkId { segment, dir, mode };
@@ -88,18 +89,30 @@ mod tests {
     }
 
     #[test]
-    fn lanes_sit_left_of_the_center_line_from_the_edge_inward() {
-        // 片側 1 車線は、中心線から車線の半分だけ左にある。
-        let (n, car, walk) = build(RoadKind::Small, (0, 0), (5, 0));
-        assert_eq!(lateral_mm(&n, car, 0), 800);
-        assert_eq!(lateral_mm(&n, walk, 0), 1_600 + 400);
-        // 片側 3 車線は、端の車線が中心線からいちばん遠い。
-        let (n, car, walk) = build(RoadKind::Large, (0, 0), (5, 0));
+    fn every_road_kind_fits_in_one_tile() {
+        use crate::network::SegmentKind;
+        // 半分の幅（mm）は小 0.3、中 0.4、大 0.5、高速 0.5 マス。道路 1 本は 1 マス（8,000mm）に収まる。
+        for (kind, half) in [
+            (SegmentKind::Road(RoadKind::Small), 2_400),
+            (SegmentKind::Road(RoadKind::Medium), 3_200),
+            (SegmentKind::Road(RoadKind::Large), 4_000),
+            (SegmentKind::Highway, 4_000),
+        ] {
+            let lanes = i64::from(kind.car_lanes_per_side());
+            assert_eq!(lanes * kind.lane_width_mm() + kind.sidewalk_width_mm(), half);
+        }
+    }
+
+    #[test]
+    fn lanes_run_from_the_edge_inward_and_sidewalks_are_on_the_right() {
+        let (n, car, walk) = build(RoadKind::Large);
         let lanes: Vec<i64> = (0..3).map(|i| lateral_mm(&n, car, i)).collect();
-        assert_eq!(lanes, [4_000, 2_400, 800]);
-        assert_eq!(lateral_mm(&n, walk, 0), 3 * 1_600 + 400);
-        // 範囲を越えた番号は、端の車線に丸める。
-        assert_eq!(lateral_mm(&n, car, 9), 800);
+        assert_eq!(lanes, [2_800, 1_680, 560]);
+        assert_eq!(lateral_mm(&n, car, 9), 560);
+        assert_eq!(lateral_mm(&n, walk, 0), -(3 * 1_120 + 320));
+        let (n, car, walk) = build(RoadKind::Small);
+        assert_eq!(lateral_mm(&n, car, 0), 880);
+        assert_eq!(lateral_mm(&n, walk, 0), -(1_760 + 320));
     }
 
     #[test]
@@ -109,48 +122,43 @@ mod tests {
         assert_eq!(left_of((-1, 0), 800), (0, 800));
         assert_eq!(left_of((0, 1), 800), (800, 0));
         assert_eq!(left_of((0, -1), 800), (-800, 0));
-        // 斜めは長さが √2 で割られる。
         assert_eq!(left_of((1, 1), 1_000), (707, -707));
+        // 負なら右になる。
+        assert_eq!(left_of((1, 0), -800), (0, 800));
     }
 
     #[test]
-    fn up_and_down_lanes_are_on_opposite_sides() {
-        let (n, car, _) = build(RoadKind::Medium, (0, 0), (5, 0));
-        let back = LinkId {
+    fn up_and_down_lanes_and_sidewalks_are_on_opposite_sides() {
+        let (n, car, walk) = build(RoadKind::Medium);
+        let back = |l: LinkId| LinkId {
             dir: Dir::Backward,
-            ..car
+            ..l
         };
-        let (_, fwd_step, _) = link_geometry(&n, car).unwrap();
-        let (_, back_step, _) = link_geometry(&n, back).unwrap();
-        let f = shift(&n, car, fwd_step, 1, None, 5_000);
-        let b = shift(&n, back, back_step, 1, None, 5_000);
-        assert_eq!((f.0, b.0), (Mm(0), Mm(0)));
-        assert_eq!(f.1.0, -b.1.0);
-        assert_ne!(f.1, Mm(0));
+        let east = (1, 0);
+        let west = (-1, 0);
+        let f = target(&n, car, east, 1);
+        let b = target(&n, back(car), west, 1);
+        assert_eq!(f.1, -b.1);
+        assert_ne!(f.1, 0);
+        let f = target(&n, walk, east, 0);
+        let b = target(&n, back(walk), west, 0);
+        assert_eq!(f.1, -b.1);
+        // 車は左の（北の）車線、歩く人は右の（南の）歩道にいる。
+        assert!(target(&n, car, east, 0).1 < 0);
+        assert!(target(&n, walk, east, 0).1 > 0);
     }
 
     #[test]
-    fn shift_moves_smoothly_into_a_new_link_after_a_turn() {
-        let mut n = Network::new();
-        for (a, b) in [((0, 0), (5, 0)), ((5, 0), (5, 5))] {
-            let line = Line::between(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1)).unwrap();
-            n.build_road(&line, RoadKind::Small).unwrap();
-        }
-        let links: Vec<LinkId> = n
-            .links()
-            .filter(|l| l.dir == Dir::Forward && l.mode == LaneMode::Car)
-            .collect();
-        let (first, second) = (links[0], links[1]);
-        let step = link_geometry(&n, second).unwrap().1;
-        assert_eq!(step, (0, 1));
-        // 入った直後は、前のリンクでのずれ（右へ進む車の左 = 上）と同じで、横に飛ばない。
-        let enter = shift(&n, second, step, 0, Some(first), 0);
-        assert_eq!(enter, (Mm(0), Mm(-800)));
-        // 半分進むと、前と今のずれの真ん中になる。
-        let mid = shift(&n, second, step, 0, Some(first), BLEND_MM as u32 / 2);
-        assert_eq!(mid, (Mm(400), Mm(-400)));
-        // 移りきると、下へ進む車の左（+x）の車線に着く。
-        let done = shift(&n, second, step, 0, Some(first), BLEND_MM as u32);
-        assert_eq!(done, (Mm(800), Mm(0)));
+    fn blending_starts_at_the_old_shift_and_ends_at_the_new_one() {
+        let b = Blend {
+            from: (0, -800),
+            start: 100,
+        };
+        let to = (800, 0);
+        assert_eq!(blended(to, Some(b), 100), (0, -800));
+        assert_eq!(blended(to, Some(b), 100 + BLEND_MM as u32 / 2), (400, -400));
+        assert_eq!(blended(to, Some(b), 100 + BLEND_MM as u32), to);
+        assert_eq!(blended(to, Some(b), 50), (0, -800));
+        assert_eq!(blended(to, None, 0), to);
     }
 }

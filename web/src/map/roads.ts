@@ -10,7 +10,15 @@ import {
   SUPPLY_WATER,
 } from "../protocol/messages.ts";
 import type { Camera, Viewport } from "./camera.ts";
-import { crossSection, HIGHWAY_CODE, roadHalfWidth, type StripRole, showsLanes } from "./lanes.ts";
+import {
+  carriagewayHalfWidth,
+  crossSection,
+  HIGHWAY_CODE,
+  hasSidewalks,
+  roadHalfWidth,
+  type StripRole,
+  showsLanes,
+} from "./lanes.ts";
 
 /** マスの座標。 */
 export type Tile = { x: number; y: number };
@@ -251,24 +259,37 @@ export function unsuppliedCount(buildings: Float64Array): number {
   return n;
 }
 
-type RoadNodes = Map<string, { half: number; arms: number }>;
+/** ノードにつながる区間の 1 本。`dx`、`dy` はノードから区間の向こうの端へ向かう単位ベクトルである。 */
+type Arm = { segment: number; dx: number; dy: number };
+
+type RoadNode = { half: number; carriage: number; kind: number; arms: Arm[] };
+type RoadNodes = Map<string, RoadNode>;
 
 const nodeKey = (x: number, y: number) => `${x},${y}`;
 
-/** ノードごとに、つながる区間のいちばん広い半分の幅と、つながる区間の数を求める。 */
+/** ノードごとに、つながる区間と、いちばん広い区間の幅を求める。 */
 function roadNodes(segments: Float64Array): RoadNodes {
   const nodes: RoadNodes = new Map();
-  const touch = (x: number, y: number, half: number) => {
+  const touch = (x: number, y: number, other: Tile, kind: number, segment: number) => {
     const key = nodeKey(x, y);
-    const node = nodes.get(key) ?? { half: 0, arms: 0 };
+    const node = nodes.get(key) ?? { half: 0, carriage: 0, kind, arms: [] };
+    const half = halfWidthOf(kind);
+    if (half >= node.half) {
+      node.kind = kind;
+    }
     node.half = Math.max(node.half, half);
-    node.arms += 1;
+    node.carriage = Math.max(node.carriage, carriagewayHalfWidth(kind));
+    const len = Math.hypot(other.x - x, other.y - y);
+    node.arms.push({ segment, dx: (other.x - x) / len, dy: (other.y - y) / len });
     nodes.set(key, node);
   };
-  for (let i = 0; i + SEGMENT_STRIDE <= segments.length; i += SEGMENT_STRIDE) {
+  for (let i = 0, n = 0; i + SEGMENT_STRIDE <= segments.length; i += SEGMENT_STRIDE, n++) {
     const [ax = 0, ay = 0, bx = 0, by = 0, kind = 0] = segments.subarray(i, i + SEGMENT_STRIDE);
-    touch(ax, ay, halfWidthOf(kind));
-    touch(bx, by, halfWidthOf(kind));
+    if (ax === bx && ay === by) {
+      continue;
+    }
+    touch(ax, ay, { x: bx, y: by }, kind, n);
+    touch(bx, by, { x: ax, y: ay }, kind, n);
   }
   return nodes;
 }
@@ -296,45 +317,92 @@ const STRIP_COLOR: Record<Exclude<StripRole, "asphalt">, Color> = {
   divider: DIVIDER_COLOR,
 };
 
+// これより急に折り返す角では、継ぎ目の線を縮めも伸ばしもしない
+const MAX_MITER_ANGLE = 2.4;
+
 /**
- * 拡大したときの、車線ごとの道路の描き方。車道、歩道、中央線、車線の区切りの順に重ねる。
- * 交差点のノードは車道の色の四角で埋め、そこへ入る線は縮めて、交差点の中を線が横切らないようにする。
+ * ちょうど 2 本がつながる角で、帯が折れ曲がりに沿ってつながるよう、端をどれだけ縮めるか（マス）。
+ * 中心線から `offset` だけ横にずらした帯の端が、角の内側では縮み、外側では伸びる。負なら伸ばす。
+ * `first` から `second` へ折れ曲がる道筋の上で、2 本の帯がつながる位置である。
+ */
+export function miterTrim(
+  first: { x: number; y: number },
+  second: { x: number; y: number },
+  offset: number,
+): number {
+  const angle = Math.atan2(
+    first.x * second.y - first.y * second.x,
+    first.x * second.x + first.y * second.y,
+  );
+  if (Math.abs(angle) > MAX_MITER_ANGLE) {
+    return 0;
+  }
+  return offset * Math.tan(angle / 2);
+}
+
+/**
+ * 拡大したときの、車線ごとの道路の描き方。下から順に、行き止まりと曲がり角の外側を埋める歩道の色の四角、
+ * 車道、歩道、交差点と曲がり角の車道の色の四角、中央線と車線の区切りの線を重ねる。
+ * 3 本以上が集まる交差点では、線を交差点の手前で止める。2 本だけがつながる角では、線を折れ曲がりに沿ってつなぐ。
  */
 export function roadLaneGeometry(segments: Float64Array, nodes: Float64Array): Geometry {
   const geometry = new Geometry({ x: nodes[0] ?? 0, y: nodes[1] ?? 0 });
   const ends = roadNodes(segments);
-  const trimAt = (x: number, y: number, diagonal: boolean): number => {
+  const asphaltOf = (kind: number) =>
+    kind === HIGHWAY_CODE ? HIGHWAY_ASPHALT_COLOR : ASPHALT_COLOR;
+  const nodeList: { x: number; y: number; node: RoadNode }[] = [];
+  for (let i = 0; i + NODE_STRIDE <= nodes.length; i += NODE_STRIDE) {
+    const [x = 0, y = 0] = nodes.subarray(i, i + 2);
     const node = ends.get(nodeKey(x, y));
-    // つながる区間が 3 本以上ある所が交差点である。
-    if (node === undefined || node.arms < 3) {
+    if (node !== undefined) {
+      nodeList.push({ x, y, node });
+    }
+  }
+
+  // 帯の端を縮める長さ。`atEnd` は区間の終わり側のノードかどうか
+  const trimOf = (index: number, atEnd: boolean, role: StripRole, offset: number): number => {
+    const [ax = 0, ay = 0, bx = 0, by = 0] = segments.subarray(
+      index * SEGMENT_STRIDE,
+      (index + 1) * SEGMENT_STRIDE,
+    );
+    const [x, y] = atEnd ? [bx, by] : [ax, ay];
+    const node = ends.get(nodeKey(x, y));
+    if (node === undefined || role === "asphalt") {
       return 0;
     }
-    return diagonal ? node.half * Math.SQRT2 : node.half;
-  };
-  // 線の帯は、下の帯をすべて描いてから重ねる
-  const roles: StripRole[][] = [["asphalt"], ["sidewalk"], ["center", "divider"]];
-  for (const layer of roles) {
-    if (layer[0] === "center") {
-      drawNodes(geometry, nodes, ends);
+    if (node.arms.length >= 3) {
+      if (role === "sidewalk") {
+        return 0;
+      }
+      return ax !== bx && ay !== by ? node.half * Math.SQRT2 : node.half;
     }
-    for (let i = 0; i + SEGMENT_STRIDE <= segments.length; i += SEGMENT_STRIDE) {
+    const other = node.arms.find((arm) => arm.segment !== index);
+    if (other === undefined) {
+      return 0;
+    }
+    const len = Math.hypot(bx - ax, by - ay);
+    const u = { x: (bx - ax) / len, y: (by - ay) / len };
+    return atEnd
+      ? miterTrim(u, { x: other.dx, y: other.dy }, offset)
+      : miterTrim({ x: -other.dx, y: -other.dy }, u, offset);
+  };
+
+  const strips = (roles: StripRole[]) => {
+    for (let i = 0, n = 0; i + SEGMENT_STRIDE <= segments.length; i += SEGMENT_STRIDE, n++) {
       const [ax = 0, ay = 0, bx = 0, by = 0, kind = 0] = segments.subarray(i, i + SEGMENT_STRIDE);
-      const diagonal = ax !== bx && ay !== by;
       const [a, b] = [
         { x: ax, y: ay },
         { x: bx, y: by },
       ];
-      const trimA = trimAt(ax, ay, diagonal);
-      const trimB = trimAt(bx, by, diagonal);
       for (const strip of crossSection(kind)) {
-        if (!layer.includes(strip.role)) {
+        if (!roles.includes(strip.role)) {
           continue;
         }
         if (strip.role === "asphalt") {
-          const color = kind === HIGHWAY_CODE ? HIGHWAY_ASPHALT_COLOR : ASPHALT_COLOR;
-          geometry.strip(a, b, strip.offset, strip.half, color, false);
+          geometry.strip(a, b, strip.offset, strip.half, asphaltOf(kind), false);
         } else {
-          const t = strip.role === "sidewalk" ? 0 : 1;
+          const trimA = trimOf(n, false, strip.role, strip.offset);
+          const trimB = trimOf(n, true, strip.role, strip.offset);
           geometry.strip(
             a,
             b,
@@ -342,25 +410,30 @@ export function roadLaneGeometry(segments: Float64Array, nodes: Float64Array): G
             strip.half,
             STRIP_COLOR[strip.role],
             true,
-            t * trimA,
-            t * trimB,
+            trimA,
+            trimB,
           );
         }
       }
     }
-  }
-  return geometry;
-}
+  };
 
-/** 交差点とつなぎ目のノードを、車道の色の四角で埋める。 */
-function drawNodes(geometry: Geometry, nodes: Float64Array, ends: RoadNodes): void {
-  for (let i = 0; i + NODE_STRIDE <= nodes.length; i += NODE_STRIDE) {
-    const [x = 0, y = 0] = nodes.subarray(i, i + 2);
-    const node = ends.get(nodeKey(x, y));
-    if (node !== undefined && node.arms >= 3) {
-      geometry.square({ x, y }, node.half, ASPHALT_COLOR);
+  // 行き止まりと曲がり角の外側の、車道に覆われない所を埋める
+  for (const { x, y, node } of nodeList) {
+    if (node.arms.length < 3) {
+      const color = hasSidewalks(node.kind) ? SIDEWALK_COLOR : asphaltOf(node.kind);
+      geometry.square({ x, y }, node.half, color);
     }
   }
+  strips(["asphalt"]);
+  strips(["sidewalk"]);
+  // 交差点は歩道の上まで車道の色で埋める。角は車道の幅だけ埋め、歩道は残す
+  for (const { x, y, node } of nodeList) {
+    const crossing = node.arms.length >= 3;
+    geometry.square({ x, y }, crossing ? node.half : node.carriage, asphaltOf(node.kind));
+  }
+  strips(["center", "divider"]);
+  return geometry;
 }
 
 /** 縮小したときの 1 本の線と、拡大したときの車線ごとの描き方。 */
