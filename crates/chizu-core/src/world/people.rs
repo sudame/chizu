@@ -166,6 +166,33 @@ impl World {
         s
     }
 
+    /// 家のある住民の、通勤・生活サービス・暮らし向きの点数の平均。端数は切り捨てる。
+    /// 家のある住民がいなければ中立の値である。画面に出すだけで、状態には混ぜない。
+    pub fn happiness_averages(&self) -> HappinessParts {
+        let p = &self.population;
+        let (mut sum, mut housed) = ([0_u64; 3], 0_u64);
+        for id in p.citizen_ids() {
+            let row = p.citizen(id).expect("いる住民の行がない");
+            let home = p.home(row.household).flatten();
+            if home.is_some_and(|b| self.buildings.get(b).is_some()) {
+                let h = row.happiness;
+                sum[0] += u64::from(h.commute);
+                sum[1] += u64::from(h.services);
+                sum[2] += u64::from(h.wealth);
+                housed += 1;
+            }
+        }
+        if housed == 0 {
+            return HappinessParts::NEUTRAL;
+        }
+        let avg = |v: u64| (v / housed) as u8;
+        HappinessParts {
+            commute: avg(sum[0]),
+            services: avg(sum[1]),
+            wealth: avg(sum[2]),
+        }
+    }
+
     /// いま職場にいる住民の数。移動している住民と、帰りに寄った店にいる住民は数えない。
     pub fn citizens_at_work(&self) -> usize {
         let p = &self.population;
