@@ -1,9 +1,11 @@
 //! chizu-core と画面（Web Worker）のあいだの受け渡しの層。
 
+pub mod command_input;
 pub mod sim;
 pub mod snapshot;
 
-use chizu_core::{Command, SimSpeed};
+use chizu_core::Command;
+use command_input::Field;
 use js_sys::Reflect;
 use rayon::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -77,25 +79,16 @@ impl Simulation {
 }
 
 fn command_from_js(value: &JsValue) -> Result<Command, JsError> {
-    let field = |name: &str| Reflect::get(value, &JsValue::from_str(name)).ok();
-    let kind = field("kind")
-        .and_then(|v| v.as_string())
-        .ok_or_else(|| JsError::new("コマンドに kind がない"))?;
-    match kind.as_str() {
-        "SetSimSpeed" => {
-            let speed = field("speed")
-                .and_then(|v| v.as_f64())
-                .and_then(integer_u16)
-                .and_then(SimSpeed::new)
-                .ok_or_else(|| JsError::new("速度は 1 から 48 までの整数で指定する"))?;
-            Ok(Command::SetSimSpeed { speed })
-        }
-        other => Err(JsError::new(&format!("知らないコマンド {other}"))),
-    }
-}
-
-fn integer_u16(v: f64) -> Option<u16> {
-    (v.fract() == 0.0 && (0.0..=f64::from(u16::MAX)).contains(&v)).then_some(v as u16)
+    let field = |name: &str| match Reflect::get(value, &JsValue::from_str(name)) {
+        Ok(v) if v.is_undefined() => Field::Missing,
+        Ok(v) => match (v.as_f64(), v.as_string()) {
+            (Some(n), _) => Field::Number(n),
+            (None, Some(s)) => Field::Text(s),
+            (None, None) => Field::Other,
+        },
+        Err(_) => Field::Missing,
+    };
+    command_input::parse(value.is_object(), field).map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[cfg(test)]
@@ -108,15 +101,5 @@ mod tests {
         assert_eq!(parallel_sum(1), 1);
         assert_eq!(parallel_sum(100), 5050);
         assert_eq!(parallel_sum(1_000_000), 500_000_500_000);
-    }
-
-    #[test]
-    fn integer_u16_rejects_fractions_and_out_of_range() {
-        assert_eq!(integer_u16(4.0), Some(4));
-        assert_eq!(integer_u16(4.5), None);
-        assert_eq!(integer_u16(-1.0), None);
-        assert_eq!(integer_u16(65_536.0), None);
-        assert_eq!(integer_u16(f64::NAN), None);
-        assert_eq!(integer_u16(f64::INFINITY), None);
     }
 }

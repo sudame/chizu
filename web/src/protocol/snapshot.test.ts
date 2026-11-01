@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { Worker } from "node:worker_threads";
 import { describe, expect, test } from "vitest";
 import { layout, SnapshotReader, slotBase } from "./snapshot.ts";
@@ -37,6 +38,33 @@ describe("三重バッファ", () => {
       money: -1_234_567,
       speed: 4,
       paused: true,
+    });
+  });
+
+  test("Rust の書き手が書いた枠を読む", () => {
+    // crates/chizu-wasm/src/snapshot.rs の fixture_bytes が書き出したもの。
+    // 制御の語のあとに、各枠の先頭の数値だけが並んでいる
+    const bytes = readFileSync(new URL("./snapshot-fixture.bin", import.meta.url));
+    const fixture = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+    expect(fixture.length).toBe(layout.controlWords + layout.slotCount * layout.slotHeaderWords);
+    const buffer = new SharedArrayBuffer(layout.totalWords * 4);
+    const words = new Uint32Array(buffer);
+    words.set(fixture.subarray(0, layout.controlWords));
+    for (let slot = 0; slot < layout.slotCount; slot++) {
+      const from = layout.controlWords + slot * layout.slotHeaderWords;
+      words.set(fixture.subarray(from, from + layout.slotHeaderWords), slotBase(slot));
+    }
+
+    const reader = new SnapshotReader(buffer, 0);
+    expect(reader.acquire()).toEqual({
+      tick: 2 ** 32 + 7,
+      day: 3,
+      secondOfDay: 45_672,
+      money: -1_234_567_890_123,
+      population: 42,
+      speed: 48,
+      paused: true,
+      moverCount: 0,
     });
   });
 

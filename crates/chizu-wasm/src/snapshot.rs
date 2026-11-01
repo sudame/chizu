@@ -51,7 +51,8 @@ pub mod header {
     pub const MOVER_COUNT: usize = 9;
 }
 
-/// 枠の先頭の数値に充てる語の数。移動体の配列が 16 バイト境界に乗るよう、4 の倍数にする。
+/// 枠の先頭の数値に充てる語の数。移動体の配列の始まりが、枠の先頭から 16 バイトの倍数の位置に来るよう、
+/// 4 の倍数にする。バッファそのものの先頭の位置は 4 バイト境界にしか乗せていない。
 pub const SLOT_HEADER_WORDS: usize = 12;
 
 /// 移動体 1 体の語の数（16 バイト）。中の語の位置は [`mover`] にある。
@@ -242,6 +243,56 @@ mod tests {
         assert!(
             actual == expected,
             "{LAYOUT_FILE} が Rust 側の配置と食い違う。\
+             CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm で書き直す"
+        );
+    }
+
+    const FIXTURE_FILE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../web/src/protocol/snapshot-fixture.bin"
+    );
+
+    /// 画面の側のテストが読む枠の値。`web/src/protocol/snapshot.test.ts` にも同じ値を書く。
+    fn fixture_header() -> Header {
+        Header {
+            tick: (1 << 32) + 7,
+            day: 3,
+            second_of_day: 45_672,
+            money: -1_234_567_890_123,
+            population: 42,
+            speed: 48,
+            paused: true,
+        }
+    }
+
+    /// 2 回書いたあとの、制御の語と各枠の先頭の数値を、リトルエンディアンで並べる。
+    /// 読み手は最初の枠を持ったまま、2 回目に書いた枠を受け取ることになる。
+    fn fixture_bytes() -> Vec<u8> {
+        let mut buf = TripleBuffer::new();
+        buf.publish(&header(1), &[]);
+        buf.publish(&fixture_header(), &[]);
+        let mut words: Vec<u32> = (0..CONTROL_WORDS)
+            .map(|i| buf.words[i].load(Ordering::Relaxed))
+            .collect();
+        for slot in 0..SLOT_COUNT as usize {
+            let base = CONTROL_WORDS + slot * SLOT_WORDS;
+            words.extend(
+                (0..SLOT_HEADER_WORDS).map(|i| buf.words[base + i].load(Ordering::Relaxed)),
+            );
+        }
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn fixture_file_matches() {
+        let expected = fixture_bytes();
+        if std::env::var_os("CHIZU_UPDATE_LAYOUT").is_some() {
+            std::fs::write(FIXTURE_FILE, &expected).unwrap();
+        }
+        let actual = std::fs::read(FIXTURE_FILE).unwrap();
+        assert!(
+            actual == expected,
+            "{FIXTURE_FILE} が Rust 側の書き方と食い違う。\
              CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm で書き直す"
         );
     }

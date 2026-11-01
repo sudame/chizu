@@ -14,6 +14,10 @@ const TIMEOUT_MS = 30_000;
 const MIN_THREADS = 2;
 const TICKS_PER_SECOND = 30;
 const FAST_SPEED = 48;
+// chizu-core の clock.rs と world.rs の値
+const TICKS_PER_DAY = 7_200;
+const GAME_SECONDS_PER_TICK = 12;
+const INITIAL_MONEY = 500_000;
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -105,6 +109,21 @@ try {
   await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
   const paused = await ticksIn(1_000);
   check(paused === 0, `一時停止すると時計が止まる（${paused} tick）`);
+
+  // 一時停止のあいだは枠が変わらないので、1 枠の値をまとめて読める
+  const shown = await hud.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  const shownTick = Number(shown.tick);
+  const expectedClock = {
+    day: Math.floor(shownTick / TICKS_PER_DAY),
+    secondOfDay: (shownTick % TICKS_PER_DAY) * GAME_SECONDS_PER_TICK,
+  };
+  check(
+    Number(shown.day) === expectedClock.day &&
+      Number(shown.secondOfDay) === expectedClock.secondOfDay,
+    `時計の日と時刻が tick ${shownTick} と合う（${shown.day} 日、${shown.secondOfDay} 秒）`,
+  );
+  check(Number(shown.money) === INITIAL_MONEY, `お金が初期値と合う（${shown.money}）`);
+  check(Number(shown.speed) === FAST_SPEED, `速度が ${FAST_SPEED} 倍と読める（${shown.speed}）`);
 
   await page.locator("#pause").click();
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });

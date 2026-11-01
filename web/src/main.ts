@@ -42,6 +42,9 @@ function draw(ctx: CanvasRenderingContext2D, header: SnapshotHeader): void {
   canvas.dataset.tick = String(header.tick);
   canvas.dataset.speed = String(header.speed);
   canvas.dataset.paused = String(header.paused);
+  canvas.dataset.day = String(header.day);
+  canvas.dataset.secondOfDay = String(header.secondOfDay);
+  canvas.dataset.money = String(header.money);
 }
 
 function startDrawing(reader: SnapshotReader, ctx: CanvasRenderingContext2D): void {
