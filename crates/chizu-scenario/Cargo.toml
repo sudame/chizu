@@ -27,5 +27,9 @@ harness = false
 name = "population"
 harness = false
 
+[[bench]]
+name = "walk_tick"
+harness = false
+
 [dev-dependencies]
 criterion = "0.8.2"

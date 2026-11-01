@@ -5,7 +5,9 @@
 
 use core::fmt;
 
-use chizu_core::{ChunkCoord, Command, RoadKind, SimSpeed, TilePos, TileRect, ZoneKind};
+use chizu_core::{
+    ChunkCoord, Command, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, ZoneKind,
+};
 
 /// オブジェクトのフィールドを読んだ値。
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +29,7 @@ pub enum InputError {
     BadInteger(&'static str),
     BadRoadKind,
     BadZone,
+    BadService,
 }
 
 impl fmt::Display for InputError {
@@ -38,6 +41,7 @@ impl fmt::Display for InputError {
             InputError::BadSpeed => write!(f, "速度は 1 から 48 までの整数で指定する"),
             InputError::BadInteger(name) => write!(f, "{name} が範囲の中の整数でない"),
             InputError::BadRoadKind => write!(f, "road は Small、Medium、Large のどれかで指定する"),
+            InputError::BadService => write!(f, "service は PowerPlant か WaterPump で指定する"),
             InputError::BadZone => write!(
                 f,
                 "zone は Residential、Commercial、Industrial、Office、Clear のどれかで指定する"
@@ -104,6 +108,20 @@ pub fn parse(is_object: bool, field: impl Fn(&str) -> Field) -> Result<Command, 
                 max: tile(&field, "maxX", "maxY")?,
             },
         }),
+        "PlaceBuilding" => {
+            let kind = match field("service") {
+                Field::Text(t) if t == "PowerPlant" => ServiceKind::PowerPlant,
+                Field::Text(t) if t == "WaterPump" => ServiceKind::WaterPump,
+                _ => return Err(InputError::BadService),
+            };
+            let rotation = integer(&field, "rotation")
+                .and_then(|v| u8::try_from(v).map_err(|_| InputError::BadInteger("rotation")))?;
+            Ok(Command::PlaceBuilding {
+                kind,
+                at: tile(&field, "atX", "atY")?,
+                rotation,
+            })
+        }
         "BuyChunk" => {
             let coord = |name: &'static str| {
                 integer(&field, name)
@@ -290,6 +308,32 @@ mod tests {
         );
         assert_eq!(paint(Field::Text("Park".into())), Err(InputError::BadZone));
         assert_eq!(paint(Field::Missing), Err(InputError::BadZone));
+    }
+
+    #[test]
+    fn accepts_place_building() {
+        let place = |service: &str, rotation: f64| {
+            object(&[
+                ("kind", Field::Text("PlaceBuilding".into())),
+                ("service", Field::Text(service.into())),
+                ("atX", Field::Number(-3.0)),
+                ("atY", Field::Number(7.0)),
+                ("rotation", Field::Number(rotation)),
+            ])
+        };
+        assert_eq!(
+            place("WaterPump", 2.0),
+            Ok(Command::PlaceBuilding {
+                kind: ServiceKind::WaterPump,
+                at: TilePos::new(-3, 7),
+                rotation: 2,
+            })
+        );
+        assert_eq!(place("Park", 0.0), Err(InputError::BadService));
+        assert_eq!(
+            place("PowerPlant", 300.0),
+            Err(InputError::BadInteger("rotation"))
+        );
     }
 
     #[test]

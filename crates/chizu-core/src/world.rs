@@ -8,13 +8,15 @@ use crate::service::Facility;
 use crate::chunk::{Chunk, Layer, TileUse};
 use crate::citizens::{CitizenChange, CitizenRow, Population};
 use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
-use crate::id::CitizenId;
-use crate::network::{Line, Network, road_cost};
+use crate::id::{CitizenId, TripId};
+use crate::movement::{Mover, SidewalkPos, Trips};
+use crate::network::{Line, Network, TILE_MM, road_cost};
 use crate::rng::{RngPurpose, mix_words};
+use crate::routing::AstarRouter;
 use crate::schedule::{bucket_at, update_citizen};
 use crate::state_hash::{StateHash, StateHasher};
-use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
-use crate::units::{Money, Tick};
+use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, WORLD_LIMIT, local_index};
+use crate::units::{Mm, Money, Tick, WorldPos};
 use crate::zone::{around, near_road, tiles_of};
 
 /// 始めたときの所持金。
@@ -130,10 +132,26 @@ pub struct World {
     lots: growth::LotFronts,
     /// 適用済みの記録の次の番号。記録から続きを回すときは、この番号から適用する。
     next_seq: u64,
+    trips: Trips,
+    router: RouterSlot,
 }
 
 pub mod growth;
 pub mod people;
+
+/// 網から作り直せる経路探索。状態に入れず、`World` どうしを比べるときも見ない。
+#[derive(Clone, Debug)]
+struct RouterSlot {
+    router: AstarRouter,
+}
+
+impl PartialEq for RouterSlot {
+    fn eq(&self, _: &RouterSlot) -> bool {
+        true
+    }
+}
+
+impl Eq for RouterSlot {}
 
 /// 外部接続の高速道路の通り道。始めたときに買ってある土地の端のマスから外へ向かう。
 /// どの辺から出るかと辺のどこから出るかは、種から決める。地形もこの通り道を見て水辺を抑える。
@@ -179,6 +197,9 @@ impl World {
         let mut network = Network::new();
         let highway = highway_line(seed);
         network.add_highway(highway.start, highway.end());
+        let router = RouterSlot {
+            router: AstarRouter::new(&network),
+        };
         let mut world = World {
             seed,
             tick: Tick::ZERO,
@@ -194,6 +215,8 @@ impl World {
             supply_dirty: false,
             lots: Default::default(),
             next_seq: 0,
+            trips: Trips::default(),
+            router,
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
         for coord in coords {
@@ -428,6 +451,41 @@ impl World {
         self.chunks.values()
     }
 
+    pub fn trips(&self) -> &Trips {
+        &self.trips
+    }
+
+    /// 網が変わっていたら経路探索を作り直し、通れなくなった移動を探し直す。
+    fn sync_router(&mut self) {
+        if self.router.router.sync(&self.network) {
+            self.trips.reroute(&self.network, &mut self.router.router);
+        }
+    }
+
+    /// `from` から `to` へ歩く移動を作る。住民の予定とつなぐまで、テストとシナリオから移動を作る入口にする。
+    /// 出入口が歩道の上にないか、つながっていなければ `None`。
+    pub fn spawn_walk(&mut self, from: SidewalkPos, to: SidewalkPos) -> Option<TripId> {
+        self.sync_router();
+        let now = self.tick;
+        self.trips
+            .spawn(&self.network, &mut self.router.router, from, to, now)
+    }
+
+    /// マスの範囲 `rect` にいる移動体を ID の順に返す。状態は変えない。
+    pub fn movers_in(&self, rect: TileRect) -> Vec<Mover> {
+        // 範囲はコマンドで指せる広さに切り詰める。その外にマスはないので、結果は変わらない。
+        let edge = |t: i64| {
+            let t = t.clamp(-WORLD_LIMIT, WORLD_LIMIT + 1);
+            Mm(t.checked_mul(TILE_MM).expect("座標があふれた"))
+        };
+        let min = WorldPos::new(edge(rect.min.x), edge(rect.min.y));
+        let max = WorldPos::new(
+            edge(rect.max.x.saturating_add(1)),
+            edge(rect.max.y.saturating_add(1)),
+        );
+        self.trips.movers_in(min, max)
+    }
+
     /// プレイヤーが置いた公共の施設。置いた順に並ぶ。
     pub fn facilities(&self) -> &[Facility] {
         &self.facilities
@@ -540,10 +598,12 @@ impl World {
     where
         F: Fn(u64, Tick, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
     {
+        self.sync_router();
         let (seed, tick) = (self.seed, self.tick);
         self.population
             .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
         self.update_people();
+        self.trips.step(&self.network);
         self.grow_buildings();
         self.tick = tick.next();
     }
@@ -567,6 +627,7 @@ impl StateHash for World {
         h.write(&self.chunks_bought);
         h.write(&self.network);
         h.write(&self.population);
+        h.write(&self.trips);
         h.write(&self.buildings);
         h.write(&self.facilities);
         h.write(&self.supply_dirty);
