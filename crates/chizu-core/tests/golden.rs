@@ -70,6 +70,10 @@ fn road_network() -> CommandLog {
     rec(20, road((40, -20), (40, 0), RoadKind::Large));
     rec(20, road((0, 0), (30, 30), RoadKind::Large));
     rec(20, road((10, 0), (30, 0), RoadKind::Small));
+    // 斜めの区間とマスの角で交わる。
+    rec(20, road((1, 0), (0, 1), RoadKind::Small));
+    // 既存のノードを途中で通り、そこで分ける。
+    rec(30, road((35, 5), (45, -5), RoadKind::Small));
     rec(30, road((100, 0), (140, 0), RoadKind::Small));
     rec(100, bulldoze((39, 10), (41, 12)));
     rec(100, bulldoze((-50, -50), (-40, -40)));
@@ -203,14 +207,14 @@ fn road_network_covers_the_rules() {
         .unwrap();
     let mut world = World::new(s.seed);
     let stats = replay(&mut world, &s.log, s.ticks);
-    assert_eq!((stats.applied, stats.denied), (6, 4));
+    assert_eq!((stats.applied, stats.denied), (7, 5));
     let net = world.network();
     let degree = |x, y| {
         let node = net.node_at(TilePos::new(x, y)).unwrap();
         net.node(node).unwrap().segments.len()
     };
-    assert_eq!((degree(40, 0), degree(0, 0)), (3, 2));
-    assert_eq!(net.segments().count(), 4);
+    assert_eq!((degree(40, 0), degree(0, 0)), (5, 2));
+    assert_eq!(net.segments().count(), 6);
     assert!(world.money() < chizu_core::world::INITIAL_MONEY);
 }
 

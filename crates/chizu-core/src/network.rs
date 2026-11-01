@@ -710,6 +710,27 @@ mod tests {
             let s = n.segment(s).unwrap();
             [s.a, s.b].map(|e| n.node(e).unwrap().tile())
         };
+        let tiles: BTreeSet<TilePos> = n.nodes().map(|(_, node)| node.tile()).collect();
+        assert_eq!(
+            tiles.len(),
+            n.nodes().count(),
+            "同じマスにノードが 2 つある"
+        );
+        // すべての区間の 1 歩を、向きをそろえて集める。
+        let mut steps = BTreeSet::new();
+        for (id, _) in n.segments() {
+            let l = n.segment_line(id).unwrap();
+            for k in 0..l.len {
+                let (p, q) = (l.tile(k), l.tile(k + 1));
+                assert!(steps.insert((p.min(q), p.max(q))), "1 歩の重なり {p:?}");
+            }
+        }
+        for (p, q) in &steps {
+            if p.x != q.x && p.y != q.y {
+                let (a, b) = (TilePos::new(q.x, p.y), TilePos::new(p.x, q.y));
+                assert!(!steps.contains(&(a.min(b), a.max(b))), "角での交わり {p:?}");
+            }
+        }
         let mut lane_count = 0;
         for (id, seg) in n.segments() {
             assert_ne!(seg.a, seg.b);
