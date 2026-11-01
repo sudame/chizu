@@ -1,0 +1,7 @@
+{
+  "name": "chizu-wasm",
+  "private": true,
+  "type": "module",
+  "main": "chizu_wasm.js",
+  "types": "chizu_wasm.d.ts"
+}

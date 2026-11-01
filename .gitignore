@@ -1,1 +1,6 @@
 target/
+web/node_modules/
+web/dist/
+# wasm-bindgen が作るつなぎのコード。package.json だけは手で書いたものを置く
+web/wasm/*
+!web/wasm/package.json
