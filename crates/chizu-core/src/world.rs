@@ -115,6 +115,7 @@ pub struct World {
     network: Network,
     population: Population,
     buildings: Buildings,
+    lots: growth::LotFronts,
 }
 
 mod growth;
@@ -142,6 +143,14 @@ pub fn highway_line(seed: u64) -> Line {
 }
 
 impl World {
+    /// 所持金を `money` にして始める。テストとベンチマークで、広い土地を買い進めた街を作るのに使う。
+    pub fn new_with_money(seed: u64, money: Money) -> World {
+        World {
+            money,
+            ..World::new(seed)
+        }
+    }
+
     pub fn new(seed: u64) -> World {
         let r = START_CHUNK_RADIUS;
         let chunks = (-r..=r)
@@ -166,6 +175,7 @@ impl World {
             network,
             population: Population::default(),
             buildings: Buildings::default(),
+            lots: Default::default(),
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
         for coord in coords {
@@ -192,6 +202,7 @@ impl World {
                 .or_default()
                 .push((local_index(lx, ly), u));
         }
+        let touched = World::edited_tiles(&edits);
         for (coord, list) in edits {
             let chunk = self.chunks.get_mut(&coord).expect("チャンクがない");
             chunk.edit_layer(Layer::Ground, |tiles| {
@@ -204,6 +215,7 @@ impl World {
                 }
             });
         }
+        self.refresh_lot_fronts(touched);
     }
 
     /// マスの区画。メモリにないチャンクのマスは `None` である。
@@ -215,6 +227,7 @@ impl World {
 
     /// 区画の表をまとめて書き換え、変えたチャンクの版を上げる。
     fn write_zones(&mut self, edits: BTreeMap<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>) {
+        let touched = World::edited_tiles(&edits);
         for (coord, list) in edits {
             let chunk = self.chunks.get_mut(&coord).expect("チャンクがない");
             chunk.edit_layer(Layer::Ground, |tiles| {
@@ -223,6 +236,7 @@ impl World {
                 }
             });
         }
+        self.refresh_lot_fronts(touched);
     }
 
     /// 長方形の中の、区画を塗れるマスに `zone` を塗る。`None` なら区画を消す。
