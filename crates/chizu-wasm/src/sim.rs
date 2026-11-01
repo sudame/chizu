@@ -62,10 +62,31 @@ impl Sim {
         self.paused = paused;
     }
 
-    /// 検証したコマンドを、次に進める tick の頭で適用するものとして記録する。
+    /// 検証したコマンドを、いまの tick（まだ `step` していない tick）に記録し、その場で適用する。
+    ///
+    /// `chizu_core::replay` は tick T のコマンドを tick T の `step` の前に適用するので、
+    /// step と step のあいだに受けたコマンドをすぐ適用しても、記録を再生した結果と変わらない。
+    /// 一時停止のあいだも tick T のままなので、止めたまま建てられる。
     pub fn submit(&mut self, command: Command) -> Result<u64, RecordError> {
         command.validate().map_err(RecordError::Invalid)?;
-        self.log.record(self.world.tick(), command)
+        let seq = self.log.record(self.world.tick(), command)?;
+        let outcome = self.world.apply(&command);
+        let reason =
+            (outcome == ApplyOutcome::Denied).then(|| denial_reason(&self.world, &command));
+        if outcome == ApplyOutcome::Applied
+            && matches!(
+                command,
+                Command::BuildRoad { .. } | Command::Bulldoze { .. }
+            )
+        {
+            self.network_revision = self.network_revision.wrapping_add(1);
+        }
+        self.reports.push(Report {
+            seq,
+            outcome,
+            reason,
+        });
+        Ok(seq)
     }
 
     /// チャンクの版。メモリに置いていないチャンクは、種から作ったばかりのチャンクと同じ 0 を返す。
@@ -86,38 +107,12 @@ impl Sim {
         }
     }
 
-    /// 一時停止していなければ `ticks` だけ進める。
-    ///
-    /// 進め方は `chizu_core::replay` と同じで、各 tick の頭にその tick のコマンドを番号順に
-    /// 適用してから `step` を呼ぶ。コマンドごとの結果を受け取るため、ここで同じ手順を回す。
+    /// 一時停止していなければ `ticks` だけ進める。コマンドは受けたときに適用してあるので、tick を進めるだけである。
     pub fn advance(&mut self, ticks: u32) {
         if self.paused {
             return;
         }
-        let entries = self.log.entries();
-        let mut next = entries.partition_point(|e| e.tick < self.world.tick());
         for _ in 0..ticks {
-            while let Some(e) = entries.get(next)
-                && e.tick == self.world.tick()
-            {
-                let outcome = self.world.apply(&e.command);
-                let reason = (outcome == ApplyOutcome::Denied)
-                    .then(|| denial_reason(&self.world, &e.command));
-                if outcome == ApplyOutcome::Applied
-                    && matches!(
-                        e.command,
-                        Command::BuildRoad { .. } | Command::Bulldoze { .. }
-                    )
-                {
-                    self.network_revision = self.network_revision.wrapping_add(1);
-                }
-                self.reports.push(Report {
-                    seq: e.seq,
-                    outcome,
-                    reason,
-                });
-                next += 1;
-            }
             self.world.step();
         }
     }
@@ -270,16 +265,33 @@ mod tests {
     }
 
     #[test]
-    fn command_applies_at_the_head_of_the_next_tick() {
+    fn command_applies_before_the_current_tick_steps() {
         let mut sim = Sim::new(0);
         sim.advance(2);
         let speed = SimSpeed::new(4).unwrap();
         assert_eq!(sim.submit(Command::SetSimSpeed { speed }), Ok(0));
         assert_eq!(sim.log().entries()[0].tick, Tick(2));
-        assert_eq!(sim.world().speed(), SimSpeed::NORMAL);
-        sim.advance(1);
         assert_eq!(sim.world().speed(), speed);
+        assert_eq!(sim.world().tick(), Tick(2));
+    }
+
+    #[test]
+    fn building_while_paused_matches_replay() {
+        let mut sim = Sim::new(5);
+        sim.advance(3);
+        sim.set_paused(true);
+        sim.submit(road((0, 0), (5, 0))).unwrap();
+        sim.submit(road((2, -3), (2, 3))).unwrap();
+        assert_eq!(sim.network_revision(), 2, "止めたままでも建つ");
         assert_eq!(sim.world().tick(), Tick(3));
+        sim.set_paused(false);
+        sim.advance(2);
+        sim.submit(road((0, 0), (0, 5))).unwrap();
+        sim.advance(1);
+        let mut world = World::new(5);
+        chizu_core::replay(&mut world, sim.log(), 6);
+        assert_eq!(world.tick(), sim.world().tick());
+        assert_eq!(world.state_hash(), sim.world().state_hash());
     }
 
     #[test]

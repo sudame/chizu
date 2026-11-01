@@ -236,12 +236,18 @@ try {
   );
   // 縦に 1.5 マスずらした終点は横に寄せるので、40 マスの小さい道路になる
   check(built.cost === 40 * 250, `引く前に費用が見積もられる（${built.cost}）`);
-  await page.waitForFunction(
-    () => Number(document.querySelector<HTMLElement>("#map")?.dataset.roadSegments ?? 0) > 0,
-    undefined,
-    { timeout: TIMEOUT_MS },
+  const waitSegments = (n: number) =>
+    page.waitForFunction(
+      (expected) =>
+        Number(document.querySelector<HTMLElement>("#map")?.dataset.roadSegments) === expected,
+      n,
+      { timeout: TIMEOUT_MS },
+    );
+  await waitSegments(initialSegments + 1);
+  check(
+    (await roadSegments()) === initialSegments + 1,
+    `引いた道路の区間が届く（${await roadSegments()} 本）`,
   );
-  check((await roadSegments()) === 1, `道路の区間が届く（${await roadSegments()} 本）`);
   await page.waitForFunction(
     (expected) => Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) === expected,
     moneyBefore - built.cost,
@@ -273,12 +279,22 @@ try {
     bulldozed.command === "Bulldoze" && bulldozed.outcome === "Applied",
     `ブルドーザで長方形の中の道路を消せる（${bulldozed.text}）`,
   );
-  await page.waitForFunction(
-    () => document.querySelector<HTMLElement>("#map")?.dataset.roadSegments === "0",
-    undefined,
-    { timeout: TIMEOUT_MS },
+  await waitSegments(initialSegments);
+  check((await roadSegments()) === initialSegments, "消した道路は描かれなくなる");
+
+  // CS2 と同じく、一時停止したままでも建てられる
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
+  await page.locator('button[data-tool="road-Small"]').click();
+  const pausedAt = await tick();
+  const pausedBuild = await drawRoad();
+  await waitSegments(initialSegments + 1);
+  check(
+    pausedBuild.result.outcome === "Applied" && (await tick()) === pausedAt,
+    `一時停止したままでも道路を引ける（${pausedBuild.result.text}、tick ${pausedAt}）`,
   );
-  check((await roadSegments()) === 0, "消した道路は描かれなくなる");
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   await page.locator('button[data-tool="none"]').click();
 
   await page.mouse.move(cx, cy);

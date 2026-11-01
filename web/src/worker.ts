@@ -146,7 +146,10 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
     const { sim, setPaused } = await ready;
     switch (message.kind) {
       case "command":
+        // 適用はその場で済むので、止めているときも結果と道路をすぐ返す
         submit(sim, message.command);
+        sendOutcomes(sim);
+        sendRoads(sim);
         break;
       case "pause":
         setPaused(message.paused);

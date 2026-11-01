@@ -66,7 +66,7 @@ impl Simulation {
         self.0.snapshot().byte_offset()
     }
 
-    /// 画面から届いたコマンドを `Command` に直し、検証して記録する。記録した番号を返す。
+    /// 画面から届いたコマンドを `Command` に直し、検証して記録し、その場で適用する。記録した番号を返す。
     pub fn submit(&mut self, command: JsValue) -> Result<f64, JsError> {
         let command = command_from_js(&command)?;
         self.0
