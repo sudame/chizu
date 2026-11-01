@@ -82,7 +82,7 @@ start_server() {
   local _
   for _ in $(seq 60); do
     if curl --silent --output /dev/null "http://localhost:$port/"; then
-      log "配信している: $label（http://localhost:$port/）"
+      log "配信している: ${label}（http://localhost:$port/）"
       return 0
     fi
     if ! kill -0 "$server_pid" 2>/dev/null; then
@@ -131,6 +131,7 @@ main() {
   mkdir -p "$play_dir" "$feedback_dir"
   log_file="$play_dir/play.log"
   trap on_exit INT TERM
+  trap stop_server EXIT
 
   local active="" served="" failed="" latest
   log "$remote の $branch を見張る。フィードバックは $feedback_dir に書く"
