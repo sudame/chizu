@@ -179,6 +179,14 @@ fn drive(
     (v, t.offset.advance(v.distance(1)))
 }
 
+/// リンクの終わりまでが、最高速度から止まるまでの距離と車間より近いか。
+fn near_end(net: &Network, t: &Trip) -> bool {
+    let seg = net.segment(t.link().segment).expect("リンクの区間がない");
+    let vmax = i64::from(speed_limit(seg.kind).0);
+    let left = i64::from(t.link_len.0) - i64::from(t.offset.0);
+    left <= vmax + i64::from(CAR_ACCEL) + braking_distance(vmax) + i64::from(SPACING)
+}
+
 #[cfg(test)]
 fn check_lane(rows: &[Option<Trip>], lane: LaneId) {
     let mut at: Vec<u32> = rows
@@ -222,7 +230,8 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
         let mut next_lane = None;
         let leader = match ahead {
             Some(l) => Some(l),
-            None if !t.last_leg() => {
+            // 次の車線の最後尾がこの tick の速さに効くのは、リンクの終わりが止まれる距離より近いときだけである。
+            None if !t.last_leg() && near_end(net, t) => {
                 let node = end_node(net, t.link());
                 let next = t.route.links[t.leg as usize + 1];
                 let after = t.route.links.get(t.leg as usize + 2).copied();
