@@ -337,7 +337,7 @@ impl Restoring {
     pub fn finish(self) -> RestoredSimulation {
         let r = self.0.finish();
         RestoredSimulation {
-            sim: Some(Simulation(r.sim)),
+            sim: Some(Simulation(r.sim, crate::layers::LayerCache::default())),
             rules_changed: r.rules_changed,
         }
     }
