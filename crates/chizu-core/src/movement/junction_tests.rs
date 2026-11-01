@@ -1,4 +1,4 @@
-use super::junction::{GIVE_UP, Move, PATIENCE};
+use super::junction::{GIVE_UP, Move, PATIENCE, Rescues};
 use super::*;
 use crate::command::RoadKind;
 use crate::network::Line;
@@ -68,6 +68,8 @@ struct Cars {
     net: Network,
     router: AstarRouter,
     trips: Trips,
+    /// 減速の上限を越えて速さを落とした回数。
+    hard_brakes: usize,
 }
 
 impl Cars {
@@ -77,6 +79,7 @@ impl Cars {
             net,
             router,
             trips: Trips::default(),
+            hard_brakes: 0,
         }
     }
 
@@ -86,8 +89,24 @@ impl Cars {
             .unwrap()
     }
 
+    /// 1 tick 進め、減速の上限を越えて速さを落とした車を数える。
     fn step(&mut self) -> Vec<TripId> {
-        self.trips.step(&self.net, &mut self.router)
+        let before: Vec<(TripId, *const Route, i32)> = self
+            .trips
+            .iter()
+            .filter(|(_, t)| car::on_road(t))
+            .map(|(id, t)| (id, std::ptr::from_ref(t.route()), t.speed().0))
+            .collect();
+        let arrived = self.trips.step(&self.net, &mut self.router);
+        for (id, route, v) in before {
+            let Some(t) = self.trips.get(id) else {
+                continue;
+            };
+            if car::on_road(t) && std::ptr::eq(t.route(), route) && v - t.speed().0 > CAR_DECEL {
+                self.hard_brakes += 1;
+            }
+        }
+        arrived
     }
 }
 
@@ -194,6 +213,8 @@ fn heavy_crossroads(arms: &[(i64, i64)], per_arm: usize) -> (usize, usize) {
             );
         }
     }
+    assert_eq!(c.trips.rescues(), Default::default(), "救済が働いた");
+    assert_eq!(c.hard_brakes, 0, "減速の上限を越えた");
     (arrived, longest)
 }
 
@@ -289,12 +310,15 @@ fn cars_driving_into_each_others_exits_do_not_lock_up() {
     }
     assert_eq!(total, 180);
     assert!(c.trips.is_empty(), "残った {}", c.trips.len());
+    assert_eq!(c.trips.rescues().teleported, 0, "詰まりの救済が働いた");
+    // 前の車がノードを抜けて車線の先頭になったとたんに止まりきれない車どうしが、同じリンクへ
+    // 合流することがある。その後ろの車だけは、減速の上限を越えて止まる。
+    assert!(c.hard_brakes <= 10, "減速の上限を越えた {}", c.hard_brakes);
 }
 
 /// 小さい道路を東西と南北に `lines` の位置へ引いた格子で、外周から擬似乱数の行き先へ
-/// 毎 tick 4 台ずつ `ticks` tick 出し、着かずに残った台数を返す。
-/// これだけ多いと出ていく車線の詰まりが輪になることがあり、`RESCUE` でほどけることも含めて見る。
-fn random_grid(lines: [i64; 3], ticks: usize) -> usize {
+/// `every` tick ごとに `per` 台ずつ `ticks` tick 出す。着かずに残った台数と、救済の回数を返す。
+fn random_grid(lines: [i64; 3], (per, every): (usize, usize), ticks: usize) -> (usize, Rescues) {
     let mut n = Network::new();
     for v in lines {
         road(&mut n, (0, v), (30, v), RoadKind::Small);
@@ -315,9 +339,9 @@ fn random_grid(lines: [i64; 3], ticks: usize) -> usize {
             .wrapping_add(1_442_695_040_888_963_407);
         usize::try_from(s >> 33).unwrap()
     };
-    for _ in 0..ticks {
+    for tick in 0..ticks {
         let mut d = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..if tick % every == 0 { per } else { 0 } {
             let a = rnd() % ends.len();
             let mut b = rnd() % ends.len();
             if b == a {
@@ -342,15 +366,31 @@ fn random_grid(lines: [i64; 3], ticks: usize) -> usize {
     for _ in 0..30_000 {
         c.step();
     }
-    c.trips.len()
+    (c.trips.len(), c.trips.rescues())
 }
 
 #[test]
-fn a_dense_grid_with_random_traffic_drains() {
-    assert_eq!(random_grid([10, 11, 12], 600), 0);
+fn a_dense_grid_with_heavy_random_traffic_drains() {
+    // 毎 tick 4 台では出ていく車線の詰まりが輪になり、`RESCUE` でほどけて抜ける。
+    // 交差点で譲らせない版でも、出す期間を変えると同じように輪になって止まる。
+    let (left, rescues) = random_grid([10, 11, 12], (4, 1), 600);
+    assert_eq!(left, 0);
+    assert!(rescues.teleported > 0);
 }
 
 #[test]
-fn a_sparse_grid_with_random_traffic_drains() {
-    assert_eq!(random_grid([10, 13, 16], 600), 0);
+fn a_sparse_grid_with_heavy_random_traffic_drains() {
+    let (left, rescues) = random_grid([10, 13, 16], (4, 1), 600);
+    assert_eq!(left, 0);
+    assert!(rescues.teleported > 0);
+}
+
+#[test]
+fn light_random_traffic_needs_no_rescue() {
+    // 2 tick に 1 台なら、どちらの格子でも救済なしに抜ける。
+    for lines in [[10, 11, 12], [10, 13, 16]] {
+        let (left, rescues) = random_grid(lines, (1, 2), 600);
+        assert_eq!(left, 0);
+        assert_eq!(rescues, Rescues::default(), "{lines:?}");
+    }
 }

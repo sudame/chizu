@@ -24,9 +24,13 @@
 //! 誰も動かない行き詰まりは起きない。
 //!
 //! 交差点の中の車が抜けきれるように、出ていく車線の最後尾までに、車間と交差点を抜ける距離を
-//! 足した空きがなければ、ノードをまたがせない（`car`）。前の車が止まっていても、入った車は
-//! 交差点を抜けきれるので、交差点の中に止まり続ける車は出ない。網を変えたあとなどに
-//! それでも止まった車が残ったときは、`GIVE_UP` tick より長く待った候補がその車を無視して入る。
+//! 足した空きがなければ、ノードをまたがせない（`car`）。車はその空きの足りない所を前の車の
+//! 代わりとみなして、減速の上限の内で手前に止まる。入った車は、前の車が止まっていても
+//! 交差点を抜けきれる。
+//!
+//! それでも交差点の中で止まり続ける車は出うる。出ていくリンクが空きの距離より短く、その先の
+//! 交差点で待たされるときと、止まりきれずに空きの足りない車線へ入ったときである。
+//! そのときは、`GIVE_UP` tick より長く待った候補がその車を無視して入る。
 //!
 //! 出ていく車線が詰まった交差点がつながって輪になると、どの車も動けなくなる（グリッドロック）。
 //! これは譲り合いでなく車線の空きの不足で起きるので、`RESCUE` tick より長く待った車を
@@ -164,11 +168,13 @@ pub(super) struct Inside {
 }
 
 /// 交差点ごとに候補を優先の順に見て、ノードの手前で止める候補の `id` を小さい順に返す。
+/// あわせて、交差点の中で止まった車を無視して入れた候補の数を返す。
 pub(super) fn holds(
     net: &Network,
     mut cands: Vec<Approach>,
     mut inside: Vec<Inside>,
-) -> Vec<usize> {
+) -> (Vec<usize>, u64) {
+    let mut passed = 0_u64;
     cands.sort_unstable_by_key(|c| (c.node, c.id));
     // 同じノードの中の並びは結果に効かない。
     inside.sort_unstable_by_key(|x| x.node);
@@ -207,14 +213,18 @@ pub(super) fn holds(
                 .map(|x| (Move::new(net, x.from, x.to), x.stopped)),
         );
         for (c, mv) in &group {
-            // 待ちすぎた車は、交差点の中で止まった車の脇をすり抜けて入る。
-            let free = c.room
-                && !placed
+            let blocked = |skip_stopped: bool| {
+                placed
                     .iter()
-                    .filter(|(_, stopped)| !(*stopped && c.waited >= GIVE_UP))
-                    .any(|(m, _)| m.conflicts(mv));
+                    .filter(|(_, stopped)| !(skip_stopped && *stopped))
+                    .any(|(m, _)| m.conflicts(mv))
+            };
+            // 待ちすぎた車は、交差点の中で止まった車の脇をすり抜けて入る。
+            let free = c.room && !blocked(c.waited >= GIVE_UP);
             if !(c.committed || free) {
                 held.push(c.id);
+            } else if !c.committed && blocked(false) {
+                passed = passed.saturating_add(1);
             }
             // 待たせた候補も、先の車線に空きがあれば動きを押さえ、後の候補に割り込ませない。
             if c.committed || c.room {
@@ -223,5 +233,14 @@ pub(super) fn holds(
         }
     }
     held.sort_unstable();
-    held
+    (held, passed)
+}
+
+/// 詰まりをほどく救済が働いた回数。状態には入れず、状態ハッシュにも含めない。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rescues {
+    /// `GIVE_UP` を越えて待った車が、交差点の中で止まった車を無視して入った回数。
+    pub passed_stuck: u64,
+    /// `RESCUE` を越えて待った車を、行き先に着いたことにした回数。
+    pub teleported: u64,
 }

@@ -41,7 +41,8 @@ const SPACING: u32 = CAR_LENGTH + MIN_GAP;
 const JUNCTION_CLEAR: u32 = SPACING;
 
 /// 交差点から出ていく車線に入るときに要る、最後尾までの距離。入った車は、前の車が止まっていても
-/// `JUNCTION_CLEAR` まで進んで交差点を抜けきれる。
+/// `JUNCTION_CLEAR` まで進んで交差点を抜けきれる。止まりきれずに入った車と、出ていくリンクが
+/// この距離より短い車は例外で、`junction` の先頭に書いた救済が受け持つ。
 const JUNCTION_ROOM: u32 = SPACING + JUNCTION_CLEAR;
 
 /// ノード `node` をまたぐ車が、行き先の車線の最後尾までに要る距離。
@@ -267,7 +268,8 @@ fn entry_speed(left: i64, v_next: i64) -> i64 {
 /// 合流では減速の上限を破りうる。ノードで次の車線へ移るときに位置をずらされた車や、入れ替わった
 /// 最後尾は、前の tick の条件を満たしていないためである。重なりは起きない。
 /// 交差点では、別のリンクから同じリンクへ入る車をノードの手前で待たせるので、横から入った車で
-/// 最後尾が入れ替わるのは、止まりきれない車どうしが同じ tick に入るときだけになる。
+/// 最後尾が入れ替わるのは、止まりきれない車どうしが同じ tick に入るときだけになる。前の車が
+/// ノードを抜けて車線の先頭になったとたんに止まりきれない車が、これにあたる。
 /// 同じリンクの何本かの車線が 1 本へ寄るときと、先の車線の最後尾が見込みより進まずに位置を
 /// ずらされたときは、まだ破りうる。
 pub(super) fn safe_speed(me: LaneOffset, at: LaneOffset, v_l: MmPerTick) -> i64 {
@@ -291,12 +293,13 @@ pub(super) fn safe_speed(me: LaneOffset, at: LaneOffset, v_l: MmPerTick) -> i64 
 
 /// 車の新しい速さと、リンクの始まりからの新しい位置。`leader` は前の車（いまのリンクの始まりから
 /// 数えた位置と速さ）。
-/// `held` なら、交差点でほかの車に譲り、ノードの手前で止まる。
+/// `stop` なら、交差点でほかの車に譲るか先の車線の空きを待って、ノードの手前で止まる。
+/// ただし、減速の上限の内で止まれないときは止まらない。
 fn drive(
     net: &Network,
     t: &Trip,
     leader: Option<(LaneOffset, MmPerTick)>,
-    held: bool,
+    stop: bool,
 ) -> (MmPerTick, LaneOffset) {
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
     let mut v = i64::from(t.speed.0)
@@ -313,8 +316,11 @@ fn drive(
         let left = i64::from(t.link_len.0) - i64::from(t.offset.0);
         v = v.min(entry_speed(left, i64::from(speed_limit(next_kind).0)));
     }
-    if held {
-        v = v.min(stop_speed(t));
+    if stop {
+        let s = stop_speed(t);
+        if s >= i64::from(t.speed.0) - i64::from(CAR_DECEL) {
+            v = v.min(s);
+        }
     }
     if t.last_leg() {
         // 着く位置には、止まった前の車があるものとして近づき、残りが加速の幅に収まったら着く。
@@ -343,6 +349,8 @@ fn stop_speed(t: &Trip) -> i64 {
 struct Look {
     /// リンクの先へ進む車が次に入る車線。リンクの終わりが止まれる距離より近いときだけ選ぶ。
     next_lane: Option<LaneId>,
+    /// 交差点の先の車線に、交差点を抜けきるだけの空きができそうにないか。
+    no_room: bool,
     /// 交差点の手前まで来た車。
     approach: Option<Approach>,
     /// 交差点の中にいる車。
@@ -387,7 +395,7 @@ fn look(
         return out;
     }
     // 先の車線の最後尾がこの tick も同じ速さで進むとして、入った車が交差点を抜けきれるか。
-    // 見込みが外れても、ノードをまたぐときに確かめ直すので、交差点の中で止まる車は出ない。
+    // 抜けきれそうになければ、ノードの手前に止まる。
     let room = st.rear.get(&to_lane).is_none_or(|(at, v)| {
         i64::from(at.0) + i64::from(v.0) >= i64::from(room_needed(net, node))
     });
@@ -403,6 +411,7 @@ fn look(
         room,
         waited: t.waited,
     });
+    out.no_room = !room;
     out
 }
 
@@ -429,7 +438,12 @@ fn check_lane(rows: &[Option<Trip>], lane: LaneId) {
 }
 
 /// 車を 1 tick 進め、着いた主体の行の番号を返す。
-pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector]) -> Vec<usize> {
+pub(super) fn step(
+    rows: &mut [Option<Trip>],
+    net: &Network,
+    conn: &[Connector],
+    rescues: &mut junction::Rescues,
+) -> Vec<usize> {
     // 出発を待っている車を、主体の番号の順に置き直す。
     let waiting: Vec<usize> = (0..rows.len())
         .filter(|i| rows[*i].as_ref().is_some_and(|t| t.waiting))
@@ -462,7 +476,9 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
         acc.1.extend(l.inside);
         acc
     });
-    for k in junction::holds(net, cands, inside) {
+    let (stop, passed) = junction::holds(net, cands, inside);
+    rescues.passed_stuck = rescues.passed_stuck.saturating_add(passed);
+    for k in stop {
         held[k] = true;
     }
     let plan = |k: usize| {
@@ -484,8 +500,8 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
                 .get(&next_lane?)
                 .map(|(at, v)| (LaneOffset(t.link_len.0.saturating_add(at.0)), *v))
         });
-        let (v, at) = drive(net, t, leader, held[k]);
-        (i, v, at, next_lane, held[k])
+        let (v, at) = drive(net, t, leader, held[k] || looks[k].no_room);
+        (i, t.speed, v, at, next_lane, held[k])
     };
     #[cfg(feature = "parallel")]
     let moves: Vec<_> = (0..order.len()).into_par_iter().map(plan).collect();
@@ -494,12 +510,13 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
 
     let mut arrived = Vec::new();
     let mut crossing = Vec::new();
-    for (i, v, at, next_lane, held) in moves {
+    for (i, before, v, at, next_lane, held) in moves {
         let t = rows[i].as_mut().expect("車の主体がない");
         (t.speed, t.offset) = (v, at);
         if held {
             t.waited = t.waited.saturating_add(1);
             if t.waited > junction::RESCUE {
+                rescues.teleported = rescues.teleported.saturating_add(1);
                 arrived.push(i);
                 continue;
             }
@@ -510,7 +527,7 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
             }
         } else if at >= t.link_len && !held {
             let lane = next_lane.expect("リンクの先の車線を選んでいない");
-            crossing.push((end_node(net, t.link()), i, lane));
+            crossing.push((end_node(net, t.link()), i, lane, before));
         }
     }
     // 車線ごとの最後尾。リンクの終わりを越えた車は、移れずに終わりで止まるものとして数える。
@@ -522,10 +539,15 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
         *r = (*r).min(at);
     }
     crossing.sort_unstable();
-    for (node, i, lane) in crossing {
+    for (node, i, lane, before) in crossing {
         let t = rows[i].as_mut().expect("車の主体がない");
-        // 交差点では、入った車が交差点の中で止まらないだけの空きを求める。
-        let need = room_needed(net, node);
+        // 交差点では、入った車が交差点の中で止まらないだけの空きを求める。ただし、ここで止めると
+        // 減速の上限を破る車は、車間が保てるかぎり入れる。
+        let need = if before.0 <= CAR_DECEL {
+            room_needed(net, node)
+        } else {
+            SPACING
+        };
         let next = t.route.links[t.leg as usize + 1];
         let over = t.link_len.distance_to(t.offset);
         let next_len = super::pos::link_geometry(net, next)

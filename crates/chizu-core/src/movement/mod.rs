@@ -140,6 +140,8 @@ pub struct Trips {
     rows: Vec<Option<Trip>>,
     parking: parking::Parking,
     commuters: commute::Commuters,
+    /// 交差点の詰まりをほどく救済が働いた回数。状態ハッシュには入れない。
+    rescues: junction::Rescues,
 }
 
 /// 画面に描く移動体。
@@ -286,6 +288,12 @@ impl Trips {
         self.len() == 0
     }
 
+    /// 交差点の詰まりをほどく救済が働いた回数。
+    #[cfg(test)]
+    pub(crate) fn rescues(&self) -> junction::Rescues {
+        self.rescues
+    }
+
     pub fn get(&self, id: TripId) -> Option<&Trip> {
         self.slots
             .contains(id.index, id.generation)
@@ -421,7 +429,12 @@ impl Trips {
             .filter_map(advance)
             .collect();
         let mut arrived = arrived;
-        arrived.extend(car::step(&mut self.rows, net, connectors));
+        arrived.extend(car::step(
+            &mut self.rows,
+            net,
+            connectors,
+            &mut self.rescues,
+        ));
         arrived.sort_unstable();
         arrived
     }
