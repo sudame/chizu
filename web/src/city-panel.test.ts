@@ -5,17 +5,24 @@ import {
   demandBar,
   demandBars,
   formatCityNumbers,
+  formatUtilities,
   parseCityStats,
 } from "./city-panel.ts";
 
 describe("街の数字", () => {
   test("city_stats の並びを読む", () => {
-    expect(parseCityStats([3, 40, 12, 20, -5, 0, 7])).toEqual({
+    expect(parseCityStats([3, 40, 12, 20, -5, 0, 7, 400, 300, 25])).toEqual({
       buildings: 3,
       households: 40,
       workplaces: 12,
       demand: [20, -5, 0, 7],
+      power: 400,
+      water: 300,
+      utilityDemand: 25,
     });
+    expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 0, 1200]))).toBe(
+      "電気 400 / 需要 1,200・水道 0 / 需要 1,200",
+    );
   });
 
   test("棒は住宅・商業・工業・オフィスの順に並び、正は上、負は下へ伸びる", () => {
