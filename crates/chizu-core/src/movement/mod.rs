@@ -20,6 +20,7 @@ mod pos;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 #[cfg(feature = "parallel")]
@@ -142,6 +143,16 @@ pub struct Trips {
     commuters: commute::Commuters,
     /// 交差点の詰まりをほどく救済が働いた回数。状態ハッシュには入れない。
     rescues: junction::Rescues,
+    /// 直前の `step` と `reroute` で消えた移動の結果。状態ハッシュには入れない。
+    finished: BTreeMap<TripId, Finished>,
+}
+
+/// 消えた移動の結果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Finished {
+    /// 行き先に着いたか。次の区切りの経路が見つからず消えた移動と、通れなくなって消えた移動は `false`。
+    pub reached: bool,
+    pub departed: Tick,
 }
 
 /// 画面に描く移動体。
@@ -294,6 +305,11 @@ impl Trips {
         self.rescues
     }
 
+    /// 直前の `step` と `reroute` で消えた移動 `id` の結果。
+    pub fn finished(&self, id: TripId) -> Option<Finished> {
+        self.finished.get(&id).copied()
+    }
+
     pub fn get(&self, id: TripId) -> Option<&Trip> {
         self.slots
             .contains(id.index, id.generation)
@@ -394,6 +410,7 @@ impl Trips {
     /// その場で次の区切りの経路を探して進む。経路が見つからなかった主体も消して返す。
     /// `router` は `net` に合わせてあること。
     pub fn step(&mut self, net: &Network, router: &mut AstarRouter) -> Vec<TripId> {
+        self.finished.clear();
         let done = self.advance(net, router.connectors());
         let mut ended = self.next_legs(net, router, done);
         ended.sort_unstable();
@@ -402,6 +419,17 @@ impl Trips {
             .map(|i| {
                 let (index, generation) = self.slots.current(i).expect("着いた主体がない");
                 let id = TripId { index, generation };
+                let t = self.rows[i].as_ref().expect("着いた主体がない");
+                // 最後の歩く区切りを終えたときだけ着いたことになる。経路がなくなって消えた主体は、
+                // 区切りの途中の手段と次にすることが残っている。
+                let reached = t.mode == LaneMode::Sidewalk && t.then == parking::Then::Arrive;
+                self.finished.insert(
+                    id,
+                    Finished {
+                        reached,
+                        departed: t.departed,
+                    },
+                );
                 self.remove(id);
                 id
             })
@@ -444,6 +472,7 @@ impl Trips {
     /// 経路探索が古い網のままなら、先に作り直す。
     pub fn reroute(&mut self, net: &Network, router: &mut AstarRouter) -> Vec<TripId> {
         router.sync(net);
+        self.finished.clear();
         let broken: Vec<(TripId, LaneMode, SidewalkPos, SidewalkPos)> = self
             .iter()
             .filter(|(_, t)| {
@@ -486,6 +515,16 @@ impl Trips {
         }
         lost.sort();
         for id in &lost {
+            if let Some(t) = self.get(*id) {
+                let departed = t.departed;
+                self.finished.insert(
+                    *id,
+                    Finished {
+                        reached: false,
+                        departed,
+                    },
+                );
+            }
             self.remove(*id);
         }
         lost

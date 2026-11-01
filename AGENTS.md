@@ -122,6 +122,10 @@ map は observe と同じく何も書かず、フィードバックのディレ�
 買った土地の範囲は observe の `land.ownedBounds` にあるので、まずそこを `--scale` を上げて眺め、置きたい所を拡大するとよい。
 重なったときの優先順位と、文字の意味は `--help` に書いてある。
 
+observe は、人と車の動きも出す（`citizenPlaces`、`traffic`、`migration`）。「その日に着いた移動の数」などの集計は、中核の `World::traffic()` が
+移動の結果から数える。この集計は読み取り用で、状態ハッシュには入れない。止まっている車は、記録を `STOPPED_TICKS` 手前まで再生した時点の
+車の位置と見比べて決める。欄の意味は `--help` に書いてある。
+
 コマンドの JSON の形と座標の意味は `cargo run -p chizu-cli -- agent --help` で出る。
 
 コマンドや、遊ぶ人が見て判断する状態（お金、需要、サービスなど）を足したり変えたりしたら、同じ PR で `chizu-cli agent` の act と observe を追従させる。

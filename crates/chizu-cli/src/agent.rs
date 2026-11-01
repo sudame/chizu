@@ -15,8 +15,8 @@ use chizu_core::service::supply_balance;
 use chizu_core::world::economy::Finances;
 use chizu_core::world::highway_line;
 use chizu_core::{
-    ApplyOutcome, CHUNK_SIDE, CommandLog, GameTime, ServiceKind, TilePos, TileRect, World,
-    ZoneKind, replay,
+    ApplyOutcome, CHUNK_SIDE, CarSample, CitizenPlaces, CommandLog, DayTraffic, GameTime,
+    MigrationOutlook, ServiceKind, TilePos, TileRect, Traffic, World, ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -34,6 +34,20 @@ feedback/<日時>-<番号>/ は observe ではそのまま見られ、続きを�
 act と advance は、記録を再生したハッシュが state.json の stateHash と食い違うときは何も書かずに止まる。
 <commands.json> に - を渡すと標準入力から読む。中身はコマンドの配列か、コマンド 1 つである。
 map のほかのサブコマンドは、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
+
+observe の人と車の欄（原因が交通にあるかを見分けるためのもの）:
+  citizenPlaces  住民のいまの居場所ごとの人数。atHome 家、atWork 職場か学校、atShop 帰りに寄った店、
+                 walking 歩いて移動中（車を降りて歩く区切りを含む）、driving 車で移動中、homeless 家のない世帯の住民。
+  traffic.cars   車の台数。total 全部、stopped 直前の 100 tick（ゲーム内の約 20 分）のあいだ同じ車線の同じ位置にいる車、
+                 moving それ以外。stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。
+  traffic.trips  通勤や買い物の移動。inProgress 移動中の数（歩くのも含む）。today と yesterday は
+                 ゲーム内の日ごとの結果で、arrived 着いた数、abandoned 道路が変わるなどして途中で着けなくなった数、
+                 noRoute 出発のときに経路がなく始められなかった数、avgTravelTicks と avgTravelMinutes 着いた移動の平均の移動時間
+                 （1 tick は 12 秒）。着いた移動がなければ null。yesterday は始まって 1 日たつまでは null。
+  migration      転入。wantingHouseholds 移住の処理（60 tick ごと）1 回で外から来ようとする世帯の数、
+                 vacantHomes 外の世界と道路でつながった住宅の空き戸数、homelessHouseholds と homelessCitizens 家がなく空き家を待つ世帯と住民、
+                 blockedHouseholds 来ようとしても空き家が足りず入れない世帯の数。
+                 vacantHomes が 0 なのに wantingHouseholds があるときは、住宅が足りないか、外の世界とつながっていない。
 
 地図（map）:
   observe と同じく何も書かず、フィードバックのディレクトリにも打てる。角 (x0,y0)〜(x1,y1) は両端を含み、順番は問わない。
@@ -78,6 +92,10 @@ act の結果:
     Invalid        形か値が正しくない。message に理由がある。記録には足さない
   Applied、Denied、NotImplemented は記録に足す。画面で遊んだときと同じ扱いである。
 "#;
+
+/// 車が止まっているとみなす時間（tick）。この長さのあいだ車線の同じ位置にいた車を止まっている車と数える。
+/// 1 tick は 12 秒なので、約 20 分である。交差点で譲って待つ程度では超えない長さにしてある。
+const STOPPED_TICKS: u64 = 100;
 
 const STATE_FILE: &str = "state.json";
 const RECORD_FILE: &str = "commands.rec";
@@ -151,6 +169,17 @@ impl Saved {
         let mut world = World::new(self.seed);
         replay(&mut world, &self.log, self.tick);
         world
+    }
+
+    /// `world` に加えて、止まっている車を見分けるための、[`STOPPED_TICKS`] tick 前の車の位置を返す。
+    /// 続きを回すだけなので、街は `world` と同じになる。
+    fn world_sampled(&self) -> (World, CarSample) {
+        let mut world = World::new(self.seed);
+        let window = STOPPED_TICKS.min(self.tick);
+        replay(&mut world, &self.log, self.tick - window);
+        let before = world.car_sample();
+        replay(&mut world, &self.log, window);
+        (world, before)
     }
 
     fn saved_hash(&self) -> Option<&str> {
@@ -364,8 +393,94 @@ fn clock_text(time: GameTime) -> String {
     )
 }
 
+/// 車の台数。`before` の時点から同じ車線の同じ位置にいる車を、止まっている車と数える。
+fn cars(world: &World, before: &CarSample) -> Value {
+    let now = world.car_sample();
+    let stopped = now.unmoved_since(before);
+    json!({
+        "total": now.len(),
+        "moving": now.len() - stopped,
+        "stopped": stopped,
+        "stoppedAfterTicks": STOPPED_TICKS,
+    })
+}
+
+/// 1 日ぶんの移動の結果。
+fn day_traffic(d: Option<DayTraffic>) -> Value {
+    let Some(d) = d else {
+        return Value::Null;
+    };
+    // 中核に欄が足されたらここで止まり、observe に出すかを決められるよう、`..` なしで分解する。
+    let DayTraffic {
+        day,
+        arrived,
+        abandoned,
+        no_route,
+        travel_ticks,
+    } = d;
+    let avg = (arrived > 0).then(|| travel_ticks as f64 / arrived as f64);
+    json!({
+        "day": day + 1,
+        "arrived": arrived,
+        "abandoned": abandoned,
+        "noRoute": no_route,
+        "avgTravelTicks": avg.map(|t| (t * 10.0).round() / 10.0),
+        // 1 tick は 12 秒である。
+        "avgTravelMinutes": avg.map(|t| (t * 12.0 / 60.0 * 10.0).round() / 10.0),
+    })
+}
+
+fn traffic(world: &World, before: &CarSample) -> Value {
+    let Traffic { today, yesterday } = world.traffic();
+    json!({
+        "cars": cars(world, before),
+        "trips": {
+            "inProgress": world.trips().len(),
+            "today": day_traffic(Some(today)),
+            "yesterday": day_traffic(yesterday),
+        },
+    })
+}
+
+fn citizen_places(p: CitizenPlaces) -> Value {
+    let CitizenPlaces {
+        at_home,
+        at_work,
+        at_shop,
+        walking,
+        driving,
+        homeless,
+    } = p;
+    json!({
+        "atHome": at_home,
+        "atWork": at_work,
+        "atShop": at_shop,
+        "walking": walking,
+        "driving": driving,
+        "homeless": homeless,
+    })
+}
+
+fn migration(m: MigrationOutlook) -> Value {
+    let MigrationOutlook {
+        wanting_households,
+        vacant_homes,
+        homeless_households,
+        homeless_citizens,
+        blocked_households,
+    } = m;
+    json!({
+        "wantingHouseholds": wanting_households,
+        "vacantHomes": vacant_homes,
+        "homelessHouseholds": homeless_households,
+        "homelessCitizens": homeless_citizens,
+        "blockedHouseholds": blocked_households,
+    })
+}
+
 /// 街の様子。`World` の公開の読み出し口から取れるものをそのまま並べる。
-fn observe(world: &World) -> Value {
+/// `before` は、止まっている車を見分けるための、少し前の車の位置である。
+fn observe(world: &World, before: &CarSample) -> Value {
     let tick = world.tick();
     let time = GameTime::at(tick);
     let stats = world.city_stats();
@@ -452,6 +567,9 @@ fn observe(world: &World) -> Value {
             "employed": employed,
             "happiness": happiness,
         },
+        "citizenPlaces": citizen_places(world.citizen_places()),
+        "traffic": traffic(world, before),
+        "migration": migration(world.migration_outlook()),
         "demand": by_zone(|z| demand[z.index()]),
         "zoned": by_zone(|z| zoned[z.index()]),
         "jobs": {
@@ -492,7 +610,7 @@ fn print(value: &Value) -> String {
 
 /// 新しいセッションを作り、街の様子を返す。`from` があれば、そのディレクトリの種、tick、記録を写す。
 fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, String> {
-    let world = from.world();
+    let (world, before) = from.world_sampled();
     let copied = from_dir.map(|d| {
         let hash = hash_text(&world);
         let recorded = from.saved_hash().map(str::to_string);
@@ -516,7 +634,7 @@ fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, 
     });
     let mut s = Session::create(Path::new(dir), from)?;
     s.save(&world)?;
-    let mut out = observe(&world);
+    let mut out = observe(&world, &before);
     if let Some(c) = copied {
         out["copiedFrom"] = c;
     }
@@ -524,10 +642,10 @@ fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, 
 }
 
 /// 読むだけで開く。人間のフィードバックも見られるよう、セッションでなくても読む。共有ロックは返り値が持つ。
-fn open_for_read(dir: &Path) -> Result<(Option<File>, World), String> {
+fn open_for_read(dir: &Path) -> Result<(Option<File>, World, CarSample), String> {
     let lock = lock(dir, false, false)?;
     let saved = read_saved(dir)?;
-    let world = saved.world();
+    let (world, before) = saved.world_sampled();
     let hash = hash_text(&world);
     if let Some(recorded) = saved.saved_hash()
         && recorded != hash
@@ -536,7 +654,7 @@ fn open_for_read(dir: &Path) -> Result<(Option<File>, World), String> {
             "{STATE_FILE} の stateHash {recorded} と、再生した街のハッシュ {hash} が食い違う"
         );
     }
-    Ok((lock, world))
+    Ok((lock, world, before))
 }
 
 /// `agent` のあとの引数を受けて、標準出力に書く文字列を返す。
@@ -589,8 +707,8 @@ pub fn run(args: &[String]) -> Result<String, String> {
             })))
         }
         ["observe", dir] => {
-            let (_lock, world) = open_for_read(Path::new(dir))?;
-            Ok(print(&observe(&world)))
+            let (_lock, world, before) = open_for_read(Path::new(dir))?;
+            Ok(print(&observe(&world, &before)))
         }
         ["map", dir, x0, y0, x1, y1, rest @ ..] => {
             let coord = |s: &str, what: &str| {
@@ -604,7 +722,7 @@ pub fn run(args: &[String]) -> Result<String, String> {
                 ["--scale", n] => parse_u64(n, "--scale")?,
                 _ => return Err(USAGE.trim_end().to_string()),
             };
-            let (_lock, world) = open_for_read(Path::new(dir))?;
+            let (_lock, world, _) = open_for_read(Path::new(dir))?;
             map::render(&world, TileRect::from_corners(a, b), scale)
         }
         _ => Err(USAGE.trim_end().to_string()),

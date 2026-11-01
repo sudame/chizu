@@ -144,6 +144,8 @@ pub struct World {
     next_seq: u64,
     trips: Trips,
     errands: errand::Errands,
+    /// 通勤の移動の結果の集計。読み取り用で、状態ハッシュには入れない。
+    traffic: traffic::TrafficTally,
     router: RouterSlot,
 }
 
@@ -152,6 +154,9 @@ pub mod economy;
 mod errand;
 pub mod growth;
 pub mod people;
+mod traffic;
+
+pub use traffic::{CarSample, CitizenPlaces, DayTraffic, Traffic};
 
 /// 網から作り直せる経路探索。状態に入れず、`World` どうしを比べるときも見ない。
 #[derive(Clone, Debug)]
@@ -243,6 +248,7 @@ impl World {
             next_seq: 0,
             trips: Trips::default(),
             errands: Default::default(),
+            traffic: Default::default(),
             router,
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
