@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// 配置の版。配置を変えたら上げる。
-pub const LAYOUT_VERSION: u32 = 1;
+pub const LAYOUT_VERSION: u32 = 2;
 
 pub const SLOT_COUNT: u32 = 3;
 /// 枠の前に置く制御の語の数。
@@ -49,6 +49,9 @@ pub mod header {
     pub const SPEED: usize = 7;
     pub const PAUSED: usize = 8;
     pub const MOVER_COUNT: usize = 9;
+    /// 移動体の座標の基準にするチャンクの座標（`i32` のビット列）。
+    pub const BASE_CX: usize = 10;
+    pub const BASE_CY: usize = 11;
 }
 
 /// 枠の先頭の数値に充てる語の数。移動体の配列の始まりが、枠の先頭から 16 バイトの倍数の位置に来るよう、
@@ -60,9 +63,9 @@ pub const MOVER_WORDS: usize = 4;
 
 /// 移動体の、1 体の中での語の位置。
 pub mod mover {
-    /// チャンク原点からの x（`f32` のビット列）。
+    /// 基準のチャンク（[`header::BASE_CX`]）の原点からの x。マスを単位にした `f32` のビット列。
     pub const X: usize = 0;
-    /// チャンク原点からの y（`f32` のビット列）。
+    /// 基準のチャンクの原点からの y。マスを単位にした `f32` のビット列。
     pub const Y: usize = 1;
     /// 下位 16 ビットが向き、上位 16 ビットが種類と色。
     pub const HEADING_KIND: usize = 2;
@@ -89,6 +92,9 @@ pub struct Header {
     pub population: u32,
     pub speed: u16,
     pub paused: bool,
+    /// 移動体の座標の基準にするチャンク。
+    pub base_cx: i32,
+    pub base_cy: i32,
 }
 
 /// 描画用の移動体。
@@ -147,6 +153,8 @@ impl TripleBuffer {
         put(header::PAUSED, u32::from(header.paused));
         // 上限で切ってあるので u32 に収まる。
         put(header::MOVER_COUNT, movers.len() as u32);
+        put(header::BASE_CX, header.base_cx as u32);
+        put(header::BASE_CY, header.base_cy as u32);
 
         for (i, m) in movers.iter().enumerate() {
             let at = SLOT_HEADER_WORDS + i * MOVER_WORDS;
@@ -193,7 +201,9 @@ pub fn layout_json() -> String {
     "population": {},
     "speed": {},
     "paused": {},
-    "moverCount": {}
+    "moverCount": {},
+    "baseCx": {},
+    "baseCy": {}
   }},
   "moverWords": {MOVER_WORDS},
   "mover": {{
@@ -217,6 +227,8 @@ pub fn layout_json() -> String {
         header::SPEED,
         header::PAUSED,
         header::MOVER_COUNT,
+        header::BASE_CX,
+        header::BASE_CY,
         mover::X,
         mover::Y,
         mover::HEADING_KIND,
@@ -262,6 +274,8 @@ mod tests {
             population: 42,
             speed: 48,
             paused: true,
+            base_cx: -3,
+            base_cy: 5,
         }
     }
 
