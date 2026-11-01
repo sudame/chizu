@@ -36,7 +36,7 @@ mise run lint          # 静的検査をすべて回す
 mise run test:rust     # cargo test --workspace
 mise run lint:md       # markdown の検査（rumdl）
 mise run lint:actions  # ワークフローの検査（jactionlint）
-mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core の浮動小数点の検査
+mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core と chizu-scenario の浮動小数点の検査
 mise run lint:wasm     # wasm32 のターゲットで chizu-wasm に cargo clippy
 mise run lint:web      # Biome と tsc --noEmit
 mise run test:web      # Vitest
@@ -45,6 +45,8 @@ mise run build         # build:wasm と build:web をまとめて回す
 mise run build:wasm    # chizu-wasm をスレッドつきでビルドし、wasm-bindgen で web/wasm につなぎのコードを作る
 mise run build:web     # Vite で web/dist にビルドする
 mise run dev           # WASM をビルドしてから Vite の開発サーバーを立てる
+mise run bench         # ネイティブのベンチマーク（criterion）。CI では回さない
+mise run build:bench   # ベンチマークをビルドだけする。CI はこれでベンチが壊れていないかを見る
 ```
 
 `test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。
