@@ -278,6 +278,30 @@ fn batch_returns_results_in_request_order_and_reuses_them() {
 }
 
 #[test]
+fn bundling_and_the_cache_limit_do_not_change_the_routes() {
+    let n = grid(6);
+    let mut reqs = requests(&n, 300);
+    // 着くリンクを 3 つに集めた依頼を足し、束ねる組を作る。
+    let links: Vec<LinkId> = n.links().filter(|l| l.mode == LaneMode::Car).collect();
+    reqs.extend((0..300).map(|i| RouteRequest {
+        from: links[(i * 11) % links.len()],
+        to: links[i % 3],
+        mode: LaneMode::Car,
+    }));
+    let want = AstarRouter::new(&n)
+        .with_bundle_min(usize::MAX)
+        .route_batch(&reqs);
+    let mut router = AstarRouter::new(&n)
+        .with_bundle_min(2)
+        .with_cache_limit(400);
+    assert_eq!(router.route_batch(&reqs[..250]), want[..250]);
+    let before = router.cached();
+    assert_eq!(router.route_batch(&reqs), want);
+    assert!(router.cached() < before + reqs.len() - 250);
+    assert!(router.cached() <= reqs.len());
+}
+
+#[test]
 fn mixed_modes_do_not_reallocate_the_scratch() {
     // 高速道路があると、車と歩行者でグラフの頂点の数が違う。
     let mut n = grid(4);
@@ -298,7 +322,7 @@ fn mixed_modes_do_not_reallocate_the_scratch() {
     reqs.sort();
     let mut s = Scratches::default();
     for r in &reqs {
-        router.solve(r, &mut s);
+        router.solve(&Job::Single(*r), &mut s);
     }
     assert_eq!((s.car.allocations(), s.walk.allocations()), (1, 1));
 }
@@ -357,6 +381,50 @@ proptest! {
                     check_route(&g, &r);
                 }
             }
+            let ends: Vec<(LinkId, LinkId)> = pairs
+                .iter()
+                .map(|(a, b)| (g.link((a % g.vertex_count()) as u32), g.link((b % g.vertex_count()) as u32)))
+                .collect();
+            check_bundles(&g, &ends);
+        }
+    }
+}
+
+/// 着くリンクで束ねても出発のリンクで束ねても、A* と同じ経路になることを確かめる。
+fn check_bundles(g: &Graph, ends: &[(LinkId, LinkId)]) {
+    let mut s = Scratch::default();
+    let (from, to) = ends[0];
+    let starts: Vec<LinkId> = ends.iter().map(|e| e.0).collect();
+    let goals: Vec<LinkId> = ends.iter().map(|e| e.1).collect();
+    let back = one_to_many(g, to, &starts, Toward::Backward, &mut s);
+    for (a, got) in starts.iter().zip(back) {
+        assert_eq!(got, astar(g, *a, to, &mut s), "{a:?} から {to:?}");
+    }
+    let fwd = one_to_many(g, from, &goals, Toward::Forward, &mut s);
+    for (b, got) in goals.iter().zip(fwd) {
+        assert_eq!(got, astar(g, from, *b, &mut s), "{from:?} から {b:?}");
+    }
+}
+
+#[test]
+fn bundles_pick_the_same_route_as_astar_among_ties() {
+    // 同じ道路の格子には、費用の同じ最短経路がたくさんある。
+    let mut n = Network::new();
+    for i in 0..=6 {
+        road(&mut n, (0, i * 3), (18, i * 3), RoadKind::Small);
+        road(&mut n, (i * 3, 0), (i * 3, 18), RoadKind::Small);
+    }
+    for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+        let g = Graph::build(&n, mode);
+        let m = g.vertex_count();
+        for root in [0, m / 3, m - 1] {
+            let ends: Vec<_> = (0..m)
+                .step_by(5)
+                .map(|v| (g.link(root as u32), g.link(v as u32)))
+                .collect();
+            check_bundles(&g, &ends);
+            let swapped: Vec<_> = ends.iter().map(|(a, b)| (*b, *a)).collect();
+            check_bundles(&g, &swapped);
         }
     }
 }

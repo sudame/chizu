@@ -1,9 +1,13 @@
-//! A* による最短経路。
+//! 最短経路の探索。1 対 1 の A* と、根を共有する依頼をまとめて解く 1 対多のダイクストラ。
+//!
+//! 費用の同じ最短経路がいくつあっても、どの解き方でも同じ経路を返す。返すのは、最短経路のうち、
+//! 出発のリンクから順に頂点の番号を比べていちばん小さいものである。こうすると、どの依頼を
+//! 束ねたかや、覚えた結果があったかで経路が変わらない。
 
 use core::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use super::graph::Graph;
+use super::graph::{Edge, Graph};
 use crate::network::LinkId;
 
 /// 見つけた経路。
@@ -15,14 +19,25 @@ pub struct Route {
     pub cost: u64,
 }
 
+/// 探索の向き。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Toward {
+    /// 根から辺の向きに広げる。根は出発のリンクで、距離は根の始まりからその頂点の終わりまで。
+    Forward,
+    /// 根から辺を逆にたどる。根は着くリンクで、距離はその頂点の始まりから根の終わりまで。
+    Backward,
+}
+
 /// 探索の作業領域。探索ごとに印を変えて、配列を埋め直さずに使い回す。
 #[derive(Clone, Debug, Default)]
 pub struct Scratch {
     stamp: u32,
     seen: Vec<u32>,
     dist: Vec<u64>,
-    parent: Vec<u32>,
     closed: Vec<bool>,
+    mark_stamp: u32,
+    mark: Vec<u32>,
+    stack: Vec<u32>,
     heap: BinaryHeap<Reverse<(u64, u64, u32)>>,
     /// 配列を作り直した回数。
     allocations: u32,
@@ -39,9 +54,10 @@ impl Scratch {
             self.allocations = self.allocations.saturating_add(1);
             self.seen = vec![0; n];
             self.dist = vec![0; n];
-            self.parent = vec![0; n];
             self.closed = vec![false; n];
+            self.mark = vec![0; n];
             self.stamp = 0;
+            self.mark_stamp = 0;
         }
         self.stamp += 1;
         self.heap.clear();
@@ -51,69 +67,202 @@ impl Scratch {
         (self.seen[v as usize] == self.stamp).then(|| self.dist[v as usize])
     }
 
-    fn set(&mut self, v: u32, d: u64, parent: u32) {
+    fn is_closed(&self, v: u32) -> bool {
+        self.seen[v as usize] == self.stamp && self.closed[v as usize]
+    }
+
+    fn set(&mut self, v: u32, d: u64) {
         let i = v as usize;
         if self.seen[i] != self.stamp {
             self.seen[i] = self.stamp;
             self.closed[i] = false;
         }
         self.dist[i] = d;
-        self.parent[i] = parent;
     }
+
+    fn new_mark(&mut self) {
+        if self.mark_stamp == u32::MAX {
+            self.mark.fill(0);
+            self.mark_stamp = 0;
+        }
+        self.mark_stamp += 1;
+    }
+
+    fn is_marked(&self, v: u32) -> bool {
+        self.mark[v as usize] == self.mark_stamp
+    }
+}
+
+fn add(a: u64, b: u64) -> u64 {
+    a.checked_add(b).expect("経路の費用があふれた")
+}
+
+fn adjacent(g: &Graph, v: u32, toward: Toward) -> &[Edge] {
+    match toward {
+        Toward::Forward => g.edges(v),
+        Toward::Backward => g.rev_edges(v),
+    }
+}
+
+/// `root` から広げる。`done` が真を返したら、その頂点の推定の総費用より大きい頂点を取り出す前に止める。
+/// 同じ推定の頂点は最後まで閉じるので、止めた時点で最短経路の上の頂点はすべて閉じている。
+fn search(
+    g: &Graph,
+    root: u32,
+    toward: Toward,
+    s: &mut Scratch,
+    h: impl Fn(u32) -> u64,
+    mut done: impl FnMut(u32) -> bool,
+) {
+    s.reset(g.vertex_count());
+    let d0 = g.cost(root);
+    s.set(root, d0);
+    s.heap.push(Reverse((add(d0, h(root)), h(root), root)));
+    let mut bound = None;
+    while let Some(Reverse((f, _, v))) = s.heap.pop() {
+        if bound.is_some_and(|b| f > b) {
+            break;
+        }
+        if s.is_closed(v) {
+            continue;
+        }
+        s.closed[v as usize] = true;
+        if bound.is_none() && done(v) {
+            bound = Some(f);
+        }
+        let dv = s.dist[v as usize];
+        for e in adjacent(g, v, toward) {
+            let d = add(add(dv, e.cost), g.cost(e.to));
+            if s.dist(e.to).is_some_and(|old| old <= d) {
+                continue;
+            }
+            s.set(e.to, d);
+            let hv = h(e.to);
+            s.heap.push(Reverse((add(d, hv), hv, e.to)));
+        }
+    }
+}
+
+/// 根から前向きに広げた距離から、`src` から `dst` への経路を取り出す。
+fn path_from_forward(g: &Graph, s: &mut Scratch, src: u32, dst: u32) -> Option<Route> {
+    if !s.is_closed(dst) {
+        return None;
+    }
+    // 着くリンクから逆にたどり、最短経路の上にある頂点に印を付ける。
+    s.new_mark();
+    s.mark[dst as usize] = s.mark_stamp;
+    s.stack.clear();
+    s.stack.push(dst);
+    while let Some(v) = s.stack.pop() {
+        let dv = s.dist[v as usize];
+        for e in g.rev_edges(v) {
+            let u = e.to;
+            if s.is_closed(u)
+                && !s.is_marked(u)
+                && add(add(s.dist[u as usize], e.cost), g.cost(v)) == dv
+            {
+                s.mark[u as usize] = s.mark_stamp;
+                s.stack.push(u);
+            }
+        }
+    }
+    let cost = s.dist[dst as usize];
+    let s = &*s;
+    walk(g, src, dst, cost, |u, e| {
+        s.is_marked(e.to)
+            && add(add(s.dist[u as usize], e.cost), g.cost(e.to)) == s.dist[e.to as usize]
+    })
+}
+
+/// 根から逆向きに広げた距離から、`src` から根への経路を取り出す。
+fn path_from_backward(g: &Graph, s: &Scratch, src: u32, dst: u32) -> Option<Route> {
+    if !s.is_closed(src) {
+        return None;
+    }
+    let cost = s.dist[src as usize];
+    walk(g, src, dst, cost, |u, e| {
+        s.dist(e.to)
+            .is_some_and(|dv| add(add(g.cost(u), e.cost), dv) == s.dist[u as usize])
+    })
+}
+
+/// `src` から、最短経路を続けられる辺のうち行き先の番号がいちばん小さいものを選んで進む。
+fn walk(
+    g: &Graph,
+    src: u32,
+    dst: u32,
+    cost: u64,
+    tight: impl Fn(u32, &Edge) -> bool,
+) -> Option<Route> {
+    let mut links = vec![g.link(src)];
+    let mut u = src;
+    while u != dst {
+        u = g
+            .edges(u)
+            .iter()
+            .find(|e| tight(u, e))
+            .expect("最短経路が続かない")
+            .to;
+        links.push(g.link(u));
+    }
+    Some(Route { links, cost })
 }
 
 /// `from` から `to` への費用の最も小さい経路。つながっていないか、どちらかのリンクがグラフにないときは `None`。
 ///
-/// 待ち行列は（推定の総費用、残りの推定、頂点の番号）の小さい順に取り出す。同じ費用の経路が
-/// いくつあっても、取り出す順と親を書き換える条件（真に小さくなったときだけ）が決まっているので、
-/// 同じ入力からは同じ経路を返す。
+/// 待ち行列は（推定の総費用、残りの推定、頂点の番号）の小さい順に取り出す。
 pub fn astar(g: &Graph, from: LinkId, to: LinkId, s: &mut Scratch) -> Option<Route> {
     let (src, dst) = (g.vertex(from)?, g.vertex(to)?);
-    s.reset(g.vertex_count());
-    let d0 = g.cost(src);
-    s.set(src, d0, src);
-    let h0 = g.heuristic(src, dst);
-    s.heap.push(Reverse((
-        d0.checked_add(h0).expect("経路の費用があふれた"),
-        h0,
+    search(
+        g,
         src,
-    )));
-    while let Some(Reverse((_, _, v))) = s.heap.pop() {
-        if s.closed[v as usize] {
-            continue;
-        }
-        s.closed[v as usize] = true;
-        let dv = s.dist(v).expect("待ち行列の頂点に距離がない");
-        if v == dst {
-            return Some(Route {
-                links: path(g, s, src, dst),
-                cost: dv,
-            });
-        }
-        for e in g.edges(v) {
-            let d = dv
-                .checked_add(e.cost)
-                .and_then(|d| d.checked_add(g.cost(e.to)))
-                .expect("経路の費用があふれた");
-            if s.dist(e.to).is_some_and(|old| old <= d) {
-                continue;
-            }
-            s.set(e.to, d, v);
-            let h = g.heuristic(e.to, dst);
-            let f = d.checked_add(h).expect("経路の費用があふれた");
-            s.heap.push(Reverse((f, h, e.to)));
-        }
-    }
-    None
+        Toward::Forward,
+        s,
+        |v| g.heuristic(v, dst),
+        |v| v == dst,
+    );
+    path_from_forward(g, s, src, dst)
 }
 
-fn path(g: &Graph, s: &Scratch, src: u32, dst: u32) -> Vec<LinkId> {
-    let mut out = vec![g.link(dst)];
-    let mut v = dst;
-    while v != src {
-        v = s.parent[v as usize];
-        out.push(g.link(v));
-    }
-    out.reverse();
-    out
+/// 根 `root` を共有する依頼をまとめて解き、`others` の順に結果を返す。
+///
+/// `Forward` なら `root` は出発のリンクで `others` は着くリンク、`Backward` なら `root` は着くリンクで
+/// `others` は出発のリンクである。`others` がすべて閉じたところで止める。
+pub fn one_to_many(
+    g: &Graph,
+    root: LinkId,
+    others: &[LinkId],
+    toward: Toward,
+    s: &mut Scratch,
+) -> Vec<Option<Route>> {
+    let Some(r) = g.vertex(root) else {
+        return vec![None; others.len()];
+    };
+    let mut want: Vec<u32> = others.iter().filter_map(|l| g.vertex(*l)).collect();
+    want.sort_unstable();
+    want.dedup();
+    let mut left = want.len();
+    search(
+        g,
+        r,
+        toward,
+        s,
+        |_| 0,
+        |v| {
+            if want.binary_search(&v).is_ok() {
+                left -= 1;
+            }
+            left == 0
+        },
+    );
+    others
+        .iter()
+        .map(|l| {
+            let o = g.vertex(*l)?;
+            match toward {
+                Toward::Forward => path_from_forward(g, s, r, o),
+                Toward::Backward => path_from_backward(g, s, o, r),
+            }
+        })
+        .collect()
 }
