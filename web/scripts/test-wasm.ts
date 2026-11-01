@@ -400,6 +400,39 @@ try {
     );
   }
 
+  // 道路の吸い付き。既存の道路（行 32）の 1 マス手前（行 31）で離すと、行 32 まで延びてつながる
+  const toolInfo = page.locator("#tool-info");
+  const snapSegments = await roadSegments();
+  const [snapFrom, snapNear, snapFar] = [
+    tileCenter(30, 20),
+    tileCenter(30, 31),
+    tileCenter(40, 20),
+  ];
+  await page.mouse.click(snapFrom.x, snapFrom.y);
+  await page.mouse.move(snapFar.x, snapFar.y, { steps: 3 });
+  const lonely = (await toolInfo.textContent()) ?? "";
+  check(
+    lonely.includes("つながらない"),
+    `どの道路ともつながらない道路は、プレビューで知らせる（${lonely}）`,
+  );
+  await page.mouse.move(snapNear.x, snapNear.y, { steps: 3 });
+  const joined = (await toolInfo.textContent()) ?? "";
+  check(
+    !joined.includes("つながらない") && joined.includes("長さ 12 マス"),
+    `道路の 1 マス手前までなら、つながる道路として長さ 12 マスと見積もる（${joined}）`,
+  );
+  const snapBeforeOutcome = await outcomeCount();
+  await page.mouse.click(snapNear.x, snapNear.y);
+  await page.keyboard.press("Escape");
+  const snapped = await nextOutcome(snapBeforeOutcome);
+  check(snapped.outcome === "Applied", `吸い付けた道路は受け付けられる（${snapped.text}）`);
+  // 新しい道路 1 本と、つながった既存の道路が分かれた 1 本で、区間が 2 本増える
+  await waitSegments(snapSegments + 2);
+  check(
+    (await roadSegments()) === snapSegments + 2,
+    `1 マス手前で離した道路は既存の道路につながる（${snapSegments} → ${await roadSegments()} 本）`,
+  );
+
   const again = await drawRoad();
   check(
     again.result.outcome === "Denied" && (again.result.text ?? "").includes("重なる"),

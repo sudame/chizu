@@ -19,6 +19,15 @@ import {
   unsuppliedCount,
 } from "./map/roads.ts";
 import {
+  buildRoadIndex,
+  DISCONNECTED_NOTICE,
+  EMPTY_ROAD_INDEX,
+  isDisconnected,
+  type RoadIndex,
+  snapRoadEnd,
+  snapRoadStart,
+} from "./map/snap.ts";
+import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
@@ -271,6 +280,9 @@ let probe: { service: ServiceName; x: number; y: number; results: ServiceProbe }
 let probeSent = "";
 let money = 0;
 let roadStart: Tile | null = null;
+let roadIndex: RoadIndex = EMPTY_ROAD_INDEX;
+// Alt を押しているあいだは、道路を近くの道路に吸い付けない
+let noSnap = false;
 let cursor: Tile | null = null;
 let pointer: {
   id: number;
@@ -291,8 +303,8 @@ function updatePreview(): void {
   let info = "";
   let infoText = "";
   if (tool.kind === "road" && cursor !== null) {
-    const from = roadStart ?? cursor;
-    const to = roadStart === null ? cursor : snapToEightDirections(roadStart, cursor);
+    const from = roadStart ?? roadStartAt(cursor);
+    const to = roadStart === null ? cursor : roadEndAt(roadStart, cursor);
     geometry = new Geometry(from);
     const half = halfWidthOf(ROAD_CODES[tool.road]);
     if (roadStart !== null && roadCosts !== null) {
@@ -301,6 +313,9 @@ function updatePreview(): void {
       const color = cost > money ? PREVIEW_BAD : PREVIEW_OK;
       geometry.segment(from, to, half, color);
       info = `長さ ${length} マス・費用 ${cost.toLocaleString("ja-JP")}`;
+      if (isDisconnected(roadIndex, from, to)) {
+        info += `・${DISCONNECTED_NOTICE}`;
+      }
       mapCanvas.dataset.previewCost = String(cost);
     }
     geometry.square(from, half, PREVIEW_OK);
@@ -339,6 +354,16 @@ function updatePreview(): void {
   }
   renderer?.roads.setPreview(geometry);
   toolInfo.textContent = infoText === "" ? info : infoText;
+}
+
+/** 道路の始点。近くの道路に吸い付ける。Alt を押しているあいだは吸い付けない。 */
+function roadStartAt(at: Tile): Tile {
+  return noSnap ? at : snapRoadStart(roadIndex, at);
+}
+
+/** 道路の終点。8 方向に寄せ、近くの道路に吸い付ける。 */
+function roadEndAt(start: Tile, at: Tile): Tile {
+  return noSnap ? snapToEightDirections(start, at) : snapRoadEnd(roadIndex, start, at);
 }
 
 function requestProbe(service: ServiceName, at: Tile): void {
@@ -399,9 +424,9 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
 function clickTile(at: Tile): void {
   if (tool.kind === "road") {
     if (roadStart === null) {
-      roadStart = at;
+      roadStart = roadStartAt(at);
     } else {
-      const end = snapToEightDirections(roadStart, at);
+      const end = roadEndAt(roadStart, at);
       if (end.x !== roadStart.x || end.y !== roadStart.y) {
         sendCommand(buildRoadCommand(tool.road, roadStart, end));
         // CS2 と同じく、引いた終点から続けて引ける
@@ -466,7 +491,8 @@ mapCanvas.addEventListener("pointerdown", (event) => {
 });
 mapCanvas.addEventListener("pointermove", (event) => {
   const at = tileAt(event);
-  if (cursor?.x !== at.x || cursor?.y !== at.y) {
+  if (cursor?.x !== at.x || cursor?.y !== at.y || noSnap !== event.altKey) {
+    noSnap = event.altKey;
     cursor = at;
     updatePreview();
   }
@@ -491,6 +517,7 @@ mapCanvas.addEventListener("pointerup", (event) => {
   }
   const done = pointer;
   pointer = null;
+  noSnap = event.altKey;
   if (done.mode === "click") {
     clickTile(tileAt(event));
   } else if (done.mode === "area") {
@@ -633,6 +660,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "roads") {
     roads = roadMeshes(message.segments, message.nodes);
+    roadIndex = buildRoadIndex(message.segments, message.nodes);
     renderer?.roads.setRoads(roads);
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);
