@@ -182,7 +182,9 @@ fn walked_mm(net: &Network, route: &Route, (from, to): Ends) -> Option<u64> {
 ///
 /// 歩道は 1 本の歩道を 2 つの向きに歩けるものとし、区間の 2 本の歩道のリンクを、その 2 つの向きとして使う。
 /// 歩くときは、出発と行き先のそれぞれで 2 つの向きを試し、歩く距離のいちばん短い組を選ぶ。
-/// 距離の同じ組は、位置を表したままの向きを先に選ぶ。
+/// 距離の同じ組は、位置を表したままの向きを先に選ぶ。同じリンクの手前へ戻る組は、向きを入れ替えた
+/// まっすぐの組に必ず負けるので、ほかの組があれば探さない。
+/// 横切りの罰則と衝突区間が入るまでは、反対側の歩道へ移る費用を 0 として扱う。
 fn plan(
     router: &mut AstarRouter,
     net: &Network,
@@ -197,11 +199,13 @@ fn plan(
             }
             let starts = [Some(*a), flip(net, *a)];
             let goals = [Some(*b), flip(net, *b)];
-            starts
+            let all: Vec<Ends> = starts
                 .iter()
                 .flatten()
                 .flat_map(|s| goals.iter().flatten().map(|g| (*s, *g)))
-                .collect()
+                .collect();
+            let ahead: Vec<Ends> = all.iter().filter(|e| !behind(e)).copied().collect();
+            if ahead.is_empty() { all } else { ahead }
         })
         .collect();
     let flat: Vec<Ends> = candidates.iter().flatten().copied().collect();
@@ -226,10 +230,14 @@ fn plan(
         .collect()
 }
 
+/// 行き先が出発と同じリンクの、出発より手前にあるか。
+fn behind(((a, ao), (b, bo)): &Ends) -> bool {
+    a == b && bo < ao
+}
+
 /// 手段 `mode` で 2 点を結ぶ経路を、まとめて探す。行き先が同じリンクの手前にあるときは、
 /// 次のリンクへ出て戻ってくる経路にする。
 fn plan_exact(router: &mut AstarRouter, mode: LaneMode, ends: &[Ends]) -> Vec<Option<Arc<Route>>> {
-    let behind = |((a, ao), (b, bo)): &Ends| a == b && bo < ao;
     let reqs: Vec<RouteRequest> = ends
         .iter()
         .filter(|e| !behind(e))
