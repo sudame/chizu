@@ -10,7 +10,7 @@
 use core::fmt;
 
 use crate::network::{Line, MAX_ROAD_TILES};
-use crate::tile::{ChunkCoord, TilePos, TileRect};
+use crate::tile::{ChunkCoord, TilePos, TileRect, WORLD_LIMIT};
 use crate::zone::{MAX_ZONE_SIDE, rect_size};
 
 /// 道路の種類。
@@ -168,6 +168,8 @@ pub enum Command {
 /// コマンドの値が受け付ける範囲の外にある。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvalidCommand {
+    /// マスかチャンクが、コマンドで指せる範囲（`WORLD_LIMIT`）の外にある。
+    OutOfWorld,
     /// 長方形の `min` が `max` を超えている。
     UnorderedRect(TileRect),
     /// 税率が `MAX_TAX_PERMILLE` を超えている。
@@ -192,6 +194,9 @@ impl fmt::Display for InvalidCommand {
             ),
             InvalidCommand::TaxRateTooHigh(p) => {
                 write!(f, "税率 {p}‰ は上限の {MAX_TAX_PERMILLE}‰ を超えている")
+            }
+            InvalidCommand::OutOfWorld => {
+                write!(f, "マスの座標の絶対値が上限の {WORLD_LIMIT} を超えている")
             }
             InvalidCommand::ZoneAreaTooLarge(r) => write!(
                 f,
@@ -218,8 +223,24 @@ impl fmt::Display for InvalidCommand {
 impl std::error::Error for InvalidCommand {}
 
 impl Command {
+    /// コマンドが指すマスとチャンクが、すべて [`WORLD_LIMIT`] の範囲の中か。
+    fn in_world(&self) -> bool {
+        match *self {
+            Command::BuildRoad { from, to, .. } => from.in_world() && to.in_world(),
+            Command::Bulldoze { area } | Command::PaintZone { area, .. } => area.in_world(),
+            Command::PlaceBuilding { at, .. } => at.in_world(),
+            Command::BuyChunk { coord } => coord.in_world(),
+            Command::SetSignal { .. }
+            | Command::SetTaxRate { .. }
+            | Command::SetSimSpeed { .. } => true,
+        }
+    }
+
     /// 値が受け付ける範囲にあるか。範囲の外のコマンドは記録せず、適用もしない。
     pub fn validate(&self) -> Result<(), InvalidCommand> {
+        if !self.in_world() {
+            return Err(InvalidCommand::OutOfWorld);
+        }
         match *self {
             Command::Bulldoze { area } => {
                 if area.is_ordered() {
@@ -301,7 +322,7 @@ mod tests {
         let wide = TileRect::from_corners(TilePos::new(0, 0), TilePos::new(side, 0));
         assert_eq!(paint(wide), Err(InvalidCommand::ZoneAreaTooLarge(wide)));
         let huge = TileRect::from_corners(TilePos::new(i64::MIN, 0), TilePos::new(i64::MAX, 0));
-        assert_eq!(paint(huge), Err(InvalidCommand::ZoneAreaTooLarge(huge)));
+        assert_eq!(paint(huge), Err(InvalidCommand::OutOfWorld));
         let clear = Command::PaintZone {
             area: ok,
             zone: None,
@@ -343,11 +364,60 @@ mod tests {
                 to: at(2, 1)
             })
         );
-        for (fx, tx) in [(0, max + 1), (-3, i64::MAX), (i64::MIN, i64::MAX)] {
-            assert!(
-                matches!(road(fx, 0, tx, 0), Err(InvalidCommand::RoadTooLong { .. })),
+        assert!(matches!(
+            road(0, 0, max + 1, 0),
+            Err(InvalidCommand::RoadTooLong { .. })
+        ));
+        for (fx, tx) in [(-3, i64::MAX), (i64::MIN, i64::MAX)] {
+            assert_eq!(
+                road(fx, 0, tx, 0),
+                Err(InvalidCommand::OutOfWorld),
                 "{fx} → {tx}"
             );
+        }
+    }
+
+    #[test]
+    fn validate_keeps_commands_inside_the_world() {
+        let lim = WORLD_LIMIT;
+        let at = |x, y| TilePos::new(x, y);
+        let rect = |a, b| TileRect::from_corners(a, b);
+        let edge = rect(at(lim - 5, -lim), at(lim, -lim + 5));
+        let over = rect(at(lim - 5, 0), at(lim + 1, 0));
+        let road = |from, to| Command::BuildRoad {
+            from,
+            to,
+            kind: RoadKind::Small,
+        };
+        let chunk = |cx| Command::BuyChunk {
+            coord: ChunkCoord::new(cx, 0),
+        };
+        let paint = |area| Command::PaintZone { area, zone: None };
+        let place = |at| Command::PlaceBuilding {
+            kind: ServiceKind::PowerPlant,
+            at,
+            rotation: 0,
+        };
+        let chunk_lim = (lim / 64) as i32;
+        for ok in [
+            road(at(lim - 3, 0), at(lim, 0)),
+            Command::Bulldoze { area: edge },
+            paint(edge),
+            chunk(chunk_lim - 1),
+            chunk(-chunk_lim),
+            place(at(-lim, lim)),
+        ] {
+            assert_eq!(ok.validate(), Ok(()), "{ok:?}");
+        }
+        for bad in [
+            road(at(lim - 3, 0), at(lim + 1, 0)),
+            Command::Bulldoze { area: over },
+            paint(over),
+            chunk(chunk_lim),
+            chunk(-chunk_lim - 1),
+            place(at(-lim - 1, 0)),
+        ] {
+            assert_eq!(bad.validate(), Err(InvalidCommand::OutOfWorld), "{bad:?}");
         }
     }
 }
