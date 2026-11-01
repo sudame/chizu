@@ -125,6 +125,8 @@ pub struct World {
     buildings: Buildings,
     /// プレイヤーが置いた公共の施設。置いた順に並ぶ。
     facilities: Vec<Facility>,
+    /// 建物の需要か施設が変わり、電気と水道の届き方を判定し直す必要がある。
+    supply_dirty: bool,
     lots: growth::LotFronts,
     /// 適用済みの記録の次の番号。記録から続きを回すときは、この番号から適用する。
     next_seq: u64,
@@ -188,6 +190,7 @@ impl World {
             population: Population::default(),
             buildings: Buildings::default(),
             facilities: Vec::new(),
+            supply_dirty: false,
             lots: Default::default(),
             next_seq: 0,
         };
@@ -372,9 +375,12 @@ impl World {
     }
 
     // 消した道路の建設費は払い戻さない。
+    // 施設も道路と同じく、長方形にかかれば取り除く。
     fn bulldoze(&mut self, area: TileRect) -> ApplyOutcome {
+        let facilities = self.bulldoze_facilities(area);
         let removed = match self.network.bulldoze(area) {
             Ok(removed) => removed,
+            Err(_) if facilities > 0 => Vec::new(),
             Err(reason) => return ApplyOutcome::Denied(reason),
         };
         self.sync_road_tiles(
@@ -561,6 +567,7 @@ impl StateHash for World {
         h.write(&self.population);
         h.write(&self.buildings);
         h.write(&self.facilities);
+        h.write(&self.supply_dirty);
         h.write(&self.next_seq);
     }
 }
