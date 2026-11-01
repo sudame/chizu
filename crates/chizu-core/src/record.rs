@@ -434,6 +434,7 @@ pub struct ReplayStats {
     pub applied: u64,
     pub not_implemented: u64,
     pub rejected: u64,
+    pub denied: u64,
 }
 
 /// `world` を `ticks` だけ進め、そのあいだの tick に記録されたコマンドを各 tick の頭で適用する。
@@ -451,6 +452,7 @@ pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
                 ApplyOutcome::Applied => stats.applied += 1,
                 ApplyOutcome::NotImplemented => stats.not_implemented += 1,
                 ApplyOutcome::Rejected => stats.rejected += 1,
+                ApplyOutcome::Denied => stats.denied += 1,
             }
             next += 1;
         }
@@ -749,8 +751,9 @@ mod tests {
             stats,
             ReplayStats {
                 applied: 2,
-                not_implemented: 6,
-                rejected: 0
+                not_implemented: 5,
+                rejected: 0,
+                denied: 1,
             }
         );
         let mut pieces = World::new(9);

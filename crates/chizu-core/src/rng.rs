@@ -118,12 +118,18 @@ impl Pcg32 {
     }
 }
 
-/// その場で生成器を作る。同じ引数からは必ず同じ列が出る。
-pub fn rng(seed: u64, purpose: RngPurpose, id: u64, tick: Tick) -> Pcg32 {
+/// 種・用途と語の列を 1 つの値に混ぜる。生成器を作らずに、座標などから値を 1 つだけ引くときに使う。
+pub fn mix_words(seed: u64, purpose: RngPurpose, words: &[u64]) -> u64 {
     let mut h = mix64(seed.wrapping_add(GOLDEN_GAMMA));
-    for word in [purpose as u64, id, tick.0] {
+    for word in core::iter::once(purpose as u64).chain(words.iter().copied()) {
         h = mix64(h ^ mix64(word.wrapping_add(GOLDEN_GAMMA)));
     }
+    h
+}
+
+/// その場で生成器を作る。同じ引数からは必ず同じ列が出る。
+pub fn rng(seed: u64, purpose: RngPurpose, id: u64, tick: Tick) -> Pcg32 {
+    let h = mix_words(seed, purpose, &[id, tick.0]);
     let mut sm = SplitMix64 { state: h };
     let init_state = sm.next_u64();
     let init_seq = sm.next_u64();

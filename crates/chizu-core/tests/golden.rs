@@ -27,12 +27,48 @@ struct Scenario {
 }
 
 fn scenarios() -> Vec<Scenario> {
-    vec![Scenario {
-        name: "clock_and_commands",
-        seed: 42,
-        ticks: 2 * chizu_core::TICKS_PER_DAY,
-        log: clock_and_commands(),
-    }]
+    vec![
+        Scenario {
+            name: "clock_and_commands",
+            seed: 42,
+            ticks: 2 * chizu_core::TICKS_PER_DAY,
+            log: clock_and_commands(),
+        },
+        Scenario {
+            name: "land_purchase",
+            seed: 42,
+            ticks: 600,
+            log: land_purchase(),
+        },
+    ]
+}
+
+/// 土地を買い進める記録。買える場合と、買った土地・離れた土地・角だけで接する土地・
+/// 所持金の不足で却下される場合を混ぜる。
+fn land_purchase() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut buy = |tick: u64, cx: i32, cy: i32| {
+        log.record(
+            Tick(tick),
+            Command::BuyChunk {
+                coord: ChunkCoord::new(cx, cy),
+            },
+        )
+        .unwrap();
+    };
+    buy(10, 2, 0);
+    buy(10, 2, 0);
+    buy(20, 4, 4);
+    buy(20, 1, 1);
+    buy(30, 2, 2);
+    buy(100, 0, -2);
+    buy(100, 3, 0);
+    buy(200, -2, 0);
+    // 次の 1 件で所持金をちょうど使い切り、その次は却下される。
+    buy(300, 0, 2);
+    buy(300, 0, 3);
+    buy(400, 0, -3);
+    log
 }
 
 /// 速度と税率を何度か変え、中身のまだないコマンドも混ぜた 2 日ぶんの記録。
@@ -86,6 +122,10 @@ fn clock_and_commands() -> CommandLog {
 
 /// 再生して、状態ハッシュの列を `.hash` の形式の文字列で返す。
 fn checkpoints(seed: u64, log: &CommandLog, ticks: u64) -> String {
+    checkpoints_and_world(seed, log, ticks).0
+}
+
+fn checkpoints_and_world(seed: u64, log: &CommandLog, ticks: u64) -> (String, World) {
     let mut world = World::new(seed);
     let mut digest = StateHasher::new();
     digest.write(&world.state_hash());
@@ -99,7 +139,25 @@ fn checkpoints(seed: u64, log: &CommandLog, ticks: u64) -> String {
             out.push_str(&format!("{t} {h:016x} {:016x}\n", digest.finish()));
         }
     }
-    out
+    (out, world)
+}
+
+/// 買い進める記録の結果が、水辺の配置と購入の規則を通っていることを確かめる。
+/// ここが崩れると、ゴールデンのハッシュがそれらを見ていないことになる。
+#[test]
+fn land_purchase_covers_water_and_the_rules() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "land_purchase")
+        .unwrap();
+    let mut world = World::new(s.seed);
+    let stats = replay(&mut world, &s.log, s.ticks);
+    assert_eq!((stats.applied, stats.denied), (5, 6));
+    assert_eq!(world.money(), chizu_core::Money::ZERO);
+    assert_eq!(world.chunks().filter(|c| c.owned()).count(), 9 + 5);
+    let water: u32 = world.chunks().map(|c| c.terrain().water_count()).sum();
+    assert!(water > 0, "買った土地に水辺が 1 マスもない");
+    assert_eq!(checkpoints_and_world(s.seed, &s.log, s.ticks).1, world);
 }
 
 fn golden_dir() -> PathBuf {

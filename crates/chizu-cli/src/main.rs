@@ -29,8 +29,8 @@ fn run(args: &[String]) -> Result<String, String> {
     let mut world = World::new(seed);
     let stats = replay(&mut world, &log, ticks);
     eprintln!(
-        "適用 {} 件、未実装で無視 {} 件、範囲外で無視 {} 件",
-        stats.applied, stats.not_implemented, stats.rejected
+        "適用 {} 件、未実装で無視 {} 件、範囲外で無視 {} 件、却下 {} 件",
+        stats.applied, stats.not_implemented, stats.rejected, stats.denied
     );
     Ok(format!("{:016x}", world.state_hash()))
 }
