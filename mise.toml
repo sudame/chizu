@@ -1,8 +1,10 @@
 [tools]
+jactionlint = "2.4.0"
 rumdl = "0.3.2"
+shellcheck = "0.11.0"
 
 [tasks.test]
 run = "echo 'テストはまだない'"
 
 [tasks.lint]
-run = "rumdl check ."
+run = ["rumdl check .", "jactionlint"]
