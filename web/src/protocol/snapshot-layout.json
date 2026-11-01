@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "slotCount": 3,
+  "controlWords": 4,
+  "control": {
+    "latest": 0,
+    "version": 1
+  },
+  "indexMask": 3,
+  "fresh": 4,
+  "initial": {
+    "writer": 0,
+    "latest": 1,
+    "reader": 2
+  },
+  "slotHeaderWords": 12,
+  "header": {
+    "tickLo": 0,
+    "tickHi": 1,
+    "day": 2,
+    "secondOfDay": 3,
+    "moneyLo": 4,
+    "moneyHi": 5,
+    "population": 6,
+    "speed": 7,
+    "paused": 8,
+    "moverCount": 9
+  },
+  "moverWords": 4,
+  "mover": {
+    "x": 0,
+    "y": 1,
+    "headingKind": 2,
+    "id": 3
+  },
+  "maxMovers": 20000,
+  "slotWords": 80012,
+  "totalWords": 240040
+}

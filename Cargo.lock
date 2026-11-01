@@ -112,6 +112,7 @@ name = "chizu-wasm"
 version = "0.1.0"
 dependencies = [
  "chizu-core",
+ "js-sys",
  "rayon",
  "wasm-bindgen",
  "wasm-bindgen-rayon",

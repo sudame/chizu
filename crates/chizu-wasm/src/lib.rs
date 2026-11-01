@@ -1,7 +1,10 @@
 //! chizu-core と画面（Web Worker）のあいだの受け渡しの層。
 
-// 中核の API はまだないが、依存の向きを先に決めておく
-use chizu_core as _;
+pub mod sim;
+pub mod snapshot;
+
+use chizu_core::{Command, SimSpeed};
+use js_sys::Reflect;
 use rayon::prelude::*;
 use wasm_bindgen::prelude::*;
 
@@ -20,6 +23,81 @@ pub fn thread_count() -> usize {
     rayon::current_num_threads()
 }
 
+/// 三重バッファの配置を JSON で返す。画面の側の定数と食い違っていないかを確かめるのに使う。
+#[wasm_bindgen]
+pub fn snapshot_layout() -> String {
+    snapshot::layout_json()
+}
+
+/// 等速のときに実時間の 1 秒で進める tick 数。
+#[wasm_bindgen]
+pub fn ticks_per_second() -> u32 {
+    chizu_core::clock::TICKS_PER_SECOND_AT_NORMAL_SPEED
+}
+
+/// Worker から使うシミュレーション。
+#[wasm_bindgen]
+pub struct Simulation(sim::Sim);
+
+#[wasm_bindgen]
+impl Simulation {
+    #[wasm_bindgen(constructor)]
+    pub fn new(seed: u64) -> Simulation {
+        Simulation(sim::Sim::new(seed))
+    }
+
+    /// 三重バッファの先頭の、WASM のメモリの中でのバイト位置。
+    pub fn snapshot_offset(&self) -> usize {
+        self.0.snapshot().byte_offset()
+    }
+
+    /// 画面から届いたコマンドを `Command` に直し、検証して記録する。
+    pub fn submit(&mut self, command: JsValue) -> Result<(), JsError> {
+        let command = command_from_js(&command)?;
+        self.0
+            .submit(command)
+            .map(|_| ())
+            .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    pub fn set_paused(&mut self, paused: bool) {
+        self.0.set_paused(paused);
+    }
+
+    /// 等速の何倍で回しているか。
+    pub fn speed(&self) -> u16 {
+        self.0.world().speed().multiplier()
+    }
+
+    /// 一時停止していなければ `ticks` だけ進め、いまの状態を三重バッファに書く。
+    pub fn advance(&mut self, ticks: u32) {
+        self.0.advance(ticks);
+        self.0.publish();
+    }
+}
+
+fn command_from_js(value: &JsValue) -> Result<Command, JsError> {
+    let field = |name: &str| Reflect::get(value, &JsValue::from_str(name)).ok();
+    let kind = field("kind")
+        .and_then(|v| v.as_string())
+        .ok_or_else(|| JsError::new("コマンドに kind がない"))?;
+    match kind.as_str() {
+        "SetSimSpeed" => {
+            let speed = field("speed")
+                .and_then(|v| v.as_f64())
+                .and_then(integer_u16)
+                .and_then(SimSpeed::new)
+                .ok_or_else(|| JsError::new("速度は 1 から 48 までの整数で指定する"))?;
+            Ok(Command::SetSimSpeed { speed })
+        }
+        other => Err(JsError::new(&format!("知らないコマンド {other}"))),
+    }
+}
+
+fn integer_u16(v: f64) -> Option<u16> {
+    (v.fract() == 0.0 && (0.0..=f64::from(u16::MAX)).contains(&v)).then_some(v as u16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -30,5 +108,15 @@ mod tests {
         assert_eq!(parallel_sum(1), 1);
         assert_eq!(parallel_sum(100), 5050);
         assert_eq!(parallel_sum(1_000_000), 500_000_500_000);
+    }
+
+    #[test]
+    fn integer_u16_rejects_fractions_and_out_of_range() {
+        assert_eq!(integer_u16(4.0), Some(4));
+        assert_eq!(integer_u16(4.5), None);
+        assert_eq!(integer_u16(-1.0), None);
+        assert_eq!(integer_u16(65_536.0), None);
+        assert_eq!(integer_u16(f64::NAN), None);
+        assert_eq!(integer_u16(f64::INFINITY), None);
     }
 }

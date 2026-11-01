@@ -7,6 +7,14 @@
   </head>
   <body>
     <p id="status" data-state="loading">WASM を読み込んでいる</p>
+    <canvas id="hud" width="480" height="96"></canvas>
+    <div id="controls">
+      <button type="button" id="pause">一時停止</button>
+      <button type="button" data-speed="1">1 倍</button>
+      <button type="button" data-speed="4">4 倍</button>
+      <button type="button" data-speed="16">16 倍</button>
+      <button type="button" data-speed="48">48 倍</button>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
