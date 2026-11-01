@@ -1,10 +1,10 @@
 // 「見る」の道具で押した建物や施設の様子を出す小さなパネル。DOM に触るのは setupInspector だけで、
 // 数の読み方と文言は Vitest で確かめられる。
 
-import type { ServiceName, ZoneName } from "./protocol/messages.ts";
+import type { InspectQuery, InspectTarget, ServiceName, ZoneName } from "./protocol/messages.ts";
 
 /** chizu-wasm の inspect が返す数の個数。 */
-export const INSPECT_LENGTH = 13;
+export const INSPECT_LENGTH = 15;
 
 /** 幸福度とその要素の満点。chizu-core の HAPPINESS_MAX と同じ。 */
 export const HAPPINESS_MAX = 100;
@@ -22,6 +22,8 @@ export type ResidentsInfo = {
 
 export type BuildingView = {
   kind: "building";
+  /** 押したものの識別子。以後はマスでなくこれで引く。 */
+  target: InspectTarget;
   zone: Exclude<ZoneName, "Clear">;
   level: number;
   power: boolean;
@@ -36,6 +38,7 @@ export type BuildingView = {
 
 export type FacilityView = {
   kind: "facility";
+  target: InspectTarget;
   service: ServiceName;
   capacity: number;
   upkeepPerDay: number;
@@ -57,11 +60,12 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
     return null;
   }
   const at = (i: number) => numbers[i] ?? -1;
+  const target: InspectTarget = [at(0), at(INSPECT_LENGTH - 2), at(INSPECT_LENGTH - 1)];
   if (at(0) === 2) {
     const service = SERVICES[at(1)];
     return service === undefined
       ? null
-      : { kind: "facility", service, capacity: at(2), upkeepPerDay: at(3) };
+      : { kind: "facility", target, service, capacity: at(2), upkeepPerDay: at(3) };
   }
   const zone = ZONES[at(1)];
   if (at(0) !== 1 || zone === undefined) {
@@ -70,6 +74,7 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
   const residents = zone === "Residential" && at(7) > 0;
   return {
     kind: "building",
+    target,
     zone,
     level: at(2),
     power: at(3) === 1,
@@ -155,13 +160,53 @@ export function describeInspect(view: InspectView): InspectText {
   return { title: `住宅（段階 ${view.level}）`, rows };
 }
 
+/** 2 つの問い合わせが同じか。 */
+export function sameQuery(a: InspectQuery, b: InspectQuery): boolean {
+  if (a.kind === "tile" && b.kind === "tile") {
+    return a.x === b.x && a.y === b.y;
+  }
+  if (a.kind === "target" && b.kind === "target") {
+    return a.target.every((v, i) => v === b.target[i]);
+  }
+  return false;
+}
+
+/** 答えを受けた結果。stale なら捨てる。そうでなければ、次の問い合わせ（null なら閉じる）と出す中身を返す。 */
+export type InspectOutcome =
+  | { stale: true }
+  | { stale: false; query: InspectQuery | null; view: InspectView | null };
+
+/**
+ * 答えが、いま出している（または待っている）問い合わせへのものかを見分けて受ける。
+ * 押し直したあとに届いた前の答えは捨てる。マスで押した最初の答えが届いたら、以後は識別子で引く。
+ * 答えが空（押したものが消えた）なら閉じる。
+ */
+export function applyInspectReply(
+  current: InspectQuery | null,
+  replied: InspectQuery,
+  info: ArrayLike<number>,
+): InspectOutcome {
+  if (current === null || !sameQuery(current, replied)) {
+    return { stale: true };
+  }
+  const view = parseInspect(info);
+  if (view === null) {
+    return { stale: false, query: null, view: null };
+  }
+  return { stale: false, query: { kind: "target", target: view.target }, view };
+}
+
 export type Inspector = {
   /** 届いた様子で書き直す。null ならパネルを閉じる。 */
   show: (view: InspectView | null) => void;
   close: () => void;
 };
 
-/** パネルの中身を作る。閉じるボタンを押したら onClose を呼ぶ。 */
+/**
+ * パネルの中身を作る。閉じるボタンを押したら onClose を呼ぶ。
+ * 行の要素は題が変わるか行の並びが変わるときだけ作り直し、そのほかは値が変わった文だけ書き換える。
+ * 読み上げ（aria-live）は題に付け、パネルを開いたときと題が変わったときだけ読まれるようにする。
+ */
 export function setupInspector(panel: HTMLElement, onClose: () => void): Inspector {
   const title = panel.querySelector<HTMLElement>("[data-inspector-title]");
   const list = panel.querySelector<HTMLElement>("[data-inspector-rows]");
@@ -169,9 +214,14 @@ export function setupInspector(panel: HTMLElement, onClose: () => void): Inspect
   if (title === null || list === null || closeButton === null) {
     throw new Error("建物のパネルの要素が足りない");
   }
+  let labels: string[] = [];
+  let values: HTMLElement[] = [];
   const close = () => {
     panel.hidden = true;
+    title.textContent = "";
     list.replaceChildren();
+    labels = [];
+    values = [];
   };
   closeButton.addEventListener("click", () => {
     close();
@@ -185,16 +235,29 @@ export function setupInspector(panel: HTMLElement, onClose: () => void): Inspect
         return;
       }
       const text = describeInspect(view);
-      title.textContent = text.title;
-      list.replaceChildren(
-        ...text.rows.flatMap(({ label, value }) => {
-          const dt = document.createElement("dt");
-          dt.textContent = label;
-          const dd = document.createElement("dd");
+      if (title.textContent !== text.title) {
+        title.textContent = text.title;
+      }
+      const next = text.rows.map((r) => r.label);
+      if (next.length !== labels.length || next.some((l, i) => l !== labels[i])) {
+        values = [];
+        list.replaceChildren(
+          ...text.rows.flatMap(({ label }) => {
+            const dt = document.createElement("dt");
+            dt.textContent = label;
+            const dd = document.createElement("dd");
+            values.push(dd);
+            return [dt, dd];
+          }),
+        );
+        labels = next;
+      }
+      text.rows.forEach(({ value }, i) => {
+        const dd = values[i];
+        if (dd !== undefined && dd.textContent !== value) {
           dd.textContent = value;
-          return [dt, dd];
-        }),
-      );
+        }
+      });
       panel.hidden = false;
       // test:wasm が読む
       panel.dataset.title = text.title;

@@ -350,6 +350,13 @@ impl Sim {
         crate::inspect::encode(crate::inspect::inspect(&self.world, at))
     }
 
+    /// 押したものの識別子（[`crate::inspect::decode_target`]）で様子を返す。消えていたり読めなければ空。
+    pub fn inspect_target(&self, kind: f64, a: f64, b: f64) -> Vec<f64> {
+        let found = crate::inspect::decode_target(kind, a, b)
+            .and_then(|t| crate::inspect::inspect_target(&self.world, t));
+        crate::inspect::encode(found)
+    }
+
     /// 施設を、1 つにつき `[min の x, min の y, max の x, max の y, 種類]` の 5 つの数で返す。
     /// 種類は `ServiceKind` の値である。
     pub fn facilities(&self) -> Vec<f64> {

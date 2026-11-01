@@ -198,8 +198,12 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         break;
       }
       case "inspect": {
-        const { x, y } = message;
-        reply({ kind: "inspect", x, y, info: [...sim.inspect(x, y)] });
+        const { query } = message;
+        const info =
+          query.kind === "tile"
+            ? sim.inspect(query.x, query.y)
+            : sim.inspect_target(...query.target);
+        reply({ kind: "inspect", query, info: [...info] });
         break;
       }
       case "feedback": {

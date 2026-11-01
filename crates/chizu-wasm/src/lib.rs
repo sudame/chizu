@@ -173,6 +173,12 @@ impl Simulation {
         Ok(self.0.inspect(TilePos::new(coord(x)?, coord(y)?)))
     }
 
+    /// 押したものの識別子 `[種類, a, b]`（`inspect` の答えの先頭と最後の 2 つ）で様子を求める。
+    /// 消えていれば空の配列。
+    pub fn inspect_target(&self, kind: f64, a: f64, b: f64) -> Vec<f64> {
+        self.0.inspect_target(kind, a, b)
+    }
+
     /// 施設ごとに `[min の x, min の y, max の x, max の y, 種類]`。
     pub fn facilities(&self) -> Vec<f64> {
         self.0.facilities()

@@ -1,7 +1,7 @@
 import { parseCityStats, renderCityStats } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
-import { parseInspect, setupInspector } from "./inspector.ts";
+import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { setupLayerPanel } from "./map/layers.ts";
@@ -41,6 +41,7 @@ import {
   CHUNK_SIDE,
   type CommandMessage,
   FACILITY_STRIDE,
+  type InspectQuery,
   isWorkerToMain,
   type MainToWorker,
   type Outcome,
@@ -353,7 +354,8 @@ function serviceChoice(service: ServiceName, at: Tile) {
 
 // 「見る」で押したマス。パネルを出しているあいだ、数百 ms ごとに中核へ問い合わせ直す
 const INSPECT_INTERVAL_MS = 400;
-let inspected: Tile | null = null;
+// 最初はマスで引き、答えが届いたら押したものの識別子で引く。消えたら閉じる
+let inspected: InspectQuery | null = null;
 const inspector = setupInspector(element<HTMLElement>("#inspector"), () => {
   inspected = null;
 });
@@ -363,7 +365,7 @@ function closeInspector(): void {
 }
 function requestInspect(): void {
   if (inspected !== null) {
-    send({ kind: "inspect", x: inspected.x, y: inspected.y });
+    send({ kind: "inspect", query: inspected });
   }
 }
 setInterval(requestInspect, INSPECT_INTERVAL_MS);
@@ -412,7 +414,7 @@ function clickTile(at: Tile): void {
     sendCommand(placeServiceCommand(tool.service, at, serviceChoice(tool.service, at).rotation));
   } else if (tool.kind === "none") {
     // 何もないところを押すと、答えが空で返ってきてパネルが閉じる
-    inspected = at;
+    inspected = { kind: "tile", x: at.x, y: at.y };
     requestInspect();
   }
 }
@@ -668,13 +670,11 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   if (message.kind === "inspect") {
-    // 押し直したあとに、前のマスの答えが遅れて届くことがある
-    if (inspected?.x === message.x && inspected.y === message.y) {
-      const view = parseInspect(message.info);
-      inspector.show(view);
-      if (view === null) {
-        inspected = null;
-      }
+    // 押し直したあとに、前の問い合わせの答えが遅れて届くことがある
+    const result = applyInspectReply(inspected, message.query, message.info);
+    if (!result.stale) {
+      inspected = result.query;
+      inspector.show(result.view);
     }
     return;
   }
