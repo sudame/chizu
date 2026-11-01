@@ -319,6 +319,8 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::AlreadyOwned => "もう買ってある",
         DenyReason::NoZonableTile => "道路沿いに区画を塗れるマスがない",
         DenyReason::ZoneUnchanged => "変わるマスがない",
+        DenyReason::Occupied => "ほかの施設か道路がある",
+        DenyReason::NoRoadAccess => "道路に面していない",
     }
 }
 

@@ -143,6 +143,8 @@ pub enum Command {
         area: TileRect,
         zone: Option<ZoneKind>,
     },
+    /// 公共の施設を置く。`at` は道路に面する角のマスで、`rotation` は 0〜3 で
+    /// `at` から道路へ向かう向き（上、右、下、左）を表す。敷地は `at` から道路と反対へ延びる。
     PlaceBuilding {
         kind: ServiceKind,
         at: TilePos,
@@ -170,6 +172,8 @@ pub enum Command {
 pub enum InvalidCommand {
     /// マスかチャンクが、コマンドで指せる範囲（`WORLD_LIMIT`）の外にある。
     OutOfWorld,
+    /// 建物の向きが 0〜3 の外にある。
+    BadRotation(u8),
     /// 長方形の `min` が `max` を超えている。
     UnorderedRect(TileRect),
     /// 税率が `MAX_TAX_PERMILLE` を超えている。
@@ -195,6 +199,7 @@ impl fmt::Display for InvalidCommand {
             InvalidCommand::TaxRateTooHigh(p) => {
                 write!(f, "税率 {p}‰ は上限の {MAX_TAX_PERMILLE}‰ を超えている")
             }
+            InvalidCommand::BadRotation(r) => write!(f, "建物の向き {r} は 0 から 3 の外にある"),
             InvalidCommand::OutOfWorld => {
                 write!(f, "マスの座標の絶対値が上限の {WORLD_LIMIT} を超えている")
             }
@@ -266,11 +271,17 @@ impl Command {
                 }
             }
             Command::BuildRoad { from, to, .. } => Line::between(from, to).map(|_| ()),
+            Command::PlaceBuilding { rotation, .. } => {
+                if rotation <= 3 {
+                    Ok(())
+                } else {
+                    Err(InvalidCommand::BadRotation(rotation))
+                }
+            }
             // 種類の enum と `SimSpeed` は、型そのものが範囲の外の値を持てない。
-            Command::PlaceBuilding { .. }
-            | Command::SetSignal { .. }
-            | Command::BuyChunk { .. }
-            | Command::SetSimSpeed { .. } => Ok(()),
+            Command::SetSignal { .. } | Command::BuyChunk { .. } | Command::SetSimSpeed { .. } => {
+                Ok(())
+            }
         }
     }
 }
