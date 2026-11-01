@@ -26,7 +26,7 @@ pub const CHUNK_BASE_PRICE: Money = Money(50_000);
 pub const CHUNK_PRICE_STEP: Money = Money(25_000);
 
 /// 外部接続の高速道路が、始めたときに買ってある土地の端から外へ延びる長さ（マス）。
-pub const HIGHWAY_OUTSIDE_TILES: i64 = 1_024;
+pub const HIGHWAY_OUTSIDE_TILES: u64 = 1_024;
 
 /// コマンドを適用した結果。どの結果でも状態ハッシュには影響しない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,20 +61,25 @@ pub struct World {
     network: Network,
 }
 
-/// 外部接続の高速道路の、買ってある土地の端のマスと、外へ向かう 1 歩。
-/// どの辺から出るかと辺のどこから出るかは、種から決める。
-fn highway_start(seed: u64) -> (TilePos, (i64, i64)) {
+/// 外部接続の高速道路の通り道。始めたときに買ってある土地の端のマスから外へ向かう。
+/// どの辺から出るかと辺のどこから出るかは、種から決める。地形もこの通り道を見て水辺を抑える。
+pub fn highway_line(seed: u64) -> Line {
     let side = CHUNK_SIDE as i64;
     let r = i64::from(START_CHUNK_RADIUS);
     let (min, max) = (-r * side, (r + 1) * side - 1);
     let h = mix_words(seed, RngPurpose::TrunkLine, &[0]);
     // 原点のチャンクの幅の中から出す。
     let along = (h >> 8) as i64 & (side - 1);
-    match h % 4 {
+    let (start, step) = match h % 4 {
         0 => (TilePos::new(max, along), (1, 0)),
         1 => (TilePos::new(min, along), (-1, 0)),
         2 => (TilePos::new(along, max), (0, 1)),
         _ => (TilePos::new(along, min), (0, -1)),
+    };
+    Line {
+        start,
+        step,
+        len: HIGHWAY_OUTSIDE_TILES,
     }
 }
 
@@ -90,12 +95,8 @@ impl World {
             })
             .collect();
         let mut network = Network::new();
-        let (inner, (sx, sy)) = highway_start(seed);
-        let outer = TilePos::new(
-            inner.x + sx * HIGHWAY_OUTSIDE_TILES,
-            inner.y + sy * HIGHWAY_OUTSIDE_TILES,
-        );
-        network.add_highway(inner, outer);
+        let highway = highway_line(seed);
+        network.add_highway(highway.start, highway.end());
         let mut world = World {
             seed,
             tick: Tick::ZERO,
@@ -413,7 +414,7 @@ mod tests {
                 .segment_line(w.network().segments().next().unwrap().0);
             let line = line.unwrap();
             assert!(!w.is_buildable(line.tile(1)));
-            assert_eq!(line.len, HIGHWAY_OUTSIDE_TILES as u64);
+            assert_eq!(line, highway_line(seed));
             sides.insert(line.step);
         }
         assert_eq!(sides.len(), 4, "種によって出る辺が変わる");
@@ -510,6 +511,61 @@ mod tests {
                     proptest::prop_assert_eq!(tile_use(&w, x, y), expected, "({}, {})", x, y);
                 }
             }
+        }
+
+        /// 高速道路の内側のノードのまわりで、引く・消す・高速道路の先のチャンクを買うを任意に並べても、
+        /// メモリにあるマスの使い道が網と一致する。
+        #[test]
+        fn road_tiles_match_the_network_around_the_highway(
+            seed in 0_u64..8,
+            edits in proptest::collection::vec(
+                (0_u8..6, -8_i64..8, -8_i64..8, -1_i64..=1, -1_i64..=1, 1_i64..10),
+                1..30,
+            )
+        ) {
+            let mut w = World::new(seed);
+            w.money = Money(1_000_000_000);
+            let highway = highway_line(seed);
+            let (inner, (hx, hy)) = (highway.start, highway.step);
+            for (op, dx, dy, sx, sy, len) in edits {
+                let (x, y) = (inner.x + dx, inner.y + dy);
+                match op {
+                    0 => {
+                        let area = TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + len / 2, y + len / 2));
+                        w.apply(&Command::Bulldoze { area });
+                    }
+                    1 => {
+                        // 高速道路が通る、外側の k 番めのチャンクを買う。
+                        let k = u64::try_from(dx.rem_euclid(3)).unwrap();
+                        let c = highway.tile(1 + 64 * k).chunk().unwrap();
+                        buy(&mut w, c.cx, c.cy);
+                    }
+                    2 => {
+                        // 内側のノードから、土地の内へ引く。
+                        let to = (inner.x - hx * len, inner.y - hy * len);
+                        road(&mut w, (inner.x, inner.y), to, RoadKind::Medium);
+                    }
+                    _ if (sx, sy) != (0, 0) => {
+                        road(&mut w, (x, y), (x + sx * len, y + sy * len), RoadKind::Small);
+                    }
+                    _ => {}
+                }
+            }
+            let near = (-20..20).flat_map(|dx| (-20..20).map(move |dy| TilePos::new(inner.x + dx, inner.y + dy)));
+            let along = (0..200).map(|k| highway.tile(k));
+            for t in near.chain(along) {
+                if t.chunk().and_then(|c| w.chunk(c)).is_none() {
+                    continue;
+                }
+                let expected = if w.network().is_road_tile(t) {
+                    TileUse::Road
+                } else {
+                    TileUse::Empty
+                };
+                proptest::prop_assert_eq!(tile_use(&w, t.x, t.y), expected, "{:?}", t);
+            }
+            let (id, _) = w.network().segments().next().unwrap();
+            proptest::prop_assert_eq!(w.network().segment_line(id), Some(highway));
         }
     }
 

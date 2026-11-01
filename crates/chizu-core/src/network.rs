@@ -265,8 +265,18 @@ pub struct Line {
 }
 
 impl Line {
-    /// `from` から `to` への直線。8 方向でない、長さが 0、または長すぎるときはエラー。
+    /// `from` から `to` への、プレイヤーが引ける道路の直線。8 方向でない、長さが 0、
+    /// または `MAX_ROAD_TILES` マスより長いときはエラー。
     pub fn between(from: TilePos, to: TilePos) -> Result<Line, InvalidCommand> {
+        let line = Line::straight(from, to)?;
+        if line.len > MAX_ROAD_TILES {
+            return Err(InvalidCommand::RoadTooLong { from, to });
+        }
+        Ok(line)
+    }
+
+    /// `from` から `to` への 8 方向の直線。長さの上限はない。網の中の区間に使う。
+    pub fn straight(from: TilePos, to: TilePos) -> Result<Line, InvalidCommand> {
         let dx = to.x.checked_sub(from.x);
         let dy = to.y.checked_sub(from.y);
         let (Some(dx), Some(dy)) = (dx, dy) else {
@@ -280,9 +290,6 @@ impl Line {
             return Err(InvalidCommand::RoadNotStraight { from, to });
         }
         let len = ax.max(ay);
-        if len > MAX_ROAD_TILES {
-            return Err(InvalidCommand::RoadTooLong { from, to });
-        }
         Ok(Line {
             start: from,
             step: (dx.signum(), dy.signum()),
@@ -439,7 +446,7 @@ impl Network {
         let s = self.segment(id)?;
         let a = self.nodes.get(s.a).expect("区間の端のノードがない").tile();
         let b = self.nodes.get(s.b).expect("区間の端のノードがない").tile();
-        Some(Line::between(a, b).expect("区間が 8 方向の直線でない"))
+        Some(Line::straight(a, b).expect("区間が 8 方向の直線でない"))
     }
 
     /// 網のリンクを、区間の ID、向き、使うものの順に返す。
@@ -516,7 +523,7 @@ impl Network {
     }
 
     fn add_segment(&mut self, a: NodeId, b: NodeId, kind: SegmentKind) -> SegmentId {
-        let line = Line::between(self.nodes[a].tile(), self.nodes[b].tile())
+        let line = Line::straight(self.nodes[a].tile(), self.nodes[b].tile())
             .expect("区間が 8 方向の直線でない");
         let length = line.length();
         let id = self.segments.insert(Segment {
@@ -993,6 +1000,35 @@ mod tests {
         assert_eq!(road_cost(RoadKind::Small, &line(0, 0, 1, 1)), Money(354));
     }
 
+    /// 高速道路が `inner` から `outer` への 1 本のまま残り、「外の世界」ノードには高速道路しか
+    /// つながっていないことを確かめる。
+    fn check_highway(n: &Network, inner: TilePos, outer: TilePos) {
+        let highways: Vec<_> = n
+            .segments()
+            .filter(|(_, s)| s.kind == SegmentKind::Highway)
+            .collect();
+        assert_eq!(highways.len(), 1, "高速道路が 1 本でない");
+        let (id, seg) = highways[0];
+        let (a, b) = (n.node(seg.a).unwrap(), n.node(seg.b).unwrap());
+        assert_eq!(
+            (a.tile(), b.tile()),
+            (inner, outer),
+            "高速道路の端が変わった"
+        );
+        assert!(!a.outside && b.outside);
+        assert_eq!(b.segments, [id], "外の世界ノードに高速道路以外がつながった");
+        let line = n.segment_line(id).unwrap();
+        for k in 1..line.len {
+            assert_eq!(
+                n.node_at(line.tile(k)),
+                None,
+                "高速道路の途中にノードがある"
+            );
+        }
+        let outside = n.nodes().filter(|(_, node)| node.outside).count();
+        assert_eq!(outside, 1);
+    }
+
     proptest! {
         #[test]
         fn edits_keep_the_network_consistent(
@@ -1002,6 +1038,9 @@ mod tests {
             )
         ) {
             let mut n = Network::new();
+            // 編集の範囲を横切り、外の世界ノードも範囲の端に入る高速道路。
+            let (inner, outer) = (TilePos::new(60, 0), TilePos::new(80, 0));
+            n.add_highway(inner, outer);
             for (op, x, y, sx, sy, len) in edits {
                 if op == 0 {
                     let area = TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + len / 2, y));
@@ -1013,6 +1052,7 @@ mod tests {
                     }
                 }
                 check_invariants(&n);
+                check_highway(&n, inner, outer);
             }
         }
     }
