@@ -241,6 +241,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn zone_kind_all_matches_the_index_and_every_variant() {
+        for (i, zone) in ZoneKind::ALL.iter().enumerate() {
+            assert_eq!(zone.index(), i);
+            assert_eq!(ZoneKind::from_code(*zone as u8), Some(*zone));
+        }
+        // 種類を足したら、ここの match がコンパイルできなくなり、ALL にも足すことを思い出させる。
+        let count = |z: ZoneKind| match z {
+            ZoneKind::Residential
+            | ZoneKind::Commercial
+            | ZoneKind::Industrial
+            | ZoneKind::Office => 4,
+        };
+        assert_eq!(ZoneKind::ALL.len(), count(ZoneKind::Office));
+    }
+
+    #[test]
     fn validate_checks_ranges() {
         let rect = TileRect {
             min: TilePos::new(1, 0),

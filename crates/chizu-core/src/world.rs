@@ -410,6 +410,27 @@ impl StateHash for World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deny_reason_all_matches_the_index_and_every_variant() {
+        for (i, reason) in DenyReason::ALL.iter().enumerate() {
+            assert_eq!(reason.index(), i);
+        }
+        // 種類を足したら、ここの match がコンパイルできなくなり、ALL にも足すことを思い出させる。
+        let listed = |r: DenyReason| match r {
+            DenyReason::NotOwned
+            | DenyReason::Water
+            | DenyReason::NotEnoughMoney
+            | DenyReason::Overlap
+            | DenyReason::CornerCrossing
+            | DenyReason::HighwayMidway
+            | DenyReason::NothingToBulldoze
+            | DenyReason::NotAdjacent
+            | DenyReason::AlreadyOwned => DenyReason::ALL.contains(&r),
+        };
+        assert!(DenyReason::ALL.into_iter().all(listed));
+        assert_eq!(DenyReason::ALL.len(), 9);
+    }
     use crate::command::{MAX_TAX_PERMILLE, NodeId};
 
     #[test]
