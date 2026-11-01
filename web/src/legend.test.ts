@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { cssColor, legendSections, trianglePoints, zoneGroundColor } from "./legend.ts";
-import { BOLT_SHAPE, NO_POWER_COLOR, NO_WATER_COLOR } from "./map/roads.ts";
+import { NO_POWER_COLOR, NO_WATER_COLOR } from "./map/roads.ts";
 
 describe("凡例", () => {
   test("区画・建物の段階・印・施設の順に並ぶ", () => {
@@ -35,10 +35,15 @@ describe("凡例", () => {
   });
 
   test("図形の座標を SVG の大きさに直す", () => {
-    const first = BOLT_SHAPE[0];
-    expect(first).toBeDefined();
-    if (first !== undefined) {
-      expect(trianglePoints(first, 16)).toBe("12,0 0.8,9.6 10.4,9.6");
-    }
+    expect(
+      trianglePoints(
+        [
+          [-1, -1],
+          [1, -1],
+          [0, 1],
+        ],
+        10,
+      ),
+    ).toBe("0,0 10,0 5,10");
   });
 });

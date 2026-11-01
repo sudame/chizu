@@ -655,8 +655,7 @@ try {
         y: cy + (by + 0.3 - view.y) * view.zoom,
       },
     );
-  const isYellow = (c: number[]) =>
-    (c[0] ?? 0) > 200 && (c[1] ?? 0) > 180 && (c[2] ?? 0) < 100;
+  const isYellow = (c: number[]) => (c[0] ?? 0) > 200 && (c[1] ?? 0) > 180 && (c[2] ?? 0) < 100;
   const anyYellow = (cs: number[][]) => cs.some(isYellow);
   const markBefore = await markPixels();
   check(
