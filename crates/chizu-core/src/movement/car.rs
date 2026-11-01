@@ -369,8 +369,11 @@ fn look(
     let (lane, _, i) = order[k];
     let t = rows[i].as_ref().expect("車の主体がない");
     let mut out = Look::default();
-    if t.leg > 0 && t.offset.0 < JUNCTION_CLEAR {
-        let prev = t.route.links[t.leg as usize - 1];
+    // 抜けてきたリンクは、網が変わって消えていることがある。消えていれば交差点の中にいないとみなす。
+    let prev = (t.leg > 0 && t.offset.0 < JUNCTION_CLEAR)
+        .then(|| t.route.links[t.leg as usize - 1])
+        .filter(|l| net.segment(l.segment).is_some());
+    if let Some(prev) = prev {
         let node = end_node(net, prev);
         if junction::is_junction(net, node) {
             out.inside = Some(Inside {
@@ -508,6 +511,11 @@ pub(super) fn step(
     #[cfg(not(feature = "parallel"))]
     let moves: Vec<_> = (0..order.len()).map(plan).collect();
 
+    // この tick の前の位置。位置が変わらなかった車を、あとで止まったままの車として数える。
+    let was: Vec<(usize, u32, LaneOffset)> = order
+        .iter()
+        .map(|(_, at, i)| (*i, rows[*i].as_ref().expect("車の主体がない").leg, at.0))
+        .collect();
     let mut arrived = Vec::new();
     let mut crossing = Vec::new();
     for (i, before, v, at, next_lane, held) in moves {
@@ -515,11 +523,6 @@ pub(super) fn step(
         (t.speed, t.offset) = (v, at);
         if held {
             t.waited = t.waited.saturating_add(1);
-            if t.waited > junction::RESCUE {
-                rescues.teleported = rescues.teleported.saturating_add(1);
-                arrived.push(i);
-                continue;
-            }
         }
         if t.last_leg() {
             if at >= t.dest_offset {
@@ -578,5 +581,35 @@ pub(super) fn step(
         #[cfg(test)]
         check_lane(rows, lane);
     }
+    rescue_stalled(rows, &was, &mut arrived, rescues);
     arrived
+}
+
+/// 位置の変わらなかった車の `stalled` を数え、`RESCUE` tick より長く止まったままの車を、行き先に
+/// 着いたことにして `arrived` に足す。`was` は、この tick の前に車線の上にいた車と、その位置である。
+/// 交差点の手前に限らず、前の車の後ろ、交差点でないノードの手前、行き止まりの折り返しなど、
+/// どこで止まった車も同じに扱う。
+fn rescue_stalled(
+    rows: &mut [Option<Trip>],
+    was: &[(usize, u32, LaneOffset)],
+    arrived: &mut Vec<usize>,
+    rescues: &mut junction::Rescues,
+) {
+    arrived.sort_unstable();
+    let done = arrived.len();
+    for &(i, leg, at) in was {
+        if arrived[..done].binary_search(&i).is_ok() {
+            continue;
+        }
+        let t = rows[i].as_mut().expect("車の主体がない");
+        if (t.leg, t.offset) != (leg, at) {
+            t.stalled = 0;
+            continue;
+        }
+        t.stalled = t.stalled.saturating_add(1);
+        if t.stalled > junction::RESCUE {
+            rescues.teleported = rescues.teleported.saturating_add(1);
+            arrived.push(i);
+        }
+    }
 }

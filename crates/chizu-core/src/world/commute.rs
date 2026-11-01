@@ -48,12 +48,17 @@ impl World {
         let trips = self
             .trips
             .start_commutes(net, router, &self.buildings, &requests, self.tick);
+        let mut no_route = 0;
         for (r, trip) in requests.iter().zip(trips) {
             match trip {
                 Some(t) => self.population.set_trip(r.who.citizen, Some(t)),
-                None => stuck.push(r.who.citizen),
+                None => {
+                    no_route += 1;
+                    stuck.push(r.who.citizen);
+                }
             }
         }
+        self.tally_no_route(no_route);
         stuck.sort_unstable();
         stuck
     }
@@ -78,6 +83,9 @@ impl World {
             let Some(c) = self.trips.take_commuter(trip) else {
                 continue;
             };
+            if let Some(f) = self.trips.finished(trip) {
+                self.tally_finished(f);
+            }
             let Some(row) = self.population.citizen(c.citizen) else {
                 continue;
             };

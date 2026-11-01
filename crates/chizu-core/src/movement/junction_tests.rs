@@ -2,6 +2,7 @@ use super::junction::{GIVE_UP, Move, PATIENCE, Rescues};
 use super::*;
 use crate::command::RoadKind;
 use crate::network::Line;
+use crate::tile::TileRect;
 
 fn road(n: &mut Network, from: (i64, i64), to: (i64, i64), kind: RoadKind) {
     let line = Line::between(TilePos::new(from.0, from.1), TilePos::new(to.0, to.1)).unwrap();
@@ -393,4 +394,93 @@ fn light_random_traffic_needs_no_rescue() {
         assert_eq!(left, 0);
         assert_eq!(rescues, Rescues::default(), "{lines:?}");
     }
+}
+
+#[test]
+fn a_gridlock_without_junctions_is_rescued() {
+    // 四角い環状の道路の 4 つの角は、2 本の区間をつなぐだけのノードで、交差点ではない。
+    // 両方の向きの車線を、次の辺へ向かう車で埋めると、どの辺の先頭も次の辺に入れず止まる。
+    let mut n = Network::new();
+    let corners = [(0, 0), (10, 0), (10, 10), (0, 10)];
+    for k in 0..4 {
+        road(&mut n, corners[k], corners[(k + 1) % 4], RoadKind::Small);
+    }
+    assert!(n.nodes().all(|(id, _)| !junction::is_junction(&n, id)));
+    let mut c = Cars::new(n);
+    let step =
+        |p: (i64, i64), q: (i64, i64)| ((q.0 - p.0).signum() as i8, (q.1 - p.1).signum() as i8);
+    // 角 `p` から向き `s` へ `mm` 進んだ位置。
+    let along = |p: (i64, i64), s: (i8, i8), mm: u32| {
+        let tiles = i64::from(mm / 8_000);
+        at(
+            p.0 + tiles * i64::from(s.0),
+            p.1 + tiles * i64::from(s.1),
+            s,
+            mm % 8_000,
+        )
+    };
+    let mut drives = Vec::new();
+    for k in 0..4 {
+        let (prev, a, b, next) = (
+            corners[(k + 3) % 4],
+            corners[k],
+            corners[(k + 1) % 4],
+            corners[(k + 2) % 4],
+        );
+        // 辺の長さ 80m に、7m おきに隙間なく並べる。
+        for mm in (1_000..80_000).step_by(7_000) {
+            // 時計回りの車は次の辺へ、反時計回りの車は前の辺へ向かう。
+            drives.push((along(a, step(a, b), mm), along(b, step(b, next), mm)));
+            drives.push((along(b, step(b, a), mm), along(a, step(a, prev), mm)));
+        }
+    }
+    let ids = c
+        .trips
+        .spawn_drives(&c.net, &mut c.router, &drives, Tick::ZERO);
+    assert!(ids.iter().all(Option::is_some));
+    let total = c.trips.len();
+    for _ in 0..junction::RESCUE {
+        c.step();
+    }
+    // 救済の待ちが過ぎるまでは、詰まったまま誰も消えない。
+    assert_eq!(c.trips.rescues().teleported, 0);
+    assert!(
+        c.trips.len() > total / 2,
+        "詰まらなかった {}",
+        c.trips.len()
+    );
+    for _ in 0..2_000 {
+        c.step();
+    }
+    assert!(c.trips.is_empty(), "残った {}", c.trips.len());
+    assert!(c.trips.rescues().teleported > 0);
+}
+
+#[test]
+fn a_car_just_past_a_junction_survives_the_removal_of_the_road_behind_it() {
+    // 交差点を抜けたばかりの車の、抜けてきた区間を消す。残りの経路は無事なので探し直されず、
+    // 経路には消えた区間が残る。それでも交差点の中かを調べるところで止まらない。
+    let mut c = Cars::new(crossroads());
+    // 止まった状態から走り出し、ノードをまたいだ tick に 7m より手前に入る位置から出す。
+    let id = c.drive(at(4, 10, (1, 0), 7_000), at(18, 10, (1, 0), 0));
+    while c.trips.get(id).unwrap().leg == 0 {
+        c.step();
+    }
+    assert!(c.trips.get(id).unwrap().offset().0 < CAR_LENGTH + MIN_GAP);
+    c.net
+        .bulldoze(TileRect::from_corners(
+            TilePos::new(7, 10),
+            TilePos::new(7, 10),
+        ))
+        .unwrap();
+    c.router.rebuild(&c.net);
+    assert!(c.trips.reroute(&c.net, &mut c.router).is_empty());
+    let t = c.trips.get(id).unwrap();
+    assert_eq!(t.leg, 1, "探し直された");
+    assert!(c.net.segment(t.route().links[0].segment).is_none());
+    let mut arrived = false;
+    for _ in 0..200 {
+        arrived |= c.step().contains(&id);
+    }
+    assert!(arrived);
 }

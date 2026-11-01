@@ -447,3 +447,58 @@ fn map_ruler_uses_absolute_digits() {
     assert_eq!(digits, "4321098765", "{map}");
     assert!(lines[lines.len() - 3].contains("-70"), "{map}");
 }
+
+/// 住宅と工場を置いて数日進めた街で、人と車の集計が出て、数が食い違わない。
+#[test]
+fn observe_gives_people_and_traffic_counts() {
+    let dir = session("agent-traffic");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    // 始めたばかりの街でも、欄は出て、空である。
+    let fresh = json(&cli(&["agent", "observe", d]));
+    assert_eq!(fresh["traffic"]["cars"]["total"], 0);
+    assert_eq!(
+        fresh["traffic"]["trips"]["yesterday"],
+        serde_json::Value::Null
+    );
+    assert!(fresh["traffic"]["trips"]["today"]["avgTravelTicks"].is_null());
+    let highway = fresh["highway"]["end"].clone();
+    let [x, y] = [highway[0].as_i64().unwrap(), highway[1].as_i64().unwrap()];
+    // 種 42 の高速道路は横向きで、内側へは外向きの逆に道路を引く。
+    let inward = -fresh["highway"]["outward"][0].as_i64().unwrap();
+    assert_ne!(inward, 0);
+    let (a, b) = (x + inward, x + 40 * inward);
+    let cmds = write(
+        &dir.join("c.json"),
+        &serde_json::json!([
+            {"type":"BuildRoad","from":[x,y],"to":[b,y],"kind":"Medium"},
+            {"type":"PaintZone","area":[[a,y+1],[b,y+6]],"zone":"Residential"},
+            {"type":"PaintZone","area":[[a,y-6],[b,y-1]],"zone":"Industrial"},
+        ])
+        .to_string(),
+    );
+    cli(&["agent", "act", d, &cmds]);
+    cli(&["agent", "advance", d, &(3 * 7200 + 2400).to_string()]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let n = |v: &serde_json::Value| v.as_u64().unwrap();
+    let people = &o["citizenPlaces"];
+    let sum: u64 = [
+        "atHome", "atWork", "atShop", "walking", "driving", "homeless",
+    ]
+    .iter()
+    .map(|k| n(&people[k]))
+    .sum();
+    assert_eq!(sum, n(&o["population"]["citizens"]));
+    assert!(sum > 0, "誰も住んでいない");
+    let cars = &o["traffic"]["cars"];
+    assert_eq!(n(&cars["total"]), n(&cars["moving"]) + n(&cars["stopped"]));
+    assert_eq!(n(&cars["stoppedAfterTicks"]), 100);
+    let trips = &o["traffic"]["trips"];
+    let yesterday = &trips["yesterday"];
+    assert!(n(&yesterday["arrived"]) > 0, "前の日に誰も着いていない");
+    assert!(yesterday["avgTravelTicks"].as_f64().unwrap() > 0.0);
+    let m = &o["migration"];
+    assert!(m["vacantHomes"].is_u64() && m["blockedHouseholds"].is_u64());
+    // 同じ記録を再生した observe は、毎回同じ値になる。
+    assert_eq!(o, json(&cli(&["agent", "observe", d])));
+}

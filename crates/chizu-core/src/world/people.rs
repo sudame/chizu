@@ -111,6 +111,21 @@ fn next_time_of_day(after: Tick, at_in_day: u64) -> Tick {
     Tick(if t > after.0 { t } else { t + TICKS_PER_DAY })
 }
 
+/// 転入のいまの様子。外から来る世帯の数は、移住の処理 1 回（[`MIGRATION_INTERVAL`] tick ごと）あたりである。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MigrationOutlook {
+    /// いま移住の処理が走ったとして、外から来ようとする世帯の数。
+    pub wanting_households: u64,
+    /// 外の世界と道路でつながった住宅の空き戸数の合計。
+    pub vacant_homes: u64,
+    /// 家がなく、空き家を待っている世帯の数。
+    pub homeless_households: u64,
+    /// 家なしの世帯の住民の数。
+    pub homeless_citizens: u64,
+    /// 来ようとする世帯のうち、空き家が足りず入れない数。
+    pub blocked_households: u64,
+}
+
 impl World {
     /// 需要の式に使う、街の人口と働き口の数。
     ///
@@ -426,24 +441,7 @@ impl World {
             };
             self.population.set_home(h, Some(home), self.tick);
         }
-        // 住宅の需要の式から空き家の項を除いた、住みたい人がいるかどうか。
-        let s = self.city_stats();
-        let jobs: u64 = s.workplaces.iter().sum();
-        let filled: u64 = s.filled.iter().sum();
-        let jobless = s.working_age.saturating_sub(s.employed);
-        let want = BASE_RESIDENTIAL_DEMAND
-            + happiness_pull(s.happiness)
-            + i64::try_from(jobs.saturating_sub(filled)).expect("職場の数があふれた")
-            - i64::try_from(jobless / 4).expect("住民の数があふれた");
-        if want <= 0 {
-            return;
-        }
-        let pull = u64::try_from(want).expect("正の需要") / MIGRANTS_PER_DEMAND;
-        let count = MIGRANTS_PER_INTERVAL + pull + free / MIGRANTS_PER_VACANCY;
-        // 越してきた人の見込みの幸福度が、出ていく境目に近いほど来る数を減らす。
-        let tax = self.tax_permille[ZoneKind::Residential.index()];
-        let margin = u64::from(happiness::newcomer_happiness(tax).saturating_sub(LEAVE_BELOW));
-        let count = count * margin.min(APPEAL_FULL_MARGIN) / APPEAL_FULL_MARGIN;
+        let count = self.arrivals_per_interval(free);
         for k in 0..count {
             let Some(home) = homes.next() else {
                 return;
@@ -457,6 +455,53 @@ impl World {
                     .add_citizen(h, age)
                     .expect("足したばかりの世帯がない");
             }
+        }
+    }
+
+    /// 空き家が合わせて `free` 戸のとき、1 回の移住の処理で外から来る世帯の数。
+    fn arrivals_per_interval(&self, free: u64) -> u64 {
+        // 住宅の需要の式から空き家の項を除いた、住みたい人がいるかどうか。
+        let s = self.city_stats();
+        let jobs: u64 = s.workplaces.iter().sum();
+        let filled: u64 = s.filled.iter().sum();
+        let jobless = s.working_age.saturating_sub(s.employed);
+        let want = BASE_RESIDENTIAL_DEMAND
+            + happiness_pull(s.happiness)
+            + i64::try_from(jobs.saturating_sub(filled)).expect("職場の数があふれた")
+            - i64::try_from(jobless / 4).expect("住民の数があふれた");
+        if want <= 0 {
+            return 0;
+        }
+        let pull = u64::try_from(want).expect("正の需要") / MIGRANTS_PER_DEMAND;
+        let count = MIGRANTS_PER_INTERVAL + pull + free / MIGRANTS_PER_VACANCY;
+        // 越してきた人の見込みの幸福度が、出ていく境目に近いほど来る数を減らす。
+        let tax = self.tax_permille[ZoneKind::Residential.index()];
+        let margin = u64::from(happiness::newcomer_happiness(tax).saturating_sub(LEAVE_BELOW));
+        count * margin.min(APPEAL_FULL_MARGIN) / APPEAL_FULL_MARGIN
+    }
+
+    /// 転入のいまの様子。状態は変えない。
+    pub fn migration_outlook(&self) -> MigrationOutlook {
+        let p = &self.population;
+        let vacant_homes: u64 = self.vacant_homes().iter().map(|(_, n)| n).sum();
+        let homeless: Vec<HouseholdId> = p
+            .household_ids()
+            .filter(|h| p.home(*h) == Some(None))
+            .collect();
+        let homeless_citizens = homeless
+            .iter()
+            .map(|h| p.members(*h).map_or(0, |m| m.len() as u64))
+            .sum();
+        let homeless_households = homeless.len() as u64;
+        let wanting = self.arrivals_per_interval(vacant_homes);
+        // 家なしの世帯が先に空き家に入るので、外から来る世帯が入れるのは、その残りである。
+        let room = vacant_homes.saturating_sub(homeless_households);
+        MigrationOutlook {
+            wanting_households: wanting,
+            vacant_homes,
+            homeless_households,
+            homeless_citizens,
+            blocked_households: wanting.saturating_sub(room),
         }
     }
 
