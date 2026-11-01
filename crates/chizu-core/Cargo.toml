@@ -8,7 +8,13 @@ publish.workspace = true
 float_arithmetic = "deny"
 disallowed_types = "deny"
 
+[features]
+default = ["parallel"]
+parallel = ["dep:rayon"]
+
 [dependencies]
+rayon = { version = "1.11", optional = true }
+smallvec = "1.15"
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [dev-dependencies]
