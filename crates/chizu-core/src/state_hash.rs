@@ -213,6 +213,22 @@ mod tests {
     use xxhash_rust::xxh3::xxh3_64;
 
     #[test]
+    fn streaming_matches_one_shot_for_long_input() {
+        // xxh3 は 240 バイトを超えると内部の処理が変わる。その前後と、数万バイトまでを通す。
+        for len in [0_usize, 1, 29, 30, 31, 32, 100, 1_000, 5_000] {
+            let v: Vec<u64> = (0..len as u64)
+                .map(|i| i.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+                .collect();
+            let mut expected = Vec::new();
+            expected.extend_from_slice(&(len as u64).to_le_bytes());
+            for x in &v {
+                expected.extend_from_slice(&x.to_le_bytes());
+            }
+            assert_eq!(state_hash_of(&v), xxh3_64(&expected), "要素数 {len}");
+        }
+    }
+
+    #[test]
     fn writes_the_documented_bytes() {
         let value = (
             0x0102_u16,
