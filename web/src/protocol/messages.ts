@@ -106,6 +106,8 @@ export type MainToWorker =
   /** id は画面が振る番号で、結果の通知で返ってくる。 */
   | { kind: "command"; id: number; command: CommandMessage }
   | { kind: "pause"; paused: boolean }
+  /** 1 倍より遅く進めるときの倍率（0 より大きく 1 以下）。中核の速度は変えず、tick を進める頻度だけを落とす。 */
+  | { kind: "pace"; pace: number }
   /** 施設を間口のマス (x, y) に置けるかを、向きごとに中核に問い合わせる。 */
   | { kind: "probe-service"; service: ServiceName; x: number; y: number }
   /** マス (x, y) にある建物か施設の様子を中核に問い合わせる。 */

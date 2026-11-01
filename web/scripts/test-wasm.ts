@@ -208,6 +208,14 @@ try {
     `等速で 2 秒待つと時計が 60 tick ほど進む（${normal} tick）`,
   );
 
+  await page.locator('button[data-speed="0.5"]').click();
+  await hud.and(page.locator('[data-speed="0.5"]')).waitFor({ timeout: TIMEOUT_MS });
+  const half = await ticksIn(2_000);
+  check(
+    half >= normal * 0.3 && half <= normal * 0.7,
+    `0.5 倍にすると等速の半分ほど進む（${half} tick、等速は ${normal} tick）`,
+  );
+
   await page.locator(`button[data-speed="${FAST_SPEED}"]`).click();
   await hud.and(page.locator(`[data-speed="${FAST_SPEED}"]`)).waitFor({ timeout: TIMEOUT_MS });
   const fast = await ticksIn(2_000);

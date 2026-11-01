@@ -54,6 +54,7 @@ import {
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 import { setupSaves } from "./save/main-side.ts";
+import { describeSpeed, shownSpeed, splitSpeed } from "./speed.ts";
 
 function element<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
@@ -92,6 +93,9 @@ function sendCommand(command: CommandMessage): void {
   send({ kind: "command", id, command });
 }
 
+// 1 倍より遅く進めているときの倍率。中核の速度は 1 のままなので、画面と Worker だけが持つ
+let pace = 1;
+
 const pad = (n: number) => String(n).padStart(2, "0");
 
 function describeClock(header: SnapshotHeader): string {
@@ -106,10 +110,11 @@ function draw(ctx: CanvasRenderingContext2D, header: SnapshotHeader): void {
   ctx.font = "20px sans-serif";
   ctx.fillText(describeClock(header), 12, 30);
   ctx.fillText(`お金 ${header.money.toLocaleString("ja-JP")}`, 12, 58);
-  ctx.fillText(header.paused ? "一時停止中" : `速度 ${header.speed} 倍`, 12, 86);
+  const speed = shownSpeed(header.speed, pace);
+  ctx.fillText(header.paused ? "一時停止中" : describeSpeed(speed), 12, 86);
   // test:wasm が読む
   canvas.dataset.tick = String(header.tick);
-  canvas.dataset.speed = String(header.speed);
+  canvas.dataset.speed = String(speed);
   canvas.dataset.paused = String(header.paused);
   canvas.dataset.day = String(header.day);
   canvas.dataset.secondOfDay = String(header.secondOfDay);
@@ -607,7 +612,10 @@ function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?:
 
 for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-speed]")) {
   button.addEventListener("click", () => {
-    sendCommand({ kind: "SetSimSpeed", speed: Number(button.dataset.speed) });
+    const { core, pace: next } = splitSpeed(Number(button.dataset.speed));
+    pace = next;
+    send({ kind: "pace", pace });
+    sendCommand({ kind: "SetSimSpeed", speed: core });
   });
 }
 
