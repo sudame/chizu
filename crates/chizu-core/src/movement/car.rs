@@ -37,6 +37,22 @@ pub const CAR_DECEL: i32 = 4_500;
 /// 前の車の後ろの端から、自分の前の端までに空ける距離に、車の長さを足したもの。
 const SPACING: u32 = CAR_LENGTH + MIN_GAP;
 
+/// 交差点を抜けた車が、交差点の中にいるとみなされるあいだに進む距離。
+const JUNCTION_CLEAR: u32 = SPACING;
+
+/// 交差点から出ていく車線に入るときに要る、最後尾までの距離。入った車は、前の車が止まっていても
+/// `JUNCTION_CLEAR` まで進んで交差点を抜けきれる。
+const JUNCTION_ROOM: u32 = SPACING + JUNCTION_CLEAR;
+
+/// ノード `node` をまたぐ車が、行き先の車線の最後尾までに要る距離。
+fn room_needed(net: &Network, node: NodeId) -> u32 {
+    if junction::is_junction(net, node) {
+        JUNCTION_ROOM
+    } else {
+        SPACING
+    }
+}
+
 fn end_node(net: &Network, link: LinkId) -> NodeId {
     let s = net.segment(link.segment).expect("リンクの区間がない");
     match link.dir {
@@ -345,11 +361,16 @@ fn look(
     let (lane, _, i) = order[k];
     let t = rows[i].as_ref().expect("車の主体がない");
     let mut out = Look::default();
-    if t.leg > 0 && t.offset.0 < SPACING {
+    if t.leg > 0 && t.offset.0 < JUNCTION_CLEAR {
         let prev = t.route.links[t.leg as usize - 1];
         let node = end_node(net, prev);
         if junction::is_junction(net, node) {
-            out.inside = Some((node, prev, t.link()));
+            out.inside = Some(Inside {
+                node,
+                from: prev,
+                to: t.link(),
+                stopped: t.speed == MmPerTick::ZERO,
+            });
         }
     }
     // 後ろの車は前の車に追従するので、車線の先頭の車だけを見る。
@@ -366,10 +387,10 @@ fn look(
         return out;
     }
     // 先の車線の最後尾がこの tick も同じ速さで進むとして、入った車が交差点を抜けきれるか。
-    let room = st
-        .rear
-        .get(&to_lane)
-        .is_none_or(|(at, v)| i64::from(at.0) + i64::from(v.0) >= 2 * i64::from(SPACING));
+    // 見込みが外れても、ノードをまたぐときに確かめ直すので、交差点の中で止まる車は出ない。
+    let room = st.rear.get(&to_lane).is_none_or(|(at, v)| {
+        i64::from(at.0) + i64::from(v.0) >= i64::from(room_needed(net, node))
+    });
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
     out.approach = Some(Approach {
         id: k,
@@ -478,6 +499,10 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
         (t.speed, t.offset) = (v, at);
         if held {
             t.waited = t.waited.saturating_add(1);
+            if t.waited > junction::RESCUE {
+                arrived.push(i);
+                continue;
+            }
         }
         if t.last_leg() {
             if at >= t.dest_offset {
@@ -497,15 +522,19 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
         *r = (*r).min(at);
     }
     crossing.sort_unstable();
-    for (_, i, lane) in crossing {
+    for (node, i, lane) in crossing {
         let t = rows[i].as_mut().expect("車の主体がない");
+        // 交差点では、入った車が交差点の中で止まらないだけの空きを求める。
+        let need = room_needed(net, node);
         let next = t.route.links[t.leg as usize + 1];
         let over = t.link_len.distance_to(t.offset);
         let next_len = super::pos::link_geometry(net, next)
             .expect("経路のリンクがない")
             .2;
         let mut place = LaneOffset::START.advance(over).min(next_len);
-        let room = rear.get(&lane).map(|r| r.0.checked_sub(SPACING));
+        let room = rear
+            .get(&lane)
+            .map(|r| (r.0 >= need).then(|| r.0 - SPACING));
         match room {
             Some(None) => {
                 (t.offset, t.speed) = (t.link_len, MmPerTick::ZERO);

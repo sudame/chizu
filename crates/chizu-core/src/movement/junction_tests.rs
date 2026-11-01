@@ -1,4 +1,4 @@
-use super::junction::{Move, PATIENCE};
+use super::junction::{GIVE_UP, Move, PATIENCE};
 use super::*;
 use crate::command::RoadKind;
 use crate::network::Line;
@@ -217,4 +217,140 @@ fn opposing_straight_traffic_does_not_wait() {
     let (arrived, longest) = heavy_crossroads(&[(-1, 0), (1, 0)], 1);
     assert_eq!(arrived, 2);
     assert_eq!(longest, 0);
+}
+
+/// 車 `id` を、経路の中のリンク `link` の位置 `offset` に止めて置き直す。
+fn put(c: &mut Cars, id: TripId, link: LinkId, offset: u32) {
+    let t = c.trips.rows[id.slot()].as_mut().unwrap();
+    let leg = t.route.links.iter().position(|l| *l == link).unwrap();
+    t.leg = u32::try_from(leg).unwrap();
+    let lane = c.net.link_lanes(link).next().unwrap();
+    t.enter(&c.net, LaneOffset(offset), Some(lane));
+    t.speed = MmPerTick::ZERO;
+    t.waiting = false;
+}
+
+/// 東西の道 1 本と、x=10 と x=11 の南北の道 2 本で、隣り合う交差点 A=(10, 10) と B=(11, 10) を作る。
+fn twin_junctions() -> Network {
+    let mut n = Network::new();
+    road(&mut n, (0, 10), (20, 10), RoadKind::Small);
+    road(&mut n, (10, 0), (10, 20), RoadKind::Small);
+    road(&mut n, (11, 0), (11, 20), RoadKind::Small);
+    n
+}
+
+#[test]
+fn cars_stuck_inside_adjacent_junctions_are_passed_after_a_while() {
+    // A と B のあいだのリンクの両端に、互いに相手の交差点の中で止まった車を置く。
+    // ノードをまたぐときの空きの確かめでは起きない並びだが、起きても待ちすぎた車が入って解ける。
+    let mut c = Cars::new(twin_junctions());
+    let (a, b) = ((10, 10), (11, 10));
+    let ab = link(&c.net, a, b);
+    let ba = link(&c.net, b, a);
+    let h1 = c.drive(at(10, 10, (1, 0), 7_000), at(11, 15, (0, 1), 0));
+    let p2 = c.drive(at(5, 10, (1, 0), 0), at(15, 10, (1, 0), 0));
+    let h2 = c.drive(at(11, 10, (-1, 0), 7_000), at(10, 5, (0, -1), 0));
+    let q2 = c.drive(at(15, 10, (-1, 0), 0), at(5, 10, (-1, 0), 0));
+    put(&mut c, h1, ab, 8_000);
+    put(&mut c, p2, ab, 500);
+    put(&mut c, h2, ba, 8_000);
+    put(&mut c, q2, ba, 500);
+    let mut arrived = 0;
+    for _ in 0..(GIVE_UP as usize + 200) {
+        arrived += c.step().len();
+    }
+    assert_eq!(arrived, 4, "行き詰まった");
+}
+
+#[test]
+fn cars_driving_into_each_others_exits_do_not_lock_up() {
+    // A で南へ、B で北へ曲がる車と、A と B を東西に抜ける車を、両方の向きから続けて出す。
+    let mut c = Cars::new(twin_junctions());
+    let d = [
+        (at(0, 10, (1, 0), 0), at(11, 18, (0, 1), 0)),
+        (at(0, 10, (1, 0), 0), at(19, 10, (1, 0), 0)),
+        (at(20, 10, (-1, 0), 0), at(10, 2, (0, -1), 0)),
+        (at(20, 10, (-1, 0), 0), at(1, 10, (-1, 0), 0)),
+        (at(10, 0, (0, 1), 0), at(19, 10, (1, 0), 0)),
+        (at(11, 20, (0, -1), 0), at(1, 10, (-1, 0), 0)),
+    ];
+    let mut total = 0;
+    for _ in 0..30 {
+        total += c
+            .trips
+            .spawn_drives(&c.net, &mut c.router, &d, Tick::ZERO)
+            .iter()
+            .flatten()
+            .count();
+        c.step();
+    }
+    for _ in 0..3_000 {
+        c.step();
+    }
+    assert_eq!(total, 180);
+    assert!(c.trips.is_empty(), "残った {}", c.trips.len());
+}
+
+/// 小さい道路を東西と南北に `lines` の位置へ引いた格子で、外周から擬似乱数の行き先へ
+/// 毎 tick 4 台ずつ `ticks` tick 出し、着かずに残った台数を返す。
+/// これだけ多いと出ていく車線の詰まりが輪になることがあり、`RESCUE` でほどけることも含めて見る。
+fn random_grid(lines: [i64; 3], ticks: usize) -> usize {
+    let mut n = Network::new();
+    for v in lines {
+        road(&mut n, (0, v), (30, v), RoadKind::Small);
+        road(&mut n, (v, 0), (v, 30), RoadKind::Small);
+    }
+    let mut c = Cars::new(n);
+    let mut ends = Vec::new();
+    for v in lines {
+        ends.push(at(0, v, (1, 0), 0));
+        ends.push(at(30, v, (-1, 0), 0));
+        ends.push(at(v, 0, (0, 1), 0));
+        ends.push(at(v, 30, (0, -1), 0));
+    }
+    let mut s: u64 = 12_345;
+    let mut rnd = || {
+        s = s
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(s >> 33).unwrap()
+    };
+    for _ in 0..ticks {
+        let mut d = Vec::new();
+        for _ in 0..4 {
+            let a = rnd() % ends.len();
+            let mut b = rnd() % ends.len();
+            if b == a {
+                b = (b + 1) % ends.len();
+            }
+            // 外周の入口から、その道を 29 マス進んだ所を行き先にする。
+            let to = ends[b];
+            let far = |p: i64, step: i8| p + 29 * i64::from(step);
+            d.push((
+                ends[a],
+                at(
+                    far(to.tile.x, to.step.0),
+                    far(to.tile.y, to.step.1),
+                    to.step,
+                    0,
+                ),
+            ));
+        }
+        c.trips.spawn_drives(&c.net, &mut c.router, &d, Tick::ZERO);
+        c.step();
+    }
+    for _ in 0..30_000 {
+        c.step();
+    }
+    c.trips.len()
+}
+
+#[test]
+fn a_dense_grid_with_random_traffic_drains() {
+    assert_eq!(random_grid([10, 11, 12], 600), 0);
+}
+
+#[test]
+fn a_sparse_grid_with_random_traffic_drains() {
+    assert_eq!(random_grid([10, 13, 16], 600), 0);
 }

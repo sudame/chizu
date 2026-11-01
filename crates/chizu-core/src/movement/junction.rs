@@ -23,6 +23,15 @@
 //! 衝突しないかぎり必ず入れる。交差点の中の車はいずれ抜けるので、互いに譲り合って
 //! 誰も動かない行き詰まりは起きない。
 //!
+//! 交差点の中の車が抜けきれるように、出ていく車線の最後尾までに、車間と交差点を抜ける距離を
+//! 足した空きがなければ、ノードをまたがせない（`car`）。前の車が止まっていても、入った車は
+//! 交差点を抜けきれるので、交差点の中に止まり続ける車は出ない。網を変えたあとなどに
+//! それでも止まった車が残ったときは、`GIVE_UP` tick より長く待った候補がその車を無視して入る。
+//!
+//! 出ていく車線が詰まった交差点がつながって輪になると、どの車も動けなくなる（グリッドロック）。
+//! これは譲り合いでなく車線の空きの不足で起きるので、`RESCUE` tick より長く待った車を
+//! 行き先に着いたことにして、輪をほどく。
+//!
 //! 道筋が交わるかは、ノードを中心とした円の上に、腕ごとの入口と出口の点を置いて決める。
 //! 左側通行とし、マスの y は画面の下向きなので、腕の向きの角度（x から y へ回る向き）から
 //! 入口は少し進めた所、出口は少し戻した所に置く。2 つの動きの弦の端が円の上で互い違いに
@@ -37,6 +46,13 @@ use crate::network::{LaneId, LinkId, Network, SegmentKind};
 
 /// この tick 数より長く待った車は、道路の格に関わらず先に入れる。
 pub(super) const PATIENCE: u32 = 30;
+
+/// この tick 数より長く待った車は、交差点の中で止まった車を待たずに入る。
+pub(super) const GIVE_UP: u32 = 2 * PATIENCE;
+
+/// この tick 数より長く交差点の手前で待った車は、詰まりから抜け出せないものとして、
+/// 行き先に着いたことにする。CS2 で、長く詰まった車が消えるのにならう。
+pub(super) const RESCUE: u32 = 300;
 
 /// ノード `n` が、車どうしを譲らせる交差点か。
 pub(super) fn is_junction(net: &Network, n: NodeId) -> bool {
@@ -136,8 +152,16 @@ pub(super) struct Approach {
     pub waited: u32,
 }
 
-/// 交差点の中にいる車の、ノードと、入ってきたリンクと、いまのリンク。
-pub(super) type Inside = (NodeId, LinkId, LinkId);
+/// 交差点の中にいる車。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Inside {
+    pub node: NodeId,
+    /// 入ってきたリンクと、いまのリンク。
+    pub from: LinkId,
+    pub to: LinkId,
+    /// 止まっているか。
+    pub stopped: bool,
+}
 
 /// 交差点ごとに候補を優先の順に見て、ノードの手前で止める候補の `id` を小さい順に返す。
 pub(super) fn holds(
@@ -147,14 +171,15 @@ pub(super) fn holds(
 ) -> Vec<usize> {
     cands.sort_unstable_by_key(|c| (c.node, c.id));
     // 同じノードの中の並びは結果に効かない。
-    inside.sort_unstable_by_key(|x| x.0);
+    inside.sort_unstable_by_key(|x| x.node);
     let mut held = Vec::new();
     let mut group: Vec<(Approach, Move)> = Vec::new();
-    let mut placed: Vec<Move> = Vec::new();
+    // 置いた動きと、それが交差点の中で止まった車のものか。
+    let mut placed: Vec<(Move, bool)> = Vec::new();
     for same in cands.chunk_by(|a, b| a.node == b.node) {
         let node = same[0].node;
-        let lo = inside.partition_point(|x| x.0 < node);
-        let hi = inside.partition_point(|x| x.0 <= node);
+        let lo = inside.partition_point(|x| x.node < node);
+        let hi = inside.partition_point(|x| x.node <= node);
         if same.len() == 1 && lo == hi {
             // ほかに車がいなければ、先の車線の空きだけで決まる。
             let c = &same[0];
@@ -176,15 +201,24 @@ pub(super) fn holds(
             )
         });
         placed.clear();
-        placed.extend(inside[lo..hi].iter().map(|x| Move::new(net, x.1, x.2)));
+        placed.extend(
+            inside[lo..hi]
+                .iter()
+                .map(|x| (Move::new(net, x.from, x.to), x.stopped)),
+        );
         for (c, mv) in &group {
-            let free = c.room && !placed.iter().any(|m| m.conflicts(mv));
+            // 待ちすぎた車は、交差点の中で止まった車の脇をすり抜けて入る。
+            let free = c.room
+                && !placed
+                    .iter()
+                    .filter(|(_, stopped)| !(*stopped && c.waited >= GIVE_UP))
+                    .any(|(m, _)| m.conflicts(mv));
             if !(c.committed || free) {
                 held.push(c.id);
             }
             // 待たせた候補も、先の車線に空きがあれば動きを押さえ、後の候補に割り込ませない。
             if c.committed || c.room {
-                placed.push(*mv);
+                placed.push((*mv, false));
             }
         }
     }
