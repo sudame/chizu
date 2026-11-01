@@ -19,6 +19,7 @@ use crate::round;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect};
 use crate::units::{Mm, Money, WorldPos};
+use crate::world::DenyReason;
 
 /// 1 マスの辺の長さ（mm）。
 pub const TILE_MM: i64 = 8_000;
@@ -363,23 +364,14 @@ pub fn road_cost(kind: RoadKind, line: &Line) -> Money {
     Money(round::div_ceil(total, TILE_MM))
 }
 
-/// 網に道路を引けなかった理由。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RoadConflict {
-    /// 既存の区間と同じ 1 歩を通る。
-    Overlap,
-    /// 斜めの区間とマスの角で交わる。
-    CornerCrossing,
-    /// 高速道路の途中につなごうとした。
-    Highway,
-}
-
 /// 道路と歩道の網。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Network {
     nodes: Arena<NodeId, Node>,
     segments: Arena<SegmentId, Segment>,
     lanes: Arena<LaneId, Lane>,
+    /// 網が変わるたびに 1 上がる。
+    version: u64,
     /// チャンクごとの、そのチャンクのマスを通る区間。ID の順に並べる。区間から作り直せるので、状態ハッシュには入れない。
     index: BTreeMap<ChunkCoord, Vec<SegmentId>>,
 }
@@ -405,8 +397,18 @@ impl Network {
             nodes: Arena::new(),
             segments: Arena::new(),
             lanes: Arena::new(),
+            version: 0,
             index: BTreeMap::new(),
         }
+    }
+
+    /// 網が変わるたびに 1 上がる版。道路を引く、消す、高速道路を置くたびに上がる。
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    fn bump_version(&mut self) {
+        self.version = self.version.checked_add(1).expect("網の版があふれた");
     }
 
     pub fn node(&self, id: NodeId) -> Option<&Node> {
@@ -596,10 +598,11 @@ impl Network {
         let a = self.add_node(inner, false);
         let b = self.add_node(outer, true);
         self.add_segment(a, b, SegmentKind::Highway);
+        self.bump_version();
     }
 
     /// 道路を引けるか確かめる。マスが建設できる土地かは呼ぶ側で確かめる。
-    fn check_road(&self, line: &Line) -> Result<(), RoadConflict> {
+    fn check_road(&self, line: &Line) -> Result<(), DenyReason> {
         for t in line.tiles() {
             for s in self.segments_through(t) {
                 let seg = &self.segments[s];
@@ -607,7 +610,7 @@ impl Network {
                     .iter()
                     .any(|n| self.nodes[*n].tile() == t && !self.nodes[*n].outside);
                 if seg.kind == SegmentKind::Highway && !at_inner_node {
-                    return Err(RoadConflict::Highway);
+                    return Err(DenyReason::HighwayMidway);
                 }
             }
         }
@@ -620,13 +623,13 @@ impl Network {
         for k in 0..line.len {
             let (p, q) = (line.tile(k), line.tile(k + 1));
             if shares_step(p, q) {
-                return Err(RoadConflict::Overlap);
+                return Err(DenyReason::Overlap);
             }
             if line.is_diagonal() {
                 let corner_a = TilePos::new(q.x, p.y);
                 let corner_b = TilePos::new(p.x, q.y);
                 if shares_step(corner_a, corner_b) {
-                    return Err(RoadConflict::CornerCrossing);
+                    return Err(DenyReason::CornerCrossing);
                 }
             }
         }
@@ -635,7 +638,7 @@ impl Network {
 
     /// 道路を引く。途中で既存の区間やノードに当たったら、そこで区間を分けてつなぐ。
     /// 引けないときは網を変えない。
-    pub fn build_road(&mut self, line: &Line, kind: RoadKind) -> Result<(), RoadConflict> {
+    pub fn build_road(&mut self, line: &Line, kind: RoadKind) -> Result<(), DenyReason> {
         self.check_road(line)?;
         let mut cuts = BTreeSet::from([0, line.len]);
         for k in 1..line.len {
@@ -659,12 +662,13 @@ impl Network {
         for w in nodes.windows(2) {
             self.add_segment(w[0], w[1], SegmentKind::Road(kind));
         }
+        self.bump_version();
         Ok(())
     }
 
     /// 長方形にかかる道路の区間を消し、つながりのなくなったノードも消す。消した区間の直線を返す。
-    /// 高速道路は消さない。
-    pub fn bulldoze(&mut self, area: TileRect) -> Vec<Line> {
+    /// 高速道路は消さない。消すものがなければ網を変えずにエラーを返す。
+    pub fn bulldoze(&mut self, area: TileRect) -> Result<Vec<Line>, DenyReason> {
         let mut targets = BTreeSet::new();
         for (coord, list) in &self.index {
             if !chunk_overlaps(*coord, area) {
@@ -691,7 +695,11 @@ impl Network {
                 }
             }
         }
-        removed
+        if removed.is_empty() {
+            return Err(DenyReason::NothingToBulldoze);
+        }
+        self.bump_version();
+        Ok(removed)
     }
 }
 
@@ -771,6 +779,7 @@ impl StateHash for Network {
         h.write(&self.nodes);
         h.write(&self.segments);
         h.write(&self.lanes);
+        h.write(&self.version);
     }
 }
 
@@ -783,7 +792,7 @@ mod tests {
         Line::between(TilePos::new(fx, fy), TilePos::new(tx, ty)).unwrap()
     }
 
-    fn build(n: &mut Network, fx: i64, fy: i64, tx: i64, ty: i64) -> Result<(), RoadConflict> {
+    fn build(n: &mut Network, fx: i64, fy: i64, tx: i64, ty: i64) -> Result<(), DenyReason> {
         n.build_road(&line(fx, fy, tx, ty), RoadKind::Small)
     }
 
@@ -921,9 +930,9 @@ mod tests {
         build(&mut n, 0, 0, 10, 0).unwrap();
         build(&mut n, 0, 1, 1, 2).unwrap();
         let before = n.clone();
-        assert_eq!(build(&mut n, 3, 0, 20, 0), Err(RoadConflict::Overlap));
-        assert_eq!(build(&mut n, 10, 0, 2, 0), Err(RoadConflict::Overlap));
-        assert_eq!(build(&mut n, 1, 1, 0, 2), Err(RoadConflict::CornerCrossing));
+        assert_eq!(build(&mut n, 3, 0, 20, 0), Err(DenyReason::Overlap));
+        assert_eq!(build(&mut n, 10, 0, 2, 0), Err(DenyReason::Overlap));
+        assert_eq!(build(&mut n, 1, 1, 0, 2), Err(DenyReason::CornerCrossing));
         assert_eq!(n, before);
         // 端のノードで同じ向きにつなぐのは重なりではない。
         build(&mut n, 10, 0, 15, 0).unwrap();
@@ -936,14 +945,17 @@ mod tests {
         let mut n = Network::new();
         n.add_highway(TilePos::new(0, 0), TilePos::new(100, 0));
         let before = n.clone();
-        assert_eq!(build(&mut n, 50, -5, 50, 5), Err(RoadConflict::Highway));
-        assert_eq!(build(&mut n, 100, 0, 100, 5), Err(RoadConflict::Highway));
+        assert_eq!(build(&mut n, 50, -5, 50, 5), Err(DenyReason::HighwayMidway));
+        assert_eq!(
+            build(&mut n, 100, 0, 100, 5),
+            Err(DenyReason::HighwayMidway)
+        );
         assert_eq!(n, before);
         build(&mut n, 0, 0, 0, 5).unwrap();
         assert_eq!(degree(&n, 0, 0), 2);
         // 高速道路は消さない。
         let all = TileRect::from_corners(TilePos::new(-10, -10), TilePos::new(200, 200));
-        assert_eq!(n.bulldoze(all).len(), 1);
+        assert_eq!(n.bulldoze(all).map_or(0, |r| r.len()), 1);
         assert_eq!(n.segments().count(), 1);
         assert_eq!(n.nodes().count(), 2);
         check_invariants(&n);
@@ -955,13 +967,13 @@ mod tests {
         build(&mut n, 0, 0, 10, 0).unwrap();
         build(&mut n, 5, 0, 5, 5).unwrap();
         let area = TileRect::from_corners(TilePos::new(4, 3), TilePos::new(6, 3));
-        assert_eq!(n.bulldoze(area).len(), 1);
+        assert_eq!(n.bulldoze(area).map_or(0, |r| r.len()), 1);
         assert_eq!((n.segments().count(), n.nodes().count()), (2, 3));
         assert_eq!(degree(&n, 5, 0), 2);
-        assert_eq!(n.bulldoze(area).len(), 0);
+        assert_eq!(n.bulldoze(area).map_or(0, |r| r.len()), 0);
         check_invariants(&n);
         let all = TileRect::from_corners(TilePos::new(0, 0), TilePos::new(10, 0));
-        assert_eq!(n.bulldoze(all).len(), 2);
+        assert_eq!(n.bulldoze(all).map_or(0, |r| r.len()), 2);
         assert_eq!(n.nodes().count(), 0);
         assert!(n.index.is_empty());
     }
@@ -975,7 +987,8 @@ mod tests {
         n.bulldoze(TileRect::from_corners(
             TilePos::new(0, 0),
             TilePos::new(5, 2),
-        ));
+        ))
+        .unwrap();
         build(&mut n, 0, 4, 5, 4).unwrap();
         let (id, _) = n.segments().next().unwrap();
         assert_eq!((id.index, id.generation), (ids[1].index, 1));
@@ -991,6 +1004,22 @@ mod tests {
         assert_eq!(l.position_of(TilePos::new(1, 2)), None);
         assert_eq!(l.position_of(TilePos::new(i64::MIN, i64::MAX)), None);
         assert_eq!(line(0, 0, 3, 0).position_of(TilePos::new(2, 1)), None);
+    }
+
+    #[test]
+    fn version_goes_up_only_when_the_network_changes() {
+        let mut n = Network::new();
+        assert_eq!(n.version(), 0);
+        build(&mut n, 0, 0, 10, 0).unwrap();
+        build(&mut n, 5, -5, 5, 5).unwrap();
+        assert_eq!(n.version(), 2);
+        assert_eq!(build(&mut n, 2, 0, 8, 0), Err(DenyReason::Overlap));
+        let empty = TileRect::from_corners(TilePos::new(50, 50), TilePos::new(60, 60));
+        assert_eq!(n.bulldoze(empty), Err(DenyReason::NothingToBulldoze));
+        assert_eq!(n.version(), 2);
+        let all = TileRect::from_corners(TilePos::new(0, -5), TilePos::new(10, 5));
+        assert_eq!(n.bulldoze(all).map(|r| r.len()), Ok(4));
+        assert_eq!(n.version(), 3);
     }
 
     #[test]
@@ -1044,7 +1073,10 @@ mod tests {
             for (op, x, y, sx, sy, len) in edits {
                 if op == 0 {
                     let area = TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + len / 2, y));
-                    n.bulldoze(area);
+                    let before = n.clone();
+                    if n.bulldoze(area).is_err() {
+                        prop_assert_eq!(&n, &before);
+                    }
                 } else if (sx, sy) != (0, 0) {
                     let before = n.clone();
                     if build(&mut n, x, y, x + sx * len, y + sy * len).is_err() {
