@@ -55,6 +55,9 @@ WASM のスレッドに要る rustflags は `.cargo/config.toml` で wasm32 の�
 決まった記録を再生した状態ハッシュは `crates/chizu-core/tests/golden/` に置いてある。
 シミュレーションや記録の形式を意図して変えたときは、`CHIZU_UPDATE_GOLDEN=1 cargo test -p chizu-core --test golden` で書き直し、同じ PR に含める。
 
+三重バッファの配置は `crates/chizu-wasm/src/snapshot.rs` で決め、`web/src/protocol/snapshot-layout.json` に書き出して画面の側で読む。
+配置や書き方を変えたときは `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` でこの JSON と、画面の側のテストが読む `snapshot-fixture.bin` を書き直し、同じ PR に含める。
+
 Rust のツールチェーンは `rust-toolchain.toml` で日付つきの nightly に固定している。
 mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファイルから版を読むので、`mise.toml` の `[tools]` には `rust` を書かない。
 
