@@ -5,6 +5,7 @@
 //! 呼び出しのあいだに状態は持たず、毎回、種から作った街に記録を再生していまの tick の街を作り直す。
 
 mod command_json;
+mod map;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -14,7 +15,8 @@ use chizu_core::service::supply_balance;
 use chizu_core::world::economy::Finances;
 use chizu_core::world::highway_line;
 use chizu_core::{
-    ApplyOutcome, CHUNK_SIDE, CommandLog, GameTime, ServiceKind, World, ZoneKind, replay,
+    ApplyOutcome, CHUNK_SIDE, CommandLog, GameTime, ServiceKind, TilePos, TileRect, World,
+    ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -24,12 +26,23 @@ pub const USAGE: &str = r#"使い方:
   chizu-cli agent act <dir> <commands.json>  いまの tick でコマンドを順に適用し、記録に足す
   chizu-cli agent advance <dir> <tick 数>    時間を進める（1 tick はゲーム内の 12 秒、1 日は 7200 tick）
   chizu-cli agent observe <dir>              街の様子を JSON で出す
+  chizu-cli agent map <dir> <x0> <y0> <x1> <y1> [--scale N]
+                                             範囲の地図を、1 マス 1 文字のマス目のテキストで出す
 
 <dir> は state.json と commands.rec を置くディレクトリである。act と advance は agent new で作ったディレクトリにだけ書く。
 feedback/<日時>-<番号>/ は observe ではそのまま見られ、続きを遊ぶときは new --from で写してから遊ぶ。
 act と advance は、記録を再生したハッシュが state.json の stateHash と食い違うときは何も書かずに止まる。
 <commands.json> に - を渡すと標準入力から読む。中身はコマンドの配列か、コマンド 1 つである。
-どのサブコマンドも、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
+map のほかのサブコマンドは、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
+
+地図（map）:
+  observe と同じく何も書かず、フィードバックのディレクトリにも打てる。角 (x0,y0)〜(x1,y1) は両端を含み、順番は問わない。
+  1 文字が 1 マスで、先頭に凡例、上に x、行頭に y の目盛りが付く。座標は act のコマンドと同じである。
+  --scale N を付けると、N×N マスを 1 文字にまとめる（既定は 1）。まとめた文字は、
+  公共施設、道路、建物、区画、水辺、買っていない土地、空きマスの順で、最初に当てはまるものにする。
+  同じ種類が混ざるときは数の多いほう（道路は大きいほう）にする。水辺と買った土地は、セルの中の見本のマスの多数決である。
+  出力は 9216 文字（96×96 など）までで、超える範囲は、必要な --scale を添えて断る。
+  いまの買った土地の範囲は observe の land.ownedBounds にある。
 
 座標:
   マスの座標 [x, y] は整数で、x は右へ、y は下へ増える。
@@ -394,6 +407,22 @@ fn observe(world: &World) -> Value {
         .filter(|c| c.owned())
         .map(|c| json!([c.coord().cx, c.coord().cy]))
         .collect();
+    // 買ったチャンクをすべて含む、マスの長方形。map の範囲を決める目安にする。
+    let side = CHUNK_SIDE as i64;
+    let owned_bounds = world
+        .chunks()
+        .filter(|c| c.owned())
+        .map(|c| c.coord().origin())
+        .fold(None, |b: Option<[i64; 4]>, o| {
+            let [x0, y0, x1, y1] = b.unwrap_or([o.x, o.y, o.x + side - 1, o.y + side - 1]);
+            Some([
+                x0.min(o.x),
+                y0.min(o.y),
+                x1.max(o.x + side - 1),
+                y1.max(o.y + side - 1),
+            ])
+        })
+        .map(|[x0, y0, x1, y1]| json!([[x0, y0], [x1, y1]]));
     json!({
         "seed": world.seed().to_string(),
         "tick": tick.0,
@@ -440,6 +469,7 @@ fn observe(world: &World) -> Value {
         "land": {
             "chunkSide": CHUNK_SIDE,
             "ownedChunks": owned,
+            "ownedBounds": owned_bounds,
             "nextChunkPrice": world.next_chunk_price().0,
             "chunkSlots": world.chunk_slots(),
             "milestone": world.milestone(),
@@ -493,6 +523,22 @@ fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, 
     Ok(out)
 }
 
+/// 読むだけで開く。人間のフィードバックも見られるよう、セッションでなくても読む。共有ロックは返り値が持つ。
+fn open_for_read(dir: &Path) -> Result<(Option<File>, World), String> {
+    let lock = lock(dir, false, false)?;
+    let saved = read_saved(dir)?;
+    let world = saved.world();
+    let hash = hash_text(&world);
+    if let Some(recorded) = saved.saved_hash()
+        && recorded != hash
+    {
+        eprintln!(
+            "{STATE_FILE} の stateHash {recorded} と、再生した街のハッシュ {hash} が食い違う"
+        );
+    }
+    Ok((lock, world))
+}
+
 /// `agent` のあとの引数を受けて、標準出力に書く文字列を返す。
 pub fn run(args: &[String]) -> Result<String, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -543,20 +589,23 @@ pub fn run(args: &[String]) -> Result<String, String> {
             })))
         }
         ["observe", dir] => {
-            let dir = Path::new(dir);
-            // 人間のフィードバックも見られるよう、セッションでなくても読む。
-            let _lock = lock(dir, false, false)?;
-            let saved = read_saved(dir)?;
-            let world = saved.world();
-            let hash = hash_text(&world);
-            if let Some(recorded) = saved.saved_hash()
-                && recorded != hash
-            {
-                eprintln!(
-                    "{STATE_FILE} の stateHash {recorded} と、再生した街のハッシュ {hash} が食い違う"
-                );
-            }
+            let (_lock, world) = open_for_read(Path::new(dir))?;
             Ok(print(&observe(&world)))
+        }
+        ["map", dir, x0, y0, x1, y1, rest @ ..] => {
+            let coord = |s: &str, what: &str| {
+                s.parse::<i64>()
+                    .map_err(|e| format!("{what} {s:?} を読めない: {e}"))
+            };
+            let a = TilePos::new(coord(x0, "x0")?, coord(y0, "y0")?);
+            let b = TilePos::new(coord(x1, "x1")?, coord(y1, "y1")?);
+            let scale = match rest {
+                [] => 1,
+                ["--scale", n] => parse_u64(n, "--scale")?,
+                _ => return Err(USAGE.trim_end().to_string()),
+            };
+            let (_lock, world) = open_for_read(Path::new(dir))?;
+            map::render(&world, TileRect::from_corners(a, b), scale)
         }
         _ => Err(USAGE.trim_end().to_string()),
     }
