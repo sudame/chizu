@@ -50,7 +50,7 @@ impl Cars {
 fn check_spacing(trips: &Trips) {
     let mut by_lane: Vec<(LaneId, LaneOffset)> = trips
         .iter()
-        .filter(|(_, t)| t.mode() == LaneMode::Car)
+        .filter(|(_, t)| car::on_road(t))
         .map(|(_, t)| (t.lane(), t.offset()))
         .collect();
     by_lane.sort();
@@ -114,12 +114,13 @@ fn followers_keep_their_distance_and_all_arrive() {
     let mut n = Network::new();
     road(&mut n, (0, 0), (60, 0), RoadKind::Small);
     let mut c = Cars::new(n);
-    // 1 マスおきに並べた 10 台が、同じ所へ向かう。
+    // 同じマスから出た 10 台が、前の車の 7m 後ろずつに詰めて並び、同じ所へ向かう。
     let ids: Vec<TripId> = (0..10)
-        .map(|k| c.drive(at(k, 0, (1, 0), 0), at(55, 0, (1, 0), 0)))
+        .map(|_| c.drive(at(20, 0, (1, 0), 0), at(55, 0, (1, 0), 0)))
         .collect();
+    check_spacing(&c.trips);
     let mut arrived = Vec::new();
-    for _ in 0..200 {
+    for _ in 0..300 {
         arrived.extend(c.step());
     }
     arrived.sort();
@@ -395,4 +396,92 @@ fn cars_use_more_than_the_first_lane_on_large_roads() {
         }
     }
     assert!(used.len() >= 2, "移ったあとの車線 {used:?}");
+}
+
+#[test]
+fn cars_from_the_same_tile_queue_behind_or_wait() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let a = c.drive(at(1, 0, (1, 0), 0), at(9, 0, (1, 0), 0));
+    let b = c.drive(at(1, 0, (1, 0), 0), at(9, 0, (1, 0), 0));
+    check_spacing(&c.trips);
+    // 2 台めは前の車の 7m 後ろの 1,000mm に置く。3 台めには空きがないので、出発を待つ。
+    assert_eq!(c.trips.get(a).unwrap().offset(), LaneOffset(8_000));
+    assert_eq!(c.trips.get(b).unwrap().offset(), LaneOffset(1_000));
+    let w = c.drive(at(1, 0, (1, 0), 0), at(9, 0, (1, 0), 0));
+    let m = c.trips.movers_in(
+        WorldPos::new(Mm(0), Mm(0)),
+        WorldPos::new(Mm(80_000), Mm(8_000)),
+    );
+    assert_eq!(m.len(), 2);
+    let mut arrived = Vec::new();
+    for _ in 0..100 {
+        arrived.extend(c.step());
+    }
+    assert!(arrived.contains(&w), "待っていた車が出発しない");
+}
+
+#[test]
+fn rerouting_keeps_cars_side_by_side_in_their_lanes() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Large);
+    road(&mut n, (20, 0), (40, 0), RoadKind::Large);
+    road(&mut n, (20, 0), (20, 10), RoadKind::Large);
+    road(&mut n, (20, 10), (40, 10), RoadKind::Large);
+    road(&mut n, (40, 10), (40, 0), RoadKind::Large);
+    road(&mut n, (40, 0), (50, 0), RoadKind::Large);
+    let mut c = Cars::new(n);
+    let a = c.drive(at(2, 0, (1, 0), 0), at(45, 0, (1, 0), 0));
+    let b = c.drive(at(2, 0, (1, 0), 0), at(45, 0, (1, 0), 0));
+    let lanes = |c: &Cars| {
+        (
+            c.trips.get(a).unwrap().lane(),
+            c.trips.get(b).unwrap().lane(),
+        )
+    };
+    assert_ne!(lanes(&c).0, lanes(&c).1);
+    c.step();
+    let before = lanes(&c);
+    c.net
+        .bulldoze(TileRect::from_corners(
+            TilePos::new(30, 0),
+            TilePos::new(30, 0),
+        ))
+        .unwrap();
+    c.router.rebuild(&c.net);
+    assert!(c.trips.reroute(&c.net, &mut c.router).is_empty());
+    check_spacing(&c.trips);
+    assert_ne!(lanes(&c).0, lanes(&c).1);
+    let _ = before;
+    for _ in 0..200 {
+        c.step();
+    }
+    assert!(c.trips.is_empty());
+}
+
+#[test]
+fn a_car_slows_down_before_a_slower_road() {
+    let mut n = Network::new();
+    n.add_highway(TilePos::new(0, 0), TilePos::new(100, 0));
+    road(&mut n, (0, 0), (0, -40), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let id = c.drive(at(99, 0, (-1, 0), 0), at(0, -39, (0, -1), 0));
+    let mut speeds = vec![0];
+    let mut on_small = None;
+    for _ in 0..300 {
+        if c.step().contains(&id) {
+            break;
+        }
+        let t = c.trips.get(id).unwrap();
+        speeds.push(t.speed().0);
+        if on_small.is_none() && t.link() != t.route().links[0] {
+            on_small = Some(t.speed().0);
+        }
+    }
+    // 細い道路に入るときには、その最高速度まで落としてある。
+    assert!(on_small.unwrap() <= 11_111);
+    for w in speeds.windows(2) {
+        assert!(w[0] - w[1] <= CAR_DECEL, "{w:?}");
+    }
 }
