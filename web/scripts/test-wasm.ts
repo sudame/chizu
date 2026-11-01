@@ -3,6 +3,7 @@
 // スレッドつきの WASM が Worker で動き、正しい和を返すかを確かめる。
 // 三重バッファから読んだ時計が実時間に合わせて進み、速度と一時停止のボタンに従うかも確かめる。
 // チャンクが Worker から届いて描かれること、ドラッグとホイールでカメラが動くことも確かめる。
+// 道路の道具で道路を引くと描かれて所持金が減ること、断られると理由が出ること、ブルドーザで消せることも確かめる。
 // Chrome は mise の tools で入れた chrome-headless-shell を PATH から探す。
 
 import { accessSync, constants } from "node:fs";
@@ -198,6 +199,87 @@ try {
       (await map.getAttribute("data-road-segments")) === "0",
     "起動すると、まだ道路のない道路網が届く",
   );
+
+  // 道路を引く道具で、画面の中心の行に横の道路を引く
+  const message = page.locator("#tool-message");
+  const outcomeCount = async () => Number((await message.getAttribute("data-count")) ?? 0);
+  const nextOutcome = async (before: number) => {
+    await page.waitForFunction(
+      (n) => Number(document.querySelector<HTMLElement>("#tool-message")?.dataset.count ?? 0) > n,
+      before,
+      { timeout: TIMEOUT_MS },
+    );
+    return {
+      command: await message.getAttribute("data-command"),
+      outcome: await message.getAttribute("data-outcome"),
+      text: await message.textContent(),
+    };
+  };
+  const roadSegments = async () => Number((await map.getAttribute("data-road-segments")) ?? 0);
+  const moneyNow = async () => Number(await hud.getAttribute("data-money"));
+  const drawRoad = async () => {
+    await page.mouse.click(cx - 80, cy);
+    await page.mouse.move(cx + 80, cy + 6, { steps: 4 });
+    const cost = Number(await map.getAttribute("data-preview-cost"));
+    const before = await outcomeCount();
+    await page.mouse.click(cx + 80, cy + 6);
+    await page.keyboard.press("Escape");
+    return { cost, result: await nextOutcome(before) };
+  };
+
+  await page.locator('button[data-tool="road-Small"]').click();
+  const moneyBefore = await moneyNow();
+  const built = await drawRoad();
+  check(
+    built.result.outcome === "Applied",
+    `道路を引くと受け付けられる（${built.result.outcome}：${built.result.text}）`,
+  );
+  // 縦に 1.5 マスずらした終点は横に寄せるので、40 マスの小さい道路になる
+  check(built.cost === 40 * 250, `引く前に費用が見積もられる（${built.cost}）`);
+  await page.waitForFunction(
+    () => Number(document.querySelector<HTMLElement>("#map")?.dataset.roadSegments ?? 0) > 0,
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check((await roadSegments()) === 1, `道路の区間が届く（${await roadSegments()} 本）`);
+  await page.waitForFunction(
+    (expected) => Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) === expected,
+    moneyBefore - built.cost,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, `所持金が見積もりの分だけ減る（${moneyBefore} → ${await moneyNow()}）`);
+  // 道路はマスの中心を通るので、中心の行のマスの真ん中（2 ピクセル下）に描かれる
+  await page.waitForTimeout(100);
+  const road = await pixel(cx, cy + 2);
+  check(
+    Math.abs((road[1] ?? 0) - (road[0] ?? 0)) < 30 && brightness(road) < brightness(owned),
+    `道路が灰色で描かれる（${road.join(", ")}）`,
+  );
+
+  const again = await drawRoad();
+  check(
+    again.result.outcome === "Denied" && (again.result.text ?? "").includes("重なる"),
+    `同じ場所に引くと理由つきで断られる（${again.result.text}）`,
+  );
+
+  await page.locator('button[data-tool="bulldoze"]').click();
+  const beforeBulldoze = await outcomeCount();
+  await page.mouse.move(cx - 100, cy - 20);
+  await page.mouse.down();
+  await page.mouse.move(cx + 100, cy + 20, { steps: 4 });
+  await page.mouse.up();
+  const bulldozed = await nextOutcome(beforeBulldoze);
+  check(
+    bulldozed.command === "Bulldoze" && bulldozed.outcome === "Applied",
+    `ブルドーザで長方形の中の道路を消せる（${bulldozed.text}）`,
+  );
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#map")?.dataset.roadSegments === "0",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check((await roadSegments()) === 0, "消した道路は描かれなくなる");
+  await page.locator('button[data-tool="none"]').click();
 
   await page.mouse.move(cx, cy);
   for (let i = 0; i < 20; i++) {
