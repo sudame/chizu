@@ -43,12 +43,12 @@ describe("建物", () => {
       supplies.flatMap((supply, i) => [10 + 2 * i, 20, 10 + 2 * i, 20, 1, 1, supply]),
     );
     const g = buildingGeometry(buildings, facilities);
-    // 施設 1 つ、建物 3 つ、印 3 つ（水道 1、電気と水道 2）
-    expect(g.vertexCount).toBe(6 * (1 + 3 + 3));
+    // 施設 1 つ、建物 3 つ、印は水滴 2 つ（9 頂点）と稲妻 1 つ（6 頂点）
+    expect(g.vertexCount).toBe(6 * (1 + 3) + 9 * 2 + 6);
     expect(unsuppliedCount(buildings)).toBe(2);
     const data = g.build();
     expect([...data.subarray(5, 9)]).toEqual([...(FACILITY_COLOR[1] ?? [])].map(Math.fround));
-    // 4 つめの四角が、電気だけ届く建物の水道の印。基準のマスは最初の建物の左上 (10, 20)
+    // 印の最初が、電気だけ届く建物の水道の印。基準のマスは最初の建物の左上 (10, 20)
     const water = markCenter({ x: 12, y: 20 }, "water");
     expect(data[6 * 4 * VERTEX_FLOATS]).toBeCloseTo(water.x - 10);
     expect(data[6 * 4 * VERTEX_FLOATS + 1]).toBeCloseTo(water.y - 20);
