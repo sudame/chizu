@@ -68,7 +68,7 @@ dir = "web"
 run = "pnpm exec vitest run"
 
 [tasks."test:wasm"]
-description = "ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかと、保存と読み込みを確かめる"
+description = "ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかと、保存と読み込み、朝の通勤の描画を確かめる"
 depends = ["build:web"]
 dir = "web"
 run = ["node scripts/test-wasm.ts", "node scripts/test-save.ts", "node scripts/test-commute.ts"]
