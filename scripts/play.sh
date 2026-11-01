@@ -9,15 +9,17 @@
 # 使い方: scripts/play.sh [--port <番号>] [--branch <ブランチ>]
 # 環境変数: CHIZU_PLAY_PORT、CHIZU_PLAY_BRANCH、CHIZU_PLAY_REMOTE（clone 元）、
 #           CHIZU_PLAY_DIR（コピーの置き場所）、CHIZU_PLAY_INTERVAL（版を見る間隔の秒）、CHIZU_FEEDBACK_DIR
+# 1 つの置き場所で動かせるのは 1 つだけである。2 つ動かすときは、CHIZU_PLAY_DIR とポートを変える。
 set -euo pipefail
 
 log() {
   local line
   line="[play $(date '+%Y-%m-%d %H:%M:%S')] $*"
-  echo "$line"
+  # Ctrl-C で端末が先に閉じても、ログのファイルには残す
   if [ -n "${log_file:-}" ]; then
     echo "$line" >>"$log_file"
   fi
+  echo "$line" 2>/dev/null || true
 }
 
 # 配信している版、最新の版、ビルドに失敗した版を受け、ビルドし直すべきかを返す。
@@ -42,6 +44,47 @@ version_label() {
   git -C "$1" log -1 --format='%h %cd' --date='format:%Y-%m-%d %H:%M'
 }
 
+# 置き場所に 1 つだけが入れるよう、ディレクトリを作ってロックにする。持ち主が死んでいれば取り直す
+take_lock() {
+  local lock="$1/.play-running" owner
+  if mkdir "$lock" 2>/dev/null; then
+    echo $$ >"$lock/pid"
+    return 0
+  fi
+  owner="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    return 1
+  fi
+  echo $$ >"$lock/pid"
+}
+
+release_lock() {
+  local lock="$1/.play-running"
+  if [ "$(cat "$lock/pid" 2>/dev/null || true)" = $$ ]; then
+    rm -rf "$lock"
+  fi
+}
+
+port_in_use() {
+  (exec 3<>"/dev/tcp/localhost/$1") 2>/dev/null
+}
+
+# 生きていて、端末からの読み書きなどで止まっていない（ps の状態が T でない）か
+process_running() {
+  local stat
+  stat="$(ps -o stat= -p "$1" 2>/dev/null)" || return 1
+  [[ "$stat" != T* ]]
+}
+
+# ポートで応えているのが、この版を配信している自分の vite か。版の表示で見分ける
+serves_version() {
+  curl --silent --max-time 3 "http://localhost:$1/" | grep --quiet --fixed-strings ">$2<"
+}
+
+server_alive() {
+  [ -n "$server_pid" ] && process_running "$server_pid" && serves_version "$port" "$server_label"
+}
+
 # 依存を入れ、WASM をビルドする。set -e は if の中で効かないので、手順ごとに失敗を返す
 prepare_slot() {
   local dir="$play_dir/$1" sha="$2"
@@ -51,42 +94,48 @@ prepare_slot() {
   git -C "$dir" fetch --quiet origin "$branch" || return 1
   git -C "$dir" reset --quiet --hard "$sha" || return 1
   if [ ! -L "$dir/target" ]; then
-    mkdir -p "$play_dir/target"
-    rm -rf "$dir/target"
-    ln -s "$play_dir/target" "$dir/target"
+    mkdir -p "$play_dir/target" || return 1
+    rm -rf "$dir/target" || return 1
+    ln -s "$play_dir/target" "$dir/target" || return 1
   fi
   (
-    cd "$dir"
-    mise trust --quiet "$dir/mise.toml"
+    cd "$dir" || exit 1
+    mise trust --quiet "$dir/mise.toml" || exit 1
     if lock_changed "$dir"; then
       log "依存を入れる"
-      mise run install:web
-      git rev-parse HEAD:web/pnpm-lock.yaml >"$dir/.play-lock"
+      mise run install:web || exit 1
+      git rev-parse HEAD:web/pnpm-lock.yaml >"$dir/.play-lock" || exit 1
     fi
-    mise run build:wasm
+    mise run build:wasm || exit 1
   ) || return 1
 }
 
 start_server() {
   local dir="$play_dir/$1" label
   label="$(version_label "$dir")"
-  # 自分のプロセスグループで動かし、止めるときに vite まで含めてまとめて止める
+  if port_in_use "$port"; then
+    log "ポート $port をほかのプロセスが使っているので、サーバーを立てられない"
+    return 1
+  fi
+  # 自分のプロセスグループで動かし、止めるときに vite まで含めてまとめて止める。
+  # 端末を読みに行って止まらないよう、標準入力は渡さない（vite のキーのショートカットも出ない）
   set -m
   (
     cd "$dir/web"
     CHIZU_PLAY_VERSION="$label" CHIZU_FEEDBACK_DIR="$feedback_dir" \
-      exec mise exec -- pnpm exec vite --port "$port" --strictPort
+      exec mise exec -- pnpm exec vite --port "$port" --strictPort </dev/null
   ) &
   server_pid=$!
   set +m
   local _
   for _ in $(seq 60); do
-    if curl --silent --output /dev/null "http://localhost:$port/"; then
+    if ! process_running "$server_pid"; then
+      break
+    fi
+    if serves_version "$port" "$label"; then
+      server_label="$label"
       log "配信している: ${label}（http://localhost:$port/）"
       return 0
-    fi
-    if ! kill -0 "$server_pid" 2>/dev/null; then
-      break
     fi
     sleep 1
   done
@@ -98,6 +147,7 @@ start_server() {
 stop_server() {
   if [ -n "${server_pid:-}" ]; then
     kill -TERM -- "-$server_pid" 2>/dev/null || true
+    kill -CONT -- "-$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
     server_pid=""
   fi
@@ -106,12 +156,17 @@ stop_server() {
 on_exit() {
   trap - INT TERM
   log "止める"
-  stop_server
   exit 0
+}
+
+cleanup() {
+  stop_server
+  release_lock "$play_dir"
 }
 
 main() {
   server_pid=""
+  server_label=""
   port="${CHIZU_PLAY_PORT:-5173}"
   branch="${CHIZU_PLAY_BRANCH:-main}"
   while [ $# -gt 0 ]; do
@@ -129,9 +184,19 @@ main() {
   common="$(git rev-parse --path-format=absolute --git-common-dir)"
   feedback_dir="${CHIZU_FEEDBACK_DIR:-$(dirname "$common")/feedback}"
   mkdir -p "$play_dir" "$feedback_dir"
-  log_file="$play_dir/play.log"
+  # vite は clone の中で動くので、相対パスのままだと clone の中に書いてしまう
+  feedback_dir="$(cd "$feedback_dir" && pwd)"
+  if ! take_lock "$play_dir"; then
+    echo "$play_dir ではすでに play が動いている。2 つ動かすなら CHIZU_PLAY_DIR とポートを変える" >&2
+    exit 1
+  fi
+  trap cleanup EXIT
   trap on_exit INT TERM
-  trap stop_server EXIT
+  if port_in_use "$port"; then
+    echo "ポート $port はほかのプロセスが使っている。--port か CHIZU_PLAY_PORT で変える" >&2
+    exit 1
+  fi
+  log_file="$play_dir/play.log"
 
   local active="" served="" failed="" latest
   log "$remote の $branch を見張る。フィードバックは $feedback_dir に書く"
@@ -158,8 +223,9 @@ main() {
         failed="$latest"
         log "ビルドに失敗した: ${latest:0:7}。前の版を配信し続け、次の版を待つ"
       fi
-    elif [ -n "$active" ] && ! kill -0 "$server_pid" 2>/dev/null; then
-      log "サーバーが止まっていたので立て直す"
+    elif [ -n "$active" ] && ! server_alive; then
+      log "サーバーが応えていないので立て直す"
+      stop_server
       start_server "$active" || true
     fi
     sleep "$interval" &

@@ -51,6 +51,36 @@ label_is_hash_and_time() {
 }
 check "版はハッシュと日時で出す" label_is_hash_and_time "$repo"
 
+# prepare_slot は、mise のタスクをまねた偽物の mise で回す
+work="$(mktemp -d)"
+trap 'rm -rf "$repo" "$work"' EXIT
+mkdir -p "$work/bin"
+cat >"$work/bin/mise" <<'EOF'
+#!/usr/bin/env bash
+if [ "$*" = "run install:web" ] && [ -n "${FAKE_INSTALL_FAIL:-}" ]; then
+  exit 1
+fi
+EOF
+chmod +x "$work/bin/mise"
+PATH="$work/bin:$PATH"
+remote="$repo"
+branch="$(git -C "$repo" symbolic-ref --short HEAD)"
+play_dir="$work/play"
+sha="$(git -C "$repo" rev-parse HEAD)"
+export FAKE_INSTALL_FAIL=1
+check "依存を入れられなければ失敗にする" negate prepare_slot a "$sha"
+unset FAKE_INSTALL_FAIL
+check "依存を入れられなければ lock を書かない" [ ! -e "$play_dir/a/.play-lock" ]
+check "依存を入れられれば通す" prepare_slot a "$sha"
+check "依存を入れられれば lock を書く" [ -s "$play_dir/a/.play-lock" ]
+
+check "空いていればロックを取れる" take_lock "$work"
+check "動いている持ち主のロックは取れない" negate bash -c "source '$(dirname "$0")/play.sh'; take_lock '$work'"
+echo 999999 >"$work/.play-running/pid"
+check "持ち主が死んでいればロックを取り直す" take_lock "$work"
+release_lock "$work"
+check "ロックを外せる" [ ! -e "$work/.play-running" ]
+
 if [ "$failures" -gt 0 ]; then
   echo "$failures 件が通らなかった" >&2
   exit 1

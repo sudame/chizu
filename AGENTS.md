@@ -53,6 +53,7 @@ mise run build:bench   # ベンチマークをビルドだけする。CI はこ�
 
 `mise run play` は `~/.cache/chizu-play` に origin を clone し、60 秒ごとに main を見て、進んでいたらビルドし直して立て直す。開いているページは自動で読み直され、右下に配信している版が出る。
 ビルドに失敗した版は飛ばし、前の版を配信し続ける。ポートは既定で 5173 で、`mise run play -- --port 5180` か `CHIZU_PLAY_PORT` で変える。フィードバックはリポジトリ本体の `feedback/` に書く。
+1 つの置き場所で動かせるのは 1 つだけで、2 つ動かすときは `CHIZU_PLAY_DIR` とポートを変える。
 
 `test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。
 
