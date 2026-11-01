@@ -85,6 +85,18 @@ function sendRoads(sim: Simulation): void {
   reply({ kind: "roads", revision, segments, nodes }, [segments.buffer, nodes.buffer]);
 }
 
+// 建物は、表の版が変わったときだけ全体を送り直す
+let sentBuildingsVersion = -1;
+function sendBuildings(sim: Simulation): void {
+  const version = sim.buildings_version();
+  if (version === sentBuildingsVersion) {
+    return;
+  }
+  sentBuildingsVersion = version;
+  const buildings = sim.buildings();
+  reply({ kind: "buildings", buildings, stats: [...sim.city_stats()] }, [buildings.buffer]);
+}
+
 // 実時間に合わせて tick を進める。何 tick 進めるかはここで決め、中核には整数の tick 数だけを渡す
 function run(sim: Simulation): (paused: boolean) => void {
   const perSecond = ticks_per_second();
@@ -103,6 +115,7 @@ function run(sim: Simulation): (paused: boolean) => void {
     sim.advance(ticks);
     sendOutcomes(sim);
     sendRoads(sim);
+    sendBuildings(sim);
     sendChunks(sim);
   }, FRAME_MS);
   return (p) => {
@@ -151,6 +164,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         submit(sim, message.id, message.command);
         sendOutcomes(sim);
         sendRoads(sim);
+        sendBuildings(sim);
         break;
       case "pause":
         setPaused(message.paused);
