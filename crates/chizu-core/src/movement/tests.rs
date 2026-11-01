@@ -293,3 +293,55 @@ fn stepping_does_not_depend_on_the_thread_count() {
     assert_eq!(run(8), one);
     assert_eq!(run(3), one);
 }
+
+/// 格子の道路を引いた街で歩く人を何人も作り、`ticks` だけ進めた状態ハッシュ。
+/// `look` なら毎 tick、画面の範囲の移動体を問い合わせる。
+fn walking_world_hash(ticks: u64, look: bool) -> u64 {
+    use crate::command::Command;
+    use crate::world::{ApplyOutcome, World};
+    let mut w = World::new(7);
+    for i in 0..=3 {
+        for (from, to) in [((0, i * 10), (30, i * 10)), ((i * 10, 0), (i * 10, 30))] {
+            let c = Command::BuildRoad {
+                from: TilePos::new(from.0, from.1),
+                to: TilePos::new(to.0, to.1),
+                kind: RoadKind::Small,
+            };
+            assert_eq!(w.apply(&c), ApplyOutcome::Applied);
+        }
+    }
+    for k in 0..40_i64 {
+        let from = at(k % 29, 10 * (k % 4), (1, 0), 500);
+        let to = at(10 * ((k + 1) % 4), (k * 7) % 29, (0, 1), 7_000);
+        assert!(w.spawn_walk(from, to).is_some());
+    }
+    let area = TileRect::from_corners(TilePos::new(0, 0), TilePos::new(15, 15));
+    for t in 0..ticks {
+        if t == 50 {
+            let c = Command::Bulldoze {
+                area: TileRect::from_corners(TilePos::new(15, 10), TilePos::new(15, 10)),
+            };
+            assert_eq!(w.apply(&c), ApplyOutcome::Applied);
+        }
+        if look {
+            assert!(t > 200 || !w.movers_in(area).is_empty());
+        }
+        w.step();
+    }
+    w.state_hash()
+}
+
+#[test]
+fn world_walks_do_not_depend_on_threads_or_the_view() {
+    let base = walking_world_hash(300, false);
+    assert_eq!(base, walking_world_hash(300, true));
+    assert_ne!(base, walking_world_hash(299, false));
+    #[cfg(feature = "parallel")]
+    for threads in [1, 3, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        assert_eq!(pool.install(|| walking_world_hash(300, false)), base);
+    }
+}
