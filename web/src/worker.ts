@@ -111,6 +111,24 @@ function sendBuildings(sim: Simulation): void {
   ]);
 }
 
+// 収支の見込みは全住民を数えて出すので、毎フレームは求めない。送るのは前と数が違うときだけにする。
+// 税収は住民の動きで tick ごとに動くが、画面に出す精度ではこの間隔で足りる
+const FINANCE_INTERVAL_MS = 500;
+let lastFinanceAt = Number.NEGATIVE_INFINITY;
+let lastFinance = "";
+function sendFinance(sim: Simulation, now: number, force = false): void {
+  if (!force && now - lastFinanceAt < FINANCE_INTERVAL_MS) {
+    return;
+  }
+  lastFinanceAt = now;
+  const values = [...sim.finance()];
+  const key = values.join(",");
+  if (key !== lastFinance) {
+    lastFinance = key;
+    reply({ kind: "finance", values });
+  }
+}
+
 // 実時間に合わせて tick を進める。何 tick 進めるかはここで決め、中核には整数の tick 数だけを渡す
 function run(sim: Simulation): (paused: boolean) => void {
   const perSecond = ticks_per_second();
@@ -130,6 +148,7 @@ function run(sim: Simulation): (paused: boolean) => void {
     sendOutcomes(sim);
     sendRoads(sim);
     sendBuildings(sim);
+    sendFinance(sim, now);
     sendChunks(sim);
     layerSender.send(sim, reply, CHUNKS_PER_FRAME, now);
   }, FRAME_MS);
@@ -182,6 +201,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         sendOutcomes(sim);
         sendRoads(sim);
         sendBuildings(sim);
+        sendFinance(sim, performance.now(), true);
         layerSender.send(sim, reply, CHUNKS_PER_FRAME);
         break;
       case "layers":

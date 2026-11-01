@@ -1,6 +1,13 @@
 import { parseCityStats, renderCityStats } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
+import {
+  deficitNote,
+  type Finance,
+  type FinancePanel,
+  parseFinance,
+  setupFinance,
+} from "./finance.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
@@ -92,6 +99,13 @@ function sendCommand(command: CommandMessage): void {
   send({ kind: "command", id, command });
 }
 
+// 最後に届いた収支の見込み。所持金の横の赤字の表示に使う
+let finance: Finance | null = null;
+const financePanel: FinancePanel = setupFinance(
+  element<HTMLDetailsElement>("#finance"),
+  sendCommand,
+);
+
 const pad = (n: number) => String(n).padStart(2, "0");
 
 function describeClock(header: SnapshotHeader): string {
@@ -105,7 +119,16 @@ function draw(ctx: CanvasRenderingContext2D, header: SnapshotHeader): void {
   ctx.fillStyle = "#222";
   ctx.font = "20px sans-serif";
   ctx.fillText(describeClock(header), 12, 30);
-  ctx.fillText(`お金 ${header.money.toLocaleString("ja-JP")}`, 12, 58);
+  const moneyText = `お金 ${header.money.toLocaleString("ja-JP")}`;
+  ctx.fillText(moneyText, 12, 58);
+  // 収支が赤字のあいだは、所持金の横に知らせる
+  const note = deficitNote(finance);
+  if (note !== "") {
+    ctx.fillStyle = "#b00020";
+    ctx.fillText(note, 12 + ctx.measureText(moneyText).width + 12, 58);
+    ctx.fillStyle = "#222";
+  }
+  canvas.dataset.deficit = String(note !== "");
   ctx.fillText(header.paused ? "一時停止中" : `速度 ${header.speed} 倍`, 12, 86);
   // test:wasm が読む
   canvas.dataset.tick = String(header.tick);
@@ -590,6 +613,7 @@ const DONE: Record<CommandMessage["kind"], string> = {
   PaintZone: "区画を塗った",
   PlaceBuilding: "施設を置いた",
   SetSimSpeed: "速度を変えた",
+  SetTaxRate: "税率を変えた",
 };
 function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?: string): void {
   const text: Record<Outcome, string> = {
@@ -647,6 +671,13 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     mapCanvas.dataset.firstBuilding = Array.from(message.buildings.subarray(0, 4)).join(",");
     mapCanvas.dataset.unsupplied = String(unsuppliedCount(message.buildings));
     mapCanvas.dataset.facilities = String(message.facilities.length / FACILITY_STRIDE);
+    return;
+  }
+  if (message.kind === "finance") {
+    finance = parseFinance(message.values);
+    if (finance !== null) {
+      financePanel.update(finance);
+    }
     return;
   }
   if (message.kind === "outcome") {

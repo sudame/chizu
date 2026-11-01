@@ -190,6 +190,11 @@ impl Simulation {
         self.0.city_stats()
     }
 
+    /// 収支の見込みの 12 個の数。並びは `sim::Sim::finance` にある。
+    pub fn finance(&self) -> Vec<f64> {
+        self.0.finance()
+    }
+
     pub fn set_paused(&mut self, paused: bool) {
         self.0.set_paused(paused);
     }
