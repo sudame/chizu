@@ -71,6 +71,10 @@ run = "node scripts/test-wasm.ts"
 [tasks.test]
 depends = ["test:rust", "test:web", "test:wasm"]
 
+[tasks.bench]
+description = "ネイティブのベンチマークを criterion で回す。CI では回さない"
+run = "cargo bench --package chizu-scenario"
+
 [tasks."build:wasm"]
 # スレッドを使うには std を atomics つきでビルドし直す必要がある。wasm32 用の rustflags は .cargo/config.toml にある
 run = [

@@ -1,0 +1,15 @@
+[package]
+name = "chizu-scenario"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+chizu-core = { path = "../chizu-core" }
+
+[[bench]]
+name = "citizen_bucket"
+harness = false
+
+[dev-dependencies]
+criterion = "0.8.2"

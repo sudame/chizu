@@ -45,6 +45,7 @@ mise run build         # build:wasm と build:web をまとめて回す
 mise run build:wasm    # chizu-wasm をスレッドつきでビルドし、wasm-bindgen で web/wasm につなぎのコードを作る
 mise run build:web     # Vite で web/dist にビルドする
 mise run dev           # WASM をビルドしてから Vite の開発サーバーを立てる
+mise run bench         # ネイティブのベンチマーク（criterion）。CI では回さない
 ```
 
 `test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。
