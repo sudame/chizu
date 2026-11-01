@@ -193,6 +193,12 @@ try {
     `画面の中心に買ってある陸が描かれる（${owned.join(", ")}）`,
   );
 
+  const initialSegments = Number(await map.getAttribute("data-road-segments"));
+  check(
+    (await map.getAttribute("data-road-revision")) === "0" && initialSegments > 0,
+    `起動すると、外部接続の高速道路のある道路網が届く（${initialSegments} 本）`,
+  );
+
   await page.mouse.move(cx, cy);
   for (let i = 0; i < 20; i++) {
     await page.mouse.wheel(0, 400);

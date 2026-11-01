@@ -4,7 +4,8 @@ pub mod command_input;
 pub mod sim;
 pub mod snapshot;
 
-use chizu_core::{ChunkCoord, Command};
+use chizu_core::network::{DIAGONAL_TILE_MM, TILE_MM, road_cost_per_tile};
+use chizu_core::{ApplyOutcome, ChunkCoord, Command, RoadKind};
 use command_input::Field;
 use js_sys::Reflect;
 use rayon::prelude::*;
@@ -37,6 +38,18 @@ pub fn ticks_per_second() -> u32 {
     chizu_core::clock::TICKS_PER_SECOND_AT_NORMAL_SPEED
 }
 
+/// 道路の建設費の表。`[小, 中, 大の 1 マスあたりの費用, 1 マスの長さ (mm), 斜め 1 マスの長さ (mm)]`。
+/// 画面は、引く前の見積もりをこの表から出す。
+#[wasm_bindgen]
+pub fn road_cost_table() -> Vec<f64> {
+    let kinds = [RoadKind::Small, RoadKind::Medium, RoadKind::Large];
+    kinds
+        .map(|k| road_cost_per_tile(k).0 as f64)
+        .into_iter()
+        .chain([TILE_MM as f64, DIAGONAL_TILE_MM as f64])
+        .collect()
+}
+
 /// Worker から使うシミュレーション。
 #[wasm_bindgen]
 pub struct Simulation(sim::Sim);
@@ -53,13 +66,54 @@ impl Simulation {
         self.0.snapshot().byte_offset()
     }
 
-    /// 画面から届いたコマンドを `Command` に直し、検証して記録する。
-    pub fn submit(&mut self, command: JsValue) -> Result<(), JsError> {
+    /// 画面から届いたコマンドを `Command` に直し、検証して記録する。記録した番号を返す。
+    pub fn submit(&mut self, command: JsValue) -> Result<f64, JsError> {
         let command = command_from_js(&command)?;
         self.0
             .submit(command)
-            .map(|_| ())
+            .map(|seq| seq as f64)
             .map_err(|e| JsError::new(&e.to_string()))
+    }
+
+    /// 適用したコマンドの結果を `{ seq, outcome, reason? }` の配列で取り出す。
+    pub fn take_reports(&mut self) -> js_sys::Array {
+        let set = |o: &js_sys::Object, k: &str, v: JsValue| {
+            Reflect::set(o, &JsValue::from_str(k), &v).expect("オブジェクトに書けない");
+        };
+        self.0
+            .take_reports()
+            .into_iter()
+            .map(|r| {
+                let o = js_sys::Object::new();
+                set(&o, "seq", JsValue::from_f64(r.seq as f64));
+                let outcome = match r.outcome {
+                    ApplyOutcome::Applied => "Applied",
+                    ApplyOutcome::NotImplemented => "NotImplemented",
+                    ApplyOutcome::Rejected => "Rejected",
+                    ApplyOutcome::Denied => "Denied",
+                };
+                set(&o, "outcome", JsValue::from_str(outcome));
+                if let Some(reason) = r.reason {
+                    set(&o, "reason", JsValue::from_str(reason));
+                }
+                JsValue::from(o)
+            })
+            .collect()
+    }
+
+    /// 道路網を変えた回数。変わったときだけ道路の形を読み直す。
+    pub fn network_revision(&self) -> u32 {
+        self.0.network_revision()
+    }
+
+    /// 区間ごとに `[a の x, a の y, b の x, b の y, 種類]`。座標はマスの座標で、種類は `sim::segment_kind_code`。
+    pub fn road_segments(&self) -> Vec<f64> {
+        self.0.road_segments()
+    }
+
+    /// ノードごとに `[x, y, つながる区間の数]`。
+    pub fn road_nodes(&self) -> Vec<f64> {
+        self.0.road_nodes()
     }
 
     pub fn set_paused(&mut self, paused: bool) {
