@@ -490,7 +490,7 @@ impl Network {
     }
 
     /// マス `t` を通る区間。
-    fn segments_through(&self, t: TilePos) -> Vec<SegmentId> {
+    pub fn segments_through(&self, t: TilePos) -> Vec<SegmentId> {
         let Some(coord) = t.chunk() else {
             return Vec::new();
         };

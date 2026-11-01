@@ -1,5 +1,6 @@
 //! chizu のシミュレーションの中核。
 
+pub mod building;
 pub mod chunk;
 pub mod citizens;
 pub mod clock;

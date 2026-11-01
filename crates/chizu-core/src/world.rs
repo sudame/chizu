@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::building::Buildings;
+
 use crate::chunk::{Chunk, Layer, TileUse};
 use crate::citizens::{CitizenChange, CitizenRow, Population};
 use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
@@ -112,7 +114,10 @@ pub struct World {
     chunks_bought: u32,
     network: Network,
     population: Population,
+    buildings: Buildings,
 }
+
+mod growth;
 
 /// 外部接続の高速道路の通り道。始めたときに買ってある土地の端のマスから外へ向かう。
 /// どの辺から出るかと辺のどこから出るかは、種から決める。地形もこの通り道を見て水辺を抑える。
@@ -160,6 +165,7 @@ impl World {
             chunks_bought: 0,
             network,
             population: Population::default(),
+            buildings: Buildings::default(),
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
         for coord in coords {
@@ -253,6 +259,7 @@ impl World {
             return ApplyOutcome::Denied(reason);
         }
         self.write_zones(edits);
+        self.refresh_buildings();
         ApplyOutcome::Applied
     }
 
@@ -326,6 +333,7 @@ impl World {
         }
         self.money = self.money - cost;
         self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
+        self.refresh_buildings();
         ApplyOutcome::Applied
     }
 
@@ -345,6 +353,7 @@ impl World {
         for line in &removed {
             self.prune_zones(around(line.start, line.end()));
         }
+        self.refresh_buildings();
         ApplyOutcome::Applied
     }
 
@@ -376,6 +385,11 @@ impl World {
     /// メモリに置いているチャンクを座標の順に返す。
     pub fn chunks(&self) -> impl Iterator<Item = &Chunk> {
         self.chunks.values()
+    }
+
+    /// 区画に建った建物。
+    pub fn buildings(&self) -> &Buildings {
+        &self.buildings
     }
 
     pub fn population(&self) -> &Population {
@@ -472,6 +486,7 @@ impl World {
         let (seed, tick) = (self.seed, self.tick);
         self.population
             .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
+        self.grow_buildings();
         self.tick = tick.next();
     }
 
@@ -494,6 +509,7 @@ impl StateHash for World {
         h.write(&self.chunks_bought);
         h.write(&self.network);
         h.write(&self.population);
+        h.write(&self.buildings);
     }
 }
 
