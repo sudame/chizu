@@ -5,7 +5,7 @@
 //! tick T の状態は、tick が T 以下のコマンドを適用し、step を T 回済ませたものである。
 //! 再現に必要なのは、種とこの記録だけである。
 //!
-//! 記録の並びは、tick が減らず、番号が 1 件ごとに増えていく。
+//! 記録の並びは、tick が減らず、番号が 0 から 1 件ごとに 1 ずつ増えていく。
 //! 記録するときも読み戻すときも [`Command::validate`] を通すので、記録に入ったものは必ず読み戻せる。
 //! ただし、それは同じ版の中核で書いて読む場合に限る。保存を入れるまでは、検証の範囲や中身が
 //! 変わったときの古い記録との互換を保証せず、`FORMAT_VERSION` も上げない。版の運用は、保存を入れる PR で決める。
@@ -82,8 +82,25 @@ impl std::error::Error for OutOfOrder {}
 pub enum RecordError {
     OutOfOrder(OutOfOrder),
     Invalid(InvalidCommand),
-    /// 直前の番号が `u64::MAX` で、次の番号を振れない。
-    SeqExhausted,
+    /// 番号が 0 から 1 ずつ増えていない。
+    SeqGap(SeqGap),
+}
+
+/// 番号が 0 から 1 ずつ増えていない。`expected` が来るはずだった番号である。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeqGap {
+    pub expected: u64,
+    pub got: u64,
+}
+
+impl fmt::Display for SeqGap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "記録の番号は {} のはずが {} になっている",
+            self.expected, self.got
+        )
+    }
 }
 
 impl fmt::Display for RecordError {
@@ -91,7 +108,7 @@ impl fmt::Display for RecordError {
         match self {
             RecordError::OutOfOrder(e) => e.fmt(f),
             RecordError::Invalid(e) => e.fmt(f),
-            RecordError::SeqExhausted => write!(f, "番号を使い切った"),
+            RecordError::SeqGap(e) => e.fmt(f),
         }
     }
 }
@@ -121,7 +138,9 @@ impl CommandLog {
         self.entries.is_empty()
     }
 
-    /// 1 件足す。並びが崩れるときと、コマンドが検証を通らないときは足さない。
+    /// 1 件足す。並びが崩れるとき、番号が件数と違うとき、コマンドが検証を通らないときは足さない。
+    ///
+    /// 番号は 0 から 1 ずつ増えるので、`i` 件目の番号は `i` である。
     pub fn push(&mut self, entry: RecordedCommand) -> Result<(), RecordError> {
         if let Some(last) = self.entries.last()
             && (entry.tick < last.tick || entry.seq <= last.seq)
@@ -131,17 +150,26 @@ impl CommandLog {
                 next: (entry.tick, entry.seq),
             }));
         }
+        let expected = self.next_seq();
+        if entry.seq != expected {
+            return Err(RecordError::SeqGap(SeqGap {
+                expected,
+                got: entry.seq,
+            }));
+        }
         entry.command.validate().map_err(RecordError::Invalid)?;
         self.entries.push(entry);
         Ok(())
     }
 
+    /// 次に振る番号。これまでの件数と同じである。
+    pub fn next_seq(&self) -> u64 {
+        u64::try_from(self.entries.len()).expect("記録の件数が u64 に収まらない")
+    }
+
     /// 受け取ったコマンドを、直前の番号の次の番号で記録する。振った番号を返す。
     pub fn record(&mut self, tick: Tick, command: Command) -> Result<u64, RecordError> {
-        let seq = match self.entries.last() {
-            None => 0,
-            Some(last) => last.seq.checked_add(1).ok_or(RecordError::SeqExhausted)?,
-        };
+        let seq = self.next_seq();
         self.push(RecordedCommand { tick, seq, command })?;
         Ok(seq)
     }
@@ -183,8 +211,7 @@ impl CommandLog {
                         error: e,
                         at: r.pos,
                     },
-                    // 番号を振るのは record だけなので、push からは返らない。
-                    RecordError::SeqExhausted => unreachable!(),
+                    RecordError::SeqGap(e) => DecodeError::SeqGap(e),
                 })?;
         }
         if r.pos != bytes.len() {
@@ -213,6 +240,7 @@ pub enum DecodeError {
         at: usize,
     },
     OutOfOrder(OutOfOrder),
+    SeqGap(SeqGap),
     TrailingBytes(usize),
 }
 
@@ -232,6 +260,7 @@ impl fmt::Display for DecodeError {
                 write!(f, "{at} バイト目までのコマンドが不正：{error}")
             }
             DecodeError::OutOfOrder(e) => e.fmt(f),
+            DecodeError::SeqGap(e) => e.fmt(f),
             DecodeError::TrailingBytes(n) => write!(f, "記録のあとに {n} バイト余っている"),
         }
     }
@@ -686,7 +715,7 @@ mod tests {
         let mut b = b"CHIZUREC".to_vec();
         b.extend_from_slice(&1_u32.to_le_bytes());
         b.extend_from_slice(&2_u64.to_le_bytes());
-        for (tick, seq) in [(1_u64, 5_u64), (2, 0)] {
+        for (tick, seq) in [(1_u64, 0_u64), (2, 0)] {
             b.extend_from_slice(&tick.to_le_bytes());
             b.extend_from_slice(&seq.to_le_bytes());
             b.extend_from_slice(&[8, 1, 0]);
@@ -722,19 +751,51 @@ mod tests {
     }
 
     #[test]
-    fn record_after_last_seq_returns_error() {
+    fn push_requires_seq_to_count_up_from_zero() {
         let mut log = CommandLog::new();
         let c = Command::SetSimSpeed {
             speed: SimSpeed::NORMAL,
         };
-        log.push(RecordedCommand {
+        let entry = |seq| RecordedCommand {
             tick: Tick(0),
-            seq: u64::MAX,
+            seq,
             command: c,
-        })
-        .unwrap();
-        assert_eq!(log.record(Tick(0), c), Err(RecordError::SeqExhausted));
-        assert_eq!(log.len(), 1);
+        };
+        assert_eq!(
+            log.push(entry(u64::MAX)),
+            Err(RecordError::SeqGap(SeqGap {
+                expected: 0,
+                got: u64::MAX
+            }))
+        );
+        log.push(entry(0)).unwrap();
+        assert_eq!(
+            log.push(entry(2)),
+            Err(RecordError::SeqGap(SeqGap {
+                expected: 1,
+                got: 2
+            }))
+        );
+        assert_eq!(log.record(Tick(0), c), Ok(1));
+        assert_eq!(log.len(), 2);
+    }
+
+    #[test]
+    fn decode_rejects_seq_gaps() {
+        for seqs in [[0_u64, 2], [1, 2], [u64::MAX - 1, u64::MAX]] {
+            let mut b = b"CHIZUREC".to_vec();
+            b.extend_from_slice(&1_u32.to_le_bytes());
+            b.extend_from_slice(&2_u64.to_le_bytes());
+            for seq in seqs {
+                b.extend_from_slice(&0_u64.to_le_bytes());
+                b.extend_from_slice(&seq.to_le_bytes());
+                b.extend_from_slice(&[8, 1, 0]);
+            }
+            assert!(
+                matches!(CommandLog::decode(&b), Err(DecodeError::SeqGap(_))),
+                "{seqs:?}"
+            );
+        }
     }
 
     #[test]
@@ -910,16 +971,32 @@ mod tests {
         }
 
         #[test]
-        fn decode_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..200)) {
-            let _ = CommandLog::decode(&bytes);
+        fn decode_and_replay_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..200)) {
+            if let Ok(log) = CommandLog::decode(&bytes) {
+                replay(&mut World::new(0), &log, 2);
+            }
         }
 
         #[test]
-        fn decode_never_panics_after_header(tail in proptest::collection::vec(any::<u8>(), 0..200)) {
+        fn decode_and_replay_never_panic_after_header(
+            tail in proptest::collection::vec(any::<u8>(), 0..200),
+        ) {
             let mut b = b"CHIZUREC".to_vec();
             b.extend_from_slice(&1_u32.to_le_bytes());
             b.extend_from_slice(&tail);
-            let _ = CommandLog::decode(&b);
+            if let Ok(log) = CommandLog::decode(&b) {
+                replay(&mut World::new(0), &log, 2);
+            }
+        }
+
+        /// 1 件だけの記録で、tick と番号を好きに選んでも、読めたものは再生で panic しない。
+        #[test]
+        fn decoded_single_entry_replays_without_panic(tick in 0_u64..4, seq in any::<u64>()) {
+            let bytes = single(tick, seq, &[8, 1, 0]);
+            if let Ok(log) = CommandLog::decode(&bytes) {
+                prop_assert_eq!(seq, 0);
+                replay(&mut World::new(0), &log, 4);
+            }
         }
     }
 }
