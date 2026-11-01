@@ -12,14 +12,14 @@
 
 use std::collections::BTreeMap;
 
-use super::{Ends, SidewalkPos, Trip, Trips, car, make_trip, plan, pos};
+use super::{Ends, SidewalkPos, Trip, Trips, car, make_trip, plan};
 use crate::building::{Building, Buildings};
 use crate::id::{BuildingId, TripId};
 use crate::network::{LaneMode, Network};
 use crate::routing::AstarRouter;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{TilePos, TileRect};
-use crate::units::{LaneOffset, Tick};
+use crate::units::Tick;
 
 /// 満車のときに、ほかの駐車場を探す範囲（マス）。
 pub const PARK_RADIUS: u64 = 16;
@@ -184,17 +184,10 @@ impl StateHash for Parking {
     }
 }
 
-/// 建物の前の、面した道路の上の位置。出入口の歩道の上でもあり、同じ側の車のリンクの上でもある。
+/// 建物の出入口の位置。出入口の歩道の上でもあり、同じ側の車のリンクの上でもある。
 /// 出入口のリンクがなければ `None`。
 pub fn building_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
-    let (start, step, _) = pos::link_geometry(net, b.entrance)?;
-    let road = TilePos::new(
-        b.front.x.checked_add(b.toward_road.0)?,
-        b.front.y.checked_add(b.toward_road.1)?,
-    );
-    let k = road.x.abs_diff(start.x).max(road.y.abs_diff(start.y));
-    let offset = u32::try_from(k).ok()?.checked_mul(pos::step_mm(step))?;
-    SidewalkPos::on_any_link(net, b.entrance, LaneOffset(offset))
+    SidewalkPos::on_any_link(net, b.entrance, b.entrance_at)
 }
 
 /// 手段 `mode` で `from` から `to` へ行けるか。

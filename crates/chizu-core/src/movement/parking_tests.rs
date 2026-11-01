@@ -34,6 +34,9 @@ impl Street {
             .map(|x| {
                 let front = TilePos::new(*x, -1);
                 let segment = net.segments_through(TilePos::new(*x, 0))[0];
+                // 西向きの歩道の始まりは、道路の東の端である。
+                let east = net.segment_line(segment).unwrap().end().x;
+                let entrance_at = LaneOffset(u32::try_from(east - x).unwrap() * 8_000);
                 buildings.insert(Building {
                     zone: ZoneKind::Commercial,
                     area: TileRect::from_corners(front, front),
@@ -45,6 +48,7 @@ impl Street {
                         mode: LaneMode::Sidewalk,
                     },
                     level: 1,
+                    entrance_at,
                     leveled_at: Tick::ZERO,
                     supply: Default::default(),
                 })
