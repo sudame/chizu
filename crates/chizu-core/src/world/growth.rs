@@ -271,6 +271,41 @@ impl World {
         }
     }
 
+    /// 施設を `at` に `rotation` の向きで置けるか。置けるなら間口の歩道のリンクを返す。状態は変えない。
+    /// `rotation` は `0..=3` で、`at` から `DIRS[rotation]` へ 1 歩のマスが道路になる。
+    pub fn check_service(
+        &self,
+        kind: ServiceKind,
+        at: TilePos,
+        rotation: u8,
+    ) -> Result<LinkId, DenyReason> {
+        let toward_road = DIRS[usize::from(rotation)];
+        let (w, k) = kind.size();
+        for (_, _, t) in lot_tiles(at, toward_road, w, k) {
+            self.check_buildable(t)?;
+        }
+        let free = |t: TilePos| {
+            matches!(
+                self.tile_state(t),
+                Some((_, TileUse::Empty | TileUse::Building))
+            )
+        };
+        if !lot_tiles(at, toward_road, w, k).all(|(_, _, t)| free(t)) {
+            return Err(DenyReason::Occupied);
+        }
+        let entrance = self
+            .frontage(at, toward_road)
+            .ok_or(DenyReason::NoRoadAccess)?;
+        if lot_tiles(at, toward_road, w, 1).any(|(_, _, t)| self.frontage(t, toward_road).is_none())
+        {
+            return Err(DenyReason::NoRoadAccess);
+        }
+        if self.money < kind.cost() {
+            return Err(DenyReason::NotEnoughMoney);
+        }
+        Ok(entrance)
+    }
+
     /// 公共の施設を置く。`at` から `DIRS[rotation]` へ 1 歩のマスが道路で、敷地は反対側へ延びる。
     pub(super) fn place_service(
         &mut self,
@@ -278,34 +313,16 @@ impl World {
         at: TilePos,
         rotation: u8,
     ) -> ApplyOutcome {
+        let entrance = match self.check_service(kind, at, rotation) {
+            Ok(entrance) => entrance,
+            Err(reason) => return ApplyOutcome::Denied(reason),
+        };
         let toward_road = DIRS[usize::from(rotation)];
         let (w, k) = kind.size();
         let tiles: Vec<TilePos> = lot_tiles(at, toward_road, w, k)
             .map(|(_, _, t)| t)
             .collect();
-        if let Err(reason) = tiles.iter().try_for_each(|t| self.check_buildable(*t)) {
-            return ApplyOutcome::Denied(reason);
-        }
-        if tiles.iter().any(|t| {
-            !matches!(
-                self.tile_state(*t),
-                Some((_, TileUse::Empty | TileUse::Building))
-            )
-        }) {
-            return ApplyOutcome::Denied(DenyReason::Occupied);
-        }
-        let front_row = lot_tiles(at, toward_road, w, 1).map(|(_, _, t)| t);
-        let Some(entrance) = self.frontage(at, toward_road) else {
-            return ApplyOutcome::Denied(DenyReason::NoRoadAccess);
-        };
-        let mut front_row = front_row;
-        if front_row.any(|t| self.frontage(t, toward_road).is_none()) {
-            return ApplyOutcome::Denied(DenyReason::NoRoadAccess);
-        }
         let cost = kind.cost();
-        if self.money < cost {
-            return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
-        }
         self.money = self.money - cost;
         let far = *tiles.last().expect("敷地が空");
         self.facilities.push(Facility {

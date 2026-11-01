@@ -7,6 +7,11 @@ export type CityStats = {
   workplaces: number;
   /** 住宅・商業・工業・オフィスの順。正なら建物が建つ。 */
   demand: [number, number, number, number];
+  /** 置いた発電所と浄水場の供給量の合計。 */
+  power: number;
+  water: number;
+  /** 建物の電気と水道の需要の合計。電気と水道で同じ値である。 */
+  utilityDemand: number;
 };
 
 export function parseCityStats(stats: number[]): CityStats {
@@ -16,6 +21,9 @@ export function parseCityStats(stats: number[]): CityStats {
     households: at(1),
     workplaces: at(2),
     demand: [at(3), at(4), at(5), at(6)],
+    power: at(7),
+    water: at(8),
+    utilityDemand: at(9),
   };
 }
 
@@ -35,6 +43,13 @@ export function formatCityNumbers(stats: CityStats): string {
   return `建物 ${n(stats.buildings)} 棟・住める世帯 ${n(stats.households)}・職場の枠 ${n(stats.workplaces)}`;
 }
 
+/** 電気と水道の供給量と需要の 1 行。 */
+export function formatUtilities(stats: CityStats): string {
+  const n = (v: number) => v.toLocaleString("ja-JP");
+  const d = n(stats.utilityDemand);
+  return `電気 ${n(stats.power)} / 需要 ${d}・水道 ${n(stats.water)} / 需要 ${d}`;
+}
+
 export type BarLayout = { value: number; top: number; height: number };
 
 /** 住宅・商業・工業・オフィスの順の棒の位置。正の需要は真ん中の線から上へ、負の需要は下へ伸ばす。 */
@@ -52,6 +67,10 @@ export function renderCityStats(stats: CityStats): void {
     numbers.textContent = formatCityNumbers(stats);
     // test:wasm が読む
     numbers.dataset.buildings = String(stats.buildings);
+  }
+  const utilities = document.querySelector<HTMLElement>("#city-utilities");
+  if (utilities !== null) {
+    utilities.textContent = formatUtilities(stats);
   }
   const layouts = demandBars(stats);
   document.querySelectorAll<HTMLElement>("#demand .bar").forEach((bar, i) => {
