@@ -4,7 +4,7 @@
 //! 1〜[`MAX_LOT_SIDE`] マスで、種から引いた大きさが収まらなければ小さくする。斜めの道路沿いには
 //! まだ建たない。道路か区画が消えて建物の条件が崩れたら、建物も消える。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
 use crate::building::{Building, MAX_LEVEL, MAX_LOT_SIDE, demand};
@@ -16,11 +16,27 @@ use crate::id::BuildingId;
 use crate::network::{Dir, LaneMode, LinkId};
 use crate::rng::{RngPurpose, rng};
 use crate::service::{Facility, Supply, evaluate_supply};
-use crate::tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
+use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
 use crate::world::{ApplyOutcome, DenyReason};
+use crate::zone::ZONE_DEPTH;
 
 /// 建物が建つ・育つかを見る間隔（tick）。等速で 1 秒に 1 回である。
 pub const GROWTH_INTERVAL: u64 = 30;
+
+/// 建物の奥行きの上限（マス）。区画の奥行きいっぱいまで建つので、奥に空きのマスが残らない。
+pub const MAX_LOT_DEPTH: u64 = ZONE_DEPTH as u64;
+
+/// 建てる候補の間口のマス。道路に縦か横で面した、区画のある空きマスである。
+///
+/// 道路、区画、マスの使い道が変わるたびに、変わったマスのまわりだけを [`World::refresh_lot_fronts`] で直す。
+/// 区画とマスの使い道と網から作り直せるので、状態ハッシュには入れない。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct LotFronts {
+    /// 間口のマスと、その区画の種類と、道路へ向かう向き（`DIRS` の添え字）。
+    fronts: BTreeMap<TilePos, (ZoneKind, u8)>,
+    /// 区画の種類ごとの間口のマス。添え字は [`ZoneKind::index`]。
+    by_zone: [BTreeSet<TilePos>; 4],
+}
 
 /// 1 回に、区画の種類ごとに建てる建物の数の上限。
 pub const SPAWN_PER_ZONE: u32 = 2;
@@ -124,6 +140,7 @@ impl World {
                 .or_default()
                 .push((local_index(lx, ly), u));
         }
+        let touched = World::edited_tiles(&edits);
         for (coord, list) in edits {
             let chunk = self
                 .chunks
@@ -135,30 +152,43 @@ impl World {
                 }
             });
         }
+        self.refresh_lot_fronts(touched);
     }
 
-    /// 建てる候補の間口のマスを、区画の種類ごとに座標の順で集める。
-    fn lot_candidates(&self) -> [Vec<(TilePos, (i64, i64))>; 4] {
-        let mut out: [Vec<(TilePos, (i64, i64))>; 4] = Default::default();
-        for chunk in self.chunks.values() {
-            let Some(tiles) = chunk.layer(Layer::Ground) else {
+    /// マスの位置。チャンクの中の添え字から求める。
+    fn tile_of(coord: ChunkCoord, i: usize) -> TilePos {
+        let o = coord.origin();
+        TilePos::new(o.x + (i % CHUNK_SIDE) as i64, o.y + (i / CHUNK_SIDE) as i64)
+    }
+
+    /// `tiles` とそのまわり 4 マスについて、建てる候補の間口かどうかを見直す。
+    /// 道路、区画、マスの使い道を変えたら、変えたマスを渡して呼ぶ。
+    pub(super) fn refresh_lot_fronts(&mut self, tiles: impl IntoIterator<Item = TilePos>) {
+        let mut around = BTreeSet::new();
+        for t in tiles {
+            around.insert(t);
+            around.extend(DIRS.iter().map(|d| step(t, *d, 1)));
+        }
+        for t in around {
+            if let Some((zone, _)) = self.lots.fronts.remove(&t) {
+                self.lots.by_zone[zone.index()].remove(&t);
+            }
+            let Some((Some(zone), TileUse::Empty)) = self.tile_state(t) else {
                 continue;
             };
-            let origin = chunk.coord().origin();
-            for i in 0..CHUNK_AREA {
-                let (Some(zone), TileUse::Empty) = (tiles.zone[i], tiles.occupancy[i]) else {
-                    continue;
-                };
-                let t = TilePos::new(
-                    origin.x + (i % CHUNK_SIDE) as i64,
-                    origin.y + (i / CHUNK_SIDE) as i64,
-                );
-                if let Some(d) = DIRS.into_iter().find(|d| self.frontage(t, *d).is_some()) {
-                    out[zone.index()].push((t, d));
-                }
+            if let Some(d) = (0..DIRS.len()).find(|d| self.frontage(t, DIRS[*d]).is_some()) {
+                self.lots.fronts.insert(t, (zone, d as u8));
+                self.lots.by_zone[zone.index()].insert(t);
             }
         }
-        out
+    }
+
+    /// チャンクの中で書き換えたマスの位置。
+    pub(super) fn edited_tiles<T>(edits: &BTreeMap<ChunkCoord, Vec<(usize, T)>>) -> Vec<TilePos> {
+        edits
+            .iter()
+            .flat_map(|(c, list)| list.iter().map(|(i, _)| World::tile_of(*c, *i)))
+            .collect()
     }
 
     /// 段階を上げ、需要のある区画に建物を建てる。`GROWTH_INTERVAL` ごとに呼ばれる。
@@ -179,22 +209,22 @@ impl World {
                 b.leveled_at = tick;
             }
         }
-        let candidates = self.lot_candidates();
         for zone in ZoneKind::ALL {
-            let list = &candidates[zone.index()];
             for attempt in 0..SPAWN_PER_ZONE {
+                let list = &self.lots.by_zone[zone.index()];
                 if list.is_empty() || demand(self.buildings.capacity())[zone.index()] <= 0 {
                     break;
                 }
                 let id = u64::from(zone as u8) * 16 + u64::from(attempt);
                 let mut r = rng(self.seed, RngPurpose::BuildingGrowth, id, tick);
                 let len = u32::try_from(list.len()).expect("候補の数が u32 に収まらない");
-                let (front, toward_road) = list[r.below(len) as usize];
-                let side = MAX_LOT_SIDE as u32;
-                let (wt, kt) = (1 + u64::from(r.below(side)), 1 + u64::from(r.below(side)));
+                let front = *list.iter().nth(r.below(len) as usize).expect("候補がない");
+                let toward_road = DIRS[usize::from(self.lots.fronts[&front].1)];
+                // 間口は引いた幅から、奥行きは区画の奥行きいっぱいから、収まるまで小さくする。
+                let wt = 1 + u64::from(r.below(MAX_LOT_SIDE as u32));
                 let fit = (1..=wt)
                     .rev()
-                    .flat_map(|w| (1..=kt).rev().map(move |k| (w, k)))
+                    .flat_map(|w| (1..=MAX_LOT_DEPTH).rev().map(move |k| (w, k)))
                     .find(|(w, k)| self.lot_fits(zone, front, toward_road, *w, *k));
                 if let Some((w, k)) = fit {
                     self.place_building(zone, front, toward_road, w, k);
@@ -379,7 +409,7 @@ mod tests {
     fn check_buildings(w: &World) {
         let mut covered = 0;
         for (_, b) in w.buildings().iter() {
-            assert!(b.tile_count() <= MAX_LOT_SIDE * MAX_LOT_SIDE);
+            assert!(b.tile_count() <= MAX_LOT_SIDE * MAX_LOT_DEPTH);
             for t in crate::zone::tiles_of(b.area) {
                 assert_eq!(w.tile_state(t), Some((Some(b.zone), TileUse::Building)));
             }
@@ -396,6 +426,22 @@ mod tests {
                 .count() as u64;
         }
         assert_eq!(building_tiles, covered, "建物のないマスが建物になっている");
+        // 建てる候補は、全チャンクをなめて作り直したものと一致する。
+        let mut rebuilt = LotFronts::default();
+        for c in w.chunks() {
+            let tiles = c.layer(Layer::Ground).unwrap();
+            for i in 0..crate::tile::CHUNK_AREA {
+                let (Some(zone), TileUse::Empty) = (tiles.zone[i], tiles.occupancy[i]) else {
+                    continue;
+                };
+                let t = World::tile_of(c.coord(), i);
+                if let Some(d) = (0..DIRS.len()).find(|d| w.frontage(t, DIRS[*d]).is_some()) {
+                    rebuilt.fronts.insert(t, (zone, d as u8));
+                    rebuilt.by_zone[zone.index()].insert(t);
+                }
+            }
+        }
+        assert_eq!(w.lots, rebuilt);
     }
 
     #[test]
@@ -404,7 +450,7 @@ mod tests {
         // 等速で 1 分。
         run(&mut w, 30 * 60);
         assert!(
-            w.buildings().len() >= 10,
+            w.buildings().len() >= 8,
             "{} 棟しか建たない",
             w.buildings().len()
         );

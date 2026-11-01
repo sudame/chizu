@@ -13,6 +13,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
+use smallvec::SmallVec;
+
 use crate::chunk::Layer;
 use crate::command::{InvalidCommand, NodeId, RoadKind};
 use crate::round;
@@ -374,6 +376,8 @@ pub struct Network {
     version: u64,
     /// チャンクごとの、そのチャンクのマスを通る区間。ID の順に並べる。区間から作り直せるので、状態ハッシュには入れない。
     index: BTreeMap<ChunkCoord, Vec<SegmentId>>,
+    /// マスごとの、そのマスを通る区間。ID の順に並べる。`index` と同じく区間から作り直せる。
+    tiles: BTreeMap<TilePos, SmallVec<[SegmentId; 2]>>,
 }
 
 impl Default for Network {
@@ -399,6 +403,7 @@ impl Network {
             lanes: Arena::new(),
             version: 0,
             index: BTreeMap::new(),
+            tiles: BTreeMap::new(),
         }
     }
 
@@ -491,17 +496,7 @@ impl Network {
 
     /// マス `t` を通る区間。
     pub fn segments_through(&self, t: TilePos) -> Vec<SegmentId> {
-        let Some(coord) = t.chunk() else {
-            return Vec::new();
-        };
-        self.segments_in_chunk(coord)
-            .iter()
-            .copied()
-            .filter(|s| {
-                self.segment_line(*s)
-                    .is_some_and(|l| l.position_of(t).is_some())
-            })
-            .collect()
+        self.tiles.get(&t).map_or_else(Vec::new, |s| s.to_vec())
     }
 
     /// マス `t` にあるノード。
@@ -560,6 +555,11 @@ impl Network {
             let at = list.partition_point(|s| *s < id);
             list.insert(at, id);
         }
+        for t in line.tiles() {
+            let list = self.tiles.entry(t).or_default();
+            let at = list.partition_point(|s| *s < id);
+            list.insert(at, id);
+        }
         id
     }
 
@@ -578,6 +578,14 @@ impl Network {
                 list.retain(|x| *x != id);
                 if list.is_empty() {
                     self.index.remove(&coord);
+                }
+            }
+        }
+        for t in line.tiles() {
+            if let Some(list) = self.tiles.get_mut(&t) {
+                list.retain(|x| *x != id);
+                if list.is_empty() {
+                    self.tiles.remove(&t);
                 }
             }
         }
@@ -838,6 +846,7 @@ mod tests {
         }
         let mut lane_count = 0;
         // 索引は、区間から作り直したものと一致する。
+        let mut tiles = BTreeMap::<TilePos, SmallVec<[SegmentId; 2]>>::new();
         let mut index = BTreeMap::<ChunkCoord, Vec<SegmentId>>::new();
         for (id, seg) in n.segments() {
             assert_ne!(seg.a, seg.b);
@@ -853,6 +862,9 @@ mod tests {
             for c in chunks_of(&l) {
                 index.entry(c).or_default().push(id);
             }
+            for t in l.tiles() {
+                tiles.entry(t).or_default().push(id);
+            }
             // 同じマスを通る別の区間とは、両方の端のノードでだけ交わる。
             for t in l.tiles() {
                 for other in n.segments_through(t) {
@@ -864,6 +876,7 @@ mod tests {
         }
         assert_eq!(n.lanes().count(), lane_count);
         assert_eq!(n.index, index);
+        assert_eq!(n.tiles, tiles);
     }
 
     #[test]

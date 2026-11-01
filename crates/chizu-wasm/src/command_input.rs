@@ -5,7 +5,7 @@
 
 use core::fmt;
 
-use chizu_core::{ChunkCoord, Command, RoadKind, SimSpeed, TilePos, TileRect};
+use chizu_core::{ChunkCoord, Command, RoadKind, SimSpeed, TilePos, TileRect, ZoneKind};
 
 /// オブジェクトのフィールドを読んだ値。
 #[derive(Clone, Debug, PartialEq)]
@@ -26,6 +26,7 @@ pub enum InputError {
     /// 整数で読めないフィールド。
     BadInteger(&'static str),
     BadRoadKind,
+    BadZone,
 }
 
 impl fmt::Display for InputError {
@@ -37,6 +38,10 @@ impl fmt::Display for InputError {
             InputError::BadSpeed => write!(f, "速度は 1 から 48 までの整数で指定する"),
             InputError::BadInteger(name) => write!(f, "{name} が範囲の中の整数でない"),
             InputError::BadRoadKind => write!(f, "road は Small、Medium、Large のどれかで指定する"),
+            InputError::BadZone => write!(
+                f,
+                "zone は Residential、Commercial、Industrial、Office、Clear のどれかで指定する"
+            ),
         }
     }
 }
@@ -71,6 +76,26 @@ pub fn parse(is_object: bool, field: impl Fn(&str) -> Field) -> Result<Command, 
                 from: tile(&field, "fromX", "fromY")?,
                 to: tile(&field, "toX", "toY")?,
                 kind,
+            })
+        }
+        "PaintZone" => {
+            let zone = match field("zone") {
+                Field::Text(t) => match t.as_str() {
+                    "Residential" => Some(ZoneKind::Residential),
+                    "Commercial" => Some(ZoneKind::Commercial),
+                    "Industrial" => Some(ZoneKind::Industrial),
+                    "Office" => Some(ZoneKind::Office),
+                    "Clear" => None,
+                    _ => return Err(InputError::BadZone),
+                },
+                _ => return Err(InputError::BadZone),
+            };
+            Ok(Command::PaintZone {
+                area: TileRect {
+                    min: tile(&field, "minX", "minY")?,
+                    max: tile(&field, "maxX", "maxY")?,
+                },
+                zone,
             })
         }
         "Bulldoze" => Ok(Command::Bulldoze {
@@ -233,6 +258,38 @@ mod tests {
                 coord: ChunkCoord::new(2, -1)
             })
         );
+    }
+
+    #[test]
+    fn accepts_paint_zone() {
+        let rect = [
+            ("minX", Field::Number(1.0)),
+            ("minY", Field::Number(2.0)),
+            ("maxX", Field::Number(3.0)),
+            ("maxY", Field::Number(4.0)),
+        ];
+        let paint = |zone: Field| {
+            let mut fields = vec![("kind", Field::Text("PaintZone".into())), ("zone", zone)];
+            fields.extend(rect.iter().cloned());
+            object(&fields)
+        };
+        let area = TileRect {
+            min: TilePos::new(1, 2),
+            max: TilePos::new(3, 4),
+        };
+        assert_eq!(
+            paint(Field::Text("Office".into())),
+            Ok(Command::PaintZone {
+                area,
+                zone: Some(ZoneKind::Office)
+            })
+        );
+        assert_eq!(
+            paint(Field::Text("Clear".into())),
+            Ok(Command::PaintZone { area, zone: None })
+        );
+        assert_eq!(paint(Field::Text("Park".into())), Err(InputError::BadZone));
+        assert_eq!(paint(Field::Missing), Err(InputError::BadZone));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 // メインスレッドと Worker のあいだでやりとりするメッセージ。
 
 export type RoadKindName = "Small" | "Medium" | "Large";
+/** 区画の種類。Clear は区画を消す。 */
+export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
 
 /** 画面から送るコマンド。chizu-wasm が Command に直し、検証する。座標はマスの座標。 */
 export type CommandMessage =
@@ -14,6 +16,14 @@ export type CommandMessage =
       toY: number;
     }
   | { kind: "Bulldoze"; minX: number; minY: number; maxX: number; maxY: number }
+  | {
+      kind: "PaintZone";
+      zone: ZoneName;
+      minX: number;
+      minY: number;
+      maxX: number;
+      maxY: number;
+    }
   | { kind: "BuyChunk"; cx: number; cy: number };
 
 /** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
@@ -27,8 +37,15 @@ export const NODE_STRIDE = 3;
 /** チャンクの 1 辺のマス数。chizu-core の CHUNK_SIDE と同じ。 */
 export const CHUNK_SIDE = 64;
 export const CHUNK_AREA = CHUNK_SIDE * CHUNK_SIDE;
-/** マスのバイトのうち、水辺を表すビット。chizu-wasm の sim::TILE_WATER と同じ。 */
+// マスのバイトの意味。chizu-wasm の sim::TILE_WATER などと同じ
+/** 水辺。 */
 export const TILE_WATER = 1;
+/** 道路が通っている。 */
+export const TILE_ROAD = 1 << 1;
+/** 区画を塗れる。 */
+export const TILE_ZONABLE = 1 << 2;
+/** 区画の種類（1 住宅、2 商業、3 工業、4 オフィス、なければ 0）を置くビットの位置。 */
+export const TILE_ZONE_SHIFT = 3;
 
 export type ChunkCoordMessage = { cx: number; cy: number };
 
@@ -42,7 +59,8 @@ export type ChunkData = {
 };
 
 export type MainToWorker =
-  | { kind: "command"; command: CommandMessage }
+  /** id は画面が振る番号で、結果の通知で返ってくる。 */
+  | { kind: "command"; id: number; command: CommandMessage }
   | { kind: "pause"; paused: boolean }
   /**
    * visible はいま見えているチャンクを先に送ってほしい順に並べたもの。
@@ -66,7 +84,11 @@ export type WorkerToMain =
   | { kind: "chunks"; chunks: ChunkData[] }
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
   | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
-  | { kind: "outcome"; command: CommandMessage["kind"]; outcome: Outcome; reason?: string }
+  /**
+   * id は画面が振ったコマンドの番号、seq は記録の通し番号。
+   * 記録する前に受け付けなかったコマンドには seq がない。
+   */
+  | { kind: "outcome"; id: number; seq?: number; outcome: Outcome; reason?: string }
   | { kind: "error"; message: string };
 
 function isChunkData(value: unknown): value is ChunkData {
@@ -112,7 +134,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "outcome":
       return (
-        typeof v.command === "string" &&
+        Number.isInteger(v.id) &&
+        (v.seq === undefined || Number.isInteger(v.seq)) &&
         typeof v.outcome === "string" &&
         (v.reason === undefined || typeof v.reason === "string")
       );

@@ -32,7 +32,7 @@ const chunkSync = new ChunkSync();
 
 // 画面の手元と版の違うチャンクを送る。マスの配列は移譲するので、送ったあとの Worker の側には残らない
 function sendChunks(sim: Simulation): void {
-  const picked = chunkSync.collect((cx, cy) => sim.chunk_version(cx, cy), CHUNKS_PER_FRAME);
+  const picked = chunkSync.collect((cx, cy) => sim.chunk_tiles_version(cx, cy), CHUNKS_PER_FRAME);
   if (picked.length === 0) {
     return;
   }
@@ -49,23 +49,24 @@ function sendChunks(sim: Simulation): void {
   );
 }
 
-// 記録したコマンドの番号と種類。結果が届いたら、どのコマンドの結果かを画面に伝える
-const pending = new Map<number, CommandMessage["kind"]>();
+// 記録の通し番号から、画面が振った番号を引く
+const pending = new Map<number, number>();
 
-function submit(sim: Simulation, command: CommandMessage): void {
+function submit(sim: Simulation, id: number, command: CommandMessage): void {
   try {
-    pending.set(sim.submit(command), command.kind);
+    pending.set(sim.submit(command), id);
   } catch (error) {
-    reply({ kind: "outcome", command: command.kind, outcome: "Rejected", reason: String(error) });
+    reply({ kind: "outcome", id, outcome: "Rejected", reason: String(error) });
   }
 }
 
 function sendOutcomes(sim: Simulation): void {
   for (const report of sim.take_reports() as { seq: number; outcome: Outcome; reason?: string }[]) {
-    const command = pending.get(report.seq);
+    const id = pending.get(report.seq);
     pending.delete(report.seq);
-    if (command !== undefined) {
-      reply({ kind: "outcome", command, outcome: report.outcome, reason: report.reason });
+    if (id !== undefined) {
+      const { seq, outcome, reason } = report;
+      reply({ kind: "outcome", id, seq, outcome, reason });
     }
   }
 }
@@ -74,7 +75,7 @@ function sendOutcomes(sim: Simulation): void {
 // 見えているチャンクにかかる区間だけを、チャンクの版と一緒に送る形に変える
 let sentNetworkRevision = -1;
 function sendRoads(sim: Simulation): void {
-  const revision = sim.network_revision();
+  const revision = sim.network_version();
   if (revision === sentNetworkRevision) {
     return;
   }
@@ -146,7 +147,10 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
     const { sim, setPaused } = await ready;
     switch (message.kind) {
       case "command":
-        submit(sim, message.command);
+        // 適用はその場で済むので、止めているときも結果と道路をすぐ返す
+        submit(sim, message.id, message.command);
+        sendOutcomes(sim);
+        sendRoads(sim);
         break;
       case "pause":
         setPaused(message.paused);
