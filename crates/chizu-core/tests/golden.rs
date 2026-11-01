@@ -685,10 +685,11 @@ fn economy_settles_every_hour() {
     assert!(f.taxes[ZoneKind::Industrial.index()].0 > 0, "{f:?}");
     assert!(f.road_upkeep.0 > 0 && f.facility_upkeep.iter().all(|m| m.0 > 0));
     assert_eq!(stats.denied, 0);
-    // 1 時間ぶん進めると、1 日の見込みのおよそ 1/24 だけ所持金が動く。
-    let (money, net) = (world.money().0, world.finances().net().0);
-    replay(&mut world, &s.log, 300);
-    let moved = world.money().0 - money;
+    // 精算の tick を進めると、その tick の終わりの 1 日の見込みのおよそ 1/24 だけ所持金が動く。
+    replay(&mut world, &s.log, 200);
+    let money = world.money().0;
+    replay(&mut world, &s.log, 1);
+    let (moved, net) = (world.money().0 - money, world.finances().net().0);
     assert!((moved * 24 - net).abs() <= 24, "{moved} × 24 と {net}");
 }
 

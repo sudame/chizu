@@ -7,8 +7,8 @@ use std::hint::black_box;
 
 use chizu_core::routing::{AstarRouter, Router};
 use chizu_core::{
-    Activity, BUCKET_COUNT, CitizenChange, CitizenId, CitizenRow, RngPurpose, ScheduleState,
-    TICKS_PER_DAY, Tick, Trips, bucket_at, rng,
+    Activity, BUCKET_COUNT, CitizenChange, CitizenId, CitizenRow, Population, RngPurpose,
+    ScheduleState, TICKS_PER_DAY, Tick, Trips, bucket_at, rng,
 };
 
 use crate::{city_grid_100k, commute_requests, synthetic_population, walk_ends, zoned_grid_city};
@@ -20,9 +20,11 @@ pub const SEED: u64 = 1;
 pub const OFFICE_EVERY: u32 = 100;
 
 /// 住民ごとに乱数を引き、幸福度と出発の予定を書き戻す住民の処理。
-/// 標準の処理はまだ中身が空なので、中身が入ったときの目安にこれを使う。
-pub fn rng_write(tick: Tick) -> impl Fn(CitizenId, CitizenRow) -> Option<CitizenChange> + Sync {
-    move |id, row| {
+/// 組をなめる仕組みの目安にする。
+pub fn rng_write(
+    tick: Tick,
+) -> impl Fn(&Population, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync {
+    move |_, id, row| {
         let mut r = rng(SEED, RngPurpose::DailySchedule, u64::from(id.index), tick);
         let mut happiness = row.happiness;
         happiness.commute = r.below(101) as u8;

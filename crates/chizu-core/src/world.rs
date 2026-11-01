@@ -8,12 +8,13 @@ use crate::service::Facility;
 use crate::chunk::{Chunk, Layer, TileUse};
 use crate::citizens::{CitizenChange, CitizenRow, Population};
 use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
+use crate::happiness::{CitizenContext, update_citizen};
 use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
 use crate::rng::{RngPurpose, mix_words};
 use crate::routing::AstarRouter;
-use crate::schedule::{bucket_at, update_citizen};
+use crate::schedule::bucket_at;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, WORLD_LIMIT, local_index};
 use crate::units::{Mm, Money, Tick, WorldPos};
@@ -635,12 +636,22 @@ impl World {
     /// 住民の 1 人ぶんの処理を `update` にして 1 tick 進める。
     pub(crate) fn step_with<F>(&mut self, update: F)
     where
-        F: Fn(u64, Tick, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
+        F: Fn(&CitizenContext, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
     {
         self.sync_router();
-        let (seed, tick) = (self.seed, self.tick);
+        let (seed, tick, tax_permille) = (self.seed, self.tick, self.tax_permille);
+        let buildings = &self.buildings;
         self.population
-            .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
+            .update_bucket(bucket_at(tick), |population, id, row| {
+                let ctx = CitizenContext {
+                    seed,
+                    tick,
+                    population,
+                    buildings,
+                    tax_permille,
+                };
+                update(&ctx, id, row)
+            });
         self.update_people();
         self.trips.step(&self.network, &mut self.router.router);
         self.grow_buildings();
