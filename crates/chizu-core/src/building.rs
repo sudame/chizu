@@ -11,13 +11,17 @@ use crate::network::LinkId;
 use crate::service::Supply;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{TilePos, TileRect};
-use crate::units::Tick;
+use crate::units::{LaneOffset, Tick};
 
 /// 建物の段階の上限。
 pub const MAX_LEVEL: u8 = 5;
 
 /// 区画に建つ建物の、間口と奥行きの上限（マス）。
 pub const MAX_LOT_SIDE: u64 = 4;
+
+/// 斜めの道路に面して建つ建物の 1 辺の上限（マス）。斜めの道路沿いには正方形の小さな建物を
+/// 階段状に並べる。2 マスまでにすると、2×2 と 1×1 が交互に並んで隙間なく埋まる。
+pub const DIAGONAL_LOT_SIDE: u64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Building {
@@ -26,10 +30,14 @@ pub struct Building {
     pub area: TileRect,
     /// 道路に面したマスの 1 つ。
     pub front: TilePos,
-    /// `front` から道路のマスへ向かう 1 歩。縦か横である。
+    /// `front` から道路へ向かう向き。縦か横なら、1 歩先が縦か横の道路のマスである。
+    /// 斜め `(dx, dy)` なら、`(dx, 0)` と `(0, dy)` の 1 歩先がどちらも同じ斜めの区間のマスで、
+    /// 敷地は `(-dx, -dy)` の側へ延びる。
     pub toward_road: (i64, i64),
     /// 出入口。面した道路の、建物の側の歩道のリンク。道路が分かれて ID が変わると付け直す。
     pub entrance: LinkId,
+    /// 出入口の、`entrance` の始まりからの距離。`front` に最も近い歩道の上の点である。
+    pub entrance_at: LaneOffset,
     /// 1 から `MAX_LEVEL` まで。
     pub level: u8,
     /// いまの段階になった tick。
@@ -84,6 +92,7 @@ impl StateHash for Building {
         h.write(&self.entrance.segment);
         h.write(&(self.entrance.dir as u8));
         h.write(&(self.entrance.mode as u8));
+        h.write(&self.entrance_at);
         h.write(&self.level);
         h.write(&self.leveled_at);
         h.write(&self.supply);
