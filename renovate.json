@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "timezone": "Asia/Tokyo",
+  "schedule": ["before 9am"],
+  "osvVulnerabilityAlerts": true,
+  "packageRules": [
+    {
+      "description": "メジャー以外は 1 つの PR にまとめ、CI が通ったら自動でマージする。出たばかりの版は避ける。ブランチ名は日本語から作れないので groupSlug を書く",
+      "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
+      "groupName": "メジャー以外の更新",
+      "groupSlug": "non-major",
+      "automerge": true,
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": "wasm-bindgen のクレートと mise の wasm-bindgen（CLI）は版がずれると壊れるので、ほかの更新と分けて 2 つを 1 つの PR で上げる",
+      "matchDepNames": ["wasm-bindgen", "wasm-bindgen/wasm-bindgen", "github:wasm-bindgen/wasm-bindgen"],
+      "groupName": "wasm-bindgen",
+      "groupSlug": "wasm-bindgen"
+    }
+  ]
+}
