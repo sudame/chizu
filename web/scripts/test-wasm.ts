@@ -2,6 +2,7 @@
 // preview を使うのは、本番と同じくビルドしたものを COOP/COEP のヘッダーつきで配信して確かめるためである。
 // スレッドつきの WASM が Worker で動き、正しい和を返すかを確かめる。
 // 三重バッファから読んだ時計が実時間に合わせて進み、速度と一時停止のボタンに従うかも確かめる。
+// チャンクが Worker から届いて描かれること、ドラッグとホイールでカメラが動くことも確かめる。
 // Chrome は mise の tools で入れた chrome-headless-shell を PATH から探す。
 
 import { accessSync, constants } from "node:fs";
@@ -18,6 +19,9 @@ const FAST_SPEED = 48;
 const TICKS_PER_DAY = 7_200;
 const GAME_SECONDS_PER_TICK = 12;
 const INITIAL_MONEY = 500_000;
+// web/src/map/camera.ts の値
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 32;
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -129,6 +133,134 @@ try {
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   const resumed = await ticksIn(500);
   check(resumed > 0, `再開すると時計がまた進む（${resumed} tick）`);
+
+  const map = page.locator("#map");
+  const mapState = async () => {
+    const d = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+    return {
+      drawn: Number(d.drawnChunks),
+      visible: Number(d.visibleChunks),
+      x: Number(d.cameraX),
+      y: Number(d.cameraY),
+      zoom: Number(d.zoom),
+    };
+  };
+  // 見えているチャンクがすべて届いて描かれるまで待つ
+  const waitAllDrawn = () =>
+    page.waitForFunction(
+      () => {
+        const d = document.querySelector<HTMLElement>("#map")?.dataset;
+        return d !== undefined && Number(d.drawnChunks) > 0 && d.drawnChunks === d.visibleChunks;
+      },
+      undefined,
+      { timeout: TIMEOUT_MS },
+    );
+  // 画面の点 (x, y)（CSS ピクセル）の色。描画の結果は preserveDrawingBuffer で残してある
+  const pixel = (x: number, y: number) =>
+    map.evaluate(
+      (el, at) => {
+        const canvas = el as HTMLCanvasElement;
+        const gl = canvas.getContext("webgl2");
+        const out = new Uint8Array(4);
+        const dpr = window.devicePixelRatio;
+        gl?.readPixels(
+          Math.floor(at.x * dpr),
+          canvas.height - 1 - Math.floor(at.y * dpr),
+          1,
+          1,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          out,
+        );
+        return [...out];
+      },
+      { x, y },
+    );
+  const brightness = (c: number[]) => (c[0] ?? 0) + (c[1] ?? 0) + (c[2] ?? 0);
+
+  await waitAllDrawn();
+  const first = await mapState();
+  check(first.drawn > 0, `起動するとチャンクが届いて描かれる（${first.drawn} 枚）`);
+  const size = page.viewportSize() ?? { width: 1280, height: 720 };
+  const cx = size.width / 2;
+  const cy = size.height / 2;
+  // 画面の中心は開始地点の買ってある土地で、水辺はない
+  const owned = await pixel(cx, cy);
+  check(
+    (owned[1] ?? 0) > (owned[0] ?? 0) &&
+      (owned[1] ?? 0) > (owned[2] ?? 0) &&
+      brightness(owned) > 300,
+    `画面の中心に買ってある陸が描かれる（${owned.join(", ")}）`,
+  );
+
+  await page.mouse.move(cx, cy);
+  for (let i = 0; i < 20; i++) {
+    await page.mouse.wheel(0, 400);
+  }
+  await page.waitForFunction(
+    (min) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) === min,
+    MIN_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  await waitAllDrawn();
+  const out = await mapState();
+  check(out.zoom === MIN_ZOOM, `縮小は下限 ${MIN_ZOOM} で止まる（${out.zoom}）`);
+  check(
+    out.drawn > first.drawn,
+    `縮小すると、まわりのチャンクも届いて描かれる（${first.drawn} 枚から ${out.drawn} 枚）`,
+  );
+  // 中心から 300 マス右は、買っていない土地
+  const unowned = await pixel(cx + 300, cy);
+  check(
+    brightness(unowned) < brightness(owned) * 0.6,
+    `買っていない土地は暗く描かれる（${unowned.join(", ")}）`,
+  );
+
+  const anchor = { x: cx + 200, y: cy + 100 };
+  const worldAt = (s: Awaited<ReturnType<typeof mapState>>) => ({
+    x: s.x + (anchor.x - cx) / s.zoom,
+    y: s.y + (anchor.y - cy) / s.zoom,
+  });
+  await page.mouse.move(anchor.x, anchor.y);
+  await page.mouse.wheel(0, -300);
+  await page.waitForFunction(
+    (min) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) > min,
+    MIN_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  const zoomed = await mapState();
+  const before = worldAt(out);
+  const after = worldAt(zoomed);
+  check(
+    Math.abs(before.x - after.x) < 0.01 && Math.abs(before.y - after.y) < 0.01,
+    `拡大してもカーソルの下の点は動かない（${before.x.toFixed(2)}, ${before.y.toFixed(2)} → ${after.x.toFixed(2)}, ${after.y.toFixed(2)}）`,
+  );
+
+  await page.mouse.move(cx, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx + 100, cy + 50, { steps: 5 });
+  await page.mouse.up();
+  await page.waitForFunction(
+    (x) => Number(document.querySelector<HTMLElement>("#map")?.dataset.cameraX) !== x,
+    zoomed.x,
+    { timeout: TIMEOUT_MS },
+  );
+  const dragged = await mapState();
+  check(
+    Math.abs(zoomed.x - dragged.x - 100 / zoomed.zoom) < 0.01 &&
+      Math.abs(zoomed.y - dragged.y - 50 / zoomed.zoom) < 0.01,
+    `ドラッグした分だけ地図が動く（${(zoomed.x - dragged.x).toFixed(2)}, ${(zoomed.y - dragged.y).toFixed(2)} マス）`,
+  );
+
+  for (let i = 0; i < 20; i++) {
+    await page.mouse.wheel(0, -400);
+  }
+  await page.waitForFunction(
+    (max) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) === max,
+    MAX_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  check((await mapState()).zoom === MAX_ZOOM, `拡大は上限 ${MAX_ZOOM} で止まる`);
 } finally {
   await browser.close();
   await server?.close();
