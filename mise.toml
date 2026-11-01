@@ -15,8 +15,10 @@ run = "rumdl check ."
 run = "jactionlint"
 
 [tasks."lint:rust"]
+# cargo は clippy.toml の変更を確実には拾わない。chizu-core だけ消して毎回検査し直す
 run = [
   "cargo fmt --all --check",
+  "cargo clean --package chizu-core",
   "cargo clippy --workspace --all-targets -- -D warnings",
   "scripts/check-no-float.sh",
 ]
