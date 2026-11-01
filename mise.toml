@@ -41,7 +41,10 @@ run = [
 
 [tasks."lint:wasm"]
 # lint:rust はネイティブでしか回らず、wasm32 に限った cfg の中を見ない。build:wasm と同じ条件で clippy を回す
-run = "cargo clippy --package chizu-wasm --target wasm32-unknown-unknown -Z build-std=panic_abort,std -- -D warnings"
+run = [
+  "cargo clippy --package chizu-wasm --target wasm32-unknown-unknown -Z build-std=panic_abort,std -- -D warnings",
+  "cargo clippy --package chizu-bench-wasm --target wasm32-unknown-unknown -Z build-std=panic_abort,std -- -D warnings",
+]
 
 [tasks."install:web"]
 dir = "web"
@@ -84,6 +87,19 @@ run = "cargo bench --package chizu-scenario"
 [tasks."build:bench"]
 description = "ベンチマークをリリースのプロファイルでビルドだけする"
 run = "cargo bench --workspace --no-run"
+
+[tasks."build:bench-wasm"]
+description = "ブラウザのベンチマークに使う chizu-bench-wasm を、build:wasm と同じ設定でビルドする"
+run = [
+  "cargo build --release --target wasm32-unknown-unknown --package chizu-bench-wasm -Z build-std=panic_abort,std",
+  "wasm-bindgen --target web --out-dir target/bench-wasm/pkg target/wasm32-unknown-unknown/release/chizu_bench_wasm.wasm",
+]
+
+[tasks."bench:wasm"]
+description = "スレッドつきの WASM をヘッドレスの Chrome で測り、ネイティブの値と並べた JSON を出す。CI では回さない"
+depends = ["install:web", "build:bench-wasm"]
+dir = "web"
+run = "node scripts/bench-wasm.ts"
 
 [tasks."build:wasm"]
 # スレッドを使うには std を atomics つきでビルドし直す必要がある。wasm32 用の rustflags は .cargo/config.toml にある

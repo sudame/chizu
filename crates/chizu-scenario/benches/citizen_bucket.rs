@@ -6,29 +6,10 @@
 use std::hint::black_box;
 
 use chizu_core::schedule::update_citizen;
-use chizu_core::{
-    Activity, BUCKET_COUNT, CitizenChange, CitizenId, CitizenRow, RngPurpose, ScheduleState, Tick,
-    bucket_at, rng,
-};
+use chizu_core::{BUCKET_COUNT, Tick, bucket_at};
+use chizu_scenario::perf::{SEED, rng_write};
 use chizu_scenario::synthetic_population;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-
-const SEED: u64 = 1;
-
-fn rng_write(tick: Tick) -> impl Fn(CitizenId, CitizenRow) -> Option<CitizenChange> + Sync {
-    move |id, row| {
-        let mut r = rng(SEED, RngPurpose::DailySchedule, u64::from(id.index), tick);
-        let mut happiness = row.happiness;
-        happiness.commute = r.below(101) as u8;
-        Some(CitizenChange {
-            schedule: ScheduleState {
-                next: Activity::Work,
-                depart_at: Some(tick + 1 + u64::from(r.below(7_200))),
-            },
-            happiness,
-        })
-    }
-}
 
 fn citizen_bucket(c: &mut Criterion) {
     let mut group = c.benchmark_group("citizen_bucket");
