@@ -14,7 +14,7 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 
 ## 作業の手順
 
-1. `ghq-worktree add <branch>` で worktree を作り、出力されたパスへ `cd` する。`git worktree add` と `gwq` は使わない。
+1. 作業は、マネージャーが用意した worktree の中で行う。すでに worktree の中にいるので、新しく worktree を作らず、本体のディレクトリにも移らない。`git worktree add` と `gwq` は使わない。
 2. 変更したら `mise run test` と `mise run lint` を回し、両方が通ることを確かめる。
 3. コミットメッセージは日本語で書き、末尾に `Co-Authored-By:` の行を付ける。
 4. `git push -u origin <branch>` のあと `gh pr create --base main` で PR を作る。本文は日本語で短く書く。
