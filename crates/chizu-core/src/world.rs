@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::building::Buildings;
+use crate::service::Facility;
 
 use crate::chunk::{Chunk, Layer, TileUse};
 use crate::citizens::{CitizenChange, CitizenRow, Population};
@@ -74,10 +75,14 @@ pub enum DenyReason {
     NoZonableTile = 9,
     /// 区画を塗っても消しても、変わるマスがない。
     ZoneUnchanged = 10,
+    /// 施設か道路を置くマスを、ほかの施設か道路が使っている。
+    Occupied = 11,
+    /// 施設の間口が、歩道のある縦か横の道路に面していない。
+    NoRoadAccess = 12,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 11] = [
+    pub const ALL: [DenyReason; 13] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -89,6 +94,8 @@ impl DenyReason {
         DenyReason::AlreadyOwned,
         DenyReason::NoZonableTile,
         DenyReason::ZoneUnchanged,
+        DenyReason::Occupied,
+        DenyReason::NoRoadAccess,
     ];
 
     pub fn index(self) -> usize {
@@ -115,6 +122,8 @@ pub struct World {
     network: Network,
     population: Population,
     buildings: Buildings,
+    /// プレイヤーが置いた公共の施設。置いた順に並ぶ。
+    facilities: Vec<Facility>,
 }
 
 mod growth;
@@ -166,6 +175,7 @@ impl World {
             network,
             population: Population::default(),
             buildings: Buildings::default(),
+            facilities: Vec::new(),
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
         for coord in coords {
@@ -324,6 +334,12 @@ impl World {
         if let Err(reason) = line.tiles().try_for_each(|t| self.check_buildable(t)) {
             return ApplyOutcome::Denied(reason);
         }
+        if line.tiles().any(|t| {
+            self.tile_state(t)
+                .is_some_and(|(_, u)| u == TileUse::Facility)
+        }) {
+            return ApplyOutcome::Denied(DenyReason::Occupied);
+        }
         let cost = road_cost(kind, &line);
         if self.money < cost {
             return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
@@ -385,6 +401,11 @@ impl World {
     /// メモリに置いているチャンクを座標の順に返す。
     pub fn chunks(&self) -> impl Iterator<Item = &Chunk> {
         self.chunks.values()
+    }
+
+    /// プレイヤーが置いた公共の施設。置いた順に並ぶ。
+    pub fn facilities(&self) -> &[Facility] {
+        &self.facilities
     }
 
     /// 区画に建った建物。
@@ -467,9 +488,8 @@ impl World {
             Command::BuildRoad { from, to, kind } => self.build_road(from, to, kind),
             Command::Bulldoze { area } => self.bulldoze(area),
             Command::PaintZone { area, zone } => self.paint_zone(area, zone),
-            Command::PlaceBuilding { .. } | Command::SetSignal { .. } => {
-                ApplyOutcome::NotImplemented
-            }
+            Command::PlaceBuilding { kind, at, rotation } => self.place_service(kind, at, rotation),
+            Command::SetSignal { .. } => ApplyOutcome::NotImplemented,
         }
     }
 
@@ -510,6 +530,7 @@ impl StateHash for World {
         h.write(&self.network);
         h.write(&self.population);
         h.write(&self.buildings);
+        h.write(&self.facilities);
     }
 }
 
@@ -534,10 +555,12 @@ mod tests {
             | DenyReason::NotAdjacent
             | DenyReason::AlreadyOwned
             | DenyReason::NoZonableTile
-            | DenyReason::ZoneUnchanged => DenyReason::ALL.contains(&r),
+            | DenyReason::ZoneUnchanged
+            | DenyReason::Occupied
+            | DenyReason::NoRoadAccess => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 11);
+        assert_eq!(DenyReason::ALL.len(), 13);
     }
     use crate::command::{MAX_TAX_PERMILLE, NodeId};
 

@@ -10,11 +10,14 @@ use super::World;
 use crate::building::{Building, MAX_LEVEL, MAX_LOT_SIDE, demand};
 use crate::chunk::{Layer, TileUse};
 use crate::clock::TICKS_PER_DAY;
+use crate::command::ServiceKind;
 use crate::command::ZoneKind;
 use crate::id::BuildingId;
 use crate::network::{Dir, LaneMode, LinkId};
 use crate::rng::{RngPurpose, rng};
+use crate::service::{Facility, Supply, evaluate_supply};
 use crate::tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
+use crate::world::{ApplyOutcome, DenyReason};
 
 /// 建物が建つ・育つかを見る間隔（tick）。等速で 1 秒に 1 回である。
 pub const GROWTH_INTERVAL: u64 = 30;
@@ -25,8 +28,11 @@ pub const SPAWN_PER_ZONE: u32 = 2;
 /// 段階が 1 つ上がるまでの時間（tick）。
 pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;
 
-/// 間口のマスから道路へ向かう 1 歩の候補。この順に調べる。
-const DIRS: [(i64, i64); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+/// 電気と水道が届いているかを見直す間隔（tick）。等速で 10 秒に 1 回である。
+pub const SUPPLY_INTERVAL: u64 = 300;
+
+/// 間口のマスから道路へ向かう 1 歩の候補。この順に調べる。`PlaceBuilding` の `rotation` もこの順である。
+pub(super) const DIRS: [(i64, i64); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
 
 fn step(t: TilePos, d: (i64, i64), k: i64) -> TilePos {
     let at = |v: i64, s: i64| {
@@ -56,7 +62,7 @@ fn lot_tiles(
 
 impl World {
     /// マスの区画と使い道。メモリにないチャンクのマスは `None` である。
-    fn tile_state(&self, t: TilePos) -> Option<(Option<ZoneKind>, TileUse)> {
+    pub(super) fn tile_state(&self, t: TilePos) -> Option<(Option<ZoneKind>, TileUse)> {
         let tiles = self.chunks.get(&t.chunk()?)?.layer(Layer::Ground)?;
         let (lx, ly) = t.local();
         let i = local_index(lx, ly);
@@ -158,13 +164,17 @@ impl World {
     /// 段階を上げ、需要のある区画に建物を建てる。`GROWTH_INTERVAL` ごとに呼ばれる。
     pub(super) fn grow_buildings(&mut self) {
         let tick = self.tick;
+        if tick.0.is_multiple_of(SUPPLY_INTERVAL) {
+            self.update_supply();
+        }
         if !tick.0.is_multiple_of(GROWTH_INTERVAL) {
             return;
         }
         let ids: Vec<BuildingId> = self.buildings.iter().map(|(id, _)| id).collect();
         for id in ids {
             let b = self.buildings.get_mut(id).expect("建物がない");
-            if b.level < MAX_LEVEL && tick.since(b.leveled_at) >= LEVEL_UP_TICKS {
+            let supplied = b.supply.power && b.supply.water;
+            if supplied && b.level < MAX_LEVEL && tick.since(b.leveled_at) >= LEVEL_UP_TICKS {
                 b.level += 1;
                 b.leveled_at = tick;
             }
@@ -216,12 +226,88 @@ impl World {
             entrance,
             level: 1,
             leveled_at: self.tick,
+            supply: Supply::default(),
         });
         self.write_occupancy(tiles.into_iter().map(|t| (t, TileUse::Building)));
     }
 
     /// 道路や区画が変わったあとに呼ぶ。条件の崩れた建物を消し、残った建物の出入口を付け直す。
+    /// 建物ごとの電気と水道の届き方を見直す。
+    fn update_supply(&mut self) {
+        let result = evaluate_supply(&self.network, &self.facilities, &self.buildings);
+        for (id, supply) in result {
+            self.buildings.get_mut(id).expect("建物がない").supply = supply;
+        }
+    }
+
+    /// 公共の施設を置く。`at` から `DIRS[rotation]` へ 1 歩のマスが道路で、敷地は反対側へ延びる。
+    pub(super) fn place_service(
+        &mut self,
+        kind: ServiceKind,
+        at: TilePos,
+        rotation: u8,
+    ) -> ApplyOutcome {
+        let toward_road = DIRS[usize::from(rotation)];
+        let (w, k) = kind.size();
+        let tiles: Vec<TilePos> = lot_tiles(at, toward_road, w, k)
+            .map(|(_, _, t)| t)
+            .collect();
+        if let Err(reason) = tiles.iter().try_for_each(|t| self.check_buildable(*t)) {
+            return ApplyOutcome::Denied(reason);
+        }
+        if tiles.iter().any(|t| {
+            !matches!(
+                self.tile_state(*t),
+                Some((_, TileUse::Empty | TileUse::Building))
+            )
+        }) {
+            return ApplyOutcome::Denied(DenyReason::Occupied);
+        }
+        let front_row = lot_tiles(at, toward_road, w, 1).map(|(_, _, t)| t);
+        let Some(entrance) = self.frontage(at, toward_road) else {
+            return ApplyOutcome::Denied(DenyReason::NoRoadAccess);
+        };
+        let mut front_row = front_row;
+        if front_row.any(|t| self.frontage(t, toward_road).is_none()) {
+            return ApplyOutcome::Denied(DenyReason::NoRoadAccess);
+        }
+        let cost = kind.cost();
+        if self.money < cost {
+            return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
+        }
+        self.money = self.money - cost;
+        let far = *tiles.last().expect("敷地が空");
+        self.facilities.push(Facility {
+            kind,
+            area: TileRect::from_corners(at, far),
+            front: at,
+            toward_road,
+            entrance: Some(entrance),
+        });
+        // CS2 と同じく、施設の下の区画は消し、区画の建物は取り壊す。
+        let mut zones = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
+        for t in &tiles {
+            let (lx, ly) = t.local();
+            zones
+                .entry(t.chunk().expect("チャンクがない"))
+                .or_default()
+                .push((local_index(lx, ly), None));
+        }
+        self.write_zones(zones);
+        self.refresh_buildings();
+        self.write_occupancy(tiles.into_iter().map(|t| (t, TileUse::Facility)));
+        ApplyOutcome::Applied
+    }
+
     pub(super) fn refresh_buildings(&mut self) {
+        let facilities: Vec<Option<LinkId>> = self
+            .facilities
+            .iter()
+            .map(|f| self.frontage(f.front, f.toward_road))
+            .collect();
+        for (f, entrance) in self.facilities.iter_mut().zip(facilities) {
+            f.entrance = entrance;
+        }
         let all: Vec<(BuildingId, Building)> =
             self.buildings.iter().map(|(id, b)| (id, *b)).collect();
         for (id, b) in all {
@@ -254,6 +340,7 @@ impl World {
 mod tests {
     use super::*;
     use crate::command::{Command, RoadKind};
+    use crate::units::{Money, Tick};
     use crate::world::ApplyOutcome;
 
     fn rect(a: (i64, i64), b: (i64, i64)) -> TileRect {
@@ -332,6 +419,15 @@ mod tests {
     #[test]
     fn buildings_level_up_once_a_day() {
         let mut w = zoned_street();
+        // 電気と水道が届いていないと段階は上がらない。
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
+            ApplyOutcome::Applied
+        );
         run(&mut w, GROWTH_INTERVAL + 1);
         let (id, b) = w.buildings().iter().next().map(|(id, b)| (id, *b)).unwrap();
         assert_eq!(b.level, 1);
@@ -372,5 +468,151 @@ mod tests {
         assert_eq!(w.apply(&bulldoze), ApplyOutcome::Applied);
         assert!(w.buildings().is_empty());
         check_buildings(&w);
+    }
+
+    fn place(w: &mut World, kind: ServiceKind, at: (i64, i64), rotation: u8) -> ApplyOutcome {
+        w.apply(&Command::PlaceBuilding {
+            kind,
+            at: TilePos::new(at.0, at.1),
+            rotation,
+        })
+    }
+
+    #[test]
+    fn services_supply_connected_buildings_so_they_level_up() {
+        let mut w = zoned_street();
+        // 同じ種類の区画を、つながっていない別の通りにも塗る。
+        let far = Command::BuildRoad {
+            from: TilePos::new(0, 40),
+            to: TilePos::new(40, 40),
+            kind: RoadKind::Small,
+        };
+        assert_eq!(w.apply(&far), ApplyOutcome::Applied);
+        for (area, zone) in [
+            (rect((0, 34), (40, 39)), ZoneKind::Residential),
+            (rect((0, 41), (40, 46)), ZoneKind::Industrial),
+        ] {
+            let paint = Command::PaintZone {
+                area,
+                zone: Some(zone),
+            };
+            assert_eq!(w.apply(&paint), ApplyOutcome::Applied);
+        }
+        let money = w.money();
+        // 発電所は (0..=3, 6..=9)、浄水場は (6..=7, 8..=9) を占め、y = 10 の道路に面する。
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            w.money(),
+            money - ServiceKind::PowerPlant.cost() - ServiceKind::WaterPump.cost()
+        );
+        assert_eq!(
+            w.tile_state(TilePos::new(0, 6)),
+            Some((None, TileUse::Facility))
+        );
+        run(&mut w, LEVEL_UP_TICKS + SUPPLY_INTERVAL + GROWTH_INTERVAL);
+        check_buildings(&w);
+        let mut near = 0;
+        for (_, b) in w.buildings().iter() {
+            if b.area.min.y < 20 {
+                assert!(b.supply.power && b.supply.water, "{b:?}");
+                near += 1;
+            } else {
+                assert_eq!((b.supply, b.level), (Supply::default(), 1), "{b:?}");
+            }
+        }
+        assert!(near > 0);
+        assert!(w.buildings().iter().any(|(_, b)| b.level >= 2));
+        // 道路を施設の上に引くことはできない。
+        let over = Command::BuildRoad {
+            from: TilePos::new(1, 0),
+            to: TilePos::new(1, 9),
+            kind: RoadKind::Small,
+        };
+        assert_eq!(w.apply(&over), ApplyOutcome::Denied(DenyReason::Occupied));
+    }
+
+    #[test]
+    fn services_need_owned_free_land_facing_a_road_and_money() {
+        let mut w = zoned_street();
+        let pump = ServiceKind::WaterPump;
+        assert_eq!(
+            place(&mut w, pump, (5, 10), 2),
+            ApplyOutcome::Denied(DenyReason::Occupied)
+        );
+        assert_eq!(
+            place(&mut w, pump, (5, 30), 2),
+            ApplyOutcome::Denied(DenyReason::NoRoadAccess)
+        );
+        // 敷地の一部が道路の端を越えて、間口の 1 マスが道路に面さない。
+        assert_eq!(
+            place(&mut w, pump, (0, 9), 2),
+            ApplyOutcome::Denied(DenyReason::NoRoadAccess)
+        );
+        assert_eq!(
+            place(&mut w, pump, (200, 9), 2),
+            ApplyOutcome::Denied(DenyReason::NotOwned)
+        );
+        w.money = Money(10);
+        assert_eq!(
+            place(&mut w, pump, (7, 9), 2),
+            ApplyOutcome::Denied(DenyReason::NotEnoughMoney)
+        );
+        let bad = Command::PlaceBuilding {
+            kind: pump,
+            at: TilePos::new(7, 9),
+            rotation: 4,
+        };
+        assert_eq!(w.apply(&bad), ApplyOutcome::Rejected);
+        assert!(w.facilities().is_empty());
+    }
+
+    #[test]
+    fn supply_fails_when_demand_exceeds_capacity() {
+        let mut w = World::new(0);
+        let road = Command::BuildRoad {
+            from: TilePos::new(0, 10),
+            to: TilePos::new(40, 10),
+            kind: RoadKind::Small,
+        };
+        assert_eq!(w.apply(&road), ApplyOutcome::Applied);
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
+            ApplyOutcome::Applied
+        );
+        let entrance = w.frontage(TilePos::new(20, 9), (0, 1)).unwrap();
+        // 16 マスで段階 5 の建物を 4 棟置くと、需要は 320 になる。電気（400）は足り、水道（300）は足りない。
+        for i in 0..4 {
+            w.buildings.insert(Building {
+                zone: ZoneKind::Residential,
+                area: rect((10 + 4 * i, 6), (13 + 4 * i, 9)),
+                front: TilePos::new(10 + 4 * i, 9),
+                toward_road: (0, 1),
+                entrance,
+                level: MAX_LEVEL,
+                leveled_at: Tick::ZERO,
+                supply: Supply::default(),
+            });
+        }
+        w.update_supply();
+        for (_, b) in w.buildings().iter() {
+            assert_eq!(
+                b.supply,
+                Supply {
+                    power: true,
+                    water: false
+                }
+            );
+        }
     }
 }

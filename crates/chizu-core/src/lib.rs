@@ -11,6 +11,7 @@ pub mod record;
 pub mod rng;
 pub mod round;
 pub mod schedule;
+pub mod service;
 pub mod state_hash;
 pub mod terrain;
 pub mod tile;
