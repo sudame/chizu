@@ -1,11 +1,14 @@
 //! コマンドの記録と再生。
 //!
-//! 受け取ったコマンドには通し番号を振り、「次に進める tick の頭で適用する」と決めて
-//! `(tick, 番号, Command)` を記録する。同じ tick のコマンドは番号順に適用する。
+//! 受け取ったコマンドには通し番号を振り、まだ step していないいまの tick に
+//! `(tick, 番号, Command)` として記録する。同じ tick のコマンドは番号順に適用する。
+//! tick T の状態は、tick が T 以下のコマンドを適用し、step を T 回済ませたものである。
 //! 再現に必要なのは、種とこの記録だけである。
 //!
-//! 記録の並びは、tick が減らず、番号が 1 件ごとに増えていく。
+//! 記録の並びは、tick が減らず、番号が 0 から 1 件ごとに 1 ずつ増えていく。
 //! 記録するときも読み戻すときも [`Command::validate`] を通すので、記録に入ったものは必ず読み戻せる。
+//! ただし、それは同じ版の中核で書いて読む場合に限る。保存を入れるまでは、検証の範囲や中身が
+//! 変わったときの古い記録との互換を保証せず、`FORMAT_VERSION` も上げない。版の運用は、保存を入れる PR で決める。
 //!
 //! # バイト列の形式
 //!
@@ -24,7 +27,7 @@
 //! |---|---|---|
 //! | 1 | `BuildRoad` | from `TilePos`、to `TilePos`、kind `u8` |
 //! | 2 | `Bulldoze` | area `TileRect` |
-//! | 3 | `PaintZone` | area `TileRect`、zone `u8` |
+//! | 3 | `PaintZone` | area `TileRect`、zone `u8`（0 は区画を消す） |
 //! | 4 | `PlaceBuilding` | kind `u8`、at `TilePos`、rotation `u8` |
 //! | 5 | `SetSignal` | index `u32`、generation `u16`、on `u8`（0 か 1） |
 //! | 6 | `BuyChunk` | cx `i32`、cy `i32` |
@@ -79,8 +82,25 @@ impl std::error::Error for OutOfOrder {}
 pub enum RecordError {
     OutOfOrder(OutOfOrder),
     Invalid(InvalidCommand),
-    /// 直前の番号が `u64::MAX` で、次の番号を振れない。
-    SeqExhausted,
+    /// 番号が 0 から 1 ずつ増えていない。
+    SeqGap(SeqGap),
+}
+
+/// 番号が 0 から 1 ずつ増えていない。`expected` が来るはずだった番号である。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeqGap {
+    pub expected: u64,
+    pub got: u64,
+}
+
+impl fmt::Display for SeqGap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "記録の番号は {} のはずが {} になっている",
+            self.expected, self.got
+        )
+    }
 }
 
 impl fmt::Display for RecordError {
@@ -88,7 +108,7 @@ impl fmt::Display for RecordError {
         match self {
             RecordError::OutOfOrder(e) => e.fmt(f),
             RecordError::Invalid(e) => e.fmt(f),
-            RecordError::SeqExhausted => write!(f, "番号を使い切った"),
+            RecordError::SeqGap(e) => e.fmt(f),
         }
     }
 }
@@ -118,7 +138,9 @@ impl CommandLog {
         self.entries.is_empty()
     }
 
-    /// 1 件足す。並びが崩れるときと、コマンドが検証を通らないときは足さない。
+    /// 1 件足す。並びが崩れるとき、番号が件数と違うとき、コマンドが検証を通らないときは足さない。
+    ///
+    /// 番号は 0 から 1 ずつ増えるので、`i` 件目の番号は `i` である。
     pub fn push(&mut self, entry: RecordedCommand) -> Result<(), RecordError> {
         if let Some(last) = self.entries.last()
             && (entry.tick < last.tick || entry.seq <= last.seq)
@@ -128,17 +150,26 @@ impl CommandLog {
                 next: (entry.tick, entry.seq),
             }));
         }
+        let expected = self.next_seq();
+        if entry.seq != expected {
+            return Err(RecordError::SeqGap(SeqGap {
+                expected,
+                got: entry.seq,
+            }));
+        }
         entry.command.validate().map_err(RecordError::Invalid)?;
         self.entries.push(entry);
         Ok(())
     }
 
+    /// 次に振る番号。これまでの件数と同じである。
+    pub fn next_seq(&self) -> u64 {
+        u64::try_from(self.entries.len()).expect("記録の件数が u64 に収まらない")
+    }
+
     /// 受け取ったコマンドを、直前の番号の次の番号で記録する。振った番号を返す。
     pub fn record(&mut self, tick: Tick, command: Command) -> Result<u64, RecordError> {
-        let seq = match self.entries.last() {
-            None => 0,
-            Some(last) => last.seq.checked_add(1).ok_or(RecordError::SeqExhausted)?,
-        };
+        let seq = self.next_seq();
         self.push(RecordedCommand { tick, seq, command })?;
         Ok(seq)
     }
@@ -180,8 +211,7 @@ impl CommandLog {
                         error: e,
                         at: r.pos,
                     },
-                    // 番号を振るのは record だけなので、push からは返らない。
-                    RecordError::SeqExhausted => unreachable!(),
+                    RecordError::SeqGap(e) => DecodeError::SeqGap(e),
                 })?;
         }
         if r.pos != bytes.len() {
@@ -210,6 +240,7 @@ pub enum DecodeError {
         at: usize,
     },
     OutOfOrder(OutOfOrder),
+    SeqGap(SeqGap),
     TrailingBytes(usize),
 }
 
@@ -229,6 +260,7 @@ impl fmt::Display for DecodeError {
                 write!(f, "{at} バイト目までのコマンドが不正：{error}")
             }
             DecodeError::OutOfOrder(e) => e.fmt(f),
+            DecodeError::SeqGap(e) => e.fmt(f),
             DecodeError::TrailingBytes(n) => write!(f, "記録のあとに {n} バイト余っている"),
         }
     }
@@ -331,6 +363,10 @@ impl<'a> Reader<'a> {
             Err(DecodeError::InvalidValue { what, at: self.pos })
         }
     }
+    fn check_code<T>(&self, what: &'static str, value: Option<T>) -> Result<T, DecodeError> {
+        value.ok_or(DecodeError::InvalidValue { what, at: self.pos })
+    }
+
     fn code<T>(&mut self, what: &'static str, from: fn(u8) -> Option<T>) -> Result<T, DecodeError> {
         let code = self.u8()?;
         from(code).ok_or(DecodeError::InvalidValue { what, at: self.pos })
@@ -352,7 +388,7 @@ fn encode_command(w: &mut Writer, c: &Command) {
         Command::PaintZone { area, zone } => {
             w.u8(3);
             w.rect(area);
-            w.u8(zone as u8);
+            w.u8(zone.map_or(0, |z| z as u8));
         }
         Command::PlaceBuilding { kind, at, rotation } => {
             w.u8(4);
@@ -393,7 +429,10 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
         2 => Command::Bulldoze { area: r.rect()? },
         3 => Command::PaintZone {
             area: r.rect()?,
-            zone: r.code("ZoneKind", ZoneKind::from_code)?,
+            zone: match r.u8()? {
+                0 => None,
+                code => Some(r.check_code("ZoneKind", ZoneKind::from_code(code))?),
+            },
         },
         4 => Command::PlaceBuilding {
             kind: r.code("ServiceKind", ServiceKind::from_code)?,
@@ -439,18 +478,21 @@ pub struct ReplayStats {
     pub denied_by: [u64; DenyReason::ALL.len()],
 }
 
-/// `world` を `ticks` だけ進め、そのあいだの tick に記録されたコマンドを各 tick の頭で適用する。
+/// `world` を `ticks` だけ進める。
 ///
-/// `world` のいまの tick より前に記録されたコマンドは、適用済みとみなして飛ばす。
+/// まず、まだ適用していない記録のうち、いまの tick までのものを適用する。そのあと 1 tick ずつ
+/// `step` し、進んだ先の tick のコマンドを適用する。終えたときの状態は、最後の tick のコマンドまで
+/// 適用したものになる。どこまで適用したかは [`World::next_seq`] で見分けるので、途中の状態から
+/// 続きを回しても、同じコマンドを二度は適用しない。
 pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
     let entries = log.entries();
-    let mut next = entries.partition_point(|e| e.tick < world.tick());
+    let mut next = entries.partition_point(|e| e.seq < world.next_seq());
     let mut stats = ReplayStats::default();
-    for _ in 0..ticks {
-        while let Some(e) = entries.get(next)
-            && e.tick == world.tick()
+    let mut apply_due = |world: &mut World, next: &mut usize| {
+        while let Some(e) = entries.get(*next)
+            && e.tick <= world.tick()
         {
-            match world.apply(&e.command) {
+            match world.apply_recorded(e.seq, &e.command) {
                 ApplyOutcome::Applied => stats.applied += 1,
                 ApplyOutcome::NotImplemented => stats.not_implemented += 1,
                 ApplyOutcome::Rejected => stats.rejected += 1,
@@ -459,9 +501,13 @@ pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
                     stats.denied_by[reason.index()] += 1;
                 }
             }
-            next += 1;
+            *next += 1;
         }
+    };
+    apply_due(world, &mut next);
+    for _ in 0..ticks {
         world.step();
+        apply_due(world, &mut next);
     }
     stats
 }
@@ -470,6 +516,7 @@ pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
 mod tests {
     use super::*;
     use crate::command::MAX_TAX_PERMILLE;
+    use crate::tile::WORLD_LIMIT;
     use proptest::prelude::*;
 
     fn sample_commands() -> Vec<Command> {
@@ -484,7 +531,11 @@ mod tests {
             },
             Command::PaintZone {
                 area: TileRect::from_corners(TilePos::new(0, 0), TilePos::new(3, 3)),
-                zone: ZoneKind::Industrial,
+                zone: Some(ZoneKind::Industrial),
+            },
+            Command::PaintZone {
+                area: TileRect::from_corners(TilePos::new(1, 1), TilePos::new(2, 2)),
+                zone: None,
             },
             Command::PlaceBuilding {
                 kind: ServiceKind::WaterPump,
@@ -499,7 +550,7 @@ mod tests {
                 on: true,
             },
             Command::BuyChunk {
-                coord: ChunkCoord::new(i32::MIN, 1),
+                coord: ChunkCoord::new(-(1 << 25), 1),
             },
             Command::SetTaxRate {
                 zone: ZoneKind::Commercial,
@@ -664,7 +715,7 @@ mod tests {
         let mut b = b"CHIZUREC".to_vec();
         b.extend_from_slice(&1_u32.to_le_bytes());
         b.extend_from_slice(&2_u64.to_le_bytes());
-        for (tick, seq) in [(1_u64, 5_u64), (2, 0)] {
+        for (tick, seq) in [(1_u64, 0_u64), (2, 0)] {
             b.extend_from_slice(&tick.to_le_bytes());
             b.extend_from_slice(&seq.to_le_bytes());
             b.extend_from_slice(&[8, 1, 0]);
@@ -700,19 +751,51 @@ mod tests {
     }
 
     #[test]
-    fn record_after_last_seq_returns_error() {
+    fn push_requires_seq_to_count_up_from_zero() {
         let mut log = CommandLog::new();
         let c = Command::SetSimSpeed {
             speed: SimSpeed::NORMAL,
         };
-        log.push(RecordedCommand {
+        let entry = |seq| RecordedCommand {
             tick: Tick(0),
-            seq: u64::MAX,
+            seq,
             command: c,
-        })
-        .unwrap();
-        assert_eq!(log.record(Tick(0), c), Err(RecordError::SeqExhausted));
-        assert_eq!(log.len(), 1);
+        };
+        assert_eq!(
+            log.push(entry(u64::MAX)),
+            Err(RecordError::SeqGap(SeqGap {
+                expected: 0,
+                got: u64::MAX
+            }))
+        );
+        log.push(entry(0)).unwrap();
+        assert_eq!(
+            log.push(entry(2)),
+            Err(RecordError::SeqGap(SeqGap {
+                expected: 1,
+                got: 2
+            }))
+        );
+        assert_eq!(log.record(Tick(0), c), Ok(1));
+        assert_eq!(log.len(), 2);
+    }
+
+    #[test]
+    fn decode_rejects_seq_gaps() {
+        for seqs in [[0_u64, 2], [1, 2], [u64::MAX - 1, u64::MAX]] {
+            let mut b = b"CHIZUREC".to_vec();
+            b.extend_from_slice(&1_u32.to_le_bytes());
+            b.extend_from_slice(&2_u64.to_le_bytes());
+            for seq in seqs {
+                b.extend_from_slice(&0_u64.to_le_bytes());
+                b.extend_from_slice(&seq.to_le_bytes());
+                b.extend_from_slice(&[8, 1, 0]);
+            }
+            assert!(
+                matches!(CommandLog::decode(&b), Err(DecodeError::SeqGap(_))),
+                "{seqs:?}"
+            );
+        }
     }
 
     #[test]
@@ -730,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_apply_at_the_head_of_their_tick() {
+    fn commands_apply_when_their_tick_is_reached() {
         let mut log = CommandLog::new();
         log.record(
             Tick(3),
@@ -740,11 +823,42 @@ mod tests {
         )
         .unwrap();
         let mut w = World::new(0);
-        replay(&mut w, &log, 3);
+        replay(&mut w, &log, 2);
         assert_eq!(w.speed(), SimSpeed::NORMAL);
         replay(&mut w, &log, 1);
         assert_eq!(w.speed(), SimSpeed::MAX);
-        assert_eq!(w.tick(), Tick(4));
+        assert_eq!(w.tick(), Tick(3));
+        assert_eq!(w.next_seq(), 1);
+        // 適用済みのコマンドは、続きを回しても二度は適用しない
+        let before = w.clone();
+        replay(&mut w, &log, 0);
+        assert_eq!(w, before);
+    }
+
+    #[test]
+    fn continuing_from_a_cloned_state_matches_replay_in_one_go() {
+        let road = Command::BuildRoad {
+            from: TilePos::new(0, 0),
+            to: TilePos::new(4, 0),
+            kind: RoadKind::Small,
+        };
+        let bulldoze = Command::Bulldoze {
+            area: TileRect::from_corners(TilePos::new(0, 0), TilePos::new(4, 0)),
+        };
+        let mut log = CommandLog::new();
+        log.record(Tick(2), road).unwrap();
+        log.record(Tick(2), bulldoze).unwrap();
+        log.record(Tick(4), road).unwrap();
+        let mut whole = World::new(0);
+        let stats = replay(&mut whole, &log, 6);
+        assert_eq!(stats.applied, 3);
+        for split in 0..=6 {
+            let mut first = World::new(0);
+            replay(&mut first, &log, split);
+            let mut rest = first.clone();
+            replay(&mut rest, &log, 6 - split);
+            assert_eq!(rest, whole, "{split} tick 目で分けた");
+        }
     }
 
     #[test]
@@ -755,8 +869,8 @@ mod tests {
         assert_eq!(
             stats,
             ReplayStats {
-                applied: 3,
-                not_implemented: 3,
+                applied: 5,
+                not_implemented: 2,
                 rejected: 0,
                 denied: 2,
                 denied_by: {
@@ -775,13 +889,32 @@ mod tests {
     }
 
     fn arb_command() -> impl Strategy<Value = Command> {
-        let tile = (any::<i64>(), any::<i64>()).prop_map(|(x, y)| TilePos::new(x, y));
+        // 座標は、原点のまわり、範囲の端の前後、i64 の全体から引く。
+        let lim = WORLD_LIMIT;
+        let coord = prop_oneof![
+            -1_000_i64..1_000,
+            (lim - 8)..=(lim + 8),
+            (-lim - 8)..=(-lim + 8),
+            any::<i64>(),
+        ];
+        let tile = (coord.clone(), coord.clone()).prop_map(|(x, y)| TilePos::new(x, y));
         let rect = (tile.clone(), tile.clone()).prop_map(|(a, b)| TileRect::from_corners(a, b));
+        let small_rect = (tile.clone(), 0_i64..256, 0_i64..256).prop_map(|(min, w, h)| {
+            let max = TilePos::new(min.x.saturating_add(w), min.y.saturating_add(h));
+            TileRect::from_corners(min, max)
+        });
+        let chunk_lim = (lim / 64) as i32;
+        let chunk = prop_oneof![
+            -4_i32..4,
+            (chunk_lim - 2)..=chunk_lim,
+            -chunk_lim - 2..=-chunk_lim + 2,
+            any::<i32>(),
+        ];
         let zone = proptest::sample::select(ZoneKind::ALL.to_vec());
         prop_oneof![
             (
-                -1_000_i64..1_000,
-                -1_000_i64..1_000,
+                coord.clone(),
+                coord.clone(),
                 -1_i64..=1,
                 -1_i64..=1,
                 1_i64..=1_024,
@@ -791,11 +924,12 @@ mod tests {
                     != (0, 0))
                 .prop_map(|(x, y, sx, sy, n, k)| Command::BuildRoad {
                     from: TilePos::new(x, y),
-                    to: TilePos::new(x + sx * n, y + sy * n),
+                    to: TilePos::new(x.saturating_add(sx * n), y.saturating_add(sy * n)),
                     kind: RoadKind::from_code(k).unwrap(),
                 }),
             rect.clone().prop_map(|area| Command::Bulldoze { area }),
-            (rect, zone.clone()).prop_map(|(area, zone)| Command::PaintZone { area, zone }),
+            (small_rect, proptest::option::of(zone.clone()))
+                .prop_map(|(area, zone)| Command::PaintZone { area, zone }),
             (1_u8..=2, tile, any::<u8>()).prop_map(|(k, at, rotation)| Command::PlaceBuilding {
                 kind: ServiceKind::from_code(k).unwrap(),
                 at,
@@ -807,7 +941,7 @@ mod tests {
                     on,
                 }
             }),
-            (any::<i32>(), any::<i32>()).prop_map(|(cx, cy)| Command::BuyChunk {
+            (chunk.clone(), chunk).prop_map(|(cx, cy)| Command::BuyChunk {
                 coord: ChunkCoord::new(cx, cy),
             }),
             (zone, 0..=MAX_TAX_PERMILLE)
@@ -825,22 +959,44 @@ mod tests {
             let mut tick = 0;
             for (dt, c) in steps {
                 tick += dt;
-                log.record(Tick(tick), c).unwrap();
+                match c.validate() {
+                    Ok(()) => { log.record(Tick(tick), c).unwrap(); }
+                    Err(e) => prop_assert_eq!(log.record(Tick(tick), c), Err(RecordError::Invalid(e))),
+                }
             }
-            prop_assert_eq!(CommandLog::decode(&log.encode()), Ok(log));
+            prop_assert_eq!(CommandLog::decode(&log.encode()), Ok(log.clone()));
+            // 検証を通ったコマンドは、範囲の端でも panic せずに適用できる。
+            let mut w = World::new(0);
+            replay(&mut w, &log, tick + 1);
         }
 
         #[test]
-        fn decode_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..200)) {
-            let _ = CommandLog::decode(&bytes);
+        fn decode_and_replay_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..200)) {
+            if let Ok(log) = CommandLog::decode(&bytes) {
+                replay(&mut World::new(0), &log, 2);
+            }
         }
 
         #[test]
-        fn decode_never_panics_after_header(tail in proptest::collection::vec(any::<u8>(), 0..200)) {
+        fn decode_and_replay_never_panic_after_header(
+            tail in proptest::collection::vec(any::<u8>(), 0..200),
+        ) {
             let mut b = b"CHIZUREC".to_vec();
             b.extend_from_slice(&1_u32.to_le_bytes());
             b.extend_from_slice(&tail);
-            let _ = CommandLog::decode(&b);
+            if let Ok(log) = CommandLog::decode(&b) {
+                replay(&mut World::new(0), &log, 2);
+            }
+        }
+
+        /// 1 件だけの記録で、tick と番号を好きに選んでも、読めたものは再生で panic しない。
+        #[test]
+        fn decoded_single_entry_replays_without_panic(tick in 0_u64..4, seq in any::<u64>()) {
+            let bytes = single(tick, seq, &[8, 1, 0]);
+            if let Ok(log) = CommandLog::decode(&bytes) {
+                prop_assert_eq!(seq, 0);
+                replay(&mut World::new(0), &log, 4);
+            }
         }
     }
 }

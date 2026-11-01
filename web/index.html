@@ -20,6 +20,40 @@
         touch-action: none;
         cursor: grab;
       }
+      #map:not([data-tool="none"]) {
+        cursor: crosshair;
+      }
+      #toolbar {
+        position: fixed;
+        bottom: 8px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        padding: 4px 8px;
+        background: rgb(255 255 255 / 85%);
+        border-radius: 4px;
+        white-space: nowrap;
+      }
+      #toolbar button[aria-pressed="true"] {
+        background: #2d6cdf;
+        color: #fff;
+      }
+      #feedback-open {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+      }
+      #feedback textarea {
+        width: 28em;
+        height: 6em;
+      }
+      #tool-info,
+      #tool-message {
+        min-width: 10em;
+        font-size: 14px;
+      }
       #overlay {
         position: fixed;
         top: 8px;
@@ -34,7 +68,7 @@
     </style>
   </head>
   <body>
-    <canvas id="map"></canvas>
+    <canvas id="map" data-tool="none"></canvas>
     <div id="overlay">
       <p id="status" data-state="loading">WASM を読み込んでいる</p>
       <canvas id="hud" width="480" height="96"></canvas>
@@ -46,6 +80,31 @@
         <button type="button" data-speed="48">48 倍</button>
       </div>
     </div>
+    <div id="toolbar">
+      <button type="button" data-tool="none" aria-pressed="true">見る</button>
+      <button type="button" data-tool="road-Small" aria-pressed="false">道路 小</button>
+      <button type="button" data-tool="road-Medium" aria-pressed="false">道路 中</button>
+      <button type="button" data-tool="road-Large" aria-pressed="false">道路 大</button>
+      <button type="button" data-tool="bulldoze" aria-pressed="false">ブルドーザ</button>
+      <button type="button" data-tool="zone-Residential" aria-pressed="false">住宅</button>
+      <button type="button" data-tool="zone-Commercial" aria-pressed="false">商業</button>
+      <button type="button" data-tool="zone-Industrial" aria-pressed="false">工業</button>
+      <button type="button" data-tool="zone-Office" aria-pressed="false">オフィス</button>
+      <button type="button" data-tool="zone-Clear" aria-pressed="false">区画を消す</button>
+      <button type="button" data-tool="buy" aria-pressed="false">土地を買う</button>
+      <span id="tool-info"></span>
+      <span id="tool-message" aria-live="polite"></span>
+    </div>
+    <button type="button" id="feedback-open" hidden>フィードバック</button>
+    <dialog id="feedback">
+      <form method="dialog">
+        <p>気づいたことを書く。画面、状態、これまでの操作の記録と一緒に保存する。</p>
+        <textarea id="feedback-note"></textarea>
+        <p id="feedback-result" aria-live="polite"></p>
+        <button type="submit" id="feedback-send">送る</button>
+        <button type="submit" value="close" formnovalidate>閉じる</button>
+      </form>
+    </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

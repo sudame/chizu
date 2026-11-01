@@ -1,6 +1,8 @@
 target/
 web/node_modules/
 web/dist/
+# 遊びながら残したフィードバック。AGENTS.md の「## フィードバック」の節を参照
+feedback/
 # wasm-bindgen が作るつなぎのコード。package.json だけは手で書いたものを置く
 web/wasm/*
 !web/wasm/package.json

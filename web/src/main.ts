@@ -1,12 +1,32 @@
+import { setupFeedback } from "./feedback.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { MapRenderer } from "./map/renderer.ts";
-import { type Geometry, roadGeometry } from "./map/roads.ts";
+import { type Color, Geometry, halfWidthOf, roadGeometry } from "./map/roads.ts";
+import {
+  buildRoadCommand,
+  bulldozeCommand,
+  buyChunkCommand,
+  clampArea,
+  MAX_ZONE_SIDE,
+  paintZoneCommand,
+  parseRoadCostTable,
+  type RoadCostTable,
+  roadCost,
+  screenToTile,
+  snapToEightDirections,
+  type Tile,
+  type Tool,
+} from "./map/tools.ts";
 import {
   CHUNK_SIDE,
+  type CommandMessage,
   isWorkerToMain,
   type MainToWorker,
+  type Outcome,
+  type RoadKindName,
   SEGMENT_STRIDE,
+  type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 
@@ -22,6 +42,9 @@ const status = element<HTMLElement>("#status");
 const canvas = element<HTMLCanvasElement>("#hud");
 const mapCanvas = element<HTMLCanvasElement>("#map");
 const pauseButton = element<HTMLButtonElement>("#pause");
+const toolInfo = element<HTMLElement>("#tool-info");
+const toolMessage = element<HTMLElement>("#tool-message");
+const toolButtons = [...document.querySelectorAll<HTMLButtonElement>("button[data-tool]")];
 const context = canvas.getContext("2d");
 if (context === null) {
   throw new Error("canvas の 2D の描画を使えない");
@@ -31,6 +54,15 @@ const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "modu
 
 function send(message: MainToWorker): void {
   worker.postMessage(message);
+}
+
+// 送ったコマンドの種類を、画面が振った番号で引く。結果の通知はこの番号で突き合わせる
+let nextCommandId = 0;
+const sentCommands = new Map<number, CommandMessage["kind"]>();
+function sendCommand(command: CommandMessage): void {
+  const id = nextCommandId++;
+  sentCommands.set(id, command.kind);
+  send({ kind: "command", id, command });
 }
 
 const pad = (n: number) => String(n).padStart(2, "0");
@@ -55,6 +87,7 @@ function draw(ctx: CanvasRenderingContext2D, header: SnapshotHeader): void {
   canvas.dataset.day = String(header.day);
   canvas.dataset.secondOfDay = String(header.secondOfDay);
   canvas.dataset.money = String(header.money);
+  money = header.money;
 }
 
 // 手元に置くチャンクの数の上限。超えたら見えていないものから捨てる
@@ -90,12 +123,16 @@ mapCanvas.addEventListener("webglcontextlost", (event) => {
 });
 mapCanvas.addEventListener("webglcontextrestored", () => {
   renderer = createRenderer();
+  if (renderer !== null) {
+    renderer.showZonable = tool.kind === "zone";
+  }
   for (const chunk of store.all()) {
     renderer?.upload(chunk);
   }
   if (roads !== null) {
     renderer?.roads.setRoads(roads);
   }
+  updatePreview();
 });
 
 const viewport = (): Viewport => ({
@@ -154,29 +191,192 @@ function startDrawing(reader: SnapshotReader, ctx: CanvasRenderingContext2D): vo
   requestAnimationFrame(frame);
 }
 
-let dragging: { id: number; x: number; y: number } | null = null;
+// 左のボタンは、この距離（CSS ピクセル）より動かしたら地図を引きずる操作とみなす。中のボタンはいつも引きずる
+const CLICK_SLOP_PX = 4;
+const ROAD_CODES: Record<RoadKindName, number> = { Small: 1, Medium: 2, Large: 3 };
+const PREVIEW_OK: Color = [0.3, 0.6, 1, 0.7];
+const PREVIEW_BAD: Color = [1, 0.3, 0.3, 0.7];
+const BULLDOZE_AREA: Color = [1, 0.3, 0.3, 0.35];
+// 区画を塗る長方形の色。renderer.ts の区画の色に合わせる
+const ZONE_AREA: Record<ZoneName, Color> = {
+  Residential: [0.15, 0.95, 0.15, 0.35],
+  Commercial: [0.25, 0.45, 0.95, 0.35],
+  Industrial: [0.95, 0.8, 0.2, 0.35],
+  Office: [0.3, 0.85, 0.95, 0.35],
+  Clear: [1, 1, 1, 0.35],
+};
+const BUY_AREA: Color = [1, 1, 1, 0.2];
+
+let tool: Tool = { kind: "none" };
+let roadCosts: RoadCostTable | null = null;
+let money = 0;
+let roadStart: Tile | null = null;
+let cursor: Tile | null = null;
+let pointer: {
+  id: number;
+  x: number;
+  y: number;
+  mode: "click" | "pan" | "area";
+  start: Tile;
+} | null = null;
+
+const tileAt = (event: PointerEvent): Tile => {
+  const rect = mapCanvas.getBoundingClientRect();
+  return screenToTile(camera, event.clientX - rect.left, event.clientY - rect.top, viewport());
+};
+
+// 道具の仮の表示と、道路の長さと費用の見積もりを書き直す
+function updatePreview(): void {
+  let geometry: Geometry | null = null;
+  let info = "";
+  if (tool.kind === "road" && cursor !== null) {
+    const from = roadStart ?? cursor;
+    const to = roadStart === null ? cursor : snapToEightDirections(roadStart, cursor);
+    geometry = new Geometry(from);
+    const half = halfWidthOf(ROAD_CODES[tool.road]);
+    if (roadStart !== null && roadCosts !== null) {
+      const cost = roadCost(roadCosts, tool.road, from, to);
+      const length = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y));
+      const color = cost > money ? PREVIEW_BAD : PREVIEW_OK;
+      geometry.segment(from, to, half, color);
+      info = `長さ ${length} マス・費用 ${cost.toLocaleString("ja-JP")}`;
+      mapCanvas.dataset.previewCost = String(cost);
+    }
+    geometry.square(from, half, PREVIEW_OK);
+  } else if ((tool.kind === "bulldoze" || tool.kind === "zone") && cursor !== null) {
+    const start = pointer?.mode === "area" ? pointer.start : cursor;
+    const end = tool.kind === "zone" ? clampArea(start, cursor, MAX_ZONE_SIDE) : cursor;
+    geometry = new Geometry(start);
+    const color = tool.kind === "zone" ? ZONE_AREA[tool.zone] : BULLDOZE_AREA;
+    geometry.rect(
+      { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y) },
+      { x: Math.max(start.x, end.x), y: Math.max(start.y, end.y) },
+      color,
+    );
+  } else if (tool.kind === "buy" && cursor !== null) {
+    const c = buyChunkCommand(cursor);
+    if (c.kind === "BuyChunk") {
+      const min = { x: c.cx * CHUNK_SIDE, y: c.cy * CHUNK_SIDE };
+      geometry = new Geometry(min);
+      geometry.rect(min, { x: min.x + CHUNK_SIDE - 1, y: min.y + CHUNK_SIDE - 1 }, BUY_AREA);
+      info = `チャンク (${c.cx}, ${c.cy})`;
+    }
+  }
+  renderer?.roads.setPreview(geometry);
+  toolInfo.textContent = info;
+}
+
+function cancelTool(): void {
+  roadStart = null;
+  if (pointer?.mode === "area") {
+    pointer = null;
+  }
+  updatePreview();
+}
+
+function selectTool(next: Tool, button: HTMLButtonElement): void {
+  tool = next;
+  for (const b of toolButtons) {
+    b.setAttribute("aria-pressed", String(b === button));
+  }
+  mapCanvas.dataset.tool = button.dataset.tool;
+  if (renderer !== null) {
+    renderer.showZonable = next.kind === "zone";
+  }
+  cancelTool();
+}
+
+function clickTile(at: Tile): void {
+  if (tool.kind === "road") {
+    if (roadStart === null) {
+      roadStart = at;
+    } else {
+      const end = snapToEightDirections(roadStart, at);
+      if (end.x !== roadStart.x || end.y !== roadStart.y) {
+        sendCommand(buildRoadCommand(tool.road, roadStart, end));
+        // CS2 と同じく、引いた終点から続けて引ける
+        roadStart = end;
+      }
+    }
+  } else if (tool.kind === "buy") {
+    sendCommand(buyChunkCommand(at));
+  }
+}
+
+mapCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    cancelTool();
+  }
+});
+// 押している指やボタンのポインター。2 つ目が来たら、どの操作も確定させずに取り消す
+const activePointers = new Set<number>();
 mapCanvas.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0) {
+  activePointers.add(event.pointerId);
+  if (activePointers.size > 1) {
+    pointer = null;
+    updatePreview();
     return;
   }
-  dragging = { id: event.pointerId, x: event.clientX, y: event.clientY };
+  if (event.button === 2) {
+    cancelTool();
+    return;
+  }
+  if (event.button !== 0 && event.button !== 1) {
+    return;
+  }
+  const area = tool.kind === "bulldoze" || tool.kind === "zone";
+  const mode = event.button === 1 ? "pan" : area ? "area" : "click";
+  pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, mode, start: tileAt(event) };
   mapCanvas.setPointerCapture(event.pointerId);
+  updatePreview();
 });
 mapCanvas.addEventListener("pointermove", (event) => {
-  if (dragging?.id !== event.pointerId) {
+  const at = tileAt(event);
+  if (cursor?.x !== at.x || cursor?.y !== at.y) {
+    cursor = at;
+    updatePreview();
+  }
+  if (pointer?.id !== event.pointerId) {
     return;
   }
-  camera.pan(event.clientX - dragging.x, event.clientY - dragging.y);
-  dragging.x = event.clientX;
-  dragging.y = event.clientY;
-});
-const endDrag = (event: PointerEvent) => {
-  if (dragging?.id === event.pointerId) {
-    dragging = null;
+  const dx = event.clientX - pointer.x;
+  const dy = event.clientY - pointer.y;
+  if (pointer.mode === "click" && Math.hypot(dx, dy) > CLICK_SLOP_PX) {
+    pointer.mode = "pan";
   }
-};
-mapCanvas.addEventListener("pointerup", endDrag);
-mapCanvas.addEventListener("pointercancel", endDrag);
+  if (pointer.mode === "pan") {
+    camera.pan(dx, dy);
+    pointer.x = event.clientX;
+    pointer.y = event.clientY;
+  }
+});
+mapCanvas.addEventListener("pointerup", (event) => {
+  activePointers.delete(event.pointerId);
+  if (pointer?.id !== event.pointerId) {
+    return;
+  }
+  const done = pointer;
+  pointer = null;
+  if (done.mode === "click") {
+    clickTile(tileAt(event));
+  } else if (done.mode === "area") {
+    const end = tileAt(event);
+    sendCommand(
+      tool.kind === "zone"
+        ? paintZoneCommand(tool.zone, done.start, clampArea(done.start, end, MAX_ZONE_SIDE))
+        : bulldozeCommand(done.start, end),
+    );
+  }
+  updatePreview();
+});
+mapCanvas.addEventListener("pointercancel", (event) => {
+  activePointers.delete(event.pointerId);
+  if (pointer?.id === event.pointerId) {
+    pointer = null;
+    updatePreview();
+  }
+});
 mapCanvas.addEventListener(
   "wheel",
   (event) => {
@@ -199,18 +399,70 @@ mapCanvas.addEventListener(
 );
 
 let paused = false;
-pauseButton.addEventListener("click", () => {
-  paused = !paused;
+function setPaused(next: boolean): void {
+  paused = next;
   pauseButton.textContent = paused ? "再開" : "一時停止";
   send({ kind: "pause", paused });
+}
+pauseButton.addEventListener("click", () => setPaused(!paused));
+
+// Worker に求めたフィードバックの状態。届いたら解決し、失敗の返事なら断る
+type FeedbackState = { state: string; commands: ArrayBuffer };
+let feedbackWaiter: { resolve: (v: FeedbackState) => void; reject: (e: Error) => void } | null =
+  null;
+setupFeedback({
+  isPaused: () => paused,
+  setPaused,
+  requestState: () =>
+    new Promise((resolve, reject) => {
+      feedbackWaiter = { resolve, reject };
+      send({ kind: "feedback" });
+    }),
+  map: mapCanvas,
+  camera: () => ({ x: camera.x, y: camera.y, zoom: camera.zoom }),
 });
+
+for (const button of toolButtons) {
+  button.addEventListener("click", () => {
+    const name = button.dataset.tool ?? "none";
+    const road = name.startsWith("road-") ? (name.slice(5) as RoadKindName) : null;
+    const zone = name.startsWith("zone-") ? (name.slice(5) as ZoneName) : null;
+    const next: Tool =
+      road !== null
+        ? { kind: "road", road }
+        : zone !== null
+          ? { kind: "zone", zone }
+          : name === "bulldoze" || name === "buy"
+            ? { kind: name }
+            : { kind: "none" };
+    selectTool(next, button);
+  });
+}
+
+const DONE: Record<CommandMessage["kind"], string> = {
+  BuildRoad: "道路を引いた",
+  Bulldoze: "道路を消した",
+  BuyChunk: "土地を買った",
+  PaintZone: "区画を塗った",
+  SetSimSpeed: "速度を変えた",
+};
+function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?: string): void {
+  const text: Record<Outcome, string> = {
+    Applied: DONE[command],
+    Denied: `できなかった：${reason ?? ""}`,
+    Rejected: `受け付けなかった：${reason ?? ""}`,
+    NotImplemented: "まだ使えない",
+  };
+  toolMessage.textContent = text[outcome];
+  // test:wasm が読む
+  toolMessage.dataset.command = command;
+  toolMessage.dataset.outcome = outcome;
+  toolMessage.dataset.count = String(Number(toolMessage.dataset.count ?? 0) + 1);
+}
 
 for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-speed]")) {
   button.addEventListener("click", () => {
-    send({
-      kind: "command",
-      command: { kind: "SetSimSpeed", speed: Number(button.dataset.speed) },
-    });
+    sendCommand({ kind: "SetSimSpeed", speed: Number(button.dataset.speed) });
   });
 }
 
@@ -234,7 +486,21 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   if (message.kind === "outcome") {
-    // 結果を画面に出すのは、道具を入れるときに足す
+    const command = sentCommands.get(message.id);
+    sentCommands.delete(message.id);
+    if (command !== undefined && command !== "SetSimSpeed") {
+      showOutcome(command, message.outcome, message.reason);
+    }
+    return;
+  }
+  if (message.kind === "feedback") {
+    feedbackWaiter?.resolve({ state: message.state, commands: message.commands });
+    feedbackWaiter = null;
+    return;
+  }
+  if (message.kind === "feedback-error") {
+    feedbackWaiter?.reject(new Error(message.message));
+    feedbackWaiter = null;
     return;
   }
   if (message.kind === "error") {
@@ -242,6 +508,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     status.dataset.state = "error";
     return;
   }
+  roadCosts = parseRoadCostTable(message.roadCosts);
   let reader: SnapshotReader;
   try {
     reader = new SnapshotReader(message.memory, message.snapshotOffset);

@@ -66,7 +66,7 @@ impl Simulation {
         self.0.snapshot().byte_offset()
     }
 
-    /// 画面から届いたコマンドを `Command` に直し、検証して記録する。記録した番号を返す。
+    /// 画面から届いたコマンドを `Command` に直し、検証して記録し、その場で適用する。記録した番号を返す。
     pub fn submit(&mut self, command: JsValue) -> Result<f64, JsError> {
         let command = command_from_js(&command)?;
         self.0
@@ -93,17 +93,17 @@ impl Simulation {
                     ApplyOutcome::Denied(_) => "Denied",
                 };
                 set(&o, "outcome", JsValue::from_str(outcome));
-                if let Some(reason) = r.reason {
-                    set(&o, "reason", JsValue::from_str(reason));
+                if let ApplyOutcome::Denied(reason) = r.outcome {
+                    set(&o, "reason", JsValue::from_str(sim::deny_text(reason)));
                 }
                 JsValue::from(o)
             })
             .collect()
     }
 
-    /// 道路網を変えた回数。変わったときだけ道路の形を読み直す。
-    pub fn network_revision(&self) -> u32 {
-        self.0.network_revision()
+    /// 道路網の版。変わったときだけ道路の形を読み直す。
+    pub fn network_version(&self) -> f64 {
+        self.0.network_version() as f64
     }
 
     /// 区間ごとに `[a の x, a の y, b の x, b の y, 種類]`。座標はマスの座標で、種類は `sim::segment_kind_code`。
@@ -120,6 +120,24 @@ impl Simulation {
         self.0.set_paused(paused);
     }
 
+    /// フィードバックに添える状態。種、tick、所持金、状態ハッシュ（16 進の 16 桁）を JSON で返す。
+    /// 種と所持金は JS の数で誤差なく表せないことがあるので、文字列にする。
+    pub fn feedback_state(&self) -> String {
+        let w = self.0.world();
+        format!(
+            "{{\"seed\":\"{}\",\"tick\":{},\"money\":\"{}\",\"stateHash\":\"{:016x}\"}}",
+            w.seed(),
+            w.tick().0,
+            w.money().0,
+            w.state_hash()
+        )
+    }
+
+    /// これまでの記録を、chizu-cli で再生できる形式で返す。
+    pub fn encode_log(&self) -> Vec<u8> {
+        self.0.log().encode()
+    }
+
     /// 等速の何倍で回しているか。
     pub fn speed(&self) -> u16 {
         self.0.world().speed().multiplier()
@@ -134,7 +152,12 @@ impl Simulation {
         self.0.chunk_owned(ChunkCoord::new(cx, cy))
     }
 
-    /// チャンクのマスを 64×64 バイトで返す。ビットの意味は `sim::TILE_WATER` にある。
+    /// `chunk_tiles` の中身が変わったかを見分ける版。チャンクの版と、近くで道路網が変わった回数から作る。
+    pub fn chunk_tiles_version(&self, cx: i32, cy: i32) -> f64 {
+        self.0.chunk_tiles_version(ChunkCoord::new(cx, cy))
+    }
+
+    /// チャンクのマスを 64×64 バイトで返す。ビットの意味は `sim::TILE_WATER` などにある。
     pub fn chunk_tiles(&self, cx: i32, cy: i32) -> Vec<u8> {
         self.0.chunk_tiles(ChunkCoord::new(cx, cy))
     }

@@ -30,6 +30,8 @@ pub enum TileUse {
     Empty = 0,
     /// 道路か歩道が通っている。
     Road = 1,
+    /// 区画に建った建物がある。
+    Building = 2,
 }
 
 /// 1 つの層のマスの表。
