@@ -58,8 +58,8 @@ impl ServiceKind {
     /// 供給量。建物の需要と同じ単位である。
     pub fn capacity(self) -> u64 {
         match self {
-            ServiceKind::PowerPlant => 1_200,
-            ServiceKind::WaterPump => 1_000,
+            ServiceKind::PowerPlant => 3_600,
+            ServiceKind::WaterPump => 3_000,
         }
     }
 }
@@ -170,6 +170,9 @@ pub struct SupplyBalance {
     pub components: Vec<[Balance; 2]>,
     /// 区間ごとの、`components` の添え字。区間の ID の順に並ぶ。
     pub segments: Vec<(SegmentId, usize)>,
+    /// 成分ごとの代表のマス。成分の中で需要が最も大きい建物の、道路に面したマスである
+    /// （需要が同じなら ID の小さい建物）。建物のない成分は `None`。
+    pub spots: Vec<Option<TilePos>>,
 }
 
 /// 成分ごとに施設の供給量と建物の需要を足したもの。
@@ -444,7 +447,22 @@ pub fn supply_balance(
         .enumerate()
         .map(|(i, r)| (r, i))
         .collect();
+    let mut spots: Vec<Option<(u64, TilePos)>> = vec![None; order.len()];
+    for (id, root) in &t.placed {
+        let (Some(root), Some(b)) = (root, buildings.get(*id)) else {
+            continue;
+        };
+        let Some(&slot) = order.get(root) else {
+            continue;
+        };
+        let d = building_demand(b);
+        // 建物は ID の順に来るので、需要が等しいときは先に来た小さい ID を残す。
+        if spots[slot].is_none_or(|(best, _)| d > best) {
+            spots[slot] = Some((d, b.front));
+        }
+    }
     SupplyBalance {
+        spots: spots.into_iter().map(|s| s.map(|(_, p)| p)).collect(),
         components: order.keys().map(|r| t.balance[*r]).collect(),
         segments: roots.into_iter().map(|(id, r)| (id, order[&r])).collect(),
     }

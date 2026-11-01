@@ -115,8 +115,26 @@ fn one_plant_and_one_pump_serve_a_small_town() {
     add_facility(&mut w, ServiceKind::WaterPump);
     run_day(&mut w);
     assert!(served(&w) >= 40, "{} 棟にしか届かない", served(&w));
-    // 足りない分は、施設を置かない限り届かないまま残る。
+    // 段階が上がって需要が伸びると、1 基ずつでは足りなくなる。足りない分は、
+    // 施設を置かない限り届かないまま残る。
+    for _ in 0..5 {
+        run_day(&mut w);
+    }
     assert!(served(&w) < w.buildings().len());
+}
+
+/// 最初の発電所と浄水場の維持費は、街が育った日の収入の 2 割に収まる。
+#[test]
+fn upkeep_of_one_plant_and_one_pump_stays_within_a_fifth_of_income() {
+    let mut w = town();
+    add_facility(&mut w, ServiceKind::PowerPlant);
+    add_facility(&mut w, ServiceKind::WaterPump);
+    for _ in 0..4 {
+        run_day(&mut w);
+    }
+    let f = w.finances();
+    let upkeep: i64 = f.facility_upkeep.iter().map(|m| m.0).sum();
+    assert!(upkeep * 5 <= f.income().0, "{f:?}");
 }
 
 /// 需要に合わせて施設を足していく街は、税率が標準のままでも黒字を保つ。

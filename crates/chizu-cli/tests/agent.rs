@@ -502,3 +502,41 @@ fn observe_gives_people_and_traffic_counts() {
     // 同じ記録を再生した observe は、毎回同じ値になる。
     assert_eq!(o, json(&cli(&["agent", "observe", d])));
 }
+
+/// 施設のない街では、足りない網の代表のマスが出て、余りは負か 0 になる。
+#[test]
+fn observe_points_at_the_short_network() {
+    let dir = session("agent-short-network");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let fresh = json(&cli(&["agent", "observe", d]));
+    let power = &fresh["utilities"]["power"];
+    assert_eq!(power["headroom"], 0);
+    assert!(power["headroomPermille"].is_null());
+    assert_eq!(power["lowHeadroom"], false);
+    assert_eq!(power["shortAt"], serde_json::json!([]));
+    let [x, y] = [
+        fresh["highway"]["end"][0].as_i64().unwrap(),
+        fresh["highway"]["end"][1].as_i64().unwrap(),
+    ];
+    let inward = -fresh["highway"]["outward"][0].as_i64().unwrap();
+    let (a, b) = (x + inward, x + 40 * inward);
+    let cmds = write(
+        &dir.join("c.json"),
+        &serde_json::json!([
+            {"type":"BuildRoad","from":[x,y],"to":[b,y],"kind":"Medium"},
+            {"type":"PaintZone","area":[[a,y+1],[b,y+6]],"zone":"Residential"},
+        ])
+        .to_string(),
+    );
+    cli(&["agent", "act", d, &cmds]);
+    cli(&["agent", "advance", d, &(2 * 7200).to_string()]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let power = &o["utilities"]["power"];
+    assert_eq!(power["capacity"], 0);
+    assert!(power["demand"].as_u64().unwrap() > 0);
+    assert!(power["headroom"].as_i64().unwrap() < 0);
+    assert_eq!(power["shortNetworks"], 1);
+    let at = &power["shortAt"][0]["at"];
+    assert!(at[0].is_i64() && at[1].is_i64(), "{power}");
+}
