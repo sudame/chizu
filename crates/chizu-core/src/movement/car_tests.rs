@@ -313,6 +313,10 @@ fn a_car_parks_at_the_destination_or_nearby_and_walks_the_rest() {
         .spawn_drive_between(&c.net, &mut c.router, &b, far, shop, Tick::ZERO)
         .unwrap();
     assert_eq!(c.trips.parked(near), 1);
+    let mut arrived = Vec::new();
+    for _ in 0..10 {
+        arrived.extend(c.step());
+    }
     // どこも満車（遠い建物は範囲の外）なので、行き先の前で車は消える。
     let third = c
         .trips
@@ -320,7 +324,6 @@ fn a_car_parks_at_the_destination_or_nearby_and_walks_the_rest() {
         .unwrap();
     assert_eq!((c.trips.parked(home), c.trips.parked(far)), (0, 0));
     let mut walked = false;
-    let mut arrived = Vec::new();
     for _ in 0..300 {
         arrived.extend(c.step());
         walked |= c
