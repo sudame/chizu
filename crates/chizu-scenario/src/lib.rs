@@ -132,14 +132,19 @@ pub fn city_grid_100k() -> Network {
 
 /// `count` 人ぶんの、家から職場への車の通勤の依頼。
 ///
-/// 家はすべての車のリンクから一様に選ぶ。職場は車のリンクの約 1/10 に集まっているとし、そこから一様に選ぶ。
-/// 職場のリンクは 1 本ずつ 1/10 の確率で選ぶので、区間の向きに片寄らない。
-pub fn commute_requests(seed: u64, net: &Network, count: u32) -> Vec<RouteRequest> {
+/// 家はすべての車のリンクから一様に選ぶ。職場は車のリンクの約 `1 / office_every` に集まっているとし、
+/// そこから一様に選ぶ。職場のリンクは 1 本ずつ `1 / office_every` の確率で選ぶので、区間の向きに片寄らない。
+pub fn commute_requests(
+    seed: u64,
+    net: &Network,
+    count: u32,
+    office_every: u32,
+) -> Vec<RouteRequest> {
     let links: Vec<LinkId> = net.links().filter(|l| l.mode == LaneMode::Car).collect();
     let len = u32::try_from(links.len()).expect("リンクが多すぎる");
     let mut offices: Vec<LinkId> = (0_u64..)
         .zip(&links)
-        .filter(|(i, _)| rng(seed, RngPurpose::JobAssignment, *i, Tick(1)).chance(1, 10))
+        .filter(|(i, _)| rng(seed, RngPurpose::JobAssignment, *i, Tick(1)).chance(1, office_every))
         .map(|(_, l)| *l)
         .collect();
     if offices.is_empty() {
@@ -168,8 +173,8 @@ mod tests {
     fn grid_is_connected_for_commutes() {
         let n = grid_network(6, 4, 3);
         assert_eq!(n.nodes().count(), 49);
-        let reqs = commute_requests(1, &n, 500);
-        assert_eq!(reqs, commute_requests(1, &n, 500));
+        let reqs = commute_requests(1, &n, 500, 10);
+        assert_eq!(reqs, commute_requests(1, &n, 500, 10));
         let routes = AstarRouter::new(&n).route_batch(&reqs);
         assert!(routes.iter().all(Option::is_some));
         let forward = reqs.iter().filter(|r| r.to.dir == Dir::Forward).count();

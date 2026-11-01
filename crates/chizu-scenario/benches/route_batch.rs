@@ -1,40 +1,70 @@
 //! 経路探索の一括の探索にかかる時間。覚えた結果がない状態から解く。
 //!
-//! - `1k`：探索 1,000 件。
-//! - `commute_100k`：人口 10 万の規模の格子で、10 万人ぶんの通勤の経路。
-//! - `mixed_100k`：同じ通勤の半分を歩いて探す。車と歩行者の依頼が混ざった一括である。
+//! 人口 10 万の規模の格子で、職場が車のリンクの約 1/10、1/100、1/1000 に集まっている通勤を解く。
+//!
+//! - `astar`：束ねずに、すべて A* で解く。
+//! - `bundled`：同じ着くリンク（または出発のリンク）の依頼を束ね、1 対多の探索で解く。
+//! - `1k` と `100k`：探索の件数。
+//! - `mixed_100k`：職場が 1/10 の通勤の半分を歩いて探す。車と歩行者の依頼が混ざった一括である。
+//! - `return_100k`：職場が 1/100 の通勤の帰り道。出発のリンクで束ねる。
+//! - `scatter_100k`：1 か所から全員が散らばる。束ねた組が 1 つだけになる。
 
 use std::hint::black_box;
 
 use chizu_core::LaneMode;
-use chizu_core::routing::{AstarRouter, Router};
+use chizu_core::routing::{AstarRouter, RouteRequest, Router};
 use chizu_scenario::{city_grid_100k, commute_requests};
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn route_batch(c: &mut Criterion) {
     let net = city_grid_100k();
-    let router = AstarRouter::new(&net);
-    let mut mixed = commute_requests(1, &net, 100_000);
+    let bundled = AstarRouter::new(&net);
+    let astar = bundled.clone().with_bundle_min(usize::MAX);
+    let mut cases: Vec<(String, Vec<RouteRequest>)> = Vec::new();
+    for count in [1_000, 100_000] {
+        for office_every in [10, 100, 1_000] {
+            let label = format!("{}k/offices_1_{office_every}", count / 1_000);
+            cases.push((label, commute_requests(1, &net, count, office_every)));
+        }
+    }
+    let mut mixed = commute_requests(1, &net, 100_000, 10);
     for r in mixed.iter_mut().skip(1).step_by(2) {
         r.from.mode = LaneMode::Sidewalk;
         r.to.mode = LaneMode::Sidewalk;
         r.mode = LaneMode::Sidewalk;
     }
-    let cases = [
-        ("1k", commute_requests(1, &net, 1_000)),
-        ("commute_100k", commute_requests(1, &net, 100_000)),
-        ("mixed_100k", mixed),
-    ];
+    cases.push(("mixed_100k".to_string(), mixed));
+    // 帰り道。職場から家へ、出発のリンクで束ねる向きになる。
+    let swap = |r: &RouteRequest| RouteRequest {
+        from: r.to,
+        to: r.from,
+        ..*r
+    };
+    let back: Vec<RouteRequest> = commute_requests(1, &net, 100_000, 100)
+        .iter()
+        .map(swap)
+        .collect();
+    cases.push(("return_100k/offices_1_100".to_string(), back));
+    // 1 か所から全員が散らばる。組が 1 つだけになる。
+    let mut scatter = commute_requests(1, &net, 100_000, 10);
+    let origin = scatter[0].from;
+    for r in &mut scatter {
+        r.from = origin;
+    }
+    cases.push(("scatter_100k".to_string(), scatter));
+
     let mut group = c.benchmark_group("route_batch");
     group.sample_size(10);
-    for (name, reqs) in &cases {
-        group.bench_function(*name, |b| {
-            b.iter_batched(
-                || router.clone(),
-                |mut r| black_box(r.route_batch(reqs)),
-                BatchSize::LargeInput,
-            );
-        });
+    for (label, reqs) in &cases {
+        for (name, router) in [("astar", &astar), ("bundled", &bundled)] {
+            group.bench_function(BenchmarkId::new(name, label), |b| {
+                b.iter_batched(
+                    || router.clone(),
+                    |mut r| black_box(r.route_batch(reqs)),
+                    BatchSize::LargeInput,
+                );
+            });
+        }
     }
     group.finish();
 }
