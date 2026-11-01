@@ -155,6 +155,11 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
       case "pause":
         setPaused(message.paused);
         break;
+      case "feedback": {
+        const commands = sim.encode_log().buffer as ArrayBuffer;
+        reply({ kind: "feedback", state: sim.feedback_state(), commands }, [commands]);
+        break;
+      }
       case "view":
         // 送るのはタイマーの側だけにして、1 周期に送る数を CHUNKS_PER_FRAME に抑える
         chunkSync.setView(message.visible, message.forgotten);

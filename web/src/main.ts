@@ -1,3 +1,4 @@
+import { setupFeedback } from "./feedback.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { MapRenderer } from "./map/renderer.ts";
@@ -371,10 +372,24 @@ mapCanvas.addEventListener(
 );
 
 let paused = false;
-pauseButton.addEventListener("click", () => {
-  paused = !paused;
+function setPaused(next: boolean): void {
+  paused = next;
   pauseButton.textContent = paused ? "再開" : "一時停止";
   send({ kind: "pause", paused });
+}
+pauseButton.addEventListener("click", () => setPaused(!paused));
+
+// Worker に求めたフィードバックの状態。届いたら解決する
+let feedbackWaiter: ((value: { state: string; commands: ArrayBuffer }) => void) | null = null;
+setupFeedback({
+  pause: () => setPaused(true),
+  requestState: () =>
+    new Promise((resolve) => {
+      feedbackWaiter = resolve;
+      send({ kind: "feedback" });
+    }),
+  map: mapCanvas,
+  camera: () => ({ x: camera.x, y: camera.y, zoom: camera.zoom }),
 });
 
 for (const button of toolButtons) {
@@ -442,6 +457,11 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     if (command !== undefined && command !== "SetSimSpeed") {
       showOutcome(command, message.outcome, message.reason);
     }
+    return;
+  }
+  if (message.kind === "feedback") {
+    feedbackWaiter?.({ state: message.state, commands: message.commands });
+    feedbackWaiter = null;
     return;
   }
   if (message.kind === "error") {
