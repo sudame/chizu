@@ -37,9 +37,20 @@ mise run test:rust     # cargo test --workspace
 mise run lint:md       # markdown の検査（rumdl）
 mise run lint:actions  # ワークフローの検査（jactionlint）
 mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core の浮動小数点の検査
+mise run lint:wasm     # wasm32 のターゲットで chizu-wasm に cargo clippy
+mise run lint:web      # Biome と tsc --noEmit
+mise run test:web      # Vitest
+mise run test:wasm     # ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかを確かめる
+mise run build         # build:wasm と build:web をまとめて回す
+mise run build:wasm    # chizu-wasm をスレッドつきでビルドし、wasm-bindgen で web/wasm につなぎのコードを作る
+mise run build:web     # Vite で web/dist にビルドする
+mise run dev           # WASM をビルドしてから Vite の開発サーバーを立てる
 ```
 
 `test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。
+
+WASM のスレッドに要る rustflags は `.cargo/config.toml` で wasm32 のターゲットに限って効かせている。`build-std` は `build:wasm` タスクのコマンドで渡す。
+`crates/chizu-wasm` の `wasm-bindgen` の版と、`mise.toml` の `wasm-bindgen` の版はそろえる。
 
 決まった記録を再生した状態ハッシュは `crates/chizu-core/tests/golden/` に置いてある。
 シミュレーションや記録の形式を意図して変えたときは、`CHIZU_UPDATE_GOLDEN=1 cargo test -p chizu-core --test golden` で書き直し、同じ PR に含める。

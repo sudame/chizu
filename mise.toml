@@ -3,10 +3,24 @@
 idiomatic_version_file_enable_tools = ["rust"]
 
 [tools]
+biome = "2.6.4"
 jactionlint = "2.4.0"
+node = "26.13.0"
+pnpm = "12.16.1"
 ripgrep = "15.2.0"
 rumdl = "0.3.2"
 shellcheck = "0.11.0"
+# crates/chizu-wasm の wasm-bindgen と同じ版にする
+"github:wasm-bindgen/wasm-bindgen" = "0.2.130"
+
+# test:wasm で使うヘッドレスの Chrome。Chrome for Testing の配布物を版を固定して入れる
+[tools."http:chrome-headless-shell"]
+version = "156.0.8078.80"
+
+[tools."http:chrome-headless-shell".platforms]
+macos-arm64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-arm64/chrome-headless-shell-mac-arm64.zip" }
+macos-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/mac-x64/chrome-headless-shell-mac-x64.zip" }
+linux-x64 = { url = "https://storage.googleapis.com/chrome-for-testing-public/{{ version }}/linux64/chrome-headless-shell-linux64.zip" }
 
 [tasks."lint:md"]
 run = "rumdl check ."
@@ -23,11 +37,56 @@ run = [
   "scripts/check-no-float.sh",
 ]
 
+[tasks."lint:wasm"]
+# lint:rust はネイティブでしか回らず、wasm32 に限った cfg の中を見ない。build:wasm と同じ条件で clippy を回す
+run = "cargo clippy --package chizu-wasm --target wasm32-unknown-unknown -Z build-std=panic_abort,std -- -D warnings"
+
+[tasks."install:web"]
+dir = "web"
+run = "pnpm install --frozen-lockfile"
+
+[tasks."lint:web"]
+# tsc は wasm-bindgen が作る型定義を読むので、先に WASM をビルドする
+depends = ["install:web", "build:wasm"]
+dir = "web"
+run = ["biome check .", "pnpm exec tsc --noEmit"]
+
 [tasks.lint]
-depends = ["lint:md", "lint:actions", "lint:rust"]
+depends = ["lint:md", "lint:actions", "lint:rust", "lint:wasm", "lint:web"]
 
 [tasks."test:rust"]
 run = "cargo test --workspace"
 
+[tasks."test:web"]
+depends = ["install:web"]
+dir = "web"
+run = "pnpm exec vitest run"
+
+[tasks."test:wasm"]
+description = "ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかを確かめる"
+depends = ["build:web"]
+dir = "web"
+run = "node scripts/test-wasm.ts"
+
 [tasks.test]
-depends = ["test:rust"]
+depends = ["test:rust", "test:web", "test:wasm"]
+
+[tasks."build:wasm"]
+# スレッドを使うには std を atomics つきでビルドし直す必要がある。wasm32 用の rustflags は .cargo/config.toml にある
+run = [
+  "cargo build --release --target wasm32-unknown-unknown --package chizu-wasm -Z build-std=panic_abort,std",
+  "wasm-bindgen --target web --out-dir web/wasm target/wasm32-unknown-unknown/release/chizu_wasm.wasm",
+]
+
+[tasks."build:web"]
+depends = ["install:web", "build:wasm"]
+dir = "web"
+run = "pnpm exec vite build"
+
+[tasks.build]
+depends = ["build:wasm", "build:web"]
+
+[tasks.dev]
+depends = ["install:web", "build:wasm"]
+dir = "web"
+run = "pnpm exec vite"
