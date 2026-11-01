@@ -287,7 +287,15 @@ window.addEventListener("keydown", (event) => {
     cancelTool();
   }
 });
+// 押している指やボタンのポインター。2 つ目が来たら、どの操作も確定させずに取り消す
+const activePointers = new Set<number>();
 mapCanvas.addEventListener("pointerdown", (event) => {
+  activePointers.add(event.pointerId);
+  if (activePointers.size > 1) {
+    pointer = null;
+    updatePreview();
+    return;
+  }
   if (event.button === 2) {
     cancelTool();
     return;
@@ -321,6 +329,7 @@ mapCanvas.addEventListener("pointermove", (event) => {
   }
 });
 mapCanvas.addEventListener("pointerup", (event) => {
+  activePointers.delete(event.pointerId);
   if (pointer?.id !== event.pointerId) {
     return;
   }
@@ -334,6 +343,7 @@ mapCanvas.addEventListener("pointerup", (event) => {
   updatePreview();
 });
 mapCanvas.addEventListener("pointercancel", (event) => {
+  activePointers.delete(event.pointerId);
   if (pointer?.id === event.pointerId) {
     pointer = null;
     updatePreview();

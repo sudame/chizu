@@ -319,6 +319,85 @@ try {
   );
   await page.locator("#pause").click();
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
+
+  // 土地を買う道具。地図を左へ 400 ピクセル引きずり、右隣のチャンクが見えるようにする
+  await page.locator('button[data-tool="buy"]').click();
+  await page.mouse.move(cx + 200, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx - 200, cy, { steps: 5 });
+  await page.mouse.up();
+  const view = await mapState();
+  // チャンク (ccx, ccy) の真ん中のマスの、画面の位置
+  const chunkPoint = (ccx: number, ccy: number) => ({
+    x: cx + (ccx * 64 + 32.5 - view.x) * view.zoom,
+    y: cy + (ccy * 64 + 32.5 - view.y) * view.zoom,
+  });
+  const buy = async (ccx: number, ccy: number) => {
+    const p = chunkPoint(ccx, ccy);
+    const before = await outcomeCount();
+    await page.mouse.click(p.x, p.y);
+    return nextOutcome(before);
+  };
+  const east = chunkPoint(2, 0);
+  const eastBefore = await pixel(east.x, east.y);
+  const moneyBeforeBuy = await moneyNow();
+  const bought = await buy(2, 0);
+  check(
+    bought.command === "BuyChunk" && bought.outcome === "Applied",
+    `隣のチャンクを買える（${bought.text}）`,
+  );
+  await page.waitForFunction(
+    (expected) => Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) === expected,
+    moneyBeforeBuy - 50_000,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, `所持金が値段の分だけ減る（${moneyBeforeBuy} → ${await moneyNow()}）`);
+  await page.waitForFunction(
+    ({ x, y, before }) => {
+      const canvas = document.querySelector<HTMLCanvasElement>("#map");
+      const gl = canvas?.getContext("webgl2");
+      if (canvas === null || canvas === undefined || gl === null || gl === undefined) {
+        return false;
+      }
+      const out = new Uint8Array(4);
+      const dpr = window.devicePixelRatio;
+      gl.readPixels(
+        Math.floor(x * dpr),
+        canvas.height - 1 - Math.floor(y * dpr),
+        1,
+        1,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        out,
+      );
+      return (out[0] ?? 0) + (out[1] ?? 0) + (out[2] ?? 0) > before * 1.5;
+    },
+    { x: east.x, y: east.y, before: brightness(eastBefore) },
+    { timeout: TIMEOUT_MS },
+  );
+  const eastAfter = await pixel(east.x, east.y);
+  check(
+    brightness(eastAfter) > brightness(eastBefore) * 1.5,
+    `買ったチャンクが明るく描き直される（${eastBefore.join(", ")} → ${eastAfter.join(", ")}）`,
+  );
+  const far = await buy(3, 1);
+  check(
+    far.outcome === "Denied" && (far.text ?? "").includes("接していない"),
+    `買った土地に接していないチャンクは理由つきで断られる（${far.text}）`,
+  );
+  // 75,000、100,000、125,000 で買い進めると、残りは次の 150,000 に届かない
+  for (const [ccx, ccy] of [
+    [3, 0],
+    [2, 1],
+    [3, 1],
+  ] as const) {
+    await buy(ccx, ccy);
+  }
+  const poor = await buy(4, 0);
+  check(
+    poor.outcome === "Denied" && (poor.text ?? "").includes("所持金"),
+    `所持金が足りないと理由つきで断られる（${poor.text}、所持金 ${await moneyNow()}）`,
+  );
   await page.locator('button[data-tool="none"]').click();
 
   await page.mouse.move(cx, cy);

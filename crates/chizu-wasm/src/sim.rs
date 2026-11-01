@@ -58,13 +58,13 @@ impl Sim {
 
     /// 検証したコマンドを、いまの tick（まだ `step` していない tick）に記録し、その場で適用する。
     ///
-    /// `chizu_core::replay` は tick T のコマンドを tick T の `step` の前に適用するので、
-    /// step と step のあいだに受けたコマンドをすぐ適用しても、記録を再生した結果と変わらない。
+    /// tick T の状態は tick が T 以下のコマンドを適用したものなので、`chizu_core::replay` で
+    /// T tick 進めた状態と、ここで受けてすぐ適用した状態は一致する。
     /// 一時停止のあいだも tick T のままなので、止めたまま建てられる。
     pub fn submit(&mut self, command: Command) -> Result<u64, RecordError> {
         command.validate().map_err(RecordError::Invalid)?;
         let seq = self.log.record(self.world.tick(), command)?;
-        let outcome = self.world.apply(&command);
+        let outcome = self.world.apply_recorded(seq, &command);
         self.reports.push(Report { seq, outcome });
         Ok(seq)
     }
@@ -249,6 +249,24 @@ mod tests {
         assert_eq!(sim.log().entries()[0].tick, Tick(2));
         assert_eq!(sim.world().speed(), speed);
         assert_eq!(sim.world().tick(), Tick(2));
+    }
+
+    #[test]
+    fn state_right_after_submit_matches_replay() {
+        let mut sim = Sim::new(2);
+        sim.advance(4);
+        sim.submit(road((0, 0), (4, 0))).unwrap();
+        sim.submit(Command::Bulldoze {
+            area: TileRect::from_corners(TilePos::new(0, 0), TilePos::new(4, 0)),
+        })
+        .unwrap();
+        let mut world = World::new(2);
+        chizu_core::replay(&mut world, sim.log(), 4);
+        assert_eq!(world.state_hash(), sim.world().state_hash());
+        // そこから続けても、同じコマンドを二度は適用しない
+        sim.advance(3);
+        chizu_core::replay(&mut world, sim.log(), 3);
+        assert_eq!(world.state_hash(), sim.world().state_hash());
     }
 
     #[test]

@@ -90,7 +90,8 @@ impl DenyReason {
 /// 街全体の状態の入れ物。
 ///
 /// 状態を変えるのは [`World::apply`] と [`World::step`] だけである。
-/// 1 tick の進め方は、その tick に記録されたコマンドを番号順に `apply` してから `step` を呼ぶ。
+/// tick T の状態は、tick が T 以下のコマンドを番号順に適用し、`step` を T 回済ませたものである。
+/// 記録したコマンドは [`World::apply_recorded`] で適用し、どの番号まで適用したかを状態に残す。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct World {
     seed: u64,
@@ -105,6 +106,8 @@ pub struct World {
     chunks_bought: u32,
     network: Network,
     population: Population,
+    /// 適用済みの記録の次の番号。記録から続きを回すときは、この番号から適用する。
+    next_seq: u64,
 }
 
 /// 外部接続の高速道路の通り道。始めたときに買ってある土地の端のマスから外へ向かう。
@@ -153,6 +156,7 @@ impl World {
             chunks_bought: 0,
             network,
             population: Population::default(),
+            next_seq: 0,
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
         for coord in coords {
@@ -346,7 +350,19 @@ impl World {
         ApplyOutcome::Applied
     }
 
-    /// コマンドを 1 つ適用する。いまの tick の頭で呼ぶ。
+    /// 適用済みの記録の次の番号。
+    pub fn next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
+    /// 記録の通し番号 `seq` のコマンドを適用し、適用済みの番号を進める。
+    pub fn apply_recorded(&mut self, seq: u64, command: &Command) -> ApplyOutcome {
+        assert!(seq >= self.next_seq, "記録 {seq} はもう適用してある");
+        self.next_seq = seq.checked_add(1).expect("記録の番号があふれた");
+        self.apply(command)
+    }
+
+    /// コマンドを 1 つ適用する。記録を通さないので、適用済みの番号は進めない。
     pub fn apply(&mut self, command: &Command) -> ApplyOutcome {
         if command.validate().is_err() {
             return ApplyOutcome::Rejected;
@@ -404,6 +420,7 @@ impl StateHash for World {
         h.write(&self.chunks_bought);
         h.write(&self.network);
         h.write(&self.population);
+        h.write(&self.next_seq);
     }
 }
 
