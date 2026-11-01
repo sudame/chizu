@@ -255,7 +255,7 @@ impl World {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::building::demand;
     use crate::command::{Command, RoadKind, ServiceKind};
@@ -279,7 +279,7 @@ mod tests {
 
     /// 2 本の通り（y = 10、40）に区画を塗り、y = -40 の通りに発電所と浄水場を並べ、外の世界とつないだ街。
     /// 区画の種類は、4 つの帯を `zones` の順に繰り返して塗る。
-    fn city(zones: &[ZoneKind]) -> World {
+    pub(crate) fn city(zones: &[ZoneKind]) -> World {
         let mut w = World::new_with_money(3, crate::units::Money(100_000_000));
         for y in [-40, 10, 40] {
             road(&mut w, (-60, y), (20, y));
@@ -319,7 +319,7 @@ mod tests {
         w
     }
 
-    fn run_days(w: &mut World, days: u64) {
+    pub(crate) fn run_days(w: &mut World, days: u64) {
         for _ in 0..days * TICKS_PER_DAY {
             w.step();
         }

@@ -35,7 +35,7 @@ pub fn synthetic_population(seed: u64, count: u32) -> Population {
 /// 街区ごとに 4 種類の区画を順に塗り、ところどころに発電所と浄水場を置き、外の世界とつないだ街。
 /// 水辺にかかる道路と区画は飛ばす。建物と住民はまだない。
 pub fn zoned_grid_city(seed: u64) -> World {
-    let mut w = World::new_with_money(seed, Money(1_000_000_000));
+    let mut w = World::new_with_money(seed, Money(1_000_000_000)).with_unlimited_land();
     for ring in 2..=3_i32 {
         for cy in -ring..=ring {
             for cx in -ring..=ring {

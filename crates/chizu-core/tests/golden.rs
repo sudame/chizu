@@ -77,6 +77,12 @@ fn scenarios() -> Vec<Scenario> {
             ticks: 7_200 + 1_200,
             log: utilities(),
         },
+        Scenario {
+            name: "economy",
+            seed: 42,
+            ticks: 2 * chizu_core::TICKS_PER_DAY,
+            log: economy(),
+        },
     ]
 }
 
@@ -281,6 +287,61 @@ fn utilities() -> CommandLog {
     for c in connect_to_outside(42, 10, 0, 40) {
         rec(5, c);
     }
+    log
+}
+
+/// 住宅と工業の通りに人が住み、途中で工業の税率を上げる記録。
+fn economy() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let rect = |a: (i64, i64), b: (i64, i64)| {
+        TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1))
+    };
+    rec(
+        1,
+        Command::BuildRoad {
+            from: TilePos::new(-40, 0),
+            to: TilePos::new(40, 0),
+            kind: RoadKind::Small,
+        },
+    );
+    for (area, zone) in [
+        (rect((-30, -6), (40, -1)), ZoneKind::Residential),
+        (rect((-40, 1), (40, 6)), ZoneKind::Industrial),
+    ] {
+        rec(
+            2,
+            Command::PaintZone {
+                area,
+                zone: Some(zone),
+            },
+        );
+    }
+    for c in connect_to_outside(42, 0, -40, 40) {
+        rec(3, c);
+    }
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, -37),
+        (ServiceKind::WaterPump, -33),
+    ] {
+        rec(
+            3,
+            Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, -1),
+                rotation: 2,
+            },
+        );
+    }
+    rec(
+        4_000,
+        Command::SetTaxRate {
+            zone: ZoneKind::Industrial,
+            permille: 250,
+        },
+    );
     log
 }
 
@@ -522,6 +583,28 @@ fn utilities_supply_only_the_connected_street() {
             assert_eq!(b.level, 1);
         }
     }
+}
+
+/// 財政の記録が、税収と維持費の精算を通っていることを確かめる。
+#[test]
+fn economy_settles_every_hour() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "economy")
+        .unwrap();
+    let mut world = World::new(s.seed);
+    let stats = replay(&mut world, &s.log, 7_000);
+    let f = world.finances();
+    assert!(world.population().citizen_count() > 0);
+    assert!(f.taxes[ZoneKind::Residential.index()].0 > 0, "{f:?}");
+    assert!(f.taxes[ZoneKind::Industrial.index()].0 > 0, "{f:?}");
+    assert!(f.road_upkeep.0 > 0 && f.facility_upkeep.iter().all(|m| m.0 > 0));
+    assert_eq!(stats.denied, 0);
+    // 1 時間ぶん進めると、1 日の見込みのおよそ 1/24 だけ所持金が動く。
+    let (money, net) = (world.money().0, world.finances().net().0);
+    replay(&mut world, &s.log, 300);
+    let moved = world.money().0 - money;
+    assert!((moved * 24 - net).abs() <= 24, "{moved} × 24 と {net}");
 }
 
 fn golden_dir() -> PathBuf {

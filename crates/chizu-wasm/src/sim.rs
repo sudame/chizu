@@ -268,6 +268,7 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::ZoneUnchanged => "変わるマスがない",
         DenyReason::Occupied => "ほかの施設か道路がある",
         DenyReason::NoRoadAccess => "道路に面していない",
+        DenyReason::NoChunkSlot => "買える土地の枠がない。人口が増えると枠が増える",
     }
 }
 
