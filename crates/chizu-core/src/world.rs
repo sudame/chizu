@@ -68,7 +68,7 @@ pub enum DenyReason {
     CornerCrossing = 4,
     /// 高速道路の、内側の端のノード以外のマスを通る。
     HighwayMidway = 5,
-    /// 消す区間がない。
+    /// 範囲に、取り壊せる道路も施設も建物もない。
     NothingToBulldoze = 6,
     /// 買う土地が、買った土地と辺を接していない。
     NotAdjacent = 7,
@@ -423,12 +423,12 @@ impl World {
     }
 
     // 消した道路の建設費は払い戻さない。
-    // 施設も道路と同じく、長方形にかかれば取り除く。
+    // 施設と建物も道路と同じく、長方形にかかれば取り除く。建物の下の区画は残すので、需要があればまた建つ。
     fn bulldoze(&mut self, area: TileRect) -> ApplyOutcome {
-        let facilities = self.bulldoze_facilities(area);
+        let cleared = self.bulldoze_facilities(area) + self.bulldoze_buildings(area);
         let removed = match self.network.bulldoze(area) {
             Ok(removed) => removed,
-            Err(_) if facilities > 0 => Vec::new(),
+            Err(_) if cleared > 0 => Vec::new(),
             Err(reason) => return ApplyOutcome::Denied(reason),
         };
         self.sync_road_tiles(
