@@ -1,4 +1,4 @@
-//! 住民の予定と、通勤の移動のつなぎ。
+//! 住民の予定と、通勤と買い物の移動のつなぎ。
 //!
 //! 出発の時刻が来た住民は、居場所をすぐには切り替えず、家と職場のあいだの移動を始める。
 //! 移動が終わったら居場所を切り替え、次の出発を積む。移動を作れなかった住民は、その場で着いたものとする。
@@ -25,9 +25,12 @@ impl World {
             }
             let home = self.population.home(row.household).flatten();
             let ends = match row.schedule.next {
-                Activity::Work => home.zip(row.workplace),
-                Activity::Home => row.workplace.zip(home),
-                Activity::Shop => None,
+                Activity::Work => {
+                    self.errands.forget(id);
+                    home.zip(row.workplace)
+                }
+                Activity::Home => self.errands.at_shop(id).or(row.workplace).zip(home),
+                Activity::Shop => row.workplace.or(home).zip(self.errands.shop(id)),
             };
             match ends {
                 Some((from, to)) => requests.push(CommuteRequest {
@@ -59,6 +62,7 @@ impl World {
     pub(super) fn remove_household(&mut self, h: HouseholdId) {
         let members = self.population.members(h).unwrap_or_default().to_vec();
         for id in members {
+            self.errands.forget(id);
             if let Some(t) = self.population.citizen(id).and_then(|r| r.trip) {
                 self.trips.cancel(t);
             }

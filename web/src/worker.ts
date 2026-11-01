@@ -9,6 +9,7 @@ import init, {
   ticks_per_second,
 } from "../wasm/chizu_wasm.js";
 import { ChunkSync } from "./map/chunk-sync.ts";
+import { LayerSender } from "./map/layer-sync.ts";
 import type {
   ChunkData,
   CommandMessage,
@@ -32,6 +33,7 @@ function reply(message: WorkerToMain, transfer: Transferable[] = []): void {
 }
 
 const chunkSync = new ChunkSync();
+const layerSender = new LayerSender();
 
 // 画面の手元と版の違うチャンクを送る。マスの配列は移譲するので、送ったあとの Worker の側には残らない
 function sendChunks(sim: Simulation): void {
@@ -93,10 +95,10 @@ function sendRoads(sim: Simulation): void {
   reply({ kind: "roads", revision, segments, nodes }, [segments.buffer, nodes.buffer]);
 }
 
-// 建物は、表の版が変わったときだけ全体を送り直す
+// 建物と街の数字は、建物の表か道路網が変わったときだけ全体を送り直す。足りない網の数は網のつながりで変わる
 let sentBuildingsVersion = -1;
 function sendBuildings(sim: Simulation): void {
-  const version = sim.buildings_version();
+  const version = sim.supply_version();
   if (version === sentBuildingsVersion) {
     return;
   }
@@ -129,6 +131,7 @@ function run(sim: Simulation): (paused: boolean) => void {
     sendRoads(sim);
     sendBuildings(sim);
     sendChunks(sim);
+    layerSender.send(sim, reply, CHUNKS_PER_FRAME, now);
   }, FRAME_MS);
   return (p) => {
     paused = p;
@@ -179,6 +182,10 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         sendOutcomes(sim);
         sendRoads(sim);
         sendBuildings(sim);
+        layerSender.send(sim, reply, CHUNKS_PER_FRAME);
+        break;
+      case "layers":
+        layerSender.setActive(message.active);
         break;
       case "pause":
         setPaused(message.paused);
@@ -198,6 +205,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
       case "view":
         // 送るのはタイマーの側だけにして、1 周期に送る数を CHUNKS_PER_FRAME に抑える
         chunkSync.setView(message.visible, message.forgotten);
+        layerSender.setView(message.visible, message.forgotten);
         setMoverView(sim, message.movers);
         break;
       case "dev-spawn-walks": {

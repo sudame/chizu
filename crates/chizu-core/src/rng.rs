@@ -29,6 +29,8 @@ pub enum RngPurpose {
     TrunkLine = 6,
     /// 幸福度の低い世帯が街を出ていく。
     Emigration = 7,
+    /// 買い物の外出。
+    Errand = 8,
 }
 
 const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;

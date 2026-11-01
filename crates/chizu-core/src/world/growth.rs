@@ -493,6 +493,7 @@ impl World {
             }
         }
         self.vacate(&removed);
+        self.vacate_shops(&removed);
         // 道路と施設の変化は、その場で供給に映す。
         self.update_supply();
     }
