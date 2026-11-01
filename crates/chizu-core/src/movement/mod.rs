@@ -35,7 +35,8 @@ pub use pos::SidewalkPos;
 use crate::id::{Slots, TripId};
 use crate::network::{Dir, LaneId, LaneMode, LinkId, Network};
 use crate::routing::{
-    AstarRouter, Connector, Route, RouteRequest, Router, Scratch, Toward, WALK_SPEED, one_to_many,
+    AstarRouter, Connector, Graph, Route, RouteRequest, Router, Scratch, Toward, WALK_SPEED,
+    one_to_many,
 };
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::TilePos;
@@ -54,6 +55,8 @@ pub struct Trip {
     waiting: bool,
     /// 交差点の手前で、ほかの車に譲って待った tick 数。ノードを抜けたら 0 に戻す。
     waited: u32,
+    /// 車線の上で、位置が変わらないまま過ぎた tick 数。動いたら 0 に戻す。
+    stalled: u32,
     /// いま歩いているリンクの、経路の中での番号。
     leg: u32,
     offset: LaneOffset,
@@ -235,6 +238,25 @@ fn walked_mm(net: &Network, route: &Route, (from, to): Ends) -> Option<u64> {
     total.checked_sub(u64::from(from.1.0))?.checked_sub(rest)
 }
 
+/// 経路 `route` で `from` から `to` まで車で走る費用（ms）。リンクの費用を、走る長さの割合で按分する。
+fn driven_ms(net: &Network, g: &Graph, route: &Route, (from, to): Ends) -> Option<u64> {
+    let last = route.links.len().checked_sub(1)?;
+    route
+        .links
+        .iter()
+        .enumerate()
+        .try_fold(0_u64, |acc, (i, l)| {
+            let len = u64::from(pos::link_geometry(net, *l)?.2.0);
+            let start = if i == 0 { u64::from(from.1.0) } else { 0 };
+            let end = if i == last { u64::from(to.1.0) } else { len };
+            let part = g
+                .link_cost(*l)?
+                .checked_mul(end.checked_sub(start)?)?
+                .checked_div(len)?;
+            acc.checked_add(part)
+        })
+}
+
 /// 手段 `mode` で 2 点を結ぶ経路を、まとめて探し、経路と、使った出発と行き先の位置を返す。
 ///
 /// 歩道は 1 本の歩道を 2 つの向きに歩けるものとし、区間の 2 本の歩道のリンクを、その 2 つの向きとして使う。
@@ -242,19 +264,22 @@ fn walked_mm(net: &Network, route: &Route, (from, to): Ends) -> Option<u64> {
 /// 距離の同じ組は、位置を表したままの向きを先に選ぶ。同じリンクの手前へ戻る組は、向きを入れ替えた
 /// まっすぐの組に必ず負けるので、ほかの組があれば探さない。
 /// 横切りの罰則と衝突区間が入るまでは、反対側の歩道へ移る費用を 0 として扱う。
+///
+/// 車も CS2 と同じく、建物の前からどちらの向きの車線へも出られ、どちらの向きからも着ける。
+/// 出発と行き先のそれぞれで 2 つの向きを試し、走る費用のいちばん小さい組を選ぶ。こうしないと、
+/// 道路の向こう側へ向かう車が、行き止まりや区画をぐるりと回って余計な車線を埋める。
+/// `fixed_start` なら出発の向きは変えない。走っている車の経路を探し直すときに使う。
 fn plan(
     router: &mut AstarRouter,
     net: &Network,
     mode: LaneMode,
     ends: &[Ends],
+    fixed_start: bool,
 ) -> Vec<Option<(Arc<Route>, Ends)>> {
     let candidates: Vec<Vec<Ends>> = ends
         .iter()
         .map(|(a, b)| {
-            if mode == LaneMode::Car {
-                return vec![(*a, *b)];
-            }
-            let starts = [Some(*a), flip(net, *a)];
+            let starts = [Some(*a), flip(net, *a).filter(|_| !fixed_start)];
             let goals = [Some(*b), flip(net, *b)];
             let all: Vec<Ends> = starts
                 .iter()
@@ -267,21 +292,21 @@ fn plan(
         .collect();
     let flat: Vec<Ends> = candidates.iter().flatten().copied().collect();
     let mut found = plan_exact(router, mode, &flat).into_iter();
+    let g = router.graph(mode);
     candidates
         .iter()
         .map(|c| {
-            let routes: Vec<_> = c
-                .iter()
-                .map(|e| Some((found.next().expect("探した経路の数が合わない")?, *e)))
-                .collect();
-            if mode == LaneMode::Car {
-                return routes.into_iter().next().flatten();
-            }
-            routes
-                .into_iter()
-                .flatten()
-                .filter_map(|(r, e)| Some((walked_mm(net, &r, e)?, r, e)))
-                .min_by_key(|(mm, _, _)| *mm)
+            c.iter()
+                .filter_map(|e| {
+                    // 候補ごとに探した経路を 1 つずつ受け取るので、どの候補でも先に取り出す。
+                    let r = found.next().expect("探した経路の数が合わない")?;
+                    let key = match mode {
+                        LaneMode::Car => driven_ms(net, g, &r, *e)?,
+                        LaneMode::Sidewalk => walked_mm(net, &r, *e)?,
+                    };
+                    Some((key, r, *e))
+                })
+                .min_by_key(|(key, _, _)| *key)
                 .map(|(_, r, e)| (r, e))
         })
         .collect()
@@ -425,7 +450,7 @@ impl Trips {
             .map(|(a, b)| Some((a.resolve_on(net, mode)?, b.resolve_on(net, mode)?)))
             .collect();
         let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
-        let mut routes = plan(router, net, mode, &ends).into_iter();
+        let mut routes = plan(router, net, mode, &ends, false).into_iter();
         // 車は、出発のリンクの車線のうち車の少ない車線に置く。前の車と重なるなら、その後ろの空いた
         // 位置まで下げる。どの車線にも空きがなければ、空くまで待たせる。
         let mut ix = car::LaneIndex::of(&self.rows, None);
@@ -530,14 +555,24 @@ impl Trips {
                 }
             }
             let ends: Vec<_> = found.iter().map(|f| f.1).collect();
-            for ((id, _, dest), route) in found.into_iter().zip(plan(router, net, mode, &ends)) {
+            for ((id, _, dest), route) in
+                found
+                    .into_iter()
+                    .zip(plan(router, net, mode, &ends, mode == LaneMode::Car))
+            {
                 let Some((route, ends)) = route else {
                     lost.push(id);
                     continue;
                 };
                 let old = self.get(id).expect("探し直す主体がない");
-                let (departed, speed, waiting, waited, then) =
-                    (old.departed, old.speed, old.waiting, old.waited, old.then);
+                let (departed, speed, waiting, waited, stalled, then) = (
+                    old.departed,
+                    old.speed,
+                    old.waiting,
+                    old.waited,
+                    old.stalled,
+                    old.then,
+                );
                 // 探し直す前の、リンクの中の車線の番号。網が変わると車線の ID も変わるので番号で覚える。
                 let index = net
                     .link_lanes(old.link())
@@ -546,7 +581,8 @@ impl Trips {
                 // 探し直す前に描いていたずれ。車線や経路が変わっても、そこから少しずつ移す。
                 let shown = old.shift_on_leg(net, old.leg as usize);
                 let mut t = make_trip(net, route, ends, dest, departed);
-                (t.speed, t.waiting, t.waited, t.then) = (speed, waiting, waited, then);
+                (t.speed, t.waiting, t.waited, t.stalled, t.then) =
+                    (speed, waiting, waited, stalled, then);
                 self.rows[id.slot()] = Some(t);
                 if mode == LaneMode::Car && !waiting {
                     car::keep_lane(&mut self.rows, net, id.slot(), index);
@@ -610,6 +646,7 @@ fn make_trip(
         speed: MmPerTick::ZERO,
         waiting: false,
         waited: 0,
+        stalled: 0,
         route,
         leg: 0,
         offset: from,
@@ -633,6 +670,7 @@ impl StateHash for Trip {
         h.write(&self.speed);
         h.write(&self.waiting);
         h.write(&self.waited);
+        h.write(&self.stalled);
         h.write_len(self.route.links.len());
         for l in &self.route.links {
             h.write(&l.segment);
