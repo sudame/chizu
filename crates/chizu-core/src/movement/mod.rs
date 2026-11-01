@@ -13,6 +13,7 @@ mod commute;
 mod junction;
 #[cfg(test)]
 mod junction_tests;
+mod lane_shift;
 mod parking;
 #[cfg(test)]
 mod parking_tests;
@@ -37,7 +38,7 @@ use crate::routing::{
 };
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::TilePos;
-use crate::units::{LaneOffset, MmPerTick, Tick, WorldPos};
+use crate::units::{LaneOffset, Mm, MmPerTick, Tick, WorldPos};
 
 /// 歩くか車で走って移動している主体。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,6 +104,24 @@ impl Trip {
         SidewalkPos::along(self.start, self.step, self.offset)
     }
 
+    /// 描くときに位置へ足す、車線や歩道に寄せるずれ。
+    fn shift(&self, net: &Network) -> (Mm, Mm) {
+        let links = &self.route.links;
+        let leg = self.leg as usize;
+        let Some(&link) = links.get(leg) else {
+            return (Mm::ZERO, Mm::ZERO);
+        };
+        let index = match self.mode {
+            LaneMode::Car => net
+                .link_lanes(link)
+                .position(|l| l == self.lane)
+                .unwrap_or(0),
+            LaneMode::Sidewalk => 0,
+        };
+        let prev = leg.checked_sub(1).and_then(|p| links.get(p)).copied();
+        lane_shift::shift(net, link, self.step, index, prev, self.offset.0)
+    }
+
     fn last_leg(&self) -> bool {
         self.leg as usize + 1 == self.route.links.len()
     }
@@ -153,6 +172,9 @@ pub struct Mover {
     pub heading: (i8, i8),
     /// 歩いているなら `Sidewalk`、車なら `Car`。
     pub mode: LaneMode,
+    /// 描くときに `pos` へ足す、車線や歩道に寄せるずれ（mm）。進む向きの左へずれる。
+    /// 描画のためだけの値で、状態にも状態ハッシュにも入らない。
+    pub shift: (Mm, Mm),
 }
 
 /// リンクと、その始まりからの距離。
@@ -492,17 +514,18 @@ impl Trips {
     }
 
     /// ワールド座標の範囲 `[min, max)` にいる移動体を ID の順に返す。
-    pub fn movers_in(&self, min: WorldPos, max: WorldPos) -> Vec<Mover> {
+    pub fn movers_in(&self, net: &Network, min: WorldPos, max: WorldPos) -> Vec<Mover> {
         self.iter()
             .filter(|(_, t)| !t.waiting)
             .filter_map(|(id, t)| {
                 let pos = t.position().world();
                 let inside = (min.x..max.x).contains(&pos.x) && (min.y..max.y).contains(&pos.y);
-                inside.then_some(Mover {
+                inside.then(|| Mover {
                     id,
                     pos,
                     heading: t.step,
                     mode: t.mode,
+                    shift: t.shift(net),
                 })
             })
             .collect()

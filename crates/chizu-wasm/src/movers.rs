@@ -70,9 +70,10 @@ pub fn visible_movers(world: &World, view: TileRect, out: &mut Vec<Mover>) -> Ch
     // 基準の原点からの差は画面の広さに収まるので、f64 を経て f32 に直しても桁は足りる。
     let tiles = |v: i64, o: i64| (v.saturating_sub(o) as f64 / TILE_MM as f64) as f32;
     out.clear();
+    // 中心線の上の位置に、車線や歩道に寄せるずれを足して描く。
     out.extend(found.iter().map(|m| Mover {
-        x: tiles(m.pos.x.0, ox),
-        y: tiles(m.pos.y.0, oy),
+        x: tiles(m.pos.x.0.saturating_add(m.shift.0.0), ox),
+        y: tiles(m.pos.y.0.saturating_add(m.shift.1.0), oy),
         heading: heading_code(m.heading),
         kind: kind_of(m),
         id: m.id.index,
@@ -193,6 +194,9 @@ mod tests {
         assert!(first.iter().all(|m| m.kind == KIND_WALK));
         // 基準のチャンクの原点は (-64, -64) なので、道路の y = 10 のマスは 74 の辺りにある。
         assert!(first.iter().all(|m| (74.0..75.0).contains(&m.y)));
+        // 歩く人は歩道の上にいる。小さい道路の歩道は中心線から 0.25 マス離れ、
+        // 右へ歩く人の左（画面の上）にある。
+        assert!(first.iter().all(|m| m.y == 74.25));
         for _ in 0..20 {
             w.step();
         }
@@ -231,6 +235,7 @@ mod tests {
             pos: WorldPos::new(Mm(84_000 + dx), Mm(84_000)),
             heading: (1, 0),
             mode: LaneMode::Sidewalk,
+            shift: (Mm(0), Mm(0)),
         };
         let mut found = vec![
             at(0, 9_000),
@@ -264,6 +269,7 @@ mod tests {
             pos: WorldPos::new(Mm(0), Mm(0)),
             heading: (0, 1),
             mode,
+            shift: (Mm(0), Mm(0)),
         };
         assert_eq!(kind_of(&m(LaneMode::Sidewalk)), KIND_WALK);
         assert_eq!(kind_of(&m(LaneMode::Car)), KIND_CAR);

@@ -10,12 +10,15 @@ import {
   SUPPLY_WATER,
 } from "../protocol/messages.ts";
 import type { Camera, Viewport } from "./camera.ts";
+import { crossSection, HIGHWAY_CODE, roadHalfWidth, type StripRole, showsLanes } from "./lanes.ts";
 
 /** マスの座標。 */
 export type Tile = { x: number; y: number };
 
-// 縮小しても線が消えないよう、半分の太さは画面で 1.5 ピクセルを下回らせない
+// 縮小しても線が消えないよう、半分の太さは画面で 1.5 ピクセルを下回らせない。
+// 車線の区切りなど細い線は、半分の太さを負の値で渡し、0.5 ピクセルまで細くする
 const MIN_HALF_PX = "1.5";
+const MIN_THIN_HALF_PX = "0.5";
 
 const VERTEX = `#version 300 es
 in vec2 a_pos;
@@ -27,7 +30,9 @@ uniform float u_zoom;
 uniform vec2 u_viewport;
 out vec4 v_color;
 void main() {
-  float half_px = a_half > 0.0 ? max(a_half * u_zoom, ${MIN_HALF_PX}) : 0.0;
+  float half_px = a_half > 0.0
+    ? max(a_half * u_zoom, ${MIN_HALF_PX})
+    : (a_half < 0.0 ? max(-a_half * u_zoom, ${MIN_THIN_HALF_PX}) : 0.0);
   vec2 p = (a_pos * u_zoom + u_offset + a_normal * half_px) / (u_viewport * 0.5);
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
   v_color = a_color;
@@ -49,10 +54,12 @@ export type Color = readonly [number, number, number, number];
 const ROAD_COLOR: Color = [0.32, 0.32, 0.35, 1];
 const HIGHWAY_COLOR: Color = [0.78, 0.55, 0.25, 1];
 const NODE_COLOR: Color = [0.5, 0.5, 0.54, 1];
-// 半分の太さ（マス）。区間の種類の番号は chizu-wasm の segment_kind_code と同じ
-const HALF_WIDTH: Record<number, number> = { 1: 0.3, 2: 0.4, 3: 0.5, 4: 0.5 };
-const HIGHWAY_CODE = 4;
 const NODE_HALF = 0.5;
+const ASPHALT_COLOR: Color = [0.24, 0.24, 0.27, 1];
+const HIGHWAY_ASPHALT_COLOR: Color = [0.55, 0.4, 0.2, 1];
+const SIDEWALK_COLOR: Color = [0.5, 0.5, 0.53, 1];
+const CENTER_LINE_COLOR: Color = [0.95, 0.8, 0.2, 1];
+const DIVIDER_COLOR: Color = [0.85, 0.85, 0.88, 1];
 
 /** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
 export class Geometry {
@@ -84,6 +91,43 @@ export class Geometry {
     const nx = -(by - ay) / len;
     const ny = (bx - ax) / len;
     const v = (x: number, y: number, s: number) => this.#vertex(x, y, nx * s, ny * s, half, color);
+    v(ax, ay, 1);
+    v(ax, ay, -1);
+    v(bx, by, 1);
+    v(bx, by, 1);
+    v(ax, ay, -1);
+    v(bx, by, -1);
+  }
+
+  /**
+   * マス a の中心からマス b の中心への、中心線から `offset`（マス）だけ横にずらした帯。
+   * 半分の太さ `half` は世界の単位で、画面では `thin` のとき 0.5 ピクセル、そうでなければ 1.5 ピクセルを下回らない。
+   * 両端は `trimA` と `trimB`（マス）だけ内側に縮める。`offset` の正は進む向き（a から b）の右である。
+   */
+  strip(
+    a: Tile,
+    b: Tile,
+    offset: number,
+    half: number,
+    color: Color,
+    thin: boolean,
+    trimA = 0,
+    trimB = 0,
+  ): void {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0 || len <= trimA + trimB) {
+      return;
+    }
+    const [ux, uy] = [dx / len, dy / len];
+    const [nx, ny] = [-uy, ux];
+    const ax = a.x + 0.5 + ux * trimA + nx * offset;
+    const ay = a.y + 0.5 + uy * trimA + ny * offset;
+    const bx = b.x + 0.5 - ux * trimB + nx * offset;
+    const by = b.y + 0.5 - uy * trimB + ny * offset;
+    const h = thin ? -half : half;
+    const v = (x: number, y: number, s: number) => this.#vertex(x, y, nx * s, ny * s, h, color);
     v(ax, ay, 1);
     v(ax, ay, -1);
     v(bx, by, 1);
@@ -125,8 +169,9 @@ export class Geometry {
   }
 }
 
+/** 道路の端（歩道を含む）までの半分の幅（マス）。 */
 export function halfWidthOf(kindCode: number): number {
-  return HALF_WIDTH[kindCode] ?? 0.4;
+  return roadHalfWidth(kindCode);
 }
 
 // 建物の色。区画の色（renderer.ts）を暗くし、段階が上がるほど明るくする
@@ -206,18 +251,123 @@ export function unsuppliedCount(buildings: Float64Array): number {
   return n;
 }
 
-/** Worker から届いた道路網の形を頂点に直す。基準のマスは最初のノードにする。 */
+type RoadNodes = Map<string, { half: number; arms: number }>;
+
+const nodeKey = (x: number, y: number) => `${x},${y}`;
+
+/** ノードごとに、つながる区間のいちばん広い半分の幅と、つながる区間の数を求める。 */
+function roadNodes(segments: Float64Array): RoadNodes {
+  const nodes: RoadNodes = new Map();
+  const touch = (x: number, y: number, half: number) => {
+    const key = nodeKey(x, y);
+    const node = nodes.get(key) ?? { half: 0, arms: 0 };
+    node.half = Math.max(node.half, half);
+    node.arms += 1;
+    nodes.set(key, node);
+  };
+  for (let i = 0; i + SEGMENT_STRIDE <= segments.length; i += SEGMENT_STRIDE) {
+    const [ax = 0, ay = 0, bx = 0, by = 0, kind = 0] = segments.subarray(i, i + SEGMENT_STRIDE);
+    touch(ax, ay, halfWidthOf(kind));
+    touch(bx, by, halfWidthOf(kind));
+  }
+  return nodes;
+}
+
+/** Worker から届いた道路網の形を頂点に直す。基準のマスは最初のノードにする。縮小したときの、1 本の線の描き方である。 */
 export function roadGeometry(segments: Float64Array, nodes: Float64Array): Geometry {
   const geometry = new Geometry({ x: nodes[0] ?? 0, y: nodes[1] ?? 0 });
+  const halves = roadNodes(segments);
   for (let i = 0; i + SEGMENT_STRIDE <= segments.length; i += SEGMENT_STRIDE) {
     const [ax = 0, ay = 0, bx = 0, by = 0, kind = 0] = segments.subarray(i, i + SEGMENT_STRIDE);
     const color = kind === HIGHWAY_CODE ? HIGHWAY_COLOR : ROAD_COLOR;
     geometry.segment({ x: ax, y: ay }, { x: bx, y: by }, halfWidthOf(kind), color);
   }
   for (let i = 0; i + NODE_STRIDE <= nodes.length; i += NODE_STRIDE) {
-    geometry.square({ x: nodes[i] ?? 0, y: nodes[i + 1] ?? 0 }, NODE_HALF, NODE_COLOR);
+    const [x = 0, y = 0] = nodes.subarray(i, i + 2);
+    const half = halves.get(nodeKey(x, y))?.half ?? NODE_HALF;
+    geometry.square({ x, y }, half, NODE_COLOR);
   }
   return geometry;
+}
+
+const STRIP_COLOR: Record<Exclude<StripRole, "asphalt">, Color> = {
+  sidewalk: SIDEWALK_COLOR,
+  center: CENTER_LINE_COLOR,
+  divider: DIVIDER_COLOR,
+};
+
+/**
+ * 拡大したときの、車線ごとの道路の描き方。車道、歩道、中央線、車線の区切りの順に重ねる。
+ * 交差点のノードは車道の色の四角で埋め、そこへ入る線は縮めて、交差点の中を線が横切らないようにする。
+ */
+export function roadLaneGeometry(segments: Float64Array, nodes: Float64Array): Geometry {
+  const geometry = new Geometry({ x: nodes[0] ?? 0, y: nodes[1] ?? 0 });
+  const ends = roadNodes(segments);
+  const trimAt = (x: number, y: number, diagonal: boolean): number => {
+    const node = ends.get(nodeKey(x, y));
+    // つながる区間が 3 本以上ある所が交差点である。
+    if (node === undefined || node.arms < 3) {
+      return 0;
+    }
+    return diagonal ? node.half * Math.SQRT2 : node.half;
+  };
+  // 線の帯は、下の帯をすべて描いてから重ねる
+  const roles: StripRole[][] = [["asphalt"], ["sidewalk"], ["center", "divider"]];
+  for (const layer of roles) {
+    if (layer[0] === "center") {
+      drawNodes(geometry, nodes, ends);
+    }
+    for (let i = 0; i + SEGMENT_STRIDE <= segments.length; i += SEGMENT_STRIDE) {
+      const [ax = 0, ay = 0, bx = 0, by = 0, kind = 0] = segments.subarray(i, i + SEGMENT_STRIDE);
+      const diagonal = ax !== bx && ay !== by;
+      const [a, b] = [
+        { x: ax, y: ay },
+        { x: bx, y: by },
+      ];
+      const trimA = trimAt(ax, ay, diagonal);
+      const trimB = trimAt(bx, by, diagonal);
+      for (const strip of crossSection(kind)) {
+        if (!layer.includes(strip.role)) {
+          continue;
+        }
+        if (strip.role === "asphalt") {
+          const color = kind === HIGHWAY_CODE ? HIGHWAY_ASPHALT_COLOR : ASPHALT_COLOR;
+          geometry.strip(a, b, strip.offset, strip.half, color, false);
+        } else {
+          const t = strip.role === "sidewalk" ? 0 : 1;
+          geometry.strip(
+            a,
+            b,
+            strip.offset,
+            strip.half,
+            STRIP_COLOR[strip.role],
+            true,
+            t * trimA,
+            t * trimB,
+          );
+        }
+      }
+    }
+  }
+  return geometry;
+}
+
+/** 交差点とつなぎ目のノードを、車道の色の四角で埋める。 */
+function drawNodes(geometry: Geometry, nodes: Float64Array, ends: RoadNodes): void {
+  for (let i = 0; i + NODE_STRIDE <= nodes.length; i += NODE_STRIDE) {
+    const [x = 0, y = 0] = nodes.subarray(i, i + 2);
+    const node = ends.get(nodeKey(x, y));
+    if (node !== undefined && node.arms >= 3) {
+      geometry.square({ x, y }, node.half, ASPHALT_COLOR);
+    }
+  }
+}
+
+/** 縮小したときの 1 本の線と、拡大したときの車線ごとの描き方。 */
+export type RoadMeshes = { simple: Geometry; lanes: Geometry };
+
+export function roadMeshes(segments: Float64Array, nodes: Float64Array): RoadMeshes {
+  return { simple: roadGeometry(segments, nodes), lanes: roadLaneGeometry(segments, nodes) };
 }
 
 type Mesh = { buffer: WebGLBuffer; vao: WebGLVertexArrayObject; count: number; origin: Tile };
@@ -229,6 +379,7 @@ export class RoadLayer {
   readonly #u: Record<"offset" | "zoom" | "viewport", WebGLUniformLocation | null>;
   readonly #buildings: Mesh;
   readonly #roads: Mesh;
+  readonly #lanes: Mesh;
   readonly #preview: Mesh;
 
   constructor(
@@ -244,6 +395,7 @@ export class RoadLayer {
     };
     this.#buildings = this.#mesh();
     this.#roads = this.#mesh();
+    this.#lanes = this.#mesh();
     this.#preview = this.#mesh();
   }
 
@@ -281,8 +433,9 @@ export class RoadLayer {
     this.#upload(this.#buildings, geometry);
   }
 
-  setRoads(geometry: Geometry): void {
-    this.#upload(this.#roads, geometry);
+  setRoads(meshes: RoadMeshes): void {
+    this.#upload(this.#roads, meshes.simple);
+    this.#upload(this.#lanes, meshes.lanes);
   }
 
   setPreview(geometry: Geometry | null): void {
@@ -296,7 +449,8 @@ export class RoadLayer {
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    for (const mesh of [this.#buildings, this.#roads, this.#preview]) {
+    const roads = showsLanes(camera.zoom) ? this.#lanes : this.#roads;
+    for (const mesh of [this.#buildings, roads, this.#preview]) {
       if (mesh.count === 0) {
         continue;
       }

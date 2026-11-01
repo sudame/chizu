@@ -6,6 +6,8 @@ import {
   Geometry,
   markCenter,
   roadGeometry,
+  roadLaneGeometry,
+  roadMeshes,
   unsuppliedCount,
   VERTEX_FLOATS,
 } from "./roads.ts";
@@ -79,5 +81,70 @@ describe("Geometry", () => {
     const g = roadGeometry(new Float64Array([0, 0, 4, 0, 1]), new Float64Array([0, 0, 1, 4, 0, 1]));
     expect(g.vertexCount).toBe(18);
     expect(roadGeometry(new Float64Array(), new Float64Array()).vertexCount).toBe(0);
+  });
+});
+
+describe("車線ごとの道路", () => {
+  test("中くらいの道路 1 本は、車道、歩道 2、中央線、車線の区切り 2 の 6 本の帯になる", () => {
+    const g = roadLaneGeometry(
+      new Float64Array([0, 0, 4, 0, 2]),
+      new Float64Array([0, 0, 1, 4, 0, 1]),
+    );
+    expect(g.vertexCount).toBe(6 * 6);
+  });
+
+  test("帯は中心線の左右へ車線の幅ごとにずれて並ぶ", () => {
+    const g = roadLaneGeometry(
+      new Float64Array([0, 0, 4, 0, 2]),
+      new Float64Array([0, 0, 1, 4, 0, 1]),
+    );
+    const centers = new Set<number>();
+    const data = g.build();
+    for (let i = 0; i < g.vertexCount; i += 6) {
+      // 帯の始点の位置。法線の分は含まない
+      centers.add(Number((data[i * VERTEX_FLOATS + 1] ?? 0).toFixed(3)));
+    }
+    // 基準のマスは (0, 0) で、道路の中心線は y = 0.5。中くらいの道路は車線が片側 2 本なので、
+    // 車道の端から順に歩道（0.05、0.95）、区切り（0.3、0.7）、中心線（0.5）が並ぶ
+    expect([...centers].sort((a, b) => a - b)).toEqual([0.05, 0.3, 0.5, 0.7, 0.95]);
+  });
+
+  test("細い線の半分の太さは負で渡し、車道の帯は正で渡す", () => {
+    const g = roadLaneGeometry(
+      new Float64Array([0, 0, 4, 0, 3]),
+      new Float64Array([0, 0, 1, 4, 0, 1]),
+    );
+    const data = g.build();
+    const halves = new Set<number>();
+    for (let i = 0; i < g.vertexCount; i++) {
+      halves.add(Math.sign(data[i * VERTEX_FLOATS + 4] ?? 0));
+    }
+    expect([...halves].sort()).toEqual([-1, 1]);
+    // 最初の帯が車道で、半分の太さは車線 3 本分
+    expect(data[4]).toBeCloseTo(0.6);
+  });
+
+  test("3 本以上が集まる交差点では、線が交差点の中を横切らないよう縮める", () => {
+    // (4, 0) に 3 本が集まる
+    const segments = new Float64Array([0, 0, 4, 0, 1, 4, 0, 8, 0, 1, 4, 0, 4, 4, 1]);
+    const nodes = new Float64Array([0, 0, 1, 4, 0, 0, 8, 0, 1, 4, 4, 1]);
+    const g = roadLaneGeometry(segments, nodes);
+    const data = g.build();
+    // 帯 4 本（車道、歩道 2、中央線）× 3 区間 + 交差点の四角 1 つ = 6 × 13
+    expect(g.vertexCount).toBe(6 * 13);
+    // 描く順は、車道 3 区間、歩道 6 本、交差点の四角、中央線 3 本。
+    // 区間 (0,0)-(4,0) の中央線は、終点側が交差点の半分の幅（0.3）だけ手前で終わる
+    const center = 3 * 6 + 6 * 6 + 6;
+    const endX = data[(center + 2) * VERTEX_FLOATS] ?? 0;
+    expect(endX).toBeCloseTo(4.5 - 0.3);
+  });
+
+  test("縮小用と拡大用の両方の頂点を作る", () => {
+    const meshes = roadMeshes(
+      new Float64Array([0, 0, 4, 0, 1]),
+      new Float64Array([0, 0, 1, 4, 0, 1]),
+    );
+    expect(meshes.simple.vertexCount).toBe(18);
+    expect(meshes.lanes.vertexCount).toBeGreaterThan(18);
   });
 });

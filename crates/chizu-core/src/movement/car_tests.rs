@@ -243,6 +243,7 @@ fn cars_reroute_around_a_removed_road_and_show_as_movers() {
     assert_eq!(t.speed(), speed);
     assert!(t.route().links.len() >= 5);
     let m = c.trips.movers_in(
+        &c.net,
         WorldPos::new(Mm(0), Mm(0)),
         WorldPos::new(Mm(80_000), Mm(8_000)),
     );
@@ -399,6 +400,38 @@ fn cars_use_more_than_the_first_lane_on_large_roads() {
 }
 
 #[test]
+fn mover_shifts_follow_the_lane_each_car_runs_in() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (12, 0), RoadKind::Large);
+    let mut c = Cars::new(n);
+    // 上り（+x）の車線ごとに 1 台ずつ、下り（-x）に 1 台走らせる。
+    for _ in 0..3 {
+        c.drive(at(2, 0, (1, 0), 0), at(10, 0, (1, 0), 0));
+    }
+    c.drive(at(10, 0, (-1, 0), 0), at(2, 0, (-1, 0), 0));
+    let min = WorldPos::new(Mm(-8_000), Mm(-8_000));
+    let max = WorldPos::new(Mm(160_000), Mm(16_000));
+    for _ in 0..40 {
+        c.step();
+        for m in c.trips.movers_in(&c.net, min, max) {
+            assert_eq!(m.mode, LaneMode::Car);
+            let t = c.trips.get(m.id).unwrap();
+            let k = c
+                .net
+                .link_lanes(t.link())
+                .position(|l| l == t.lane())
+                .unwrap();
+            // 横のずれは中心線に直交し、左側通行で、車線の番号が小さいほど端（中心線から遠い）にある。
+            assert_eq!(m.shift.0, Mm(0));
+            let side = if m.heading.0 > 0 { -1 } else { 1 };
+            if t.leg == 0 || i64::from(t.offset().0) >= lane_shift::BLEND_MM {
+                assert_eq!(m.shift.1, Mm(side * (4_000 - 1_600 * k as i64)));
+            }
+        }
+    }
+}
+
+#[test]
 fn cars_from_the_same_tile_queue_behind_or_wait() {
     let mut n = Network::new();
     road(&mut n, (0, 0), (10, 0), RoadKind::Small);
@@ -411,6 +444,7 @@ fn cars_from_the_same_tile_queue_behind_or_wait() {
     assert_eq!(c.trips.get(b).unwrap().offset(), LaneOffset(1_000));
     let w = c.drive(at(1, 0, (1, 0), 0), at(9, 0, (1, 0), 0));
     let m = c.trips.movers_in(
+        &c.net,
         WorldPos::new(Mm(0), Mm(0)),
         WorldPos::new(Mm(80_000), Mm(8_000)),
     );

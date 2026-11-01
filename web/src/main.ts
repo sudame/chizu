@@ -12,7 +12,8 @@ import {
   FACILITY_COLOR,
   Geometry,
   halfWidthOf,
-  roadGeometry,
+  type RoadMeshes,
+  roadMeshes,
   unsuppliedCount,
 } from "./map/roads.ts";
 import {
@@ -136,7 +137,7 @@ function createRenderer(): MapRenderer | null {
 }
 let renderer = createRenderer();
 // 最後に届いた道路網と建物。コンテキストを失ったあとに貼り直す
-let roads: Geometry | null = null;
+let roads: RoadMeshes | null = null;
 let buildings: Geometry | null = null;
 let activeLayers: number[] = [];
 setupLayerPanel(element<HTMLElement>("#layers"), (active) => {
@@ -603,7 +604,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   if (message.kind === "roads") {
-    roads = roadGeometry(message.segments, message.nodes);
+    roads = roadMeshes(message.segments, message.nodes);
     renderer?.roads.setRoads(roads);
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);

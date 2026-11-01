@@ -246,6 +246,7 @@ fn movers_report_world_positions_in_the_area() {
     w.trips.step(&w.net, &mut w.router);
     let world = |t: i64| Mm(t * 8_000);
     let all = w.trips.movers_in(
+        &w.net,
         WorldPos::new(world(0), world(0)),
         WorldPos::new(world(6), world(6)),
     );
@@ -258,9 +259,13 @@ fn movers_report_world_positions_in_the_area() {
             pos: WorldPos::new(Mm(p), Mm(p)),
             heading: (1, 1),
             mode: LaneMode::Sidewalk,
+            // 小さい道路の歩道は、中心線から車線 1 本と歩道の半分、進む向きの左にある。
+            // 斜めなので、2,000mm を √2 で割って 1,414mm ずつ、左（右上）へずれる。
+            shift: (Mm(1_414), Mm(-1_414)),
         }]
     );
     let none = w.trips.movers_in(
+        &w.net,
         WorldPos::new(world(3), world(3)),
         WorldPos::new(world(6), world(6)),
     );
