@@ -39,6 +39,7 @@ impl Street {
                     },
                     level: 1,
                     leveled_at: Tick::ZERO,
+                    supply: Default::default(),
                 })
             })
             .collect();
