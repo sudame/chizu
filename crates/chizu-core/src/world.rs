@@ -3,8 +3,11 @@
 use std::collections::BTreeMap;
 
 use crate::chunk::Chunk;
+use crate::citizens::{CitizenChange, CitizenRow, Population};
 use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
+use crate::id::CitizenId;
 use crate::network::{Line, Network, road_cost};
+use crate::schedule::{bucket_at, update_citizen};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{ChunkCoord, TilePos, TileRect};
 use crate::units::{Money, Tick};
@@ -55,6 +58,7 @@ pub struct World {
     /// 始めてから買ったチャンクの数。最初から買ってあるチャンクは数えない。
     chunks_bought: u32,
     network: Network,
+    population: Population,
 }
 
 impl World {
@@ -77,6 +81,7 @@ impl World {
             chunks,
             chunks_bought: 0,
             network: Network::new(),
+            population: Population::default(),
         }
     }
 
@@ -148,6 +153,15 @@ impl World {
         self.chunks.values()
     }
 
+    pub fn population(&self) -> &Population {
+        &self.population
+    }
+
+    #[cfg(test)]
+    pub(crate) fn population_mut(&mut self) -> &mut Population {
+        &mut self.population
+    }
+
     pub fn is_owned(&self, coord: ChunkCoord) -> bool {
         self.chunk(coord).is_some_and(|c| c.owned())
     }
@@ -203,7 +217,18 @@ impl World {
 
     /// 1 tick 進める。
     pub fn step(&mut self) {
-        self.tick = self.tick.next();
+        self.step_with(update_citizen);
+    }
+
+    /// 住民の 1 人ぶんの処理を `update` にして 1 tick 進める。
+    pub(crate) fn step_with<F>(&mut self, update: F)
+    where
+        F: Fn(u64, Tick, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
+    {
+        let (seed, tick) = (self.seed, self.tick);
+        self.population
+            .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
+        self.tick = tick.next();
     }
 
     /// 状態ハッシュ。表は決まった順番で書き出す。
@@ -224,6 +249,7 @@ impl StateHash for World {
         h.write(&self.chunks);
         h.write(&self.chunks_bought);
         h.write(&self.network);
+        h.write(&self.population);
     }
 }
 

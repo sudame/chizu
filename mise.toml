@@ -29,12 +29,14 @@ run = "rumdl check ."
 run = "jactionlint"
 
 [tasks."lint:rust"]
-# cargo は clippy.toml の変更を確実には拾わない。chizu-core だけ消して毎回検査し直す
+# cargo は clippy.toml の変更を確実には拾わない。clippy.toml を持つクレートだけ消して毎回検査し直す。
+# clippy.toml を持つクレートを足したら、cargo clean の --package にも足す
 run = [
   "cargo fmt --all --check",
-  "cargo clean --package chizu-core",
+  "cargo clean --package chizu-core --package chizu-scenario",
   "cargo clippy --workspace --all-targets -- -D warnings",
-  "scripts/check-no-float.sh",
+  "scripts/check-no-float.sh crates/chizu-core/src",
+  "scripts/check-no-float.sh crates/chizu-scenario/src",
 ]
 
 [tasks."lint:wasm"]
@@ -70,6 +72,14 @@ run = "node scripts/test-wasm.ts"
 
 [tasks.test]
 depends = ["test:rust", "test:web", "test:wasm"]
+
+[tasks.bench]
+description = "ネイティブのベンチマークを criterion で回す。CI では回さない"
+run = "cargo bench --package chizu-scenario"
+
+[tasks."build:bench"]
+description = "ベンチマークをリリースのプロファイルでビルドだけする"
+run = "cargo bench --workspace --no-run"
 
 [tasks."build:wasm"]
 # スレッドを使うには std を atomics つきでビルドし直す必要がある。wasm32 用の rustflags は .cargo/config.toml にある
