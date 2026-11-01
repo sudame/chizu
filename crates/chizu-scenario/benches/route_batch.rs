@@ -6,6 +6,8 @@
 //! - `bundled`：同じ着くリンク（または出発のリンク）の依頼を束ね、1 対多の探索で解く。
 //! - `1k` と `100k`：探索の件数。
 //! - `mixed_100k`：職場が 1/10 の通勤の半分を歩いて探す。車と歩行者の依頼が混ざった一括である。
+//! - `return_100k`：職場が 1/100 の通勤の帰り道。出発のリンクで束ねる。
+//! - `scatter_100k`：1 か所から全員が散らばる。束ねた組が 1 つだけになる。
 
 use std::hint::black_box;
 
@@ -32,6 +34,24 @@ fn route_batch(c: &mut Criterion) {
         r.mode = LaneMode::Sidewalk;
     }
     cases.push(("mixed_100k".to_string(), mixed));
+    // 帰り道。職場から家へ、出発のリンクで束ねる向きになる。
+    let swap = |r: &RouteRequest| RouteRequest {
+        from: r.to,
+        to: r.from,
+        ..*r
+    };
+    let back: Vec<RouteRequest> = commute_requests(1, &net, 100_000, 100)
+        .iter()
+        .map(swap)
+        .collect();
+    cases.push(("return_100k/offices_1_100".to_string(), back));
+    // 1 か所から全員が散らばる。組が 1 つだけになる。
+    let mut scatter = commute_requests(1, &net, 100_000, 10);
+    let origin = scatter[0].from;
+    for r in &mut scatter {
+        r.from = origin;
+    }
+    cases.push(("scatter_100k".to_string(), scatter));
 
     let mut group = c.benchmark_group("route_batch");
     group.sample_size(10);

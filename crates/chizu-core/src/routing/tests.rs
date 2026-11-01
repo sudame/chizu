@@ -302,6 +302,66 @@ fn bundling_and_the_cache_limit_do_not_change_the_routes() {
 }
 
 #[test]
+fn one_batch_larger_than_the_cache_limit_keeps_only_the_limit() {
+    let n = grid(6);
+    let reqs = requests(&n, 100);
+    let want = AstarRouter::new(&n).route_batch(&reqs);
+    let mut router = AstarRouter::new(&n).with_cache_limit(10);
+    assert_eq!(router.route_batch(&reqs), want);
+    assert!(router.cached() <= 10);
+    assert_eq!(router.route_batch(&reqs), want);
+    assert!(router.cached() <= 10);
+}
+
+#[test]
+fn bundles_in_the_direction_that_covers_more_requests() {
+    let n = grid(8);
+    let links: Vec<LinkId> = n.links().filter(|l| l.mode == LaneMode::Car).collect();
+    let req = |from: usize, to: usize| RouteRequest {
+        from: links[from],
+        to: links[to],
+        mode: LaneMode::Car,
+    };
+    // 1 か所から 60 か所へ散らばる依頼と、その 60 か所へほかから 2 件ずつ来る依頼。
+    // 着くリンクの組（60 組、3 件ずつ）のほうが少ないが、下限に届くのは出発のリンクの組だけである。
+    let mut reqs: Vec<RouteRequest> = (1..=60).map(|t| req(0, t)).collect();
+    reqs.extend((1..=60).flat_map(|t| [req(60 + t, t), req(120 + t, t)]));
+    reqs.sort();
+    let router = AstarRouter::new(&n);
+    let jobs = router.plan(&reqs);
+    let bundled: Vec<(Toward, usize)> = jobs
+        .iter()
+        .filter_map(|j| match j {
+            Job::Bundle { toward, others, .. } => Some((*toward, others.len())),
+            Job::Single(_) => None,
+        })
+        .collect();
+    assert_eq!(bundled, [(Toward::Forward, 60)]);
+    let want = AstarRouter::new(&n)
+        .with_bundle_min(usize::MAX)
+        .route_batch(&reqs);
+    assert_eq!(AstarRouter::new(&n).route_batch(&reqs), want);
+}
+
+#[test]
+fn a_large_group_extracts_routes_in_parallel_with_the_same_result() {
+    let n = grid(8);
+    let links: Vec<LinkId> = n.links().filter(|l| l.mode == LaneMode::Car).collect();
+    // 1 か所から 280 か所へ散らばる依頼。経路の取り出しをスレッドに分ける大きさである。
+    let reqs: Vec<RouteRequest> = (1..=280)
+        .map(|t| RouteRequest {
+            from: links[0],
+            to: links[t],
+            mode: LaneMode::Car,
+        })
+        .collect();
+    let want = AstarRouter::new(&n)
+        .with_bundle_min(usize::MAX)
+        .route_batch(&reqs);
+    assert_eq!(AstarRouter::new(&n).route_batch(&reqs), want);
+}
+
+#[test]
 fn mixed_modes_do_not_reallocate_the_scratch() {
     // 高速道路があると、車と歩行者でグラフの頂点の数が違う。
     let mut n = grid(4);

@@ -35,9 +35,7 @@ pub struct Scratch {
     seen: Vec<u32>,
     dist: Vec<u64>,
     closed: Vec<bool>,
-    mark_stamp: u32,
-    mark: Vec<u32>,
-    stack: Vec<u32>,
+    marks: Marks,
     heap: BinaryHeap<Reverse<(u64, u64, u32)>>,
     /// 配列を作り直した回数。
     allocations: u32,
@@ -55,12 +53,19 @@ impl Scratch {
             self.seen = vec![0; n];
             self.dist = vec![0; n];
             self.closed = vec![false; n];
-            self.mark = vec![0; n];
             self.stamp = 0;
-            self.mark_stamp = 0;
         }
         self.stamp += 1;
         self.heap.clear();
+    }
+
+    /// 印の作業領域を借りる。返すときは [`Scratch::put_marks`] を呼ぶ。
+    pub(crate) fn take_marks(&mut self) -> Marks {
+        std::mem::take(&mut self.marks)
+    }
+
+    pub(crate) fn put_marks(&mut self, m: Marks) {
+        self.marks = m;
     }
 
     fn dist(&self, v: u32) -> Option<u64> {
@@ -79,17 +84,31 @@ impl Scratch {
         }
         self.dist[i] = d;
     }
+}
 
-    fn new_mark(&mut self) {
-        if self.mark_stamp == u32::MAX {
-            self.mark.fill(0);
-            self.mark_stamp = 0;
+/// 最短経路の上の頂点に付ける印。経路を取り出すスレッドごとに 1 つ持つ。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Marks {
+    stamp: u32,
+    mark: Vec<u32>,
+    stack: Vec<u32>,
+}
+
+impl Marks {
+    fn begin(&mut self, n: usize) {
+        if self.mark.len() != n || self.stamp == u32::MAX {
+            self.mark = vec![0; n];
+            self.stamp = 0;
         }
-        self.mark_stamp += 1;
+        self.stamp += 1;
+    }
+
+    fn set(&mut self, v: u32) {
+        self.mark[v as usize] = self.stamp;
     }
 
     fn is_marked(&self, v: u32) -> bool {
-        self.mark[v as usize] == self.mark_stamp
+        self.mark[v as usize] == self.stamp
     }
 }
 
@@ -144,32 +163,32 @@ fn search(
 }
 
 /// 根から前向きに広げた距離から、`src` から `dst` への経路を取り出す。
-fn path_from_forward(g: &Graph, s: &mut Scratch, src: u32, dst: u32) -> Option<Route> {
+fn path_from_forward(g: &Graph, s: &Scratch, m: &mut Marks, src: u32, dst: u32) -> Option<Route> {
     if !s.is_closed(dst) {
         return None;
     }
     // 着くリンクから逆にたどり、最短経路の上にある頂点に印を付ける。
-    s.new_mark();
-    s.mark[dst as usize] = s.mark_stamp;
-    s.stack.clear();
-    s.stack.push(dst);
-    while let Some(v) = s.stack.pop() {
+    m.begin(g.vertex_count());
+    m.set(dst);
+    m.stack.clear();
+    m.stack.push(dst);
+    while let Some(v) = m.stack.pop() {
         let dv = s.dist[v as usize];
         for e in g.rev_edges(v) {
             let u = e.to;
             if s.is_closed(u)
-                && !s.is_marked(u)
+                && !m.is_marked(u)
                 && add(add(s.dist[u as usize], e.cost), g.cost(v)) == dv
             {
-                s.mark[u as usize] = s.mark_stamp;
-                s.stack.push(u);
+                m.set(u);
+                m.stack.push(u);
             }
         }
     }
     let cost = s.dist[dst as usize];
-    let s = &*s;
+    let m = &*m;
     walk(g, src, dst, cost, |u, e| {
-        s.is_marked(e.to)
+        m.is_marked(e.to)
             && add(add(s.dist[u as usize], e.cost), g.cost(e.to)) == s.dist[e.to as usize]
     })
 }
@@ -221,23 +240,22 @@ pub fn astar(g: &Graph, from: LinkId, to: LinkId, s: &mut Scratch) -> Option<Rou
         |v| g.heuristic(v, dst),
         |v| v == dst,
     );
-    path_from_forward(g, s, src, dst)
+    let mut m = std::mem::take(&mut s.marks);
+    let route = path_from_forward(g, s, &mut m, src, dst);
+    s.marks = m;
+    route
 }
 
-/// 根 `root` を共有する依頼をまとめて解き、`others` の順に結果を返す。
-///
-/// `Forward` なら `root` は出発のリンクで `others` は着くリンク、`Backward` なら `root` は着くリンクで
-/// `others` は出発のリンクである。`others` がすべて閉じたところで止める。
-pub fn one_to_many(
+/// 根 `root` を共有する依頼のための探索。`others` がすべて閉じたところで止める。
+/// 根がグラフになければ `None`。経路は [`extract`] で取り出す。
+pub(crate) fn search_many(
     g: &Graph,
     root: LinkId,
     others: &[LinkId],
     toward: Toward,
     s: &mut Scratch,
-) -> Vec<Option<Route>> {
-    let Some(r) = g.vertex(root) else {
-        return vec![None; others.len()];
-    };
+) -> Option<u32> {
+    let r = g.vertex(root)?;
     let mut want: Vec<u32> = others.iter().filter_map(|l| g.vertex(*l)).collect();
     want.sort_unstable();
     want.dedup();
@@ -255,14 +273,45 @@ pub fn one_to_many(
             left == 0
         },
     );
-    others
+    Some(r)
+}
+
+/// [`search_many`] の結果から、根 `root` と `other` を結ぶ経路を取り出す。`s` は読むだけなので、
+/// `Marks` をスレッドごとに分ければ、同じ探索から並列に取り出せる。
+pub(crate) fn extract(
+    g: &Graph,
+    s: &Scratch,
+    m: &mut Marks,
+    root: u32,
+    other: LinkId,
+    toward: Toward,
+) -> Option<Route> {
+    let o = g.vertex(other)?;
+    match toward {
+        Toward::Forward => path_from_forward(g, s, m, root, o),
+        Toward::Backward => path_from_backward(g, s, o, root),
+    }
+}
+
+/// 根 `root` を共有する依頼をまとめて解き、`others` の順に結果を返す。
+///
+/// `Forward` なら `root` は出発のリンクで `others` は着くリンク、`Backward` なら `root` は着くリンクで
+/// `others` は出発のリンクである。`others` がすべて閉じたところで止める。
+pub fn one_to_many(
+    g: &Graph,
+    root: LinkId,
+    others: &[LinkId],
+    toward: Toward,
+    s: &mut Scratch,
+) -> Vec<Option<Route>> {
+    let Some(r) = search_many(g, root, others, toward, s) else {
+        return vec![None; others.len()];
+    };
+    let mut m = std::mem::take(&mut s.marks);
+    let out = others
         .iter()
-        .map(|l| {
-            let o = g.vertex(*l)?;
-            match toward {
-                Toward::Forward => path_from_forward(g, s, r, o),
-                Toward::Backward => path_from_backward(g, s, o, r),
-            }
-        })
-        .collect()
+        .map(|l| extract(g, s, &mut m, r, *l, toward))
+        .collect();
+    s.marks = m;
+    out
 }

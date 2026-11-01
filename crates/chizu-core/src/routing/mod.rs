@@ -15,6 +15,7 @@ use std::sync::Arc;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+use astar::{Marks, extract, search_many};
 pub use astar::{Route, Scratch, Toward, astar, one_to_many};
 pub use graph::{Connector, Graph, WALK_SPEED, connectors, speed_limit};
 
@@ -25,6 +26,10 @@ pub const TIME_BANDS: u8 = 96;
 
 /// 1 対多の探索に束ねる依頼の数の既定の下限。これより少ない組は A* で解く。
 pub const DEFAULT_BUNDLE_MIN: usize = 4;
+
+/// 1 つの組の経路を、スレッドに分けて取り出し始める依頼の数。
+#[cfg(feature = "parallel")]
+const PARALLEL_EXTRACT_MIN: usize = 256;
 
 /// 覚えておく結果の数の既定の上限。超えそうになったら、新しい結果を入れる前に全部捨てる。
 pub const DEFAULT_CACHE_LIMIT: usize = 1 << 18;
@@ -138,8 +143,8 @@ impl AstarRouter {
         self.cache.len()
     }
 
-    /// 依頼を解く単位に分ける。手段ごとに、着くリンクと出発のリンクのどちらで束ねるかを、
-    /// 束ねた組の数が少ないほうに決める（同じなら着くリンク）。下限に満たない組は 1 件ずつ A* で解く。
+    /// 依頼を解く単位に分ける。手段ごとに、着くリンクと出発のリンクのどちらで束ねるかを決め、
+    /// 下限に満たない組は 1 件ずつ A* で解く。
     fn plan(&self, misses: &[RouteRequest]) -> Vec<Job> {
         let mut jobs = Vec::new();
         for mode in [LaneMode::Car, LaneMode::Sidewalk] {
@@ -149,7 +154,15 @@ impl AstarRouter {
                 by_to.entry(r.to).or_default().push(r.from);
                 by_from.entry(r.from).or_default().push(r.to);
             }
-            let (groups, toward) = if by_to.len() <= by_from.len() {
+            // 下限以上の組に入る依頼が多いほうの向きで束ねる。同じなら着くリンクで束ねる。
+            let covered = |groups: &BTreeMap<LinkId, Vec<LinkId>>| -> usize {
+                groups
+                    .values()
+                    .map(Vec::len)
+                    .filter(|n| *n >= self.bundle_min)
+                    .sum()
+            };
+            let (groups, toward) = if covered(&by_to) >= covered(&by_from) {
                 (by_to, Toward::Backward)
             } else {
                 (by_from, Toward::Forward)
@@ -188,7 +201,12 @@ impl AstarRouter {
                 toward,
                 others,
             } => {
-                let routes = one_to_many(self.graph(*mode), *root, others, *toward, s.get(*mode));
+                let g = self.graph(*mode);
+                let sc = s.get(*mode);
+                let routes: Vec<Option<Route>> = match search_many(g, *root, others, *toward, sc) {
+                    None => vec![None; others.len()],
+                    Some(r) => extract_all(g, sc, r, others, *toward),
+                };
                 others
                     .iter()
                     .zip(routes)
@@ -208,6 +226,30 @@ impl AstarRouter {
             }
         }
     }
+}
+
+/// 1 つの探索から、組の経路をすべて取り出す。組が大きければスレッドに分ける。
+/// 取り出しは探索の結果を読むだけなので、分け方で結果は変わらない。
+fn extract_all(
+    g: &Graph,
+    s: &mut Scratch,
+    root: u32,
+    others: &[LinkId],
+    toward: Toward,
+) -> Vec<Option<Route>> {
+    let mut m = s.take_marks();
+    let sc = &*s;
+    let one = |m: &mut Marks, o: &LinkId| extract(g, sc, m, root, *o, toward);
+    #[cfg(feature = "parallel")]
+    let out = if others.len() >= PARALLEL_EXTRACT_MIN {
+        others.par_iter().map_init(Marks::default, one).collect()
+    } else {
+        others.iter().map(|o| one(&mut m, o)).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let out = others.iter().map(|o| one(&mut m, o)).collect();
+    s.put_marks(m);
+    out
 }
 
 impl Router for AstarRouter {
@@ -257,7 +299,9 @@ impl Router for AstarRouter {
         if self.cache.len() + fresh.len() > self.cache_limit {
             self.cache.clear();
         }
-        self.cache.extend(fresh);
+        // 1 回の一括だけで上限を超えるときは、鍵の順で上限までを覚え、残りは捨てる。
+        let room = self.cache_limit.saturating_sub(self.cache.len());
+        self.cache.extend(fresh.into_iter().take(room));
         out
     }
 }
