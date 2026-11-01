@@ -981,11 +981,12 @@ mod tests {
             (3, 0, detached),
             (2, 2, detached),
             (-2, -2, detached),
-            (i32::MIN, 0, detached),
         ] {
             let outcome = buy(&mut w, cx, cy);
             assert_eq!(outcome, ApplyOutcome::Denied(reason), "({cx}, {cy})");
         }
+        // 世界の座標の範囲の外は、検証で弾く。
+        assert_eq!(buy(&mut w, i32::MIN, 0), ApplyOutcome::Rejected);
         assert_eq!(w, before);
     }
 
