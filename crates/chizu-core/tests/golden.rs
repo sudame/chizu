@@ -12,9 +12,9 @@
 use std::path::PathBuf;
 
 use chizu_core::{
-    BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneOffset, RecordedCommand,
-    ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed, StateHasher, Tick,
-    TilePos, TileRect, World, ZoneKind, replay, rng,
+    BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneOffset, Money, RecordedCommand,
+    ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed, StateHasher,
+    TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind, replay, rng,
 };
 
 /// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
@@ -38,6 +38,17 @@ struct Scenario {
     seed: u64,
     ticks: u64,
     log: CommandLog,
+    /// 始めたときの所持金。`None` なら決まった初期値である。
+    money: Option<Money>,
+}
+
+impl Scenario {
+    fn start(&self) -> World {
+        match self.money {
+            Some(m) => World::new_with_money(self.seed, m),
+            None => World::new(self.seed),
+        }
+    }
 }
 
 fn scenarios() -> Vec<Scenario> {
@@ -47,36 +58,56 @@ fn scenarios() -> Vec<Scenario> {
             seed: 42,
             ticks: 2 * chizu_core::TICKS_PER_DAY,
             log: clock_and_commands(),
+            money: None,
         },
         Scenario {
             name: "land_purchase",
             seed: 42,
             ticks: 600,
             log: land_purchase(),
+            money: None,
         },
         Scenario {
             name: "road_network",
             seed: 42,
             ticks: 400,
             log: road_network(42),
+            money: None,
         },
         Scenario {
             name: "zoning",
             seed: 42,
             ticks: 300,
             log: zoning(),
+            money: None,
         },
         Scenario {
             name: "growth",
             seed: 42,
             ticks: 3_600,
             log: growth(),
+            money: None,
         },
         Scenario {
             name: "utilities",
             seed: 42,
             ticks: 7_200 + 1_200,
             log: utilities(),
+            money: None,
+        },
+        Scenario {
+            name: "economy",
+            seed: 42,
+            ticks: 2 * chizu_core::TICKS_PER_DAY,
+            log: economy(),
+            money: None,
+        },
+        Scenario {
+            name: "land_slots",
+            seed: 42,
+            ticks: 2 * TICKS_PER_DAY + 600,
+            log: land_slots(),
+            money: Some(Money(10_000_000)),
         },
     ]
 }
@@ -287,6 +318,96 @@ fn utilities() -> CommandLog {
     log
 }
 
+/// 住宅と工業の通りに人が住み、途中で工業の税率を上げる記録。
+fn economy() -> CommandLog {
+    let mut log = street_city();
+    log.record(
+        Tick(4_000),
+        Command::SetTaxRate {
+            zone: ZoneKind::Industrial,
+            permille: 250,
+        },
+    )
+    .unwrap();
+    log
+}
+
+/// 始めたときの枠のぶんだけチャンクを買い、次の 1 つは枠で断られ、
+/// 人口がマイルストーンに届いたあとに同じチャンクを買える記録。所持金は多めにして始める。
+fn land_slots() -> CommandLog {
+    let mut log = street_city();
+    // 住宅が電気と水道で頭打ちにならないよう、工業の側に発電所と浄水場を足す。
+    let place = |kind, x| Command::PlaceBuilding {
+        kind,
+        at: TilePos::new(x, 1),
+        rotation: 0,
+    };
+    for x in [-40, -36] {
+        log.record(Tick(4), place(ServiceKind::PowerPlant, x))
+            .unwrap();
+    }
+    for x in [-32, -30, -28] {
+        log.record(Tick(4), place(ServiceKind::WaterPump, x))
+            .unwrap();
+    }
+    let buy = |cx| Command::BuyChunk {
+        coord: ChunkCoord::new(cx, -1),
+    };
+    for cx in 2..=8 {
+        log.record(Tick(10), buy(cx)).unwrap();
+    }
+    log.record(Tick(2 * TICKS_PER_DAY), buy(8)).unwrap();
+    log
+}
+
+/// 住宅と工業の通りに、電気と水道を引き、外の世界とつないだ記録。
+fn street_city() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let rect = |a: (i64, i64), b: (i64, i64)| {
+        TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1))
+    };
+    rec(
+        1,
+        Command::BuildRoad {
+            from: TilePos::new(-40, 0),
+            to: TilePos::new(40, 0),
+            kind: RoadKind::Small,
+        },
+    );
+    for (area, zone) in [
+        (rect((-30, -6), (40, -1)), ZoneKind::Residential),
+        (rect((-40, 1), (40, 6)), ZoneKind::Industrial),
+    ] {
+        rec(
+            2,
+            Command::PaintZone {
+                area,
+                zone: Some(zone),
+            },
+        );
+    }
+    for c in connect_to_outside(42, 0, -40, 40) {
+        rec(3, c);
+    }
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, -37),
+        (ServiceKind::WaterPump, -33),
+    ] {
+        rec(
+            3,
+            Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, -1),
+                rotation: 2,
+            },
+        );
+    }
+    log
+}
+
 /// 土地を買い進める記録。買える場合と、買った土地・離れた土地・角だけで接する土地・
 /// 所持金の不足で却下される場合を混ぜる。
 fn land_purchase() -> CommandLog {
@@ -366,11 +487,15 @@ fn clock_and_commands() -> CommandLog {
 
 /// 再生して、状態ハッシュの列を `.hash` の形式の文字列で返す。
 fn checkpoints(seed: u64, log: &CommandLog, ticks: u64) -> String {
-    checkpoints_and_world(seed, log, ticks).0
+    checkpoints_from(World::new(seed), log, ticks).0
 }
 
 fn checkpoints_and_world(seed: u64, log: &CommandLog, ticks: u64) -> (String, World) {
-    let mut world = World::new(seed);
+    checkpoints_from(World::new(seed), log, ticks)
+}
+
+/// `world` から再生する [`checkpoints`]。
+fn checkpoints_from(mut world: World, log: &CommandLog, ticks: u64) -> (String, World) {
     let mut digest = StateHasher::new();
     digest.write(&world.state_hash());
     let mut out = String::new();
@@ -527,6 +652,46 @@ fn utilities_supply_only_the_connected_street() {
     }
 }
 
+/// 枠の記録が、始めたときの枠を使い切って断られ、マイルストーンのあとに買えることを確かめる。
+#[test]
+fn land_slots_open_with_the_milestone() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "land_slots")
+        .unwrap();
+    let mut world = s.start();
+    let stats = replay(&mut world, &s.log, 11);
+    assert_denied_by(&stats, &[(DenyReason::NoChunkSlot, 1)]);
+    assert_eq!(world.milestone(), 0);
+    assert!(!world.is_owned(ChunkCoord::new(8, -1)));
+    let stats = replay(&mut world, &s.log, s.ticks - 11);
+    assert_eq!(stats.denied, 0, "{:?}", stats.denied_by);
+    assert!(world.milestone() >= 1, "{} 人", world.housed_citizens());
+    assert!(world.is_owned(ChunkCoord::new(8, -1)));
+}
+
+/// 財政の記録が、税収と維持費の精算を通っていることを確かめる。
+#[test]
+fn economy_settles_every_hour() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "economy")
+        .unwrap();
+    let mut world = World::new(s.seed);
+    let stats = replay(&mut world, &s.log, 7_000);
+    let f = world.finances();
+    assert!(world.population().citizen_count() > 0);
+    assert!(f.taxes[ZoneKind::Residential.index()].0 > 0, "{f:?}");
+    assert!(f.taxes[ZoneKind::Industrial.index()].0 > 0, "{f:?}");
+    assert!(f.road_upkeep.0 > 0 && f.facility_upkeep.iter().all(|m| m.0 > 0));
+    assert_eq!(stats.denied, 0);
+    // 1 時間ぶん進めると、1 日の見込みのおよそ 1/24 だけ所持金が動く。
+    let (money, net) = (world.money().0, world.finances().net().0);
+    replay(&mut world, &s.log, 300);
+    let moved = world.money().0 - money;
+    assert!((moved * 24 - net).abs() <= 24, "{moved} × 24 と {net}");
+}
+
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
 }
@@ -543,7 +708,7 @@ fn golden_hashes_match() {
         let rec_path = dir.join(format!("{}.rec", s.name));
         let hash_path = dir.join(format!("{}.hash", s.name));
         let encoded = s.log.encode();
-        let got = checkpoints(s.seed, &s.log, s.ticks);
+        let got = checkpoints_from(s.start(), &s.log, s.ticks).0;
 
         if updating() {
             std::fs::write(&rec_path, &encoded).unwrap();
@@ -559,7 +724,7 @@ fn golden_hashes_match() {
         // 保存した記録を読み戻して再生しても、同じ結果になる。
         let decoded = CommandLog::decode(&stored).unwrap();
         assert_eq!(
-            checkpoints(s.seed, &decoded, s.ticks),
+            checkpoints_from(s.start(), &decoded, s.ticks).0,
             got,
             "{}: 読み戻した記録で結果が変わった",
             s.name
@@ -584,8 +749,8 @@ fn golden_hashes_match() {
 fn replaying_twice_gives_the_same_hash() {
     for s in scenarios() {
         assert_eq!(
-            checkpoints(s.seed, &s.log, s.ticks),
-            checkpoints(s.seed, &s.log, s.ticks),
+            checkpoints_from(s.start(), &s.log, s.ticks).0,
+            checkpoints_from(s.start(), &s.log, s.ticks).0,
             "{}",
             s.name
         );

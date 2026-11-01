@@ -16,6 +16,13 @@ use crate::tile::{TilePos, TileRect};
 use crate::units::Money;
 
 impl ServiceKind {
+    pub const ALL: [ServiceKind; 2] = [ServiceKind::PowerPlant, ServiceKind::WaterPump];
+
+    /// `ALL` の中での位置。施設の種類ごとの表の添え字に使う。
+    pub fn index(self) -> usize {
+        self as usize - 1
+    }
+
     /// 建設費。
     pub fn cost(self) -> Money {
         match self {
@@ -24,7 +31,7 @@ impl ServiceKind {
         }
     }
 
-    /// 1 日あたりの維持費。財政を入れる PR で所持金から引く。
+    /// 1 日あたりの維持費。
     pub fn upkeep_per_day(self) -> Money {
         match self {
             ServiceKind::PowerPlant => Money(1_800),

@@ -81,10 +81,12 @@ pub enum DenyReason {
     Occupied = 11,
     /// 施設の間口が、歩道のある縦か横の道路に面していない。
     NoRoadAccess = 12,
+    /// 買えるチャンクの枠を使い切っている。人口のマイルストーンに届くと枠が増える。
+    NoChunkSlot = 13,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 13] = [
+    pub const ALL: [DenyReason; 14] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -98,6 +100,7 @@ impl DenyReason {
         DenyReason::ZoneUnchanged,
         DenyReason::Occupied,
         DenyReason::NoRoadAccess,
+        DenyReason::NoChunkSlot,
     ];
 
     pub fn index(self) -> usize {
@@ -122,6 +125,12 @@ pub struct World {
     chunks: BTreeMap<ChunkCoord, Chunk>,
     /// 始めてから買ったチャンクの数。最初から買ってあるチャンクは数えない。
     chunks_bought: u32,
+    /// 届いた人口のマイルストーンの段階。
+    milestone: u32,
+    /// マイルストーンによらず、チャンクをいくつでも買える。始める前にだけ決められる。
+    unlimited_land: bool,
+    /// 収支の 1 日あたりの見込みのうち、24 で割り切れずに次の時間へ持ち越した額。`0..24` である。
+    ledger_carry: i64,
     network: Network,
     population: Population,
     buildings: Buildings,
@@ -136,6 +145,7 @@ pub struct World {
     router: RouterSlot,
 }
 
+pub mod economy;
 pub mod growth;
 pub mod people;
 
@@ -184,6 +194,15 @@ impl World {
         }
     }
 
+    /// 買えるチャンクの枠をなくす。テストとベンチマークで、マイルストーンに届く前に広い土地を買うのに使う。
+    pub fn with_unlimited_land(self) -> World {
+        assert_eq!(self.tick, Tick::ZERO, "始めたあとでは決められない");
+        World {
+            unlimited_land: true,
+            ..self
+        }
+    }
+
     pub fn new(seed: u64) -> World {
         let r = START_CHUNK_RADIUS;
         let chunks = (-r..=r)
@@ -208,6 +227,9 @@ impl World {
             tax_permille: [INITIAL_TAX_PERMILLE; 4],
             chunks,
             chunks_bought: 0,
+            milestone: 0,
+            unlimited_land: false,
+            ledger_carry: 0,
             network,
             population: Population::default(),
             buildings: Buildings::default(),
@@ -535,12 +557,13 @@ impl World {
             Err(DenyReason::AlreadyOwned)
         } else if !coord.edge_neighbors().any(|n| self.is_owned(n)) {
             Err(DenyReason::NotAdjacent)
+        } else if self.chunks_bought >= self.chunk_slots() {
+            Err(DenyReason::NoChunkSlot)
         } else {
             Ok(())
         }
     }
 
-    // 人口のマイルストーンで買える枠が増える仕組みは、マイルストーンを入れるときに足す。
     fn buy_chunk(&mut self, coord: ChunkCoord) -> ApplyOutcome {
         let price = self.next_chunk_price();
         if let Err(reason) = self.check_buy_chunk(coord) {
@@ -621,6 +644,7 @@ impl World {
         self.update_people();
         self.trips.step(&self.network, &mut self.router.router);
         self.grow_buildings();
+        self.update_economy();
         self.tick = tick.next();
     }
 
@@ -641,6 +665,9 @@ impl StateHash for World {
         h.write(&self.tax_permille);
         h.write(&self.chunks);
         h.write(&self.chunks_bought);
+        h.write(&self.milestone);
+        h.write(&self.unlimited_land);
+        h.write(&self.ledger_carry);
         h.write(&self.network);
         h.write(&self.population);
         h.write(&self.trips);
@@ -674,10 +701,11 @@ mod tests {
             | DenyReason::NoZonableTile
             | DenyReason::ZoneUnchanged
             | DenyReason::Occupied
-            | DenyReason::NoRoadAccess => DenyReason::ALL.contains(&r),
+            | DenyReason::NoRoadAccess
+            | DenyReason::NoChunkSlot => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 13);
+        assert_eq!(DenyReason::ALL.len(), 14);
     }
     use crate::command::{MAX_TAX_PERMILLE, NodeId};
 
@@ -1051,6 +1079,7 @@ mod tests {
 
         // 水辺のある土地を買い、水辺のマスを通る道路を引こうとする。
         w.money = Money(1_000_000_000);
+        w.unlimited_land = true;
         let coord = (2..40)
             .map(|cx| ChunkCoord::new(cx, 0))
             .find(|c| {
