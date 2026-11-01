@@ -4,8 +4,9 @@
 rustflags = [
   "-C", "target-feature=+atomics,+bulk-memory,+simd128",
   "-C", "link-arg=--shared-memory",
-  # 線形メモリの上限は、wasm32 で指せる最大の 4GiB にする
-  "-C", "link-arg=--max-memory=4294967296",
+  # 線形メモリの上限は 2GiB にする。100 万人の街でも約 150MiB で足りる。
+  # iOS の Safari では、上限の大きい共有メモリで WebAssembly.Memory が作れなかったという報告があるので、4GiB にはしない
+  "-C", "link-arg=--max-memory=2147483648",
   "-C", "link-arg=--import-memory",
   "-C", "link-arg=--export=__wasm_init_tls",
   "-C", "link-arg=--export=__tls_size",

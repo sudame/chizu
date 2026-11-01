@@ -143,6 +143,7 @@ name = "chizu-bench-wasm"
 version = "0.1.0"
 dependencies = [
  "chizu-scenario",
+ "rayon",
  "wasm-bindgen",
  "wasm-bindgen-rayon",
 ]

@@ -14,7 +14,11 @@ publish = false
 
 [profile.release]
 overflow-checks = true
-# WASM が速く小さくなる。決めた理由は docs/design.md の 7.3 にある
+
+# WASM のビルドだけに使う。WASM が速く小さくなる。決めた理由は docs/design.md の 7.3 にある。
+# ネイティブのベンチと CI のビルドが遅くならないように、release には入れない
+[profile.wasm-release]
+inherits = "release"
 lto = "fat"
 codegen-units = 1
 
