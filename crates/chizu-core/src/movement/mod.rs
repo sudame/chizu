@@ -27,7 +27,7 @@ pub use parking::{Lot, PARK_RADIUS, building_spot};
 pub use pos::SidewalkPos;
 
 use crate::id::{Slots, TripId};
-use crate::network::{LaneId, LaneMode, LinkId, Network};
+use crate::network::{Dir, LaneId, LaneMode, LinkId, Network};
 use crate::routing::{
     AstarRouter, Connector, Route, RouteRequest, Router, Scratch, Toward, WALK_SPEED, one_to_many,
 };
@@ -153,10 +153,91 @@ type Spot = (LinkId, LaneOffset);
 /// 出発の位置と行き先の位置。
 type Ends = (Spot, Spot);
 
+/// 歩道の位置 `(link, offset)` を、同じ区間の逆向きの歩道のリンクの上で表したもの。
+fn flip(net: &Network, (link, offset): Spot) -> Option<Spot> {
+    let back = LinkId {
+        dir: match link.dir {
+            Dir::Forward => Dir::Backward,
+            Dir::Backward => Dir::Forward,
+        },
+        ..link
+    };
+    let len = pos::link_geometry(net, back)?.2;
+    net.link_lanes(back).next()?;
+    Some((back, LaneOffset(len.0.checked_sub(offset.0)?)))
+}
+
+/// 経路 `route` で `from` から `to` まで歩く距離。
+fn walked_mm(net: &Network, route: &Route, (from, to): Ends) -> Option<u64> {
+    let len = |l: &LinkId| pos::link_geometry(net, *l).map(|g| u64::from(g.2.0));
+    let total = route
+        .links
+        .iter()
+        .try_fold(0_u64, |acc, l| acc.checked_add(len(l)?))?;
+    let rest = len(route.links.last()?)?.checked_sub(u64::from(to.1.0))?;
+    total.checked_sub(u64::from(from.1.0))?.checked_sub(rest)
+}
+
+/// 手段 `mode` で 2 点を結ぶ経路を、まとめて探し、経路と、使った出発と行き先の位置を返す。
+///
+/// 歩道は 1 本の歩道を 2 つの向きに歩けるものとし、区間の 2 本の歩道のリンクを、その 2 つの向きとして使う。
+/// 歩くときは、出発と行き先のそれぞれで 2 つの向きを試し、歩く距離のいちばん短い組を選ぶ。
+/// 距離の同じ組は、位置を表したままの向きを先に選ぶ。同じリンクの手前へ戻る組は、向きを入れ替えた
+/// まっすぐの組に必ず負けるので、ほかの組があれば探さない。
+/// 横切りの罰則と衝突区間が入るまでは、反対側の歩道へ移る費用を 0 として扱う。
+fn plan(
+    router: &mut AstarRouter,
+    net: &Network,
+    mode: LaneMode,
+    ends: &[Ends],
+) -> Vec<Option<(Arc<Route>, Ends)>> {
+    let candidates: Vec<Vec<Ends>> = ends
+        .iter()
+        .map(|(a, b)| {
+            if mode == LaneMode::Car {
+                return vec![(*a, *b)];
+            }
+            let starts = [Some(*a), flip(net, *a)];
+            let goals = [Some(*b), flip(net, *b)];
+            let all: Vec<Ends> = starts
+                .iter()
+                .flatten()
+                .flat_map(|s| goals.iter().flatten().map(|g| (*s, *g)))
+                .collect();
+            let ahead: Vec<Ends> = all.iter().filter(|e| !behind(e)).copied().collect();
+            if ahead.is_empty() { all } else { ahead }
+        })
+        .collect();
+    let flat: Vec<Ends> = candidates.iter().flatten().copied().collect();
+    let mut found = plan_exact(router, mode, &flat).into_iter();
+    candidates
+        .iter()
+        .map(|c| {
+            let routes: Vec<_> = c
+                .iter()
+                .map(|e| Some((found.next().expect("探した経路の数が合わない")?, *e)))
+                .collect();
+            if mode == LaneMode::Car {
+                return routes.into_iter().next().flatten();
+            }
+            routes
+                .into_iter()
+                .flatten()
+                .filter_map(|(r, e)| Some((walked_mm(net, &r, e)?, r, e)))
+                .min_by_key(|(mm, _, _)| *mm)
+                .map(|(_, r, e)| (r, e))
+        })
+        .collect()
+}
+
+/// 行き先が出発と同じリンクの、出発より手前にあるか。
+fn behind(((a, ao), (b, bo)): &Ends) -> bool {
+    a == b && bo < ao
+}
+
 /// 手段 `mode` で 2 点を結ぶ経路を、まとめて探す。行き先が同じリンクの手前にあるときは、
 /// 次のリンクへ出て戻ってくる経路にする。
-fn plan(router: &mut AstarRouter, mode: LaneMode, ends: &[Ends]) -> Vec<Option<Arc<Route>>> {
-    let behind = |((a, ao), (b, bo)): &Ends| a == b && bo < ao;
+fn plan_exact(router: &mut AstarRouter, mode: LaneMode, ends: &[Ends]) -> Vec<Option<Arc<Route>>> {
     let reqs: Vec<RouteRequest> = ends
         .iter()
         .filter(|e| !behind(e))
@@ -276,7 +357,7 @@ impl Trips {
             .map(|(a, b)| Some((a.resolve_on(net, mode)?, b.resolve_on(net, mode)?)))
             .collect();
         let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
-        let mut routes = plan(router, mode, &ends).into_iter();
+        let mut routes = plan(router, net, mode, &ends).into_iter();
         // 車は、出発のリンクの車線のうち車の少ない車線に置く。前の車と重なるなら、その後ろの空いた
         // 位置まで下げる。どの車線にも空きがなければ、空くまで待たせる。
         let mut ix = car::LaneIndex::of(&self.rows, None);
@@ -284,8 +365,8 @@ impl Trips {
             .iter()
             .zip(walks)
             .map(|(e, (_, to))| {
-                let e = (*e)?;
-                let route = routes.next().expect("探した経路の数が合わない")?;
+                (*e)?;
+                let (route, e) = routes.next().expect("探した経路の数が合わない")?;
                 let id = self.insert(make_trip(net, route, e, *to, now));
                 if mode == LaneMode::Car {
                     car::place(&mut self.rows, net, &mut ix, id.slot());
@@ -363,8 +444,8 @@ impl Trips {
                 }
             }
             let ends: Vec<_> = found.iter().map(|f| f.1).collect();
-            for ((id, ends, dest), route) in found.into_iter().zip(plan(router, mode, &ends)) {
-                let Some(route) = route else {
+            for ((id, _, dest), route) in found.into_iter().zip(plan(router, net, mode, &ends)) {
+                let Some((route, ends)) = route else {
                     lost.push(id);
                     continue;
                 };

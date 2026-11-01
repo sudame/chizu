@@ -480,8 +480,8 @@ fn citizens_go_shopping_by_day_and_after_work() {
     for t in 0..ERRAND_TICKS {
         replay(&mut world, &log, 1);
         let trips = world.trips();
-        if t == hour(12) {
-            noon_movers = trips.iter().count();
+        if (hour(12)..hour(13)).contains(&t) {
+            noon_movers = trips.iter().count().max(noon_movers);
         }
         for (id, _) in trips.iter() {
             match trips.commuter(id).map(|c| c.to) {
@@ -495,7 +495,7 @@ fn citizens_go_shopping_by_day_and_after_work() {
     assert!(daytime > 0, "昼に誰も店へ向かわない");
     assert!(evening > 0, "仕事の帰りに誰も店へ寄らない");
     assert!(home_by_day > 0, "昼に店から家へ帰らない");
-    assert!(noon_movers > 0, "正午に街を誰も動いていない");
+    assert!(noon_movers > 0, "正午からの 1 時間に街を誰も動いていない");
 }
 
 /// 住民の表、移動、出発の待ち行列、買い物の行き先が互いに食い違わないことを確かめる。

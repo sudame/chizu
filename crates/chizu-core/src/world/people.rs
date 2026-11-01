@@ -518,7 +518,7 @@ pub(crate) mod tests {
             .count();
         assert_eq!(p.departures().len() + moving, workers);
         // 昼には職場にいて、夜には家にいる。出発から 4 時間待つ。移動は 1 tick に移動の 1 秒しか進まず、
-        // 歩道は片側を一方の向きにしか歩けないので、この街の徒歩の通勤は回り道で 1,000 tick 近くかかる。
+        // この街の徒歩の通勤は数百 tick かかる。
         let day_start = w.tick().0 - w.tick().0 % TICKS_PER_DAY;
         let wait = 4 * u64::from(DEPARTURE_SPREAD);
         // 母数は判定する時点の働く住民である。朝の出発のあとに職場が決まり、次の朝を待っている住民は除く。
