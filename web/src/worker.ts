@@ -197,6 +197,11 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         reply({ kind: "service-probe", service, x, y, results });
         break;
       }
+      case "inspect": {
+        const { x, y } = message;
+        reply({ kind: "inspect", x, y, info: [...sim.inspect(x, y)] });
+        break;
+      }
       case "feedback": {
         const commands = sim.encode_log().buffer as ArrayBuffer;
         reply({ kind: "feedback", state: sim.feedback_state(), commands }, [commands]);

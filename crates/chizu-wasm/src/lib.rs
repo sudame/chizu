@@ -1,6 +1,7 @@
 //! chizu-core と画面（Web Worker）のあいだの受け渡しの層。
 
 pub mod command_input;
+pub mod inspect;
 pub mod layers;
 pub mod movers;
 pub mod save;
@@ -160,6 +161,16 @@ impl Simulation {
                 Err(reason) => JsValue::from_str(sim::deny_text(*reason)),
             })
             .collect())
+    }
+
+    /// マス (x, y) にある建物か施設の様子。何もなければ空の配列。並びは `inspect::encode` にある。
+    pub fn inspect(&self, x: f64, y: f64) -> Result<Vec<f64>, JsError> {
+        let coord = |v: f64| {
+            (v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0)
+                .then_some(v as i64)
+                .ok_or_else(|| JsError::new("マスの座標が整数でない"))
+        };
+        Ok(self.0.inspect(TilePos::new(coord(x)?, coord(y)?)))
     }
 
     /// 施設ごとに `[min の x, min の y, max の x, max の y, 種類]`。

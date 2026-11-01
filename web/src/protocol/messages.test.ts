@@ -33,6 +33,11 @@ describe("isWorkerToMain", () => {
     );
     expect(isWorkerToMain({ ...probe, results: [null, null, null] })).toBe(false);
     expect(isWorkerToMain({ ...probe, results: [null, 1, null, null] })).toBe(false);
+    const inspect = { kind: "inspect", x: 3, y: -4, info: [] };
+    expect(isWorkerToMain(inspect)).toBe(true);
+    expect(isWorkerToMain({ ...inspect, info: [2, 1, 1200, 1200] })).toBe(true);
+    expect(isWorkerToMain({ ...inspect, info: ["a"] })).toBe(false);
+    expect(isWorkerToMain({ ...inspect, x: 1.5 })).toBe(false);
     const buildings = {
       kind: "buildings",
       buildings: new Float64Array(7),

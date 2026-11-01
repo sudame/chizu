@@ -84,6 +84,8 @@ export type MainToWorker =
   | { kind: "pause"; paused: boolean }
   /** 施設を間口のマス (x, y) に置けるかを、向きごとに中核に問い合わせる。 */
   | { kind: "probe-service"; service: ServiceName; x: number; y: number }
+  /** マス (x, y) にある建物か施設の様子を中核に問い合わせる。 */
+  | { kind: "inspect"; x: number; y: number }
   /** フィードバックに添える状態と記録を求める。 */
   | { kind: "feedback" }
   /**
@@ -130,6 +132,8 @@ export type WorkerToMain =
       y: number;
       results: (string | null)[];
     }
+  /** inspect の答え。info は chizu-wasm の inspect の数で、何もなければ空。 */
+  | { kind: "inspect"; x: number; y: number; info: number[] }
   /** フィードバックの状態を返せなかった。 */
   | { kind: "feedback-error"; message: string }
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
@@ -231,6 +235,13 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         Array.isArray(v.results) &&
         v.results.length === 4 &&
         v.results.every((r) => r === null || typeof r === "string")
+      );
+    case "inspect":
+      return (
+        Number.isInteger(v.x) &&
+        Number.isInteger(v.y) &&
+        Array.isArray(v.info) &&
+        v.info.every((n) => typeof n === "number")
       );
     case "feedback-error":
     case "error":

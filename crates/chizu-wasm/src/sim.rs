@@ -344,6 +344,12 @@ impl Sim {
         [0, 1, 2, 3].map(|r| self.world.check_service(kind, at, r).map(|_| ()))
     }
 
+    /// マス `at` にある建物か施設の様子を、[`crate::inspect::encode`] の形の数で返す。何もなければ空。
+    /// 押された 1 つについてだけ集計し、状態は変えない。
+    pub fn inspect(&self, at: TilePos) -> Vec<f64> {
+        crate::inspect::encode(crate::inspect::inspect(&self.world, at))
+    }
+
     /// 施設を、1 つにつき `[min の x, min の y, max の x, max の y, 種類]` の 5 つの数で返す。
     /// 種類は `ServiceKind` の値である。
     pub fn facilities(&self) -> Vec<f64> {
