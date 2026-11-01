@@ -16,8 +16,8 @@ import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
+  chooseRotation,
   clampArea,
-  facingRotation,
   MAX_ZONE_SIDE,
   paintZoneCommand,
   parseRoadCostTable,
@@ -26,6 +26,7 @@ import {
   type RoadCostTable,
   roadCost,
   type ServiceInfo,
+  type ServiceProbe,
   screenToTile,
   serviceFootprint,
   snapToEightDirections,
@@ -42,7 +43,6 @@ import {
   type RoadKindName,
   SEGMENT_STRIDE,
   type ServiceName,
-  TILE_ROAD,
   type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
@@ -233,6 +233,9 @@ let roadCosts: RoadCostTable | null = null;
 let services: Record<ServiceName, ServiceInfo> | null = null;
 // 施設の向き。近くの道路に向くよう自動で決め、R キーで回すと手で決めた向きを使う
 let manualRotation: number | null = null;
+// 施設を置けるかの、中核の答え。カーソルのマスが変わるたびに Worker に問い合わせる
+let probe: { service: ServiceName; x: number; y: number; results: ServiceProbe } | null = null;
+let probeSent = "";
 let money = 0;
 let roadStart: Tile | null = null;
 let cursor: Tile | null = null;
@@ -280,13 +283,18 @@ function updatePreview(): void {
     );
   } else if (tool.kind === "service" && cursor !== null && services !== null) {
     const info = services[tool.service];
-    const rotation = serviceRotation(cursor, info);
-    const { min, max } = serviceFootprint(cursor, rotation, info.width, info.depth);
+    requestProbe(tool.service, cursor);
+    const choice = serviceChoice(tool.service, cursor);
+    const { min, max } = serviceFootprint(cursor, choice.rotation, info.width, info.depth);
     geometry = new Geometry(min);
     const base = FACILITY_COLOR[tool.service === "PowerPlant" ? 1 : 2] ?? PREVIEW_OK;
-    const color: Color = info.cost > money ? PREVIEW_BAD : [base[0], base[1], base[2], 0.6];
+    const color: Color = choice.placeable ? [base[0], base[1], base[2], 0.6] : PREVIEW_BAD;
     geometry.rect(min, max, color);
-    infoText = `費用 ${info.cost.toLocaleString("ja-JP")}・R で回す`;
+    const cost = `費用 ${info.cost.toLocaleString("ja-JP")}・R で回す`;
+    infoText = choice.placeable ? cost : `置けない：${choice.reason}・${cost}`;
+    // test:wasm が読む
+    mapCanvas.dataset.serviceRotation = String(choice.rotation);
+    mapCanvas.dataset.servicePlaceable = String(choice.placeable);
   } else if (tool.kind === "buy" && cursor !== null) {
     const c = buyChunkCommand(cursor);
     if (c.kind === "BuyChunk") {
@@ -300,16 +308,18 @@ function updatePreview(): void {
   toolInfo.textContent = infoText === "" ? info : infoText;
 }
 
-/** マスに道路が通っているか。手元にないチャンクは通っていないとみなす。 */
-function isRoad(t: Tile): boolean {
-  const chunk = store.get(Math.floor(t.x / CHUNK_SIDE), Math.floor(t.y / CHUNK_SIDE));
-  const lx = t.x - Math.floor(t.x / CHUNK_SIDE) * CHUNK_SIDE;
-  const ly = t.y - Math.floor(t.y / CHUNK_SIDE) * CHUNK_SIDE;
-  return ((chunk?.tiles[ly * CHUNK_SIDE + lx] ?? 0) & TILE_ROAD) !== 0;
+function requestProbe(service: ServiceName, at: Tile): void {
+  const key = `${service},${at.x},${at.y}`;
+  if (key !== probeSent) {
+    probeSent = key;
+    send({ kind: "probe-service", service, x: at.x, y: at.y });
+  }
 }
 
-function serviceRotation(at: Tile, info: ServiceInfo): number {
-  return manualRotation ?? facingRotation(at, info.width, isRoad) ?? 0;
+/** 置く向き。中核の答えがまだ届いていないマスでは、置けないものとして扱う。 */
+function serviceChoice(service: ServiceName, at: Tile) {
+  const fresh = probe?.service === service && probe.x === at.x && probe.y === at.y;
+  return chooseRotation(fresh && probe !== null ? probe.results : [], manualRotation);
 }
 
 function cancelTool(): void {
@@ -347,18 +357,27 @@ function clickTile(at: Tile): void {
     }
   } else if (tool.kind === "buy") {
     sendCommand(buyChunkCommand(at));
-  } else if (tool.kind === "service" && services !== null) {
-    sendCommand(placeServiceCommand(tool.service, at, serviceRotation(at, services[tool.service])));
+  } else if (tool.kind === "service") {
+    // 答えの届いていないマスでも送り、置けるかは中核に決めさせる
+    sendCommand(placeServiceCommand(tool.service, at, serviceChoice(tool.service, at).rotation));
   }
 }
 
 mapCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
 window.addEventListener("keydown", (event) => {
+  // 文字を打っているあいだは、道具のキーとして扱わない
+  const target = event.target;
+  if (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  ) {
+    return;
+  }
   if (event.key === "Escape") {
     cancelTool();
   } else if ((event.key === "r" || event.key === "R") && tool.kind === "service") {
-    const info = services?.[tool.service];
-    const current = cursor !== null && info !== undefined ? serviceRotation(cursor, info) : 0;
+    const current = cursor !== null ? serviceChoice(tool.service, cursor).rotation : 0;
     manualRotation = (current + 1) % 4;
     updatePreview();
   }
@@ -556,6 +575,11 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "outcome") {
     const command = sentCommands.get(message.id);
     sentCommands.delete(message.id);
+    // 街が変わったので、施設を置けるかを問い合わせ直す
+    probeSent = "";
+    if (tool.kind === "service") {
+      updatePreview();
+    }
     if (command !== undefined && command !== "SetSimSpeed") {
       showOutcome(command, message.outcome, message.reason);
     }
@@ -564,6 +588,11 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "feedback") {
     feedbackWaiter?.resolve({ state: message.state, commands: message.commands });
     feedbackWaiter = null;
+    return;
+  }
+  if (message.kind === "service-probe") {
+    probe = message;
+    updatePreview();
     return;
   }
   if (message.kind === "feedback-error") {

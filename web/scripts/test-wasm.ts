@@ -541,10 +541,36 @@ try {
     await page.mouse.click(p.x, p.y);
   }
   await page.keyboard.press("Escape");
-  const place = async (service: string, x: number, y: number) => {
+  // カーソルのマスで中核に置けるかを問い合わせ、答えが届くまで待つ
+  const hoverService = async (service: string, x: number, y: number) => {
     await page.locator(`button[data-tool="service-${service}"]`).click();
     const p = tilePoint(x, y);
+    await page.mouse.move(p.x - 8, p.y);
     await page.mouse.move(p.x, p.y);
+    await page.waitForFunction(
+      () => document.querySelector<HTMLElement>("#tool-info")?.textContent?.includes("費用"),
+      undefined,
+      { timeout: TIMEOUT_MS },
+    );
+    await page.waitForTimeout(200);
+    return {
+      placeable: await map.getAttribute("data-service-placeable"),
+      rotation: await map.getAttribute("data-service-rotation"),
+      info: await page.locator("#tool-info").textContent(),
+    };
+  };
+  const away = await hoverService("WaterPump", 45, 45);
+  check(
+    away.placeable === "false" && (away.info ?? "").includes("置けない"),
+    `道路に面していない場所では、置けないと示す（${away.info}）`,
+  );
+  const place = async (service: string, x: number, y: number) => {
+    const hovered = await hoverService(service, x, y);
+    check(
+      hovered.placeable === "true" && hovered.rotation === "0",
+      `${service} は道路に向く向きが自動で選ばれる（向き ${hovered.rotation}）`,
+    );
+    const p = tilePoint(x, y);
     const before = await outcomeCount();
     await page.mouse.click(p.x, p.y);
     return nextOutcome(before);

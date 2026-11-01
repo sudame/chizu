@@ -238,8 +238,9 @@ impl Sim {
     /// 建物の表の版。建物が建つ、消える、段階が上がるたびに変わる。表の状態ハッシュの下位 52 ビットを使う。
     /// 施設も、建物の供給の有無も含む。
     ///
-    /// 建物の表が変わるのは、コマンドを適用したときと、建つ・育つが走る tick（`GROWTH_INTERVAL` の倍数）
-    /// だけである。表全体のハッシュは重いので、そのどちらかが起きたときだけ計算し直す。
+    /// 建物の表が変わるのは、コマンドを適用したときと、建つ・育つが走る tick（`GROWTH_INTERVAL` の倍数）と、
+    /// その次の tick だけである。次の tick の頭では、建つ・育つで変わった需要に合わせて供給を判定し直す。
+    /// 表全体のハッシュは重いので、そのどれかが起きたときだけ計算し直す。
     pub fn buildings_version(&self) -> f64 {
         let key = (self.log.len(), self.growth_runs());
         if let Some((commands, growth, version)) = self.buildings_version.get()
@@ -260,9 +261,11 @@ impl Sim {
         (h.finish() & ((1 << 52) - 1)) as f64
     }
 
-    /// これまでに建つ・育つの処理が走った回数。tick 0 から `GROWTH_INTERVAL` ごとに 1 回走る。
+    /// これまでに進めた tick のうち、建物の表が変わりうる tick の数。`GROWTH_INTERVAL` で割った余りが
+    /// 0（建つ・育つ）か 1（供給の判定し直し）の tick を数える。
     fn growth_runs(&self) -> u64 {
-        self.world.tick().0.div_ceil(GROWTH_INTERVAL)
+        let ticks = self.world.tick().0;
+        ticks.div_ceil(GROWTH_INTERVAL) + ticks.saturating_sub(1).div_ceil(GROWTH_INTERVAL)
     }
 
     /// 建物を、1 つにつき `[min の x, min の y, max の x, max の y, 区画の種類, 段階, 供給]` の 7 つの数で返す。
@@ -276,6 +279,11 @@ impl Sim {
             out.extend([b.zone as u8, b.level, supply].map(f64::from));
         }
         out
+    }
+
+    /// 施設を `at` に置けるかを、向き 0〜3 のそれぞれについて中核の判定で調べる。状態は変えない。
+    pub fn service_probe(&self, kind: ServiceKind, at: TilePos) -> [Result<(), DenyReason>; 4] {
+        [0, 1, 2, 3].map(|r| self.world.check_service(kind, at, r).map(|_| ()))
     }
 
     /// 施設を、1 つにつき `[min の x, min の y, max の x, max の y, 種類]` の 5 つの数で返す。
@@ -554,6 +562,76 @@ mod tests {
         assert_eq!(stats[0], count as f64);
         assert!(stats[1] > 0.0);
         assert_ne!(sim.buildings_version(), version);
+    }
+
+    #[test]
+    fn service_probe_does_not_count_the_highway_as_a_road() {
+        // 高速道路が東へ出ていく種を選び、その先のチャンクを買って高速道路の脇に置けるようにする
+        let seed = (0..256)
+            .find(|s| {
+                let line = chizu_core::world::highway_line(*s);
+                // 南に 10 マスの道路を引くので、同じチャンクの中に収まる位置を選ぶ
+                line.step == (1, 0) && line.start.y <= 50
+            })
+            .expect("東へ出る高速道路の種がない");
+        let a = chizu_core::world::highway_line(seed).start.y;
+        let mut sim = Sim::new(seed);
+        sim.submit(Command::BuyChunk {
+            coord: ChunkCoord::new(2, 0),
+        })
+        .unwrap();
+        // 高速道路のすぐ南で、東の縦の普通の道路にも面するマス
+        sim.submit(road((132, a + 1), (132, a + 10))).unwrap();
+        let outcomes: Vec<_> = sim.take_reports().iter().map(|r| r.outcome).collect();
+        assert!(
+            outcomes.iter().all(|o| *o == ApplyOutcome::Applied),
+            "{seed} {a} {outcomes:?}"
+        );
+        let probe = sim.service_probe(ServiceKind::WaterPump, TilePos::new(131, a + 1));
+        // 0（北の高速道路に向く）は置けず、1（東の普通の道路に向く）は置ける
+        assert!(probe[0].is_err());
+        assert_eq!(probe[1], Ok(()));
+        // 高速道路にしか面していないマスには、どの向きでも置けない。高速道路には歩道がないので、
+        // 北に向けると「道路に面していない」になる
+        let lonely = sim.service_probe(ServiceKind::WaterPump, TilePos::new(150, a + 1));
+        assert_eq!(lonely[0], Err(DenyReason::NoRoadAccess));
+        assert!(lonely.iter().all(Result::is_err), "{lonely:?}");
+    }
+
+    #[test]
+    fn cached_buildings_version_follows_supply_changes() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        for (kind, x) in [(ServiceKind::PowerPlant, 16), (ServiceKind::WaterPump, 20)] {
+            sim.submit(Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, 9),
+                rotation: 2,
+            })
+            .unwrap();
+        }
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        // 建つ、供給が届く、段階が上がって需要が増える、を 1 tick ずつ確かめる
+        let mut supplied = false;
+        for _ in 0..(chizu_core::TICKS_PER_DAY + GROWTH_INTERVAL * 3) {
+            sim.advance(1);
+            assert_eq!(
+                sim.buildings_version(),
+                sim.buildings_hash(),
+                "tick {}",
+                sim.world().tick().0
+            );
+            supplied |= sim.world().buildings().iter().any(|(_, b)| b.supply.power);
+        }
+        assert!(supplied, "供給が届かない");
+        assert!(
+            sim.world().buildings().iter().any(|(_, b)| b.level > 1),
+            "段階が上がらない"
+        );
     }
 
     #[test]

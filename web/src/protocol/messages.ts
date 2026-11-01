@@ -74,6 +74,8 @@ export type MainToWorker =
   /** id は画面が振る番号で、結果の通知で返ってくる。 */
   | { kind: "command"; id: number; command: CommandMessage }
   | { kind: "pause"; paused: boolean }
+  /** 施設を間口のマス (x, y) に置けるかを、向きごとに中核に問い合わせる。 */
+  | { kind: "probe-service"; service: ServiceName; x: number; y: number }
   /** フィードバックに添える状態と記録を求める。 */
   | { kind: "feedback" }
   /**
@@ -100,6 +102,14 @@ export type WorkerToMain =
   | { kind: "chunks"; chunks: ChunkData[] }
   /** state は chizu-wasm の feedback_state の JSON、commands は記録を encode したもの。 */
   | { kind: "feedback"; state: string; commands: ArrayBuffer }
+  /** probe-service の答え。results は向き 0〜3 の順に、置けるなら null、置けないなら理由の文。 */
+  | {
+      kind: "service-probe";
+      service: ServiceName;
+      x: number;
+      y: number;
+      results: (string | null)[];
+    }
   /** フィードバックの状態を返せなかった。 */
   | { kind: "feedback-error"; message: string }
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
@@ -176,6 +186,15 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "feedback":
       return typeof v.state === "string" && v.commands instanceof ArrayBuffer;
+    case "service-probe":
+      return (
+        typeof v.service === "string" &&
+        Number.isInteger(v.x) &&
+        Number.isInteger(v.y) &&
+        Array.isArray(v.results) &&
+        v.results.length === 4 &&
+        v.results.every((r) => r === null || typeof r === "string")
+      );
     case "feedback-error":
     case "error":
       return typeof v.message === "string";

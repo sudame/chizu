@@ -175,6 +175,13 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
       case "pause":
         setPaused(message.paused);
         break;
+      case "probe-service": {
+        const { service, x, y } = message;
+        const code = service === "PowerPlant" ? 1 : 2;
+        const results = [...sim.service_probe(code, x, y)] as (string | null)[];
+        reply({ kind: "service-probe", service, x, y, results });
+        break;
+      }
       case "feedback": {
         const commands = sim.encode_log().buffer as ArrayBuffer;
         reply({ kind: "feedback", state: sim.feedback_state(), commands }, [commands]);

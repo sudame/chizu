@@ -4,8 +4,8 @@ import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
+  chooseRotation,
   clampArea,
-  facingRotation,
   MAX_ROAD_TILES,
   MAX_ZONE_SIDE,
   paintZoneCommand,
@@ -141,15 +141,26 @@ describe("施設", () => {
     expect(serviceFootprint(at, 3, 4, 2)).toEqual({ min: { x: 10, y: 7 }, max: { x: 11, y: 10 } });
   });
 
-  test("間口がすべて道路に面する向きを選ぶ", () => {
-    // y = 20 の横の道路の下側に置くと、道路は上（0）
-    const road = (t: { x: number; y: number }) => t.y === 20 && t.x >= 0 && t.x <= 30;
-    expect(facingRotation({ x: 5, y: 21 }, 4, road)).toBe(0);
-    // 上側に置くと、道路は下（2）。間口は左へ伸びる
-    expect(facingRotation({ x: 5, y: 19 }, 4, road)).toBe(2);
-    // 道路の端からはみ出す間口では面していない
-    expect(facingRotation({ x: 29, y: 21 }, 4, road)).toBeNull();
-    expect(facingRotation({ x: 5, y: 25 }, 2, road)).toBeNull();
+  test("中核が置けるとした最初の向きを選び、どれも置けなければ置けないものとして返す", () => {
+    // 高速道路の脇：北（0）は歩道がなくて置けず、東（1）の普通の道路には置ける
+    const probe = ["道路に面していない", null, "ほかの施設か道路がある", "道路に面していない"];
+    expect(chooseRotation(probe, null)).toEqual({ rotation: 1, placeable: true, reason: null });
+    const none = ["道路に面していない", "道路に面していない", "水辺を通る", "道路に面していない"];
+    expect(chooseRotation(none, null)).toEqual({
+      rotation: 0,
+      placeable: false,
+      reason: "道路に面していない",
+    });
+  });
+
+  test("手で回した向きは、置けなくてもそのまま使う", () => {
+    const probe = [null, "道路に面していない", null, null];
+    expect(chooseRotation(probe, 1)).toEqual({
+      rotation: 1,
+      placeable: false,
+      reason: "道路に面していない",
+    });
+    expect(chooseRotation([], null).placeable).toBe(false);
   });
 
   test("施設の表を読み、置くコマンドを組み立てる", () => {

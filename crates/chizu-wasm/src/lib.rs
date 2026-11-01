@@ -138,6 +138,27 @@ impl Simulation {
         self.0.buildings()
     }
 
+    /// 施設を間口のマス (x, y) に置けるかを、向き 0〜3 の順に返す。置けるなら null、置けないなら理由の文。
+    /// `service` は `ServiceKind` の値である。
+    pub fn service_probe(&self, service: u8, x: f64, y: f64) -> Result<js_sys::Array, JsError> {
+        let kind = ServiceKind::from_code(service).ok_or_else(|| JsError::new("知らない施設"))?;
+        let coord = |v: f64| {
+            (v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0)
+                .then_some(v as i64)
+                .ok_or_else(|| JsError::new("マスの座標が整数でない"))
+        };
+        let at = chizu_core::TilePos::new(coord(x)?, coord(y)?);
+        Ok(self
+            .0
+            .service_probe(kind, at)
+            .iter()
+            .map(|r| match r {
+                Ok(()) => JsValue::NULL,
+                Err(reason) => JsValue::from_str(sim::deny_text(*reason)),
+            })
+            .collect())
+    }
+
     /// 施設ごとに `[min の x, min の y, max の x, max の y, 種類]`。
     pub fn facilities(&self) -> Vec<f64> {
         self.0.facilities()

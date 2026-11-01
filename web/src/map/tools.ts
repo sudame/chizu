@@ -173,25 +173,26 @@ export function serviceFootprint(
   };
 }
 
-/** 間口のマスがすべて道路に面する rotation。どれも面していなければ null。 */
-export function facingRotation(
-  at: Tile,
-  width: number,
-  isRoad: (t: Tile) => boolean,
-): number | null {
-  for (let rotation = 0; rotation < 4; rotation++) {
-    const [dx, dy] = stepOf(rotation);
-    const along = [-dy, dx];
-    let faces = true;
-    for (let i = 0; i < width && faces; i++) {
-      const t = { x: at.x + (along[0] ?? 0) * i + dx, y: at.y + (along[1] ?? 0) * i + dy };
-      faces = isRoad(t);
-    }
-    if (faces) {
-      return rotation;
-    }
+/** 中核に問い合わせた、向き 0〜3 ごとの置けるか。置けるなら null、置けないなら理由の文。 */
+export type ServiceProbe = (string | null)[];
+
+export type ServiceChoice = { rotation: number; placeable: boolean; reason: string | null };
+
+/**
+ * 置く向きを決める。手で決めた向きがあればそれを使い、なければ置ける最初の向きを選ぶ。
+ * どの向きにも置けなければ向き 0 を、置けないものとして返す。
+ */
+export function chooseRotation(probe: ServiceProbe, manual: number | null): ServiceChoice {
+  const at = (r: number) => (probe[r] === undefined ? "まだ調べていない" : probe[r]);
+  const pick = (rotation: number): ServiceChoice => {
+    const reason = at(rotation) ?? null;
+    return { rotation, placeable: reason === null, reason };
+  };
+  if (manual !== null) {
+    return pick(manual);
   }
-  return null;
+  const ok = [0, 1, 2, 3].find((r) => at(r) === null);
+  return pick(ok ?? 0);
 }
 
 export function placeServiceCommand(
