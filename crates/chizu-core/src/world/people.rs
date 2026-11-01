@@ -1,6 +1,6 @@
 //! 外からの移住、職場の割り当て、1 日の予定。
 //!
-//! - 移住：電気と水道が届き、道路で「外の世界」とつながった住宅に空きがあり、住宅の需要があれば、
+//! - 移住：道路で「外の世界」とつながった住宅に空きがあり、住宅の需要があれば、
 //!   世帯が外から来て入る。来る数は需要と空き家の数に応じて増える。家を失った世帯がいれば、
 //!   新しい世帯より先に空き家へ入る。家のないまま [`HOMELESS_LEAVE_TICKS`] たった世帯は街を出ていく。
 //! - 建物が消えたら、その tick のうちに住む世帯を家なしにし、働く住民の職場を外す。
@@ -40,8 +40,12 @@ pub const MIGRANTS_PER_VACANCY: u64 = 8;
 /// 世帯の住民の幸福度の平均がこれより低いと、世帯は街を出ていくことがある。
 pub const LEAVE_BELOW: u8 = 45;
 
-/// 幸福度の低い世帯が、1 時間ごとに街を出ていく確率の逆数。
-pub const LEAVE_CHANCE: u32 = 4;
+/// 世帯の幸福度の平均が [`LEAVE_BELOW`] を 1 点下回るごとに、1 時間あたりに出ていく確率に足す値（‰）。
+pub const LEAVE_PERMILLE_PER_POINT: u32 = 5;
+
+/// 越してきた人の見込みの幸福度が [`LEAVE_BELOW`] をこの点数だけ上回れば、移住の数を減らさない。
+/// 上回る点数がこれより少なければ、その割合まで減らす。
+pub const APPEAL_FULL_MARGIN: u64 = 40;
 
 /// 家のない世帯が街を出ていくまでの時間（tick）。ゲーム内の 1 日である。
 pub const HOMELESS_LEAVE_TICKS: u64 = TICKS_PER_DAY;
@@ -69,7 +73,7 @@ impl World {
     /// 需要の式に使う、街の人口と働き口の数。
     ///
     /// 住める世帯の数は、家のある世帯の数に、移り住める空き家（[`World::vacant_homes`]）の数を足したものとする。
-    /// 電気や水道が届かない家や、外の世界とつながらない家の空きを数えると、埋まらない空き家のせいで
+    /// 外の世界とつながらない家の空きを数えると、埋まらない空き家のせいで
     /// 住宅の需要が負のまま動かなくなるためである。
     pub fn city_stats(&self) -> CityStats {
         let p = &self.population;
@@ -146,34 +150,44 @@ impl World {
         }
     }
 
-    /// 家のある世帯のうち、住民の幸福度の平均が [`LEAVE_BELOW`] より低い世帯を、
-    /// 1/[`LEAVE_CHANCE`] の確率で街から出す。1 時間ごとに呼ばれる。
+    /// 家のある世帯のうち、住民の幸福度の平均が [`LEAVE_BELOW`] より低い世帯を、下回った点数に比例する確率で
+    /// 街から出す。1 時間ごとに呼ばれる。職場の割り当てや移住の直後でも正しく判定できるよう、点数は
+    /// 組ごとの更新で書いた値ではなく、いまの状態から求め直す。
     fn emigrate(&mut self) {
         let p = &self.population;
+        let ctx = happiness::CitizenContext {
+            seed: self.seed,
+            tick: self.tick,
+            population: p,
+            buildings: &self.buildings,
+            tax_permille: self.tax_permille,
+        };
         let leaving: Vec<HouseholdId> = p
             .household_ids()
             .filter(|h| p.home(*h).flatten().is_some())
             .filter(|h| {
                 let members = p.members(*h).expect("世帯がない");
+                let n = members.len() as u64;
+                if n == 0 {
+                    return false;
+                }
                 let sum: u64 = members
                     .iter()
                     .map(|id| {
-                        u64::from(happiness::total(
-                            p.citizen(*id).expect("住民がない").happiness,
-                        ))
+                        let row = p.citizen(*id).expect("住民がない");
+                        u64::from(happiness::total(happiness::parts_of(&ctx, &row)))
                     })
                     .sum();
-                let n = members.len() as u64;
-                n > 0 && sum < u64::from(LEAVE_BELOW) * n
-            })
-            .filter(|h| {
-                rng(
-                    self.seed,
-                    RngPurpose::Emigration,
-                    u64::from(h.index),
-                    self.tick,
-                )
-                .chance(1, LEAVE_CHANCE)
+                let below = (u64::from(LEAVE_BELOW) * n).saturating_sub(sum).div_ceil(n);
+                let permille = (below * u64::from(LEAVE_PERMILLE_PER_POINT)).min(1_000) as u32;
+                permille > 0
+                    && rng(
+                        self.seed,
+                        RngPurpose::Emigration,
+                        u64::from(h.index),
+                        self.tick,
+                    )
+                    .chance(permille, 1_000)
             })
             .collect();
         for h in leaving {
@@ -213,7 +227,8 @@ impl World {
         }
     }
 
-    /// 道路で「外の世界」とつながった、電気と水道の届く住宅のうち、空きのあるものと空きの数。建物の ID の順に並ぶ。
+    /// 道路で「外の世界」とつながった住宅のうち、空きのあるものと空きの数。建物の ID の順に並ぶ。
+    /// CS2 にならい、電気や水道が届いていない家にも移り住む。届かないぶんは生活サービスの点数が下がる。
     fn vacant_homes(&self) -> Vec<(BuildingId, u64)> {
         let mut comps = Components::of(&self.network);
         let outside: Vec<usize> = self
@@ -231,7 +246,7 @@ impl World {
         }
         self.buildings
             .iter()
-            .filter(|(_, b)| b.zone == ZoneKind::Residential && b.supply.power && b.supply.water)
+            .filter(|(_, b)| b.zone == ZoneKind::Residential)
             .filter(|(_, b)| {
                 comps
                     .of_link(&self.network, b.entrance)
@@ -321,6 +336,10 @@ impl World {
         }
         let pull = u64::try_from(want).expect("正の需要") / MIGRANTS_PER_DEMAND;
         let count = MIGRANTS_PER_INTERVAL + pull + free / MIGRANTS_PER_VACANCY;
+        // 越してきた人の見込みの幸福度が、出ていく境目に近いほど来る数を減らす。
+        let tax = self.tax_permille[ZoneKind::Residential.index()];
+        let margin = u64::from(happiness::newcomer_happiness(tax).saturating_sub(LEAVE_BELOW));
+        let count = count * margin.min(APPEAL_FULL_MARGIN) / APPEAL_FULL_MARGIN;
         for k in 0..count {
             let Some(home) = homes.next() else {
                 return;
@@ -458,7 +477,7 @@ pub(crate) mod tests {
         run_days(&mut w, 1);
         let p = w.population();
         assert!(p.household_count() > 0, "誰も移り住まない");
-        // どの世帯も、電気と水道の届く住宅に住む。
+        // どの世帯も、残っている住宅に住む。
         for h in p.household_ids() {
             let home = p.home(h).flatten().expect("家のない世帯がいる");
             let b = w.buildings().get(home).expect("消えた家に住んでいる");
@@ -513,7 +532,10 @@ pub(crate) mod tests {
             run_days(&mut w, 1);
             let late = w.city_stats();
             let d5 = demand(&late);
-            assert!(late.citizens >= early.citizens, "{mix:?}：人口が減った");
+            // 工業もオフィスもない街は職のない住民が多く、暮らし向きの低い世帯が出ていくので、人口が減ることがある。
+            if mix.contains(&Industrial) || mix.contains(&Office) {
+                assert!(late.citizens >= early.citizens, "{mix:?}：人口が減った");
+            }
             // 働き口のある区画が 2 種類以上ある街は、働き口と住まいが互いを呼び合って、2 日目のあとも育ち続ける。
             if mix.len() >= 3 {
                 let (num, den) = if mix.len() == 4 { (3, 2) } else { (5, 4) };
@@ -572,10 +594,40 @@ pub(crate) mod tests {
         assert_eq!(w.population().household_count(), 0, "家なしの世帯が残る");
     }
 
+    /// [`city`] に、y = 70 の通りを足して発電所と浄水場を並べ、区画を埋め切っても停電しない街。
+    fn served_city(zones: &[ZoneKind]) -> World {
+        let mut w = city(zones);
+        road(&mut w, (-60, 70), (20, 70));
+        road(&mut w, (-60, 40), (-60, 70));
+        for i in 0..19 {
+            let plant = Command::PlaceBuilding {
+                kind: ServiceKind::PowerPlant,
+                at: TilePos::new(-53 + 4 * i, 69),
+                rotation: 2,
+            };
+            apply(&mut w, plant);
+        }
+        for i in 0..39 {
+            let pump = Command::PlaceBuilding {
+                kind: ServiceKind::WaterPump,
+                at: TilePos::new(-59 + 2 * i, 71),
+                rotation: 0,
+            };
+            apply(&mut w, pump);
+        }
+        w
+    }
+
+    fn set_tax(w: &mut World, permille: u16) {
+        let zone = ZoneKind::Residential;
+        apply(w, Command::SetTaxRate { zone, permille });
+    }
+
     /// 住民の幸福度は組ごとの更新で決まり、住宅の税率を上げると暮らし向きが下がって世帯が出ていく。
+    /// 税率を戻すと、また人が移り住む。
     #[test]
     fn raising_the_tax_drives_households_away() {
-        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        let mut w = served_city(&[ZoneKind::Residential, ZoneKind::Industrial]);
         run_days(&mut w, 3);
         let before = w.city_stats();
         assert!(before.happiness >= 60, "{before:?}");
@@ -587,13 +639,10 @@ pub(crate) mod tests {
                 HappinessParts::NEUTRAL,
                 "更新されない住民がいる"
             );
+            assert_eq!(row.happiness.services, crate::citizens::HAPPINESS_MAX);
         }
-        let tax = Command::SetTaxRate {
-            zone: ZoneKind::Residential,
-            permille: crate::command::MAX_TAX_PERMILLE,
-        };
-        apply(&mut w, tax);
-        run_days(&mut w, 1);
+        set_tax(&mut w, crate::command::MAX_TAX_PERMILLE);
+        run_days(&mut w, 2);
         let after = w.city_stats();
         assert!(after.happiness < LEAVE_BELOW, "{after:?}");
         assert!(
@@ -602,5 +651,65 @@ pub(crate) mod tests {
             before.citizens,
             after.citizens
         );
+        set_tax(&mut w, crate::world::INITIAL_TAX_PERMILLE);
+        run_days(&mut w, 1);
+        let back = w.city_stats();
+        assert!(
+            back.citizens * 10 >= before.citizens * 9,
+            "{} 人から {} 人に減り、戻して {} 人",
+            before.citizens,
+            after.citizens,
+            back.citizens
+        );
+    }
+
+    /// 税率を少しずつ上げると、人口は段差を作らずになだらかに減っていく。
+    #[test]
+    fn population_falls_gradually_as_the_tax_rises() {
+        let mut w = served_city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 3);
+        let mut counts = vec![w.city_stats().citizens];
+        for permille in (150..=300).step_by(25) {
+            set_tax(&mut w, permille);
+            run_days(&mut w, 1);
+            counts.push(w.city_stats().citizens);
+        }
+        let peak = counts.iter().copied().max().unwrap();
+        assert!(counts[counts.len() - 1] * 4 < peak, "{counts:?}");
+        // 減り始めてからも、どの 1 段でもその時点の人口の半分より多くは減らず、何段にも分かれて減る。
+        let mut falling = 0;
+        for pair in counts.windows(2) {
+            let drop = pair[0].saturating_sub(pair[1]);
+            assert!(drop * 2 <= pair[0], "{counts:?}");
+            falling += usize::from(drop * 10 > pair[0]);
+        }
+        assert!(falling >= 3, "{counts:?}");
+    }
+
+    /// 出ていくかは、組ごとの更新で書いた古い点数ではなく、いまの状態から決める。
+    #[test]
+    fn emigration_uses_the_current_scores() {
+        let mut w = served_city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 2);
+        // 全員の書いてある点数を 0 にする。いまの状態から求めれば、職も家もある住民の幸福度は高い。
+        let ids: Vec<_> = w.population().citizen_ids().collect();
+        for id in ids {
+            let row = w.population().citizen(id).unwrap();
+            let zero = HappinessParts {
+                commute: 0,
+                services: 0,
+                wealth: 0,
+            };
+            w.population_mut().apply_change(
+                id,
+                crate::citizens::CitizenChange {
+                    schedule: row.schedule,
+                    happiness: zero,
+                },
+            );
+        }
+        let before = w.population().household_count();
+        w.emigrate();
+        assert_eq!(w.population().household_count(), before);
     }
 }

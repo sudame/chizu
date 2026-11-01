@@ -5,7 +5,7 @@
 //! - 通勤：家から職場までの所要時間。いまは移動がないので、[`commute_seconds`] で直線距離から見積もる。
 //!   移動の実時間が測れるようになったら、この関数を差し替える。
 //! - 生活サービス：家に電気と水道が届いているか。
-//! - 暮らし向き：職があるか（働く年齢でなければ問わない）と、住宅の税率。
+//! - 暮らし向き：職があるか（働く年齢でなければ問わない）、世帯の蓄え、住宅の税率。
 
 use crate::building::{Building, Buildings};
 use crate::citizens::{
@@ -15,7 +15,7 @@ use crate::command::ZoneKind;
 use crate::id::CitizenId;
 use crate::network::TILE_MM;
 use crate::round;
-use crate::units::Tick;
+use crate::units::{Money, Tick};
 
 /// 直線距離で見積もるときの、家から職場までの速さ（mm/秒）。道なりの遠回りと待ち時間を込みにした値である。
 pub const STRAIGHT_LINE_MM_PER_SECOND: u64 = 6_000;
@@ -29,14 +29,21 @@ pub const COMMUTE_ZERO_SECONDS: u64 = 3_600;
 /// 暮らし向きの基準になる住宅の税率（‰）。これより高いと点数が下がり、低いと上がる。
 pub const REFERENCE_TAX_PERMILLE: i64 = 100;
 
-/// 暮らし向きの点数の、職のある住民の値。基準の税率のときの値である。
-pub const WEALTH_EMPLOYED: i64 = 80;
+/// 暮らし向きの点数の、職のある住民の値。基準の税率で、蓄えのないときの値である。
+pub const WEALTH_EMPLOYED: i64 = 60;
 
 /// 暮らし向きの点数の、働く年齢でない住民の値。
-pub const WEALTH_NOT_WORKING_AGE: i64 = 70;
+pub const WEALTH_NOT_WORKING_AGE: i64 = 50;
 
 /// 暮らし向きの点数の、職のない働く年齢の住民の値。
-pub const WEALTH_JOBLESS: i64 = 20;
+pub const WEALTH_JOBLESS: i64 = 0;
+
+/// 世帯の蓄えで暮らし向きの点数に足す値の上限。蓄えに比例して足し、[`SAVINGS_FOR_FULL_BONUS`] で上限に届く。
+/// 蓄えで点数がばらつくので、税率を上げたときに全員が同時に出ていく境目を越えない。
+pub const SAVINGS_BONUS_MAX: i64 = 40;
+
+/// 暮らし向きの点数に [`SAVINGS_BONUS_MAX`] を足す蓄え。
+pub const SAVINGS_FOR_FULL_BONUS: Money = Money(100_000);
 
 /// 幸福度を足すときの、通勤・生活サービス・暮らし向きの重み。
 pub const WEIGHTS: [u64; 3] = [1, 1, 3];
@@ -68,8 +75,9 @@ pub fn commute_score(seconds: u64) -> u8 {
     (max - (over.min(span) * max / span)) as u8
 }
 
-/// 暮らし向きの点数。基準より高い税率は 1‰ ごとに 0.6 点、低い税率は 1‰ ごとに 0.2 点動かす。
-pub fn wealth_score(age: u8, employed: bool, tax_permille: u16) -> u8 {
+/// 暮らし向きの点数。職と世帯の蓄えで決め、基準より高い税率は 1‰ ごとに 0.6 点、低い税率は
+/// 1‰ ごとに 0.2 点動かす。
+pub fn wealth_score(age: u8, employed: bool, savings: Money, tax_permille: u16) -> u8 {
     let base = if !WORKING_AGES.contains(&age) {
         WEALTH_NOT_WORKING_AGE
     } else if employed {
@@ -77,13 +85,15 @@ pub fn wealth_score(age: u8, employed: bool, tax_permille: u16) -> u8 {
     } else {
         WEALTH_JOBLESS
     };
+    let saved = savings.0.clamp(0, SAVINGS_FOR_FULL_BONUS.0);
+    let bonus = round::div_floor(saved * SAVINGS_BONUS_MAX, SAVINGS_FOR_FULL_BONUS.0);
     let diff = REFERENCE_TAX_PERMILLE - i64::from(tax_permille);
     let shift = if diff < 0 {
         round::div_floor(diff * 3, 5)
     } else {
         round::div_floor(diff, 5)
     };
-    (base + shift).clamp(0, i64::from(HAPPINESS_MAX)) as u8
+    (base + bonus + shift).clamp(0, i64::from(HAPPINESS_MAX)) as u8
 }
 
 /// 3 つの点数を [`WEIGHTS`] で重みを付けて平均した幸福度（`0..=HAPPINESS_MAX`）。
@@ -95,6 +105,16 @@ pub fn total(h: HappinessParts) -> u8 {
         .map(|(p, w)| u64::from(*p) * w)
         .sum();
     (sum / WEIGHTS.iter().sum::<u64>()) as u8
+}
+
+/// 職を得て、電気と水道の届く家に住み、通勤が短い、蓄えが上限の半分の働く年齢の人が越してきたときの幸福度。
+/// 移住する人は、この見込みで街を選ぶ。いまは住宅の税率だけで決まる。
+pub fn newcomer_happiness(tax_permille: u16) -> u8 {
+    total(HappinessParts {
+        commute: HAPPINESS_MAX,
+        services: HAPPINESS_MAX,
+        wealth: wealth_score(30, true, Money(SAVINGS_FOR_FULL_BONUS.0 / 2), tax_permille),
+    })
 }
 
 /// 住民 1 人の 3 つの点数。
@@ -114,10 +134,14 @@ pub fn parts_of(ctx: &CitizenContext, row: &CitizenRow) -> HappinessParts {
         u8::from(b.supply.power) * half + u8::from(b.supply.water) * (HAPPINESS_MAX - half)
     });
     let tax = ctx.tax_permille[ZoneKind::Residential.index()];
+    let savings = ctx
+        .population
+        .household_money(row.household)
+        .unwrap_or(Money::ZERO);
     HappinessParts {
         commute,
         services,
-        wealth: wealth_score(row.age, work.is_some(), tax),
+        wealth: wealth_score(row.age, work.is_some(), savings, tax),
     }
 }
 
@@ -149,12 +173,24 @@ mod tests {
 
     #[test]
     fn wealth_follows_the_job_and_the_tax() {
-        assert_eq!(wealth_score(30, true, 100), 80);
-        assert_eq!(wealth_score(30, false, 100), 20);
-        assert_eq!(wealth_score(8, false, 100), 70);
-        assert_eq!(wealth_score(30, true, 200), 20);
-        assert_eq!(wealth_score(30, true, 300), 0);
-        assert_eq!(wealth_score(30, true, 0), 100);
+        let half = Money(50_000);
+        assert_eq!(wealth_score(30, true, half, 100), 80);
+        assert_eq!(wealth_score(30, false, half, 100), 20);
+        assert_eq!(wealth_score(8, false, half, 100), 70);
+        assert_eq!(wealth_score(30, true, half, 200), 20);
+        assert_eq!(wealth_score(30, true, half, 300), 0);
+        assert_eq!(wealth_score(30, true, half, 0), 100);
+        // 蓄えは 0 から上限までで 40 点の幅になり、上限より多くても増えない。
+        assert_eq!(wealth_score(30, true, Money::ZERO, 100), 60);
+        assert_eq!(wealth_score(30, true, Money(250_000), 100), 100);
+        assert_eq!(wealth_score(30, true, Money(-5), 100), 60);
+    }
+
+    #[test]
+    fn newcomers_expect_less_under_a_high_tax() {
+        assert_eq!(newcomer_happiness(100), 88);
+        assert_eq!(newcomer_happiness(200), 52);
+        assert_eq!(newcomer_happiness(300), 40);
     }
 
     #[test]
