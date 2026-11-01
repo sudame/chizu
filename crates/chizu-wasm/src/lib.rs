@@ -1,6 +1,7 @@
 //! chizu-core と画面（Web Worker）のあいだの受け渡しの層。
 
 pub mod command_input;
+pub mod save;
 pub mod sim;
 pub mod snapshot;
 
