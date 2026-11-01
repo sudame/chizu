@@ -108,16 +108,64 @@ fn walks_at_walking_speed_and_vanishes_at_the_destination() {
 }
 
 #[test]
-fn a_destination_behind_on_the_same_sidewalk_goes_around() {
+fn a_destination_behind_on_the_same_sidewalk_is_walked_straight() {
     let mut n = Network::new();
     road(&mut n, (0, 0), (10, 0));
     let mut w = Walkers::new(n);
     let id = w.spawn(at(6, 0, (1, 0), 0), at(2, 0, (1, 0), 0)).unwrap();
-    // 先の端で向こう側の歩道に移り、元の端で戻ってくる。
-    assert_eq!(w.trips.get(id).unwrap().route().links.len(), 3);
-    assert_eq!(w.ticks_to_arrive(id), walk_ticks((4 + 10 + 2) * 8_000));
+    // 端まで行って戻らず、逆の向きに歩いて手前の行き先へまっすぐ向かう。
+    let t = w.trips.get(id).unwrap();
+    assert_eq!(t.route().links.len(), 1);
+    assert_eq!(t.route().links[0].dir, Dir::Backward);
+    assert_eq!(t.step, (-1, 0));
+    assert_eq!(w.ticks_to_arrive(id), walk_ticks(4 * 8_000));
     let ahead = w.spawn(at(2, 0, (1, 0), 0), at(6, 0, (1, 0), 0)).unwrap();
-    assert_eq!(w.trips.get(ahead).unwrap().route().links.len(), 1);
+    let t = w.trips.get(ahead).unwrap();
+    assert_eq!(t.route().links.len(), 1);
+    assert_eq!(t.route().links[0].dir, Dir::Forward);
+}
+
+#[test]
+fn the_start_and_the_destination_face_the_shorter_way() {
+    // 東西の道路の途中から出て、北へ曲がった先の行き先へ向かう。行き先は北向きの歩道の位置で
+    // 表すが、南向きに表しても同じ道のりになる。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0));
+    road(&mut n, (0, 0), (0, -10));
+    let mut w = Walkers::new(n);
+    let id = w.spawn(at(3, 0, (1, 0), 0), at(0, -4, (0, 1), 0)).unwrap();
+    // 西へ 3 マス歩いて角を曲がり、北へ 4 マス。
+    assert_eq!(w.ticks_to_arrive(id), walk_ticks(7 * 8_000));
+    let id = w.spawn(at(3, 0, (1, 0), 0), at(0, -4, (0, -1), 0)).unwrap();
+    assert_eq!(w.ticks_to_arrive(id), walk_ticks(7 * 8_000));
+}
+
+#[test]
+fn walkers_cross_to_the_opposite_sidewalk_at_a_node() {
+    // T 字の交差点で、来た区間の逆向きの歩道にも、ほかの区間の歩道にも移れる。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0));
+    road(&mut n, (10, 0), (20, 0));
+    road(&mut n, (10, 0), (10, 10));
+    let g = crate::routing::Graph::build(&n, LaneMode::Sidewalk);
+    let link = |x, y, step| at(x, y, step, 0).resolve(&n).unwrap().0;
+    let west = link(5, 0, (1, 0));
+    let next: Vec<LinkId> = g
+        .edges(g.vertex(west).unwrap())
+        .iter()
+        .map(|e| g.link(e.to))
+        .collect();
+    let mut want = vec![
+        link(5, 0, (-1, 0)),
+        link(15, 0, (1, 0)),
+        link(10, 5, (0, 1)),
+    ];
+    want.sort();
+    assert_eq!(next, want);
+    // 行き先を北向きの歩道の位置で表しても、交差点で曲がって南向きに歩いて着く。
+    let mut w = Walkers::new(n);
+    let id = w.spawn(at(8, 0, (1, 0), 0), at(10, 3, (0, -1), 0)).unwrap();
+    assert_eq!(w.ticks_to_arrive(id), walk_ticks(5 * 8_000));
 }
 
 #[test]
@@ -275,13 +323,21 @@ proptest! {
 }
 
 /// 歩く距離。経路のリンクの長さの和から、最初のリンクの手前と最後のリンクの先を引いたもの。
+/// 歩き始めと行き先の位置は、どちらの向きの歩道で表しても、`from` と `to` と同じ点である。
+/// 斜めの歩道のワールド座標は切り捨てるので、向きによって 1mm ずれることがある。
 fn walked_mm(w: &Walkers, id: TripId, from: SidewalkPos, to: SidewalkPos) -> u64 {
-    let links = w.trips.get(id).unwrap().route().links.clone();
+    let t = w.trips.get(id).unwrap();
+    let links = t.route().links.clone();
+    let near = |p: WorldPos, q: WorldPos| p.x.0.abs_diff(q.x.0) <= 1 && p.y.0.abs_diff(q.y.0) <= 1;
+    assert!(near(t.position().world(), from.world()));
+    let last = *links.last().unwrap();
+    let dest = SidewalkPos::on_link(&w.net, last, t.dest_offset).unwrap();
+    assert!(near(dest.world(), to.world()));
     let len = |l: &LinkId| u64::from(pos::link_geometry(&w.net, *l).unwrap().2.0);
     let total: u64 = links.iter().map(len).sum();
-    let start = u64::from(from.resolve(&w.net).unwrap().1.0);
-    let end = u64::from(to.resolve(&w.net).unwrap().1.0);
-    total - start - (len(links.last().unwrap()) - end)
+    let start = u64::from(t.offset.0);
+    let end = u64::from(t.dest_offset.0);
+    total - start - (len(&last) - end)
 }
 
 #[test]
@@ -300,13 +356,13 @@ fn walking_onto_a_diagonal_carries_the_rest_of_the_step() {
 }
 
 #[test]
-fn a_destination_behind_on_a_diagonal_goes_around() {
+fn a_destination_behind_on_a_diagonal_is_walked_straight() {
     let mut n = Network::new();
     road(&mut n, (0, 0), (5, 5));
     let mut w = Walkers::new(n);
     let id = w.spawn(at(3, 3, (1, 1), 0), at(1, 1, (1, 1), 0)).unwrap();
-    // 先の端まで 2 歩、向こう側を 5 歩戻り、元の端から 1 歩。
-    assert_eq!(w.ticks_to_arrive(id), walk_ticks(8 * 11_314));
+    assert_eq!(w.trips.get(id).unwrap().route().links.len(), 1);
+    assert_eq!(w.ticks_to_arrive(id), walk_ticks(2 * 11_314));
 }
 
 #[test]
@@ -416,7 +472,7 @@ fn walking_world_hash(ticks: u64, look: bool) -> u64 {
             assert_eq!(w.apply(&c), ApplyOutcome::Applied);
         }
         if look {
-            assert!(t > 200 || !w.movers_in(area).is_empty());
+            assert!(t > 100 || !w.movers_in(area).is_empty());
         }
         w.step();
     }
@@ -515,4 +571,49 @@ fn world_movers_in_accepts_any_area() {
     let m = w.movers_in(all);
     assert_eq!(m.len(), 1);
     assert_eq!(m[0].id, id);
+}
+
+/// 通勤の街で 2 日目を回し、そのあいだに終わった、歩くだけの通勤の所要 tick の平均と件数。
+fn mean_walking_commute() -> (u64, u64) {
+    use crate::clock::TICKS_PER_DAY;
+    use crate::command::ZoneKind;
+    use crate::world::people::tests::{city, run_days};
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+    run_days(&mut w, 1);
+    let mut seen = BTreeSet::new();
+    let mut walking: BTreeMap<TripId, Tick> = BTreeMap::new();
+    let (mut sum, mut count) = (0_u64, 0_u64);
+    while w.tick().0 < 2 * TICKS_PER_DAY {
+        w.step();
+        let trips = w.trips();
+        for (id, t) in trips.iter() {
+            if trips.commuter(id).is_some() && seen.insert(id) {
+                let walk = t.mode == LaneMode::Sidewalk && t.then == parking::Then::Arrive;
+                if walk {
+                    walking.insert(id, t.departed);
+                }
+            }
+        }
+        let ended: Vec<TripId> = walking
+            .keys()
+            .filter(|id| trips.get(**id).is_none())
+            .copied()
+            .collect();
+        for id in ended {
+            let departed = walking.remove(&id).unwrap();
+            sum += w.tick().0 - departed.0;
+            count += 1;
+        }
+    }
+    (sum / count.max(1), count)
+}
+
+#[test]
+fn walking_commutes_take_the_near_way() {
+    let (mean, count) = mean_walking_commute();
+    println!("歩くだけの通勤：{count} 件、平均 {mean} tick");
+    assert!(count >= 20, "歩くだけの通勤が {count} 件しかない");
+    // 片側の歩道を一方の向きにしか歩けなかったころは、平均で 750 tick ほどかかっていた。
+    assert!(mean <= 500, "平均 {mean} tick");
 }
