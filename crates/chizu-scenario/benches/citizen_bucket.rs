@@ -1,22 +1,25 @@
 //! 住民データ層の 1 tick ぶんの組の更新にかかる時間。
 //!
-//! - `standard`：`World::step` と同じ標準の処理（`update_citizen`）。いまは中身が空なので、組をなめる仕組みだけの時間になる。
+//! - `standard`：`World::step` と同じ標準の処理（`update_citizen`）。建物がないので、家も職場もない住民の点数を求める時間になる。
 //! - `rng_write`：住民ごとに乱数を引き、幸福度と出発の予定を書き戻す。中身が入ったときの目安にする。
 
 use std::hint::black_box;
 
-use chizu_core::schedule::update_citizen;
+use chizu_core::building::Buildings;
+use chizu_core::happiness::{CitizenContext, update_citizen};
 use chizu_core::{
-    Activity, BUCKET_COUNT, CitizenChange, CitizenId, CitizenRow, RngPurpose, ScheduleState, Tick,
-    bucket_at, rng,
+    Activity, BUCKET_COUNT, CitizenChange, CitizenId, CitizenRow, Population, RngPurpose,
+    ScheduleState, Tick, bucket_at, rng,
 };
 use chizu_scenario::synthetic_population;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 const SEED: u64 = 1;
 
-fn rng_write(tick: Tick) -> impl Fn(CitizenId, CitizenRow) -> Option<CitizenChange> + Sync {
-    move |id, row| {
+fn rng_write(
+    tick: Tick,
+) -> impl Fn(&Population, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync {
+    move |_, id, row| {
         let mut r = rng(SEED, RngPurpose::DailySchedule, u64::from(id.index), tick);
         let mut happiness = row.happiness;
         happiness.commute = r.below(101) as u8;
@@ -38,8 +41,16 @@ fn citizen_bucket(c: &mut Criterion) {
         let mut tick = Tick::ZERO;
         group.bench_function(BenchmarkId::new("standard", &label), |b| {
             b.iter(|| {
-                p.update_bucket(bucket_at(tick), |id, row| {
-                    update_citizen(SEED, tick, id, row)
+                let buildings = Buildings::default();
+                p.update_bucket(bucket_at(tick), |population, id, row| {
+                    let ctx = CitizenContext {
+                        seed: SEED,
+                        tick,
+                        population,
+                        buildings: &buildings,
+                        tax_permille: [100; 4],
+                    };
+                    update_citizen(&ctx, id, row)
                 });
                 tick = tick.next();
             });

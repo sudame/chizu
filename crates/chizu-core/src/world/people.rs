@@ -4,6 +4,7 @@
 //!   世帯が外から来て入る。来る数は需要と空き家の数に応じて増える。家を失った世帯がいれば、
 //!   新しい世帯より先に空き家へ入る。家のないまま [`HOMELESS_LEAVE_TICKS`] たった世帯は街を出ていく。
 //! - 建物が消えたら、その tick のうちに住む世帯を家なしにし、働く住民の職場を外す。
+//! - 出ていく：幸福度の低い世帯は、1 時間ごとに一定の確率で街を出ていく。幸福度の平均は住宅の需要にも効く。
 //! - 職場：[`assign_jobs`] で割り当て、職場ができた住民に通勤の予定を立てる。
 //! - 予定：家にいる住民は朝に職場へ、職場にいる住民は夕方に家へ出発する。出発の tick は
 //!   出発の待ち行列に積み、時刻が来たら居場所を切り替える。移動そのものはまだ作らない。
@@ -11,15 +12,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
-use crate::building::{BASE_RESIDENTIAL_DEMAND, CityStats};
+use crate::building::{BASE_RESIDENTIAL_DEMAND, CityStats, happiness_pull};
+use crate::citizens::HappinessParts;
 use crate::citizens::{Activity, MAX_HOUSEHOLD_SIZE, ScheduleState, WORKING_AGES, draw_household};
 use crate::clock::TICKS_PER_DAY;
 use crate::command::ZoneKind;
+use crate::happiness;
 use crate::id::{BuildingId, CitizenId, HouseholdId};
 use crate::jobs::{assign_jobs, workers_by_building};
 use crate::rng::{RngPurpose, rng};
 use crate::service::Components;
 use crate::units::Tick;
+use crate::world::economy::TICKS_PER_HOUR;
 
 /// 移住を見る間隔（tick）。等速で 2 秒に 1 回である。
 pub const MIGRATION_INTERVAL: u64 = 60;
@@ -32,6 +36,12 @@ pub const MIGRANTS_PER_DEMAND: u64 = 4;
 
 /// 1 回に来る世帯の数に、空き家の何分の 1 を足すか。
 pub const MIGRANTS_PER_VACANCY: u64 = 8;
+
+/// 世帯の住民の幸福度の平均がこれより低いと、世帯は街を出ていくことがある。
+pub const LEAVE_BELOW: u8 = 45;
+
+/// 幸福度の低い世帯が、1 時間ごとに街を出ていく確率の逆数。
+pub const LEAVE_CHANCE: u32 = 4;
 
 /// 家のない世帯が街を出ていくまでの時間（tick）。ゲーム内の 1 日である。
 pub const HOMELESS_LEAVE_TICKS: u64 = TICKS_PER_DAY;
@@ -87,16 +97,26 @@ impl World {
             };
             s.zoned[zone.index()] = built || self.lots.has_zone(zone);
         }
+        let (mut happy_sum, mut housed) = (0_u64, 0_u64);
         for id in p.citizen_ids() {
             let row = p.citizen(id).expect("いる住民の行がない");
             if WORKING_AGES.contains(&row.age) {
                 s.working_age += 1;
+            }
+            let home = p.home(row.household).flatten();
+            if home.is_some_and(|b| self.buildings.get(b).is_some()) {
+                happy_sum += u64::from(happiness::total(row.happiness));
+                housed += 1;
             }
             if let Some(b) = row.workplace.and_then(|w| self.buildings.get(w)) {
                 s.employed += 1;
                 s.filled[b.zone.index()] += 1;
             }
         }
+        s.happiness = match housed {
+            0 => happiness::total(HappinessParts::NEUTRAL),
+            n => (happy_sum / n) as u8,
+        };
         s
     }
 
@@ -120,6 +140,44 @@ impl World {
         }
         if tick.is_multiple_of(JOB_INTERVAL) {
             self.update_jobs();
+        }
+        if tick.is_multiple_of(TICKS_PER_HOUR) {
+            self.emigrate();
+        }
+    }
+
+    /// 家のある世帯のうち、住民の幸福度の平均が [`LEAVE_BELOW`] より低い世帯を、
+    /// 1/[`LEAVE_CHANCE`] の確率で街から出す。1 時間ごとに呼ばれる。
+    fn emigrate(&mut self) {
+        let p = &self.population;
+        let leaving: Vec<HouseholdId> = p
+            .household_ids()
+            .filter(|h| p.home(*h).flatten().is_some())
+            .filter(|h| {
+                let members = p.members(*h).expect("世帯がない");
+                let sum: u64 = members
+                    .iter()
+                    .map(|id| {
+                        u64::from(happiness::total(
+                            p.citizen(*id).expect("住民がない").happiness,
+                        ))
+                    })
+                    .sum();
+                let n = members.len() as u64;
+                n > 0 && sum < u64::from(LEAVE_BELOW) * n
+            })
+            .filter(|h| {
+                rng(
+                    self.seed,
+                    RngPurpose::Emigration,
+                    u64::from(h.index),
+                    self.tick,
+                )
+                .chance(1, LEAVE_CHANCE)
+            })
+            .collect();
+        for h in leaving {
+            self.population.remove_household(h);
         }
     }
 
@@ -255,6 +313,7 @@ impl World {
         let filled: u64 = s.filled.iter().sum();
         let jobless = s.working_age.saturating_sub(s.employed);
         let want = BASE_RESIDENTIAL_DEMAND
+            + happiness_pull(s.happiness)
             + i64::try_from(jobs.saturating_sub(filled)).expect("職場の数があふれた")
             - i64::try_from(jobless / 4).expect("住民の数があふれた");
         if want <= 0 {
@@ -511,5 +570,37 @@ pub(crate) mod tests {
             w.step();
         }
         assert_eq!(w.population().household_count(), 0, "家なしの世帯が残る");
+    }
+
+    /// 住民の幸福度は組ごとの更新で決まり、住宅の税率を上げると暮らし向きが下がって世帯が出ていく。
+    #[test]
+    fn raising_the_tax_drives_households_away() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 3);
+        let before = w.city_stats();
+        assert!(before.happiness >= 60, "{before:?}");
+        let p = w.population();
+        for id in p.citizen_ids() {
+            let row = p.citizen(id).unwrap();
+            assert_ne!(
+                row.happiness,
+                HappinessParts::NEUTRAL,
+                "更新されない住民がいる"
+            );
+        }
+        let tax = Command::SetTaxRate {
+            zone: ZoneKind::Residential,
+            permille: crate::command::MAX_TAX_PERMILLE,
+        };
+        apply(&mut w, tax);
+        run_days(&mut w, 1);
+        let after = w.city_stats();
+        assert!(after.happiness < LEAVE_BELOW, "{after:?}");
+        assert!(
+            after.citizens * 2 < before.citizens,
+            "{} 人から {} 人",
+            before.citizens,
+            after.citizens
+        );
     }
 }

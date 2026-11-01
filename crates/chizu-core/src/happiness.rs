@@ -8,7 +8,9 @@
 //! - 暮らし向き：職があるか（働く年齢でなければ問わない）と、住宅の税率。
 
 use crate::building::{Building, Buildings};
-use crate::citizens::{CitizenChange, CitizenRow, HAPPINESS_MAX, HappinessParts, Population, WORKING_AGES};
+use crate::citizens::{
+    CitizenChange, CitizenRow, HAPPINESS_MAX, HappinessParts, Population, WORKING_AGES,
+};
 use crate::command::ZoneKind;
 use crate::id::CitizenId;
 use crate::network::TILE_MM;
