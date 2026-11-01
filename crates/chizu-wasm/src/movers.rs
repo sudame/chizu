@@ -13,9 +13,12 @@ use crate::snapshot::{MAX_MOVERS, Mover};
 pub const KIND_WALK: u16 = 1;
 pub const KIND_CAR: u16 = 2;
 
-/// 移動体の手段を種類の番号に直す。中核の移動体は、いまは歩く人だけである。
-fn kind_of(_m: &CoreMover) -> u16 {
-    KIND_WALK
+/// 移動体の手段を種類の番号に直す。
+fn kind_of(m: &CoreMover) -> u16 {
+    match m.mode {
+        LaneMode::Sidewalk => KIND_WALK,
+        LaneMode::Car => KIND_CAR,
+    }
 }
 
 /// 8 方向の向きを、x 軸から y 軸（画面の下）へ回る角度に直す。1 周を 65536 とする。
@@ -227,6 +230,7 @@ mod tests {
             },
             pos: WorldPos::new(Mm(84_000 + dx), Mm(84_000)),
             heading: (1, 0),
+            mode: LaneMode::Sidewalk,
         };
         let mut found = vec![
             at(0, 9_000),
@@ -247,6 +251,22 @@ mod tests {
         let mut few = vec![at(0, 9_000)];
         keep_nearest(&mut few, view, 3);
         assert_eq!(few.len(), 1);
+    }
+
+    #[test]
+    fn cars_and_walkers_get_their_own_kinds() {
+        use chizu_core::{Mm, TripId, WorldPos};
+        let m = |mode| CoreMover {
+            id: TripId {
+                index: 0,
+                generation: 0,
+            },
+            pos: WorldPos::new(Mm(0), Mm(0)),
+            heading: (0, 1),
+            mode,
+        };
+        assert_eq!(kind_of(&m(LaneMode::Sidewalk)), KIND_WALK);
+        assert_eq!(kind_of(&m(LaneMode::Car)), KIND_CAR);
     }
 
     #[test]
