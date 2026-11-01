@@ -2,6 +2,7 @@ import { parseCityStats, renderCityStats } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
+import { renderLegend } from "./legend.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { setupLayerPanel } from "./map/layers.ts";
@@ -64,6 +65,7 @@ function element<T extends Element>(selector: string): T {
 const status = element<HTMLElement>("#status");
 const canvas = element<HTMLCanvasElement>("#hud");
 const mapCanvas = element<HTMLCanvasElement>("#map");
+renderLegend(element<HTMLElement>("#legend-body"));
 const pauseButton = element<HTMLButtonElement>("#pause");
 const toolInfo = element<HTMLElement>("#tool-info");
 const toolMessage = element<HTMLElement>("#tool-message");
@@ -639,7 +641,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "buildings") {
     buildings = buildingGeometry(message.buildings, message.facilities);
     renderer?.roads.setBuildings(buildings);
-    renderCityStats(parseCityStats(message.stats));
+    renderCityStats(parseCityStats(message.stats), unsuppliedCount(message.buildings));
     // test:wasm が読む
     mapCanvas.dataset.firstBuilding = Array.from(message.buildings.subarray(0, 4)).join(",");
     mapCanvas.dataset.unsupplied = String(unsuppliedCount(message.buildings));

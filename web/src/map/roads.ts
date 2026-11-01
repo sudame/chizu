@@ -46,6 +46,46 @@ export const VERTEX_FLOATS = 9;
 
 export type Color = readonly [number, number, number, number];
 
+/** 図形の三角形。頂点は [-1, 1] の範囲の (x, y) で、y は下向きが正である。 */
+export type Triangle = readonly [
+  readonly [number, number],
+  readonly [number, number],
+  readonly [number, number],
+];
+
+/** 稲妻。上の三角形と下の三角形を、真ん中で重ねる。 */
+export const BOLT_SHAPE: readonly Triangle[] = [
+  [
+    [0.5, -1],
+    [-0.9, 0.2],
+    [0.3, 0.2],
+  ],
+  [
+    [-0.5, 1],
+    [0.9, -0.2],
+    [-0.3, -0.2],
+  ],
+];
+
+/** 水滴。上がとがった三角形と、下の丸みの代わりの台形で作る。 */
+export const DROP_SHAPE: readonly Triangle[] = [
+  [
+    [0, -1],
+    [-0.65, 0.2],
+    [0.65, 0.2],
+  ],
+  [
+    [-0.65, 0.2],
+    [0.65, 0.2],
+    [-0.4, 0.95],
+  ],
+  [
+    [0.65, 0.2],
+    [0.4, 0.95],
+    [-0.4, 0.95],
+  ],
+];
+
 const ROAD_COLOR: Color = [0.32, 0.32, 0.35, 1];
 const HIGHWAY_COLOR: Color = [0.78, 0.55, 0.25, 1];
 const NODE_COLOR: Color = [0.5, 0.5, 0.54, 1];
@@ -108,6 +148,18 @@ export class Geometry {
     v(1, 1);
   }
 
+  /**
+   * 中心 (x, y)（マスの単位）に置く、三角形の組み合わせの図形。点は [-1, 1] の範囲の形の座標で、
+   * half の分だけ広げる。縮小しても半分の太さの下限（画面のピクセル）より小さくならない。
+   */
+  shape(x: number, y: number, half: number, color: Color, triangles: readonly Triangle[]): void {
+    for (const t of triangles) {
+      for (const [sx, sy] of t) {
+        this.#vertex(x, y, sx, sy, half, color);
+      }
+    }
+  }
+
   /** 角のマスを両端に含む長方形。inset（マス）だけ内側に縮める。 */
   rect(min: Tile, max: Tile, color: Color, inset = 0): void {
     const v = (x: number, y: number) => this.#vertex(x, y, 0, 0, 0, color);
@@ -129,18 +181,21 @@ export function halfWidthOf(kindCode: number): number {
   return HALF_WIDTH[kindCode] ?? 0.4;
 }
 
-// 建物の色。区画の色（renderer.ts）を暗くし、段階が上がるほど明るくする
-const BUILDING_BASE: Record<number, readonly [number, number, number]> = {
+// 区画の色（地面の塗りと凡例も同じ値を使う）。建物の色は、これを暗くし、段階が上がるほど明るくする
+export const ZONE_BASE: Record<number, readonly [number, number, number]> = {
   1: [0.15, 0.95, 0.15],
   2: [0.25, 0.45, 0.95],
   3: [0.95, 0.8, 0.2],
   4: [0.3, 0.85, 0.95],
 };
 const BUILDING_INSET = 0.15;
+// 区画を塗った地面の色。草地の色に区画の色を ZONE_MIX の割合で混ぜる
+export const GRASS_COLOR: readonly [number, number, number] = [0.56, 0.72, 0.42];
+export const ZONE_MIX = 0.55;
 
 /** 段階 level（1〜5）の建物の色。 */
 export function buildingColor(zone: number, level: number): Color {
-  const [r, g, b] = BUILDING_BASE[zone] ?? [0.6, 0.6, 0.6];
+  const [r, g, b] = ZONE_BASE[zone] ?? [0.6, 0.6, 0.6];
   const k = 0.35 + 0.1 * Math.min(Math.max(level, 1), 5);
   return [r * k, g * k, b * k, 1];
 }
@@ -150,10 +205,10 @@ export const FACILITY_COLOR: Record<number, Color> = {
   1: [0.95, 0.5, 0.1, 1],
   2: [0.1, 0.65, 0.65, 1],
 };
-// 電気か水道が届いていない建物の印。CS2 の稲妻と水滴の代わりに、黄と青の点を左上に並べる
+// 電気か水道が届いていない建物の印。黄の稲妻と青の水滴を左上に並べる
 export const NO_POWER_COLOR: Color = [1, 0.9, 0.1, 1];
 export const NO_WATER_COLOR: Color = [0.2, 0.5, 1, 1];
-const MARK_HALF = 0.15;
+const MARK_HALF = 0.2;
 
 /** 印の中心。建物の左上のマスの中で、電気は左、水道は右に置く。 */
 export function markCenter(min: Tile, which: "power" | "water"): { x: number; y: number } {
@@ -185,11 +240,11 @@ export function buildingGeometry(buildings: Float64Array, facilities: Float64Arr
   for (const [x, y, supply] of marks) {
     if ((supply & SUPPLY_POWER) === 0) {
       const c = markCenter({ x, y }, "power");
-      geometry.dot(c.x, c.y, MARK_HALF, NO_POWER_COLOR);
+      geometry.shape(c.x, c.y, MARK_HALF, NO_POWER_COLOR, BOLT_SHAPE);
     }
     if ((supply & SUPPLY_WATER) === 0) {
       const c = markCenter({ x, y }, "water");
-      geometry.dot(c.x, c.y, MARK_HALF, NO_WATER_COLOR);
+      geometry.shape(c.x, c.y, MARK_HALF, NO_WATER_COLOR, DROP_SHAPE);
     }
   }
   return geometry;

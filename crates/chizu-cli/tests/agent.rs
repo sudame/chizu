@@ -280,3 +280,170 @@ fn reports_invalid_commands_without_recording() {
     let log = chizu_core::CommandLog::decode(&rec).unwrap();
     assert!(log.is_empty());
 }
+
+/// 道路と区画を置いた小さな街。道路は y=0 の x=0〜20 を Medium で引き、区画は x=0〜24、y=1〜6 の住宅である。
+fn small_town(name: &str) -> PathBuf {
+    let dir = session(name);
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[20,0],"kind":"Medium"},
+            {"type":"PaintZone","area":[[0,1],[24,6]],"zone":"Residential"}]"#,
+    );
+    cli(&["agent", "act", d, &cmds]);
+    dir
+}
+
+/// 地図の本体の行だけを、行頭の y の目盛りを外して取り出す。
+fn grid_rows(map: &str, rows: usize, cols: usize) -> Vec<String> {
+    let lines: Vec<&str> = map.lines().collect();
+    lines[lines.len() - rows..]
+        .iter()
+        .map(|l| l.chars().skip(l.chars().count() - cols).collect())
+        .collect()
+}
+
+#[test]
+fn map_shows_roads_zones_and_land() {
+    let dir = small_town("agent-map");
+    let d = dir.to_str().unwrap();
+    // x -2〜22、y -2〜7。区画は x=24 までなので、右端の外までは出ない。
+    let map = cli(&["agent", "map", d, "-2", "-2", "22", "7"]);
+    assert!(map.contains("凡例"), "{map}");
+    assert!(map.contains("25×10 文字"), "{map}");
+    let flat = ".".repeat(25);
+    let road = format!("..{}..", "2".repeat(21));
+    let zone = format!("..{}", "r".repeat(23));
+    let mut want = vec![flat.clone(), flat.clone(), road];
+    want.extend(std::iter::repeat_n(zone, 6));
+    want.push(flat);
+    assert_eq!(grid_rows(&map, 10, 25), want, "{map}");
+    // 角の順番を問わない。
+    assert_eq!(cli(&["agent", "map", d, "22", "7", "-2", "-2"]), map);
+}
+
+#[test]
+fn map_scale_picks_by_priority() {
+    let dir = small_town("agent-map-scale");
+    let d = dir.to_str().unwrap();
+    // 5×5 マスで 1 文字。道路のあるセルは区画が混ざっていても道路になる。
+    let map = cli(&["agent", "map", d, "0", "0", "24", "24", "--scale", "5"]);
+    assert!(map.contains("5×5 マス"), "{map}");
+    assert_eq!(
+        grid_rows(&map, 5, 5),
+        ["22222", "rrrrr", ".....", ".....", "....."],
+        "{map}"
+    );
+    // 買っていない土地と高速道路は、縮尺が大きくても見える。
+    let wide = cli(&[
+        "agent", "map", d, "-100", "-100", "160", "160", "--scale", "10",
+    ]);
+    assert!(wide.contains(','), "{wide}");
+    assert!(wide.contains('H'), "{wide}");
+}
+
+#[test]
+fn map_refuses_too_large_ranges() {
+    let dir = small_town("agent-map-large");
+    let d = dir.to_str().unwrap();
+    let err = cli_fails(&["agent", "map", d, "-500", "-500", "500", "500"]);
+    assert!(err.contains("--scale 11"), "{err}");
+    cli(&[
+        "agent", "map", d, "-500", "-500", "500", "500", "--scale", "11",
+    ]);
+    // 上限ちょうどの 96×96 マスは通る。
+    cli(&["agent", "map", d, "0", "0", "95", "95"]);
+    cli_fails(&["agent", "map", d, "0", "0", "96", "95"]);
+    cli_fails(&["agent", "map", d, "0", "0", "5", "5", "--scale", "0"]);
+}
+
+#[test]
+fn map_leaves_feedback_dir_untouched() {
+    let fb = make_feedback("agent-map-feedback", 0);
+    let before = files(&fb);
+    let map = cli(&["agent", "map", fb.to_str().unwrap(), "0", "0", "9", "9"]);
+    assert!(map.contains("凡例"), "{map}");
+    assert_eq!(files(&fb), before);
+}
+
+#[test]
+fn observe_gives_owned_bounds() {
+    let dir = session("agent-owned-bounds");
+    let d = dir.to_str().unwrap();
+    let seen = json(&cli(&["agent", "new", d, "1"]));
+    assert_eq!(
+        seen["land"]["ownedBounds"],
+        serde_json::json!([[-64, -64], [127, 127]])
+    );
+}
+
+/// 公共施設は区画より優先して出る。発電所は道路の下側、浄水場は上側に置く。
+#[test]
+fn map_shows_facilities() {
+    let dir = small_town("agent-map-facilities");
+    let d = dir.to_str().unwrap();
+    let cmds = write(
+        &dir.join("p.json"),
+        r#"[{"type":"PlaceBuilding","kind":"PowerPlant","at":[5,1],"rotation":0},
+            {"type":"PlaceBuilding","kind":"WaterPump","at":[12,-1],"rotation":2}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
+    assert_eq!(acted["results"][1]["outcome"], "Applied", "{acted}");
+    let map = cli(&["agent", "map", d, "5", "-2", "13", "2"]);
+    assert_eq!(
+        grid_rows(&map, 5, 9),
+        [
+            "......WW.",
+            "......WW.",
+            "222222222",
+            "PPPPrrrrr",
+            "PPPPrrrrr"
+        ],
+        "{map}"
+    );
+}
+
+/// 大きすぎる縮尺は、あふれずに断る。
+#[test]
+fn map_refuses_huge_scale() {
+    let dir = small_town("agent-map-huge-scale");
+    let d = dir.to_str().unwrap();
+    for scale in ["18446744073709551615", "9223372036854775808", "193"] {
+        let err = cli_fails(&[
+            "agent", "map", d, "-64", "-64", "127", "127", "--scale", scale,
+        ]);
+        assert!(err.contains("--scale"), "{err}");
+        assert!(!err.contains("panicked"), "{err}");
+    }
+    cli(&[
+        "agent", "map", d, "-64", "-64", "127", "127", "--scale", "192",
+    ]);
+}
+
+/// 世界のほぼ全体を指しても、文字数の計算があふれない。
+#[test]
+fn map_handles_whole_world() {
+    let dir = small_town("agent-map-world");
+    let d = dir.to_str().unwrap();
+    let (lo, hi) = ("-2147483648", "2147483648");
+    let err = cli_fails(&["agent", "map", d, lo, lo, hi, hi]);
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(err.contains("--scale 44"), "{err}");
+    let err = cli_fails(&["agent", "map", d, lo, lo, hi, hi, "--scale", "2"]);
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(err.contains("--scale 44"), "{err}");
+}
+
+/// 負の x の目盛りは、符号を除いた下 1 桁になる。
+#[test]
+fn map_ruler_uses_absolute_digits() {
+    let dir = small_town("agent-map-ruler");
+    let d = dir.to_str().unwrap();
+    let map = cli(&["agent", "map", d, "-74", "0", "-65", "0"]);
+    let lines: Vec<&str> = map.lines().collect();
+    let digits = lines[lines.len() - 2].trim();
+    assert_eq!(digits, "4321098765", "{map}");
+    assert!(lines[lines.len() - 3].contains("-70"), "{map}");
+}

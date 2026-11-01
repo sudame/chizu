@@ -369,9 +369,11 @@ impl Sim {
         out
     }
 
-    /// 街の数字を次の 12 個の数で返す。建物の数、世帯の上限、職場の上限、
+    /// 街の数字を次の 16 個の数で返す。建物の数、世帯の上限、職場の上限、
     /// 住宅・商業・工業・オフィスの需要、電気の供給量、水道の供給量、電気と水道の需要、
-    /// 電気と水道のそれぞれで供給量が需要に足りない網の数。供給量は道路網につながった施設の合計である。
+    /// 電気と水道のそれぞれで供給量が需要に足りない網の数、
+    /// 電気と水道のそれぞれで施設のない網の数、電気と水道のそれぞれの不足量。
+    /// 供給量は道路網につながった施設の合計である。
     pub fn city_stats(&self) -> Vec<f64> {
         let buildings = self.world.buildings();
         let capacity = buildings.capacity();
@@ -384,6 +386,7 @@ impl Sim {
         let [power, water, power_short, water_short] = crate::layers::utility_totals(&self.world);
         let need: u64 = buildings.iter().map(|(_, b)| building_demand(b)).sum();
         out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
+        out.extend(crate::layers::utility_gaps(&self.world).map(|v| v as f64));
         out
     }
 
