@@ -43,11 +43,7 @@ impl Walkers {
     /// 着くまでの tick 数。
     fn ticks_to_arrive(&mut self, id: TripId) -> u64 {
         for t in 1..100_000 {
-            if self
-                .trips
-                .step(&self.net, self.router.connectors())
-                .contains(&id)
-            {
+            if self.trips.step(&self.net, &mut self.router).contains(&id) {
                 return t;
             }
         }
@@ -142,7 +138,7 @@ fn splitting_the_road_keeps_the_walk_and_its_timing() {
     let mut w = Walkers::new(n);
     let id = w.spawn(at(0, 0, (1, 0), 0), at(19, 0, (1, 0), 0)).unwrap();
     for _ in 0..30 {
-        w.trips.step(&w.net, &[]);
+        w.trips.step(&w.net, &mut w.router);
     }
     // 歩いている道路の途中と先を、交わる道路で分ける。
     let lost = w.edit(|n| {
@@ -169,7 +165,7 @@ fn removed_roads_reroute_or_drop_the_walk() {
         .unwrap();
     let stay = w.spawn(at(0, 0, (1, 0), 0), at(5, 0, (1, 0), 0)).unwrap();
     for _ in 0..10 {
-        w.trips.step(&w.net, &[]);
+        w.trips.step(&w.net, &mut w.router);
     }
     // 先の道路を消すと、北へ回る道を探し直す。
     let lost = w.edit(|n| {
@@ -199,7 +195,7 @@ fn movers_report_world_positions_in_the_area() {
     road(&mut n, (0, 0), (5, 5));
     let mut w = Walkers::new(n);
     let id = w.spawn(at(1, 1, (1, 1), 0), at(4, 4, (1, 1), 0)).unwrap();
-    w.trips.step(&w.net, &[]);
+    w.trips.step(&w.net, &mut w.router);
     let world = |t: i64| Mm(t * 8_000);
     let all = w.trips.movers_in(
         WorldPos::new(world(0), world(0)),
@@ -379,7 +375,7 @@ fn stepping_does_not_depend_on_the_thread_count() {
             assert!(ids.iter().all(Option::is_some));
             let mut arrived = Vec::new();
             for _ in 0..60 {
-                arrived.extend(w.trips.step(&w.net, &[]));
+                arrived.extend(w.trips.step(&w.net, &mut w.router));
             }
             (arrived, state_hash_of(&w.trips))
         })

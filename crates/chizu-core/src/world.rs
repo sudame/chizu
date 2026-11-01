@@ -8,7 +8,7 @@ use crate::service::Facility;
 use crate::chunk::{Chunk, Layer, TileUse};
 use crate::citizens::{CitizenChange, CitizenRow, Population};
 use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
-use crate::id::{CitizenId, TripId};
+use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
 use crate::rng::{RngPurpose, mix_words};
@@ -493,6 +493,16 @@ impl World {
             .spawn(&self.network, &mut self.router.router, from, to, now)
     }
 
+    /// 建物 `from` から建物 `to` へ、歩く → 車 → 歩く で向かう移動を作る。`spawn_walk` と同じく、
+    /// 住民の予定とつなぐまでの入口にする。行き先の近くがどこも満車か、つながっていなければ `None`。
+    pub fn spawn_drive(&mut self, from: BuildingId, to: BuildingId) -> Option<TripId> {
+        self.sync_router();
+        let now = self.tick;
+        let (net, router) = (&self.network, &mut self.router.router);
+        self.trips
+            .spawn_drive(net, router, &self.buildings, (from, to), now)
+    }
+
     /// マスの範囲 `rect` にいる移動体を ID の順に返す。状態は変えない。
     pub fn movers_in(&self, rect: TileRect) -> Vec<Mover> {
         // 範囲はコマンドで指せる広さに切り詰める。その外にマスはないので、結果は変わらない。
@@ -593,6 +603,12 @@ impl World {
         if command.validate().is_err() {
             return ApplyOutcome::Rejected;
         }
+        let outcome = self.apply_valid(command);
+        self.trips.forget_lots(&self.buildings);
+        outcome
+    }
+
+    fn apply_valid(&mut self, command: &Command) -> ApplyOutcome {
         match *command {
             Command::SetSimSpeed { speed } => {
                 self.speed = speed;
@@ -626,8 +642,7 @@ impl World {
         self.population
             .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
         self.update_people();
-        self.trips
-            .step(&self.network, self.router.router.connectors());
+        self.trips.step(&self.network, &mut self.router.router);
         self.grow_buildings();
         self.update_economy();
         self.tick = tick.next();
