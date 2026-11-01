@@ -26,9 +26,10 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ kind: "chunks", chunks: [chunk] })).toBe(true);
     expect(isWorkerToMain({ kind: "chunks", chunks: [] })).toBe(true);
     expect(isWorkerToMain(roads)).toBe(true);
-    expect(
-      isWorkerToMain({ kind: "outcome", command: "BuildRoad", outcome: "Denied", reason: "x" }),
-    ).toBe(true);
+    expect(isWorkerToMain({ kind: "outcome", id: 3, seq: 1, outcome: "Denied", reason: "x" })).toBe(
+      true,
+    );
+    expect(isWorkerToMain({ kind: "outcome", id: 4, outcome: "Rejected" })).toBe(true);
   });
 
   test("形の違うメッセージを捨てる", () => {
@@ -42,6 +43,8 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ kind: "chunks", chunks: [{ ...chunk, cx: 0.5 }] })).toBe(false);
     expect(isWorkerToMain({ ...roads, segments: new Float64Array(4) })).toBe(false);
     expect(isWorkerToMain({ ...roads, nodes: [0, 0, 1] })).toBe(false);
+    expect(isWorkerToMain({ kind: "outcome", outcome: "Applied" })).toBe(false);
+    expect(isWorkerToMain({ kind: "outcome", id: 1, seq: "1", outcome: "Applied" })).toBe(false);
     expect(isWorkerToMain({ type: "wasm_bindgen_worker_ready" })).toBe(false);
   });
 });

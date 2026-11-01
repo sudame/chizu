@@ -254,13 +254,37 @@ try {
     { timeout: TIMEOUT_MS },
   );
   check(true, `所持金が見積もりの分だけ減る（${moneyBefore} → ${await moneyNow()}）`);
-  // 道路はマスの中心を通るので、中心の行のマスの真ん中（2 ピクセル下）に描かれる
+  // 道路はマス (12, 32) から (52, 32) へ、マスの中心を通る。カメラは (32, 32) を画面の中心に、
+  // 1 マスを 4 ピクセルで描くので、マス (x, y) の中心は画面の (cx + (x - 31.5) × 4, cy + (y - 31.5) × 4) にある
   await page.waitForTimeout(100);
-  const road = await pixel(cx, cy + 2);
-  check(
-    Math.abs((road[1] ?? 0) - (road[0] ?? 0)) < 30 && brightness(road) < brightness(owned),
-    `道路が灰色で描かれる（${road.join(", ")}）`,
-  );
+  const zoom = first.zoom;
+  const tileCenter = (x: number, y: number) => ({
+    x: cx + (x + 0.5 - first.x) * zoom,
+    y: cy + (y + 0.5 - first.y) * zoom,
+  });
+  // 道路とノードは灰色、地面は緑が強い
+  const isRoad = (c: number[]) =>
+    Math.abs((c[1] ?? 0) - (c[0] ?? 0)) < 20 && Math.abs((c[2] ?? 0) - (c[1] ?? 0)) < 20;
+  const isGround = (c: number[]) => (c[1] ?? 0) > (c[0] ?? 0) + 30;
+  const colorAt = async (x: number, y: number) => {
+    const p = tileCenter(x, y);
+    return pixel(p.x, p.y);
+  };
+  for (const [x, y, road, label] of [
+    [32, 32, true, "道路の途中のマスの中心"],
+    [12, 32, true, "始点のマスの中心"],
+    [52, 32, true, "終点のマスの中心"],
+    [32, 31, false, "1 つ上のマスの中心"],
+    [32, 33, false, "1 つ下のマスの中心"],
+    [10, 32, false, "始点の 2 つ左のマスの中心"],
+    [54, 32, false, "終点の 2 つ右のマスの中心"],
+  ] as const) {
+    const c = await colorAt(x, y);
+    check(
+      road ? isRoad(c) : isGround(c),
+      `${label} (${x}, ${y}) が${road ? "道路" : "地面"}の色で描かれる（${c.join(", ")}）`,
+    );
+  }
 
   const again = await drawRoad();
   check(

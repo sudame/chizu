@@ -51,6 +51,15 @@ function send(message: MainToWorker): void {
   worker.postMessage(message);
 }
 
+// 送ったコマンドの種類を、画面が振った番号で引く。結果の通知はこの番号で突き合わせる
+let nextCommandId = 0;
+const sentCommands = new Map<number, CommandMessage["kind"]>();
+function sendCommand(command: CommandMessage): void {
+  const id = nextCommandId++;
+  sentCommands.set(id, command.kind);
+  send({ kind: "command", id, command });
+}
+
 const pad = (n: number) => String(n).padStart(2, "0");
 
 function describeClock(header: SnapshotHeader): string {
@@ -262,13 +271,13 @@ function clickTile(at: Tile): void {
     } else {
       const end = snapToEightDirections(roadStart, at);
       if (end.x !== roadStart.x || end.y !== roadStart.y) {
-        send({ kind: "command", command: buildRoadCommand(tool.road, roadStart, end) });
+        sendCommand(buildRoadCommand(tool.road, roadStart, end));
         // CS2 と同じく、引いた終点から続けて引ける
         roadStart = end;
       }
     }
   } else if (tool.kind === "buy") {
-    send({ kind: "command", command: buyChunkCommand(at) });
+    sendCommand(buyChunkCommand(at));
   }
 }
 
@@ -320,7 +329,7 @@ mapCanvas.addEventListener("pointerup", (event) => {
   if (done.mode === "click") {
     clickTile(tileAt(event));
   } else if (done.mode === "area") {
-    send({ kind: "command", command: bulldozeCommand(done.start, tileAt(event)) });
+    sendCommand(bulldozeCommand(done.start, tileAt(event)));
   }
   updatePreview();
 });
@@ -394,10 +403,7 @@ function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?:
 
 for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-speed]")) {
   button.addEventListener("click", () => {
-    send({
-      kind: "command",
-      command: { kind: "SetSimSpeed", speed: Number(button.dataset.speed) },
-    });
+    sendCommand({ kind: "SetSimSpeed", speed: Number(button.dataset.speed) });
   });
 }
 
@@ -421,8 +427,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   if (message.kind === "outcome") {
-    if (message.command !== "SetSimSpeed") {
-      showOutcome(message.command, message.outcome, message.reason);
+    const command = sentCommands.get(message.id);
+    sentCommands.delete(message.id);
+    if (command !== undefined && command !== "SetSimSpeed") {
+      showOutcome(command, message.outcome, message.reason);
     }
     return;
   }
