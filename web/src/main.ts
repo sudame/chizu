@@ -212,7 +212,13 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   const movers =
     header === null
       ? 0
-      : (renderer?.movers.draw(camera, vp, header, reader.movers(header.moverCount)) ?? 0);
+      : (renderer?.movers.draw(
+          camera,
+          vp,
+          header,
+          reader.movers(header.moverCount),
+          performance.now(),
+        ) ?? 0);
   // test:wasm が読む
   mapCanvas.dataset.drawnMovers = String(movers);
   const first = renderer?.movers.first;

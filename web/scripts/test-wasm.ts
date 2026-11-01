@@ -140,6 +140,29 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   await waitMap("firstMover", spawned.firstMover ?? "", "ne");
   const moved = await map.getAttribute("data-first-mover");
   check(true, `時間を進めると移動体の位置が変わる（${spawned.firstMover} → ${moved}）`);
+  // 等速では 1 tick が約 33ms で、フレームは約 17ms。補間があれば、tick が変わらないフレームでも位置が変わる
+  const sampled = await page.evaluate(
+    () =>
+      new Promise<{ ticks: number; positions: number }>((resolve) => {
+        const ticks = new Set<string>();
+        const positions = new Set<string>();
+        const end = performance.now() + 1000;
+        const step = () => {
+          ticks.add(document.querySelector<HTMLElement>("#hud")?.dataset.tick ?? "");
+          positions.add(document.querySelector<HTMLElement>("#map")?.dataset.firstMover ?? "");
+          if (performance.now() < end) {
+            requestAnimationFrame(step);
+          } else {
+            resolve({ ticks: ticks.size, positions: positions.size });
+          }
+        };
+        requestAnimationFrame(step);
+      }),
+  );
+  check(
+    sampled.positions >= sampled.ticks * 1.5,
+    `移動体は 1 tick のあいだにも少しずつ動く（tick ${sampled.ticks} 回に対し位置 ${sampled.positions} 通り）`,
+  );
   check(
     await page.locator("#dev-flag").isVisible(),
     "開発用の道具を使うと、再現できないことの印が出る",
