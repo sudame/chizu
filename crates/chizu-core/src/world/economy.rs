@@ -258,15 +258,15 @@ mod tests {
         let f = w.finances();
         // 40 マスの中くらいの道路は 18,000 で、その 1% が 1 日の維持費になる。
         assert_eq!(f.road_upkeep, Money(180));
-        assert_eq!(f.facility_upkeep, [Money(1_800), Money::ZERO]);
+        assert_eq!(f.facility_upkeep, [Money(1_200), Money::ZERO]);
         assert_eq!(f.income(), Money::ZERO);
-        assert_eq!(f.net(), Money(-1_980));
+        assert_eq!(f.net(), Money(-1_380));
         let start = w.money();
         while w.tick().0 < TICKS_PER_HOUR + 1 {
             w.step();
         }
         // k 回精算すると、端数を持ち越すので、ちょうど 1 日の見込みの k/24 だけ減る。
-        let after = |k: i64| start + Money(round::div_floor(-1_980 * k, 24));
+        let after = |k: i64| start + Money(round::div_floor(-1_380 * k, 24));
         // tick 0 と 1 時間めの 2 回の精算が済んでいる。
         assert_eq!(w.money(), after(2));
         run_days(&mut w, 1);

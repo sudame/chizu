@@ -222,7 +222,7 @@ fn connect_to_outside(seed: u64, y: i64, x_min: i64, x_max: i64) -> Vec<Command>
 }
 
 /// 道路に面した住宅・商業・工業・オフィスの区画に建物が建ち、途中で道路の一部を消す記録。
-/// 下の通りは外の世界とつながり、発電所と浄水場がある。
+/// 下の通りは外の世界とつながる。どちらの通りにも発電所と浄水場を 1 つずつ置く。
 fn growth() -> CommandLog {
     let mut log = CommandLog::new();
     let mut rec = |tick: u64, c: Command| {
@@ -260,15 +260,18 @@ fn growth() -> CommandLog {
     for c in connect_to_outside(42, 0, -40, 40) {
         rec(3, c);
     }
-    for (kind, x) in [
-        (ServiceKind::PowerPlant, -37),
-        (ServiceKind::WaterPump, -33),
+    // 新しい建物は電気と水道の余りのある網にしか建たないので、どちらの通りにも施設を置く。
+    for (kind, x, y) in [
+        (ServiceKind::PowerPlant, -37, -1),
+        (ServiceKind::WaterPump, -33, -1),
+        (ServiceKind::PowerPlant, -37, 19),
+        (ServiceKind::WaterPump, -33, 19),
     ] {
         rec(
             3,
             Command::PlaceBuilding {
                 kind,
-                at: TilePos::new(x, -1),
+                at: TilePos::new(x, y),
                 rotation: 2,
             },
         );

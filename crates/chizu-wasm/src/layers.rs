@@ -278,7 +278,10 @@ mod tests {
             SUPPLY_BUILDING_OFF
         );
         assert_eq!(value_at(&mut cache, &sim, water, TilePos::new(16, 9)), 0);
-        assert_eq!(utility_totals(sim.world()), [400, 0, 0, 1]);
+        assert_eq!(
+            utility_totals(sim.world()),
+            [ServiceKind::PowerPlant.capacity(), 0, 0, 1]
+        );
     }
 
     #[test]

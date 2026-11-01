@@ -21,7 +21,7 @@ use crate::id::BuildingId;
 use crate::network::{DIAGONAL_TILE_MM, Dir, LaneMode, LinkId, TILE_MM};
 use crate::rng::{RngPurpose, rng};
 use crate::round;
-use crate::service::{Facility, Supply, evaluate_supply};
+use crate::service::{Facility, Headroom, Supply, evaluate_supply};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
 use crate::units::LaneOffset;
 use crate::world::{ApplyOutcome, DenyReason};
@@ -298,6 +298,8 @@ impl World {
                 self.supply_dirty = true;
             }
         }
+        // 新しい建物は、その道路網の電気と水道に余りがあるときだけ建つ。施設のない網には数軒しか建たない。
+        let mut headroom = Headroom::of(&self.network, &self.facilities, &self.buildings);
         for zone in ZoneKind::ALL {
             let pull = round::div_floor(demand(&stats)[zone.index()].max(0), SPAWN_PER_DEMAND);
             let spawns = u32::try_from(pull)
@@ -329,7 +331,12 @@ impl World {
                 let fit = sizes
                     .into_iter()
                     .find(|(w, k)| self.lot_fits(zone, front, toward_road, *w, *k));
-                if let Some((w, k)) = fit {
+                let Some((w, k)) = fit else {
+                    continue;
+                };
+                // 建ったときは段階 1 なので、需要は占めるマスの数である。
+                let link = self.frontage(front, toward_road).map(|(l, _)| l);
+                if link.is_some_and(|l| headroom.take(&self.network, l, w * k)) {
                     let id = self.place_building(zone, front, toward_road, w, k);
                     stats = stats.with(self.buildings.get(id).expect("建てた建物がない"));
                 }
@@ -541,6 +548,7 @@ mod tests {
     use super::*;
     use crate::command::{Command, RoadKind};
     use crate::movement::SidewalkPos;
+    use crate::service::{UNSUPPLIED_ALLOWANCE, building_demand};
     use crate::units::{Mm, Money, Tick, WorldPos};
     use crate::world::ApplyOutcome;
 
@@ -983,12 +991,33 @@ mod tests {
         assert!(freed.into_iter().any(regrown), "空いた区画にまた建たない");
     }
 
+    /// 16 マスで段階 5 の建物（需要 80）を、`front` の x ごとに、道路の `toward_road` と反対の側に置く。
+    fn insert_large(w: &mut World, xs: impl Iterator<Item = i64>, y: i64, toward_road: (i64, i64)) {
+        for x in xs {
+            let front = TilePos::new(x, y);
+            let (entrance, entrance_at) = w.frontage(front, toward_road).unwrap();
+            let far = (x + 3, y - 3 * toward_road.1);
+            w.buildings.insert(Building {
+                zone: ZoneKind::Residential,
+                area: rect((x, y), far),
+                front,
+                toward_road,
+                entrance,
+                entrance_at,
+                level: MAX_LEVEL,
+                leveled_at: Tick::ZERO,
+                supply: Supply::default(),
+            });
+        }
+    }
+
+    /// 需要が供給量を超えると、施設から遠い建物にだけ届かなくなる。
     #[test]
-    fn supply_fails_when_demand_exceeds_capacity() {
+    fn supply_fails_only_for_buildings_beyond_capacity() {
         let mut w = World::new(0);
         let road = Command::BuildRoad {
             from: TilePos::new(0, 10),
-            to: TilePos::new(40, 10),
+            to: TilePos::new(70, 10),
             kind: RoadKind::Small,
         };
         assert_eq!(w.apply(&road), ApplyOutcome::Applied);
@@ -1000,31 +1029,235 @@ mod tests {
             place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
             ApplyOutcome::Applied
         );
-        let (entrance, entrance_at) = w.frontage(TilePos::new(20, 9), (0, 1)).unwrap();
-        // 16 マスで段階 5 の建物を 4 棟置くと、需要は 320 になる。電気（400）は足り、水道（300）は足りない。
-        for i in 0..4 {
-            w.buildings.insert(Building {
-                zone: ZoneKind::Residential,
-                area: rect((10 + 4 * i, 6), (13 + 4 * i, 9)),
-                front: TilePos::new(10 + 4 * i, 9),
-                toward_road: (0, 1),
-                entrance,
-                entrance_at,
-                level: MAX_LEVEL,
-                leveled_at: Tick::ZERO,
-                supply: Supply::default(),
-            });
-        }
+        // 需要 80 の建物を 14 棟、施設から東へ並べると、需要は 1,120 になる。
+        // 電気（1,200）は足り、水道（1,000）は近い 12 棟の分しかない。
+        insert_large(&mut w, (0..14).map(|i| 10 + 4 * i), 9, (0, 1));
         w.update_supply();
         for (_, b) in w.buildings().iter() {
+            let near = b.front.x < 10 + 4 * 12;
             assert_eq!(
                 b.supply,
                 Supply {
                     power: true,
-                    water: false
-                }
+                    water: near
+                },
+                "{:?}",
+                b.front
             );
         }
+    }
+
+    /// 施設が道路の途中にあれば、両側の近い建物から順に届く。
+    #[test]
+    fn supply_reaches_the_nearest_buildings_first() {
+        let mut w = World::new(0);
+        let road = Command::BuildRoad {
+            from: TilePos::new(0, 10),
+            to: TilePos::new(80, 10),
+            kind: RoadKind::Small,
+        };
+        assert_eq!(w.apply(&road), ApplyOutcome::Applied);
+        // 北へ枝道を出して、東の端の区間を分ける。
+        build(&mut w, (62, 0), (62, 10));
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (57, 9), 2),
+            ApplyOutcome::Applied
+        );
+        // 道路の南側に 20 棟並べる。水道（1,000）は 12 棟の分しかない。
+        insert_large(&mut w, (0..20).map(|i| 4 * i), 11, (0, -1));
+        w.update_supply();
+        let gap = |b: &Building| b.front.x.abs_diff(57);
+        let (on, off): (Vec<Building>, Vec<Building>) = w
+            .buildings()
+            .iter()
+            .map(|(_, b)| *b)
+            .partition(|b| b.supply.water);
+        assert_eq!(on.len(), 12);
+        let farthest_on = on.iter().map(gap).max().unwrap();
+        assert!(off.iter().all(|b| gap(b) > farthest_on), "{on:?}");
+        // 枝道の交差点の先の区間にも、近い順に届く。
+        assert!(on.iter().any(|b| b.front.x < 57) && on.iter().any(|b| b.front.x > 62));
+        // 発電所がないので、電気はどこにも届かない。
+        assert!(w.buildings().iter().all(|(_, b)| !b.supply.power));
+    }
+
+    /// `side` マス四方で段階 `level` の住宅を、道路の `toward_road` と反対の側に 1 棟置く。
+    fn insert_square(
+        w: &mut World,
+        front: (i64, i64),
+        toward_road: (i64, i64),
+        side: i64,
+        level: u8,
+    ) -> BuildingId {
+        let (x, y) = front;
+        let front = TilePos::new(x, y);
+        let (entrance, entrance_at) = w.frontage(front, toward_road).unwrap();
+        w.buildings.insert(Building {
+            zone: ZoneKind::Residential,
+            area: rect((x, y), (x + side - 1, y - (side - 1) * toward_road.1)),
+            front,
+            toward_road,
+            entrance,
+            entrance_at,
+            level,
+            leveled_at: Tick::ZERO,
+            supply: Supply::default(),
+        })
+    }
+
+    fn street(w: &mut World, from: i64, to: i64) {
+        let road = Command::BuildRoad {
+            from: TilePos::new(from, 10),
+            to: TilePos::new(to, 10),
+            kind: RoadKind::Small,
+        };
+        assert_eq!(w.apply(&road), ApplyOutcome::Applied);
+    }
+
+    /// 収まらない建物が出たら、残りに収まる小さな建物がそれより遠くにあっても届けない。
+    #[test]
+    fn supply_stops_at_the_first_building_that_does_not_fit() {
+        let mut w = World::new(0);
+        street(&mut w, 0, 80);
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
+            ApplyOutcome::Applied
+        );
+        // 需要 80 の 12 棟で 960 を使い、残りは 40 になる。
+        insert_large(&mut w, (0..12).map(|i| 10 + 4 * i), 9, (0, 1));
+        let big = insert_square(&mut w, (58, 9), (0, 1), 4, MAX_LEVEL);
+        let small = insert_square(&mut w, (66, 9), (0, 1), 1, 1);
+        w.update_supply();
+        let water = |id: BuildingId| w.buildings().get(id).unwrap().supply.water;
+        assert!(!water(big));
+        assert!(!water(small), "収まらない建物より遠い建物に届いた");
+        let on = w.buildings().iter().filter(|(_, b)| b.supply.water).count();
+        assert_eq!(on, 12);
+    }
+
+    /// 道のりが同じ建物は、建物の ID の小さい順に届く。
+    #[test]
+    fn supply_breaks_ties_by_building_id() {
+        let mut w = World::new(0);
+        street(&mut w, 0, 80);
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (3, 9), 2),
+            ApplyOutcome::Applied
+        );
+        // 1 棟を近くに置き、その先に道路の両側で同じ x の組を並べる。水道（1,000）は 12 棟の分なので、
+        // 6 組めの 2 棟のうち 1 棟だけに届く。南の側を先に置くので、南の側の ID が小さい。
+        insert_square(&mut w, (6, 9), (0, 1), 4, MAX_LEVEL);
+        let mut pairs = Vec::new();
+        for i in 0..7 {
+            let x = 10 + 4 * i;
+            let south = insert_square(&mut w, (x, 11), (0, -1), 4, MAX_LEVEL);
+            let north = insert_square(&mut w, (x, 9), (0, 1), 4, MAX_LEVEL);
+            pairs.push((south, north));
+        }
+        w.update_supply();
+        let water = |id: BuildingId| w.buildings().get(id).unwrap().supply.water;
+        for (i, (south, north)) in pairs.into_iter().enumerate() {
+            let expected = match i {
+                0..5 => (true, true),
+                5 => (true, false),
+                _ => (false, false),
+            };
+            assert!(south < north);
+            assert_eq!((water(south), water(north)), expected, "{i} 組め");
+        }
+    }
+
+    /// 同じ種類の施設が 2 つあれば、建物はどちらか近いほうから数えた道のりの順に届く。
+    #[test]
+    fn supply_counts_the_distance_from_the_nearest_facility() {
+        let mut w = World::new(0);
+        street(&mut w, 0, 120);
+        // 北へ枝道を出して、通りを x = 60 で 2 つの区間に分ける。
+        build(&mut w, (60, 0), (60, 10));
+        for x in [5, 115] {
+            assert_eq!(
+                place(&mut w, ServiceKind::WaterPump, (x, 9), 2),
+                ApplyOutcome::Applied
+            );
+        }
+        // 南の側に 30 棟（需要 2,400）を並べる。水道（2,000）は 25 棟の分しかない。
+        insert_large(&mut w, (0..30).map(|i| 4 * i), 11, (0, -1));
+        w.update_supply();
+        for (_, b) in w.buildings().iter() {
+            let middle = (52..=68).contains(&b.front.x);
+            assert_eq!(b.supply.water, !middle, "{:?}", b.front);
+        }
+    }
+
+    /// 新しい建物は、電気と水道の両方に余りがある網にしか建たない。施設のない網にも、
+    /// [`UNSUPPLIED_ALLOWANCE`] までは建つ。施設を置けば、直後の成長の回から建ちはじめる。
+    #[test]
+    fn new_buildings_need_room_for_both_power_and_water() {
+        let mut w = zoned_street();
+        // 区画のない西の延長に施設を置く。
+        street(&mut w, -20, 0);
+        let demand =
+            |w: &World| -> u64 { w.buildings().iter().map(|(_, b)| building_demand(b)).sum() };
+        run(&mut w, 20 * GROWTH_INTERVAL);
+        let bare = w.buildings().len();
+        assert!(bare > 0, "施設を置く前に 1 軒も建たない");
+        assert!(demand(&w) <= UNSUPPLIED_ALLOWANCE, "{}", demand(&w));
+        // 発電所だけでは、水道に余りがないので建たない。
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (-10, 9), 2),
+            ApplyOutcome::Applied
+        );
+        run(&mut w, 20 * GROWTH_INTERVAL);
+        assert_eq!(w.buildings().len(), bare);
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (-5, 9), 2),
+            ApplyOutcome::Applied
+        );
+        run(&mut w, GROWTH_INTERVAL);
+        assert!(w.buildings().len() > bare, "浄水場を置いても建たない");
+    }
+
+    /// 道路を切って施設のない側に分かれた網には、[`UNSUPPLIED_ALLOWANCE`] までしか建たない。
+    #[test]
+    fn new_buildings_stop_on_the_side_cut_off_from_facilities() {
+        let mut w = served_street();
+        // 西へ 10 マスのつなぎの道路を出し、その先の通りに住宅を塗ってから、つなぎを消す。
+        street(&mut w, -10, 0);
+        street(&mut w, -50, -10);
+        paint(&mut w, (-50, 4), (-10, 9), ZoneKind::Residential);
+        let cut = Command::Bulldoze {
+            area: rect((-5, 10), (-5, 10)),
+        };
+        assert_eq!(w.apply(&cut), ApplyOutcome::Applied);
+        run(&mut w, 30 * GROWTH_INTERVAL);
+        let cut_off: Vec<Building> = w
+            .buildings()
+            .iter()
+            .map(|(_, b)| *b)
+            .filter(|b| b.front.x <= -10)
+            .collect();
+        let served = w.buildings().len() - cut_off.len();
+        let cut_demand: u64 = cut_off.iter().map(building_demand).sum();
+        assert!(!cut_off.is_empty());
+        assert!(cut_demand <= UNSUPPLIED_ALLOWANCE, "{cut_demand}");
+        assert!(cut_off.iter().all(|b| b.supply == Supply::default()));
+        assert!(served > cut_off.len(), "{served} 棟");
+    }
+
+    /// 施設のない網に建てられる需要の合計は、ちょうど [`UNSUPPLIED_ALLOWANCE`] までである。
+    #[test]
+    fn unsupplied_allowance_is_the_exact_limit() {
+        let mut w = World::new(0);
+        street(&mut w, 0, 40);
+        let id = insert_square(&mut w, (10, 9), (0, 1), 4, 1);
+        let link = w.buildings().get(id).unwrap().entrance;
+        let used = building_demand(w.buildings().get(id).unwrap());
+        let headroom = || Headroom::of(&w.network, &w.facilities, &w.buildings);
+        let rest = UNSUPPLIED_ALLOWANCE - used;
+        assert!(!headroom().take(&w.network, link, rest + 1));
+        let mut h = headroom();
+        assert!(h.take(&w.network, link, rest));
+        assert!(!h.take(&w.network, link, 1));
     }
 
     fn paint(w: &mut World, a: (i64, i64), b: (i64, i64), zone: ZoneKind) {
