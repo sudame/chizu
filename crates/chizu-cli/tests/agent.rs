@@ -457,7 +457,10 @@ fn observe_gives_people_and_traffic_counts() {
     // 始めたばかりの街でも、欄は出て、空である。
     let fresh = json(&cli(&["agent", "observe", d]));
     assert_eq!(fresh["traffic"]["cars"]["total"], 0);
-    assert_eq!(fresh["traffic"]["trips"]["yesterday"], serde_json::Value::Null);
+    assert_eq!(
+        fresh["traffic"]["trips"]["yesterday"],
+        serde_json::Value::Null
+    );
     assert!(fresh["traffic"]["trips"]["today"]["avgTravelTicks"].is_null());
     let highway = fresh["highway"]["end"].clone();
     let [x, y] = [highway[0].as_i64().unwrap(), highway[1].as_i64().unwrap()];
@@ -479,10 +482,12 @@ fn observe_gives_people_and_traffic_counts() {
     let o = json(&cli(&["agent", "observe", d]));
     let n = |v: &serde_json::Value| v.as_u64().unwrap();
     let people = &o["citizenPlaces"];
-    let sum: u64 = ["atHome", "atWork", "atShop", "walking", "driving", "homeless"]
-        .iter()
-        .map(|k| n(&people[k]))
-        .sum();
+    let sum: u64 = [
+        "atHome", "atWork", "atShop", "walking", "driving", "homeless",
+    ]
+    .iter()
+    .map(|k| n(&people[k]))
+    .sum();
     assert_eq!(sum, n(&o["population"]["citizens"]));
     assert!(sum > 0, "誰も住んでいない");
     let cars = &o["traffic"]["cars"];

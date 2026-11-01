@@ -274,7 +274,11 @@ mod tests {
         let (from, to) = (ids[0], ids[ids.len() - 1]);
         let id = w.spawn_drive(from, to).expect("車の移動を作れない");
         // 歩く区切りを先に済ませる。
-        while w.trips().get(id).is_some_and(|t| t.mode() != crate::LaneMode::Car) {
+        while w
+            .trips()
+            .get(id)
+            .is_some_and(|t| t.mode() != crate::LaneMode::Car)
+        {
             w.step();
         }
         let before = w.car_sample();
@@ -304,7 +308,10 @@ mod tests {
         // 住宅をすべて取り壊すと、住んでいた世帯は家なしになって空き家を待つ。
         let all = TileRect::from_corners(TilePos::new(-59, 4), TilePos::new(19, 9));
         assert_eq!(
-            w.apply(&Command::PaintZone { area: all, zone: None }),
+            w.apply(&Command::PaintZone {
+                area: all,
+                zone: None
+            }),
             ApplyOutcome::Applied
         );
         let road = TileRect::from_corners(TilePos::new(-60, 10), TilePos::new(20, 10));
