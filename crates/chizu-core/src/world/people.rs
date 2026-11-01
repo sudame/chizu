@@ -664,8 +664,9 @@ pub(crate) mod tests {
     }
 
     /// 住宅と区画 `work` の職場が通りを挟んで向き合う街で、3 日目の朝に `work` の職場へ向けて家を出る時刻と、
-    /// 夕方に職場を出る時刻（どちらも 1 日の中の tick）。
-    /// 職場に着いた住民の帰りに出る時刻が、着いた tick に勤務の長さと残業を足した範囲に入ることも確かめる。
+    /// その日に職場へ着いた住民が帰りに出る時刻（どちらも 1 日の中の tick）。
+    /// 帰りに出る時刻は、職場に着いた tick に記録するので、早く帰る人も取りこぼさない。
+    /// 帰りに出る時刻が、着いた tick に勤務の長さと残業のとりうる値を足した範囲に入ることも確かめる。
     fn commute_times(work: ZoneKind) -> (Vec<u64>, Vec<u64>) {
         let mut w = city(&[ZoneKind::Residential, work]);
         run_days(&mut w, 2);
@@ -674,19 +675,26 @@ pub(crate) mod tests {
             let b = r.workplace.and_then(|b| w.buildings().get(b));
             b.is_some_and(|b| b.zone == work)
         };
-        let departures = |w: &World, wanted: &[Activity]| -> Vec<u64> {
-            let p = w.population();
-            p.citizen_ids()
-                .map(|id| p.citizen(id).unwrap())
-                .filter(|r| works_here(w, r) && wanted.contains(&r.schedule.next))
-                .filter_map(|r| r.schedule.depart_at)
-                .map(|t| t.0 - day_start)
-                .collect()
-        };
-        let morning = departures(&w, &[Activity::Work]);
-        let length = Shift::of(work).length;
-        let mut next: BTreeMap<CitizenId, Activity> = BTreeMap::new();
-        while w.tick().0 < day_start + 14 * TICKS_PER_HOUR {
+        let p = w.population();
+        let morning: Vec<u64> = p
+            .citizen_ids()
+            .map(|id| p.citizen(id).unwrap())
+            .filter(|r| works_here(&w, r) && r.schedule.next == Activity::Work)
+            .filter_map(|r| r.schedule.depart_at)
+            .map(|t| t.0 - day_start)
+            .collect();
+        let mut next: BTreeMap<CitizenId, Activity> = p
+            .citizen_ids()
+            .map(|id| (id, p.citizen(id).unwrap().schedule.next))
+            .collect();
+        let shortest = Shift::of(work).length;
+        let overtime_max =
+            (OVERTIME_SPREAD / u64::from(OVERTIME_DRAWS) - 1) * u64::from(OVERTIME_DRAWS);
+        let mut evening = Vec::new();
+        // 朝の移動が長引いた人も着き終わるよう、18 時まで回す。
+        while w.tick().0 < day_start + 18 * TICKS_PER_HOUR {
+            // 職場に着いて帰りの予定を立てるのは、step を呼ぶ前の tick である。
+            let arrived = w.tick().0;
             w.step();
             let p = w.population();
             for id in p.citizen_ids() {
@@ -696,15 +704,15 @@ pub(crate) mod tests {
                     continue;
                 };
                 if before == Some(Activity::Work) && r.schedule.next != Activity::Work {
-                    let wait = t.0 - w.tick().0;
+                    let wait = t.0 - arrived;
                     assert!(
-                        (length..length + OVERTIME_SPREAD).contains(&wait),
+                        (shortest..=shortest + overtime_max).contains(&wait),
                         "{work:?}：着いてから {wait} tick で帰る"
                     );
+                    evening.push(t.0 - day_start);
                 }
             }
         }
-        let evening = departures(&w, &[Activity::Home, Activity::Shop]);
         (morning, evening)
     }
 
@@ -724,9 +732,9 @@ pub(crate) mod tests {
             if zone != ZoneKind::Commercial {
                 let from = shift.leave_home - DEPARTURE_SPREAD / 2;
                 assert_bell(&half_hours(&morning, from, 6), &format!("{zone:?} の朝"));
-                // 帰りは、出発の頂に勤務の長さを足した時刻の 2 時間前から 8 時間のあいだに散らばる。
+                // 帰りは、朝の区切りの始まりに勤務の長さを足した時刻から 8 時間のあいだに散らばる。
                 // 朝の移動にかかる時間のぶん、遅いほうの裾が長い。
-                let from = shift.leave_home + shift.length - 2 * TICKS_PER_HOUR;
+                let from = shift.leave_home + shift.length - DEPARTURE_SPREAD / 2;
                 assert_bell(&half_hours(&evening, from, 16), &format!("{zone:?} の夕方"));
             }
             evening.sort_unstable();
