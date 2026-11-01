@@ -18,6 +18,10 @@ pub fn local_index(lx: usize, ly: usize) -> usize {
     ly * CHUNK_SIDE + lx
 }
 
+/// コマンドで指せるマスの座標の絶対値の上限。x、y ともに `-WORLD_LIMIT..=WORLD_LIMIT` に収める。
+/// 範囲を決めておくと、座標の足し引きがコマンドの処理の中であふれない。
+pub const WORLD_LIMIT: i64 = 1 << 31;
+
 /// マスの座標。チャンク座標（`i32`）に 64 を掛けた範囲を表せるよう `i64` で持つ。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TilePos {
@@ -28,6 +32,12 @@ pub struct TilePos {
 impl TilePos {
     pub fn new(x: i64, y: i64) -> TilePos {
         TilePos { x, y }
+    }
+
+    /// コマンドで指せる範囲（[`WORLD_LIMIT`]）の中か。
+    pub fn in_world(self) -> bool {
+        (-WORLD_LIMIT..=WORLD_LIMIT).contains(&self.x)
+            && (-WORLD_LIMIT..=WORLD_LIMIT).contains(&self.y)
     }
 
     /// このマスを含むチャンク。チャンクの座標が `i32` に収まらないときは `None`。
@@ -64,6 +74,11 @@ impl TileRect {
         }
     }
 
+    /// 両方の角がコマンドで指せる範囲の中か。
+    pub fn in_world(self) -> bool {
+        self.min.in_world() && self.max.in_world()
+    }
+
     /// `min` が `max` を x、y のどちらでも超えていないか。
     pub fn is_ordered(self) -> bool {
         self.min.x <= self.max.x && self.min.y <= self.max.y
@@ -80,6 +95,13 @@ pub struct ChunkCoord {
 impl ChunkCoord {
     pub fn new(cx: i32, cy: i32) -> ChunkCoord {
         ChunkCoord { cx, cy }
+    }
+
+    /// チャンクのマスがすべてコマンドで指せる範囲の中か。
+    pub fn in_world(self) -> bool {
+        let last = CHUNK_SIDE as i64 - 1;
+        let o = self.origin();
+        o.in_world() && TilePos::new(o.x + last, o.y + last).in_world()
     }
 
     /// 左上（x、y が最小）のマス。

@@ -20,6 +20,10 @@ name = "route_batch"
 harness = false
 
 [[bench]]
+name = "growth"
+harness = false
+
+[[bench]]
 name = "walk_tick"
 harness = false
 

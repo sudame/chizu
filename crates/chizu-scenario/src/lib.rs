@@ -2,7 +2,8 @@
 
 use chizu_core::routing::RouteRequest;
 use chizu_core::{
-    LaneMode, Line, LinkId, Money, Network, Population, RngPurpose, RoadKind, Tick, TilePos, rng,
+    ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network, Population, RngPurpose, RoadKind,
+    Tick, TilePos, TileRect, World, ZoneKind, rng,
 };
 use chizu_core::{LaneOffset, SidewalkPos};
 
@@ -36,6 +37,67 @@ pub fn synthetic_population(seed: u64, count: u32) -> Population {
         made += size;
     }
     p
+}
+
+/// 種 `seed` の街に、開始地点を中心とする 7×7 チャンクの土地を買い、12 マスごとの格子の道路を引き、
+/// 街区ごとに 4 種類の区画を順に塗った街。水辺にかかる道路と区画は飛ばす。建物はまだない。
+pub fn zoned_grid_city(seed: u64) -> World {
+    let mut w = World::new_with_money(seed, Money(1_000_000_000));
+    for ring in 2..=3_i32 {
+        for cy in -ring..=ring {
+            for cx in -ring..=ring {
+                if cx.abs().max(cy.abs()) == ring {
+                    w.apply(&Command::BuyChunk {
+                        coord: ChunkCoord::new(cx, cy),
+                    });
+                }
+            }
+        }
+    }
+    // 角のチャンクは辺で接するまで買えないので、もう一周して買い残しを埋める。
+    for cy in -3..=3 {
+        for cx in -3..=3 {
+            w.apply(&Command::BuyChunk {
+                coord: ChunkCoord::new(cx, cy),
+            });
+        }
+    }
+    let (min, max, step) = (-192_i64, 255_i64, 12_i64);
+    let lines: Vec<i64> = (0..)
+        .map(|i| min + i * step)
+        .take_while(|v| *v <= max)
+        .collect();
+    for &at in &lines {
+        for (from, to) in [
+            (TilePos::new(min, at), TilePos::new(max, at)),
+            (TilePos::new(at, min), TilePos::new(at, max)),
+        ] {
+            // 水辺で途切れるので、街区 1 つぶんずつ引く。
+            let n = (to.x - from.x).max(to.y - from.y) / step;
+            for k in 0..n {
+                let d = (to.x - from.x).signum() * step;
+                let e = (to.y - from.y).signum() * step;
+                w.apply(&Command::BuildRoad {
+                    from: TilePos::new(from.x + d * k, from.y + e * k),
+                    to: TilePos::new(from.x + d * (k + 1), from.y + e * (k + 1)),
+                    kind: RoadKind::Small,
+                });
+            }
+        }
+    }
+    for (by, y) in lines.iter().enumerate() {
+        for (bx, x) in lines.iter().enumerate() {
+            let zone = ZoneKind::ALL[(bx + by) % 4];
+            w.apply(&Command::PaintZone {
+                area: TileRect::from_corners(
+                    TilePos::new(x + 1, y + 1),
+                    TilePos::new(x + step - 1, y + step - 1),
+                ),
+                zone: Some(zone),
+            });
+        }
+    }
+    w
 }
 
 /// 格子状の道路網。`blocks` × `blocks` の街区で、1 街区の辺は `block_tiles` マスである。

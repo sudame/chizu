@@ -1,5 +1,6 @@
 //! chizu のシミュレーションの中核。
 
+pub mod building;
 pub mod chunk;
 pub mod citizens;
 pub mod clock;
@@ -17,6 +18,7 @@ pub mod terrain;
 pub mod tile;
 pub mod units;
 pub mod world;
+pub mod zone;
 
 pub use chunk::{Chunk, Layer, LayerTiles, TileUse};
 pub use citizens::{
@@ -30,7 +32,7 @@ pub use network::{
     Dir, Lane, LaneId, LaneMode, Line, LinkId, Network, Node, NodeControl, Segment, SegmentId,
     SegmentKind,
 };
-pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, replay};
+pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, SeqGap, replay};
 pub use rng::{Pcg32, RngPurpose, mix_words, rng};
 pub use schedule::{BUCKET_COUNT, DepartureQueue, bucket_at, bucket_of};
 pub use state_hash::{StateHash, StateHasher, state_hash_of};
