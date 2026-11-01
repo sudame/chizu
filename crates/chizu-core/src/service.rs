@@ -409,6 +409,12 @@ impl Headroom {
         }
     }
 
+    /// 出入口が `link` の網に、需要 1 の建物を建てる余地が `[電気, 水道]` のそれぞれにないか。区間が消えていれば `None`。
+    pub(crate) fn lacks(&mut self, network: &Network, link: LinkId) -> Option<[bool; 2]> {
+        let c = self.comps.of_link(network, link)?;
+        Some(self.left[c].map(|r| r < 1))
+    }
+
     /// 出入口が `link` の、需要 `demand` の建物を建てる余地が電気にも水道にもあれば、その分を差し引いて真を返す。
     pub(crate) fn take(&mut self, network: &Network, link: LinkId, demand: u64) -> bool {
         let Some(c) = self.comps.of_link(network, link) else {

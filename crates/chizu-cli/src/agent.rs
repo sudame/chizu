@@ -386,14 +386,16 @@ fn observe(world: &World) -> Value {
     let count = |f: &dyn Fn(&Building) -> bool| buildings.iter().filter(|(_, b)| f(b)).count();
     let balance = supply_balance(world.network(), world.facilities(), buildings);
     let utility = |slot: usize| {
-        let (mut capacity, mut need, mut short) = (0, 0, 0);
+        let (mut capacity, mut need, mut short, mut bare) = (0, 0, 0, 0);
         for c in &balance.components {
             capacity += c[slot].capacity;
             need += c[slot].demand;
             short += u64::from(c[slot].demand > 0 && !c[slot].enough());
+            bare += u64::from(c[slot].demand > 0 && c[slot].capacity == 0);
         }
-        json!({"capacity": capacity, "demand": need, "shortNetworks": short})
+        json!({"capacity": capacity, "demand": need, "shortNetworks": short, "networksWithoutFacility": bare})
     };
+    let growth = world.growth_blocks();
     let facilities = by_service(|k| world.facilities().iter().filter(|f| f.kind == k).count());
     let finances = world.finances();
     let Finances {
@@ -466,6 +468,17 @@ fn observe(world: &World) -> Value {
         },
         "facilities": facilities,
         "utilities": {"power": utility(0), "water": utility(1)},
+        // 需要があるのに建たないとき、新築の候補の間口のうち、電気か水道の余裕がなくて建たないものの数。
+        // 余裕がないのは、施設につながっていない道路網（道路が 1 マス離れているなど）に面した間口である。
+        "growth": by_zone(|z| {
+            let g = growth[z.index()];
+            json!({
+                "fronts": g.fronts,
+                "blocked": g.blocked,
+                "noPower": g.no_power,
+                "noWater": g.no_water,
+            })
+        }),
         "land": {
             "chunkSide": CHUNK_SIDE,
             "ownedChunks": owned,

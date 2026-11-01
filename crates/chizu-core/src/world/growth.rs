@@ -115,7 +115,41 @@ fn lot_tiles(
     })
 }
 
+/// 区画の種類ごとの、建てる候補の間口の数と、電気か水道の余裕がなくて建たない数。
+///
+/// 需要があるのに建物が増えないとき、どの区画がなぜ建たないかを知る手がかりにする。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GrowthBlock {
+    /// 建てる候補の間口の数。
+    pub fronts: u64,
+    /// 面した道路網に、電気か水道の余裕がなくて建たない間口の数。
+    pub blocked: u64,
+    /// そのうち、電気の余裕がない間口の数。
+    pub no_power: u64,
+    /// そのうち、水道の余裕がない間口の数。
+    pub no_water: u64,
+}
+
 impl World {
+    /// 区画の種類（[`ZoneKind::index`] の順）ごとに、新築が電気と水道の余裕で止まっている間口を数える。状態は変えない。
+    pub fn growth_blocks(&self) -> [GrowthBlock; 4] {
+        let mut headroom = Headroom::of(&self.network, &self.facilities, &self.buildings);
+        let mut out = [GrowthBlock::default(); 4];
+        for (front, (zone, d)) in &self.lots.fronts {
+            let slot = &mut out[zone.index()];
+            slot.fronts += 1;
+            let lacks = self
+                .frontage(*front, FRONT_DIRS[usize::from(*d)])
+                .and_then(|(link, _)| headroom.lacks(&self.network, link));
+            if let Some([power, water]) = lacks.filter(|l| l.iter().any(|x| *x)) {
+                slot.blocked += 1;
+                slot.no_power += u64::from(power);
+                slot.no_water += u64::from(water);
+            }
+        }
+        out
+    }
+
     /// マスの区画と使い道。メモリにないチャンクのマスは `None` である。
     pub(super) fn tile_state(&self, t: TilePos) -> Option<(Option<ZoneKind>, TileUse)> {
         let tiles = self.chunks.get(&t.chunk()?)?.layer(Layer::Ground)?;
@@ -1258,6 +1292,55 @@ mod tests {
         assert!(cut_demand <= UNSUPPLIED_ALLOWANCE, "{cut_demand}");
         assert!(cut_off.iter().all(|b| b.supply == Supply::default()));
         assert!(served > cut_off.len(), "{served} 棟");
+    }
+
+    /// 道路を 1 マス離して引いた先は施設のない別の網になり、[`UNSUPPLIED_ALLOWANCE`] までしか建たない。
+    /// 建たない間口は [`World::growth_blocks`] に数えられ、道路をつなげば建ちはじめる。
+    #[test]
+    fn a_road_one_tile_apart_is_a_separate_network_where_growth_stalls() {
+        let mut w = served_street();
+        // 通りは外とつなぐ道路の端までで、その次のマスから引いた道路との間に 1 マスの隙間がある。
+        let end = crate::world::highway_line(w.seed()).start.x.max(40);
+        let (x0, x1) = (end + 1, end + 40);
+        street(&mut w, x0, x1);
+        paint(&mut w, (x0, 4), (x1, 9), ZoneKind::Residential);
+        run(&mut w, 40 * GROWTH_INTERVAL);
+        let apart = |w: &World| -> Vec<Building> {
+            w.buildings()
+                .iter()
+                .map(|(_, b)| *b)
+                .filter(|b| b.front.x >= x0)
+                .collect()
+        };
+        let before = apart(&w);
+        let demand: u64 = before.iter().map(building_demand).sum();
+        assert!(demand <= UNSUPPLIED_ALLOWANCE, "{demand}");
+        let [res, ..] = w.growth_blocks();
+        assert!(res.blocked > 0, "{res:?}");
+        assert!(
+            res.no_power == res.blocked && res.no_water == res.blocked,
+            "{res:?}"
+        );
+        // 施設のある網の区画は建ち尽くしていて、残る間口は施設のない網のものだけである。
+        assert_eq!(res.blocked, res.fronts, "{res:?}");
+        // 道路を引き直して隙間をなくせば、同じ網になって建ちはじめる。
+        let clear = Command::Bulldoze {
+            area: rect((x0, 10), (x1, 10)),
+        };
+        assert_eq!(w.apply(&clear), ApplyOutcome::Applied);
+        street(&mut w, end, x1);
+        paint(&mut w, (x0, 4), (x1, 9), ZoneKind::Residential);
+        // 手前の施設の余裕は建ち尽くしているので、足りない分の施設も置く。
+        for (kind, dx) in [
+            (ServiceKind::PowerPlant, 5),
+            (ServiceKind::WaterPump, 12),
+            (ServiceKind::WaterPump, 15),
+        ] {
+            assert_eq!(place(&mut w, kind, (end + dx, 9), 2), ApplyOutcome::Applied);
+        }
+        run(&mut w, 40 * GROWTH_INTERVAL);
+        assert!(apart(&w).len() > before.len() + 2, "つないでも建たない");
+        assert_eq!(w.growth_blocks()[0].blocked, 0);
     }
 
     /// 施設のない網に建てられる需要の合計は、ちょうど [`UNSUPPLIED_ALLOWANCE`] までである。
