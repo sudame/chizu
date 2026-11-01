@@ -3,6 +3,8 @@
 //! 建物は区画の上に、需要に応じて自然に建ち、時間がたつと段階が上がる。建つ・育つ処理は
 //! `world::growth` にある。ここには表と、大きさと段階から決まる値だけを置く。
 
+use std::collections::BTreeSet;
+
 use crate::command::ZoneKind;
 use crate::id::{BuildingId, Slots};
 use crate::network::LinkId;
@@ -93,9 +95,30 @@ impl StateHash for Building {
 pub struct Buildings {
     slots: Slots,
     rows: Vec<Option<Building>>,
+    /// `front` の (y, x) で引く索引。行から作り直せるので状態ハッシュには入れない。
+    by_front: BTreeSet<(i64, i64, BuildingId)>,
 }
 
 impl Buildings {
+    /// `front` が `area` の中にある建物を、`front` の (y, x) の順に返す。
+    pub fn fronts_in(&self, area: TileRect) -> impl Iterator<Item = BuildingId> + '_ {
+        let (lo, hi) = (
+            BuildingId {
+                index: 0,
+                generation: 0,
+            },
+            BuildingId {
+                index: u32::MAX,
+                generation: u16::MAX,
+            },
+        );
+        (area.min.y..=area.max.y).flat_map(move |y| {
+            self.by_front
+                .range((y, area.min.x, lo)..=(y, area.max.x, hi))
+                .map(|k| k.2)
+        })
+    }
+
     pub fn get(&self, id: BuildingId) -> Option<&Building> {
         if !self.slots.contains(id.index, id.generation) {
             return None;
@@ -128,6 +151,8 @@ impl Buildings {
 
     pub(crate) fn insert(&mut self, b: Building) -> BuildingId {
         let ((index, generation), fresh) = self.slots.alloc();
+        self.by_front
+            .insert((b.front.y, b.front.x, BuildingId { index, generation }));
         if fresh {
             self.rows.push(Some(b));
         } else {
@@ -140,7 +165,9 @@ impl Buildings {
         if !self.slots.release(id.index, id.generation) {
             return None;
         }
-        self.rows[id.slot()].take()
+        let b = self.rows[id.slot()].take()?;
+        self.by_front.remove(&(b.front.y, b.front.x, id));
+        Some(b)
     }
 
     /// 区画の種類ごとの、世帯の数と職場の数の合計。

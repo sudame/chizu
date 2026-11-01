@@ -701,8 +701,8 @@ fn compare_golden(name: &str, got: &str) {
 
 /// 車の記録を再生し、状態ハッシュの列と、作った移動の数、終わりの世界を返す。建物が建ったあと、
 /// 決まった tick ごとに種から選んだ建物どうしを車で行き来させる。途中で道路を消し、建物も消える。
-/// 毎 tick、停めてある台数と押さえた台数の和が駐車場の台数を超えず、駐車場が建っている建物にだけ
-/// あることを確かめる。
+/// 毎 tick、停めてある台数と押さえた台数の和が駐車場の台数を超えず、押さえた台数がその駐車場へ
+/// 向かう主体の数と同じで、駐車場が建っている建物にだけあることを確かめる。
 fn driving_checkpoints(seed: u64, ticks: u64) -> (String, u32, World) {
     let log = growth();
     let mut world = World::new(seed);
@@ -721,13 +721,27 @@ fn driving_checkpoints(seed: u64, ticks: u64) -> (String, u32, World) {
             }
         }
         replay(&mut world, &log, 1);
+        let mut heading = std::collections::BTreeMap::<BuildingId, u32>::new();
+        for (_, t) in world.trips().iter() {
+            if let Some(b) = t
+                .parking_lot()
+                .filter(|b| world.buildings().get(*b).is_some())
+            {
+                *heading.entry(b).or_default() += 1;
+            }
+        }
         for (id, lot) in world.trips().lots() {
             let b = world
                 .buildings()
                 .get(id)
                 .expect("消えた建物に駐車場が残った");
             assert!(u64::from(lot.parked + lot.reserved) <= b.parking_spaces());
+            assert_eq!(lot.reserved, heading.remove(&id).unwrap_or(0), "{id:?}");
         }
+        assert!(
+            heading.is_empty(),
+            "押さえた空きが数えられていない {heading:?}"
+        );
         let h = world.state_hash();
         digest.write(&h);
         let t = world.tick().0;

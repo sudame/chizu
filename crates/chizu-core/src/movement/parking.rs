@@ -12,13 +12,13 @@
 
 use std::collections::BTreeMap;
 
-use super::{Ends, SidewalkPos, Trip, Trips, make_trip, plan, pos};
+use super::{Ends, SidewalkPos, Trip, Trips, car, make_trip, plan, pos};
 use crate::building::{Building, Buildings};
 use crate::id::{BuildingId, TripId};
 use crate::network::{LaneMode, Network};
 use crate::routing::AstarRouter;
 use crate::state_hash::{StateHash, StateHasher};
-use crate::tile::TilePos;
+use crate::tile::{TilePos, TileRect};
 use crate::units::{LaneOffset, Tick};
 
 /// 満車のときに、ほかの駐車場を探す範囲（マス）。
@@ -147,19 +147,34 @@ impl Parking {
         u64::from(l.parked) + u64::from(l.reserved) < b.parking_spaces()
     }
 
-    /// 行き先 `to` の近くで空きのある駐車場。行き先そのものを先に見る。同じ距離なら番号の小さい建物にする。
-    fn find(&self, buildings: &Buildings, to: BuildingId, dest: &Building) -> Option<BuildingId> {
-        if self.is_free(to, dest) {
-            return Some(to);
-        }
-        let dist = |a: TilePos, b: TilePos| a.x.abs_diff(b.x).max(a.y.abs_diff(b.y));
-        buildings
-            .iter()
+    /// 行き先 `to` の近くで空きのある駐車場を、試す順に返す。行き先そのものを先に、そのあとは
+    /// [`PARK_RADIUS`] マスの中の建物を近い順に並べる。同じ距離なら番号の小さい建物を先にする。
+    fn candidates(
+        &self,
+        buildings: &Buildings,
+        to: BuildingId,
+        dest: &Building,
+    ) -> Vec<BuildingId> {
+        let r = i64::try_from(PARK_RADIUS).expect("範囲が i64 に収まらない");
+        let at = |dx: i64, dy: i64| {
+            let c = |v: i64, d: i64| v.checked_add(d).expect("マスの座標があふれた");
+            TilePos::new(c(dest.front.x, dx), c(dest.front.y, dy))
+        };
+        let area = TileRect::from_corners(at(-r, -r), at(r, r));
+        let dist = |a: TilePos| a.x.abs_diff(dest.front.x).max(a.y.abs_diff(dest.front.y));
+        let mut near: Vec<(u64, BuildingId)> = buildings
+            .fronts_in(area)
+            .filter(|id| *id != to)
+            .filter_map(|id| Some((id, buildings.get(id)?)))
             .filter(|(id, b)| self.is_free(*id, b))
-            .map(|(id, b)| (dist(b.front, dest.front), id))
-            .filter(|(d, _)| *d <= PARK_RADIUS)
-            .min()
-            .map(|(_, id)| id)
+            .map(|(id, b)| (dist(b.front), id))
+            .collect();
+        near.sort_unstable();
+        let first = self.is_free(to, dest).then_some(to);
+        first
+            .into_iter()
+            .chain(near.into_iter().map(|(_, id)| id))
+            .collect()
     }
 }
 
@@ -192,6 +207,13 @@ fn reachable(
 ) -> bool {
     let ends = from.resolve_on(net, mode).zip(to.resolve_on(net, mode));
     ends.is_some_and(|e| plan(router, mode, &[e])[0].is_some())
+}
+
+impl Trip {
+    /// 空きを押さえている駐車場。車を停めるまでのあいだだけ持つ。
+    pub fn parking_lot(&self) -> Option<BuildingId> {
+        self.then.lot()
+    }
 }
 
 impl Trips {
@@ -237,14 +259,17 @@ impl Trips {
         (origin, to, dest): (SidewalkPos, BuildingId, SidewalkPos),
         now: Tick,
     ) -> Option<TripId> {
-        let lot = self.parking.find(buildings, to, buildings.get(to)?)?;
-        let park_at = building_spot(net, buildings.get(lot)?)?;
         router.sync(net);
-        if !reachable(net, router, LaneMode::Car, origin, park_at)
-            || !reachable(net, router, LaneMode::Sidewalk, park_at, dest)
-        {
-            return None;
-        }
+        // 近い順に試し、車でも歩いても行ける最初の駐車場にする。
+        let (lot, park_at) = self
+            .parking
+            .candidates(buildings, to, buildings.get(to)?)
+            .into_iter()
+            .filter_map(|lot| Some((lot, building_spot(net, buildings.get(lot)?)?)))
+            .find(|(_, at)| {
+                reachable(net, router, LaneMode::Car, origin, *at)
+                    && reachable(net, router, LaneMode::Sidewalk, *at, dest)
+            })?;
         let id = self.spawn_many(net, router, &[(origin, origin)], now)[0]?;
         self.rows[id.slot()]
             .as_mut()
@@ -299,13 +324,17 @@ impl Trips {
                 }
             }
         }
-        for (mode, legs) in [LaneMode::Car, LaneMode::Sidewalk].into_iter().zip(legs) {
+        // 歩く区切りを先に作り、そのあと車を車線に置く。降りた車は、もう車線の上にいない。
+        let [cars, walks] = legs;
+        for (mode, legs) in [(LaneMode::Sidewalk, walks), (LaneMode::Car, cars)] {
             let resolved: Vec<Option<Ends>> = legs
                 .iter()
                 .map(|(_, a, b, _)| a.resolve_on(net, mode).zip(b.resolve_on(net, mode)))
                 .collect();
             let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
             let mut routes = plan(router, mode, &ends).into_iter();
+            // 置き直す行はまだ歩いているので、車線の上の車には入らない。
+            let mut ix = (mode == LaneMode::Car).then(|| car::LaneIndex::of(&self.rows, None));
             for ((i, _, to, then), e) in legs.into_iter().zip(resolved) {
                 let route = e.and_then(|_| routes.next().expect("探した経路の数が合わない"));
                 let (Some(e), Some(route)) = (e, route) else {
@@ -316,6 +345,10 @@ impl Trips {
                 let mut t: Trip = make_trip(net, route, e, to, departed);
                 t.then = then;
                 self.rows[i] = Some(t);
+                // 出発と同じく、空いた車線に置き、前の車と重なるなら下げ、空きがなければ待たせる。
+                if let Some(ix) = ix.as_mut() {
+                    car::place(&mut self.rows, net, ix, i);
+                }
             }
         }
         ended

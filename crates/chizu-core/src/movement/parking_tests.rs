@@ -18,15 +18,22 @@ struct Street {
 impl Street {
     /// 建物を `xs` のマスに建てる。どれも段階 1 で、駐車場は 1 台ぶんである。
     fn new(xs: &[i64]) -> (Street, Vec<BuildingId>) {
+        Street::with_roads(xs, &[(0, 60)])
+    }
+
+    /// x が `roads` の各組の範囲の、東西の道路を引いて、建物を `xs` のマスに建てる。
+    fn with_roads(xs: &[i64], roads: &[(i64, i64)]) -> (Street, Vec<BuildingId>) {
         let mut net = Network::new();
-        let line = Line::between(TilePos::new(0, 0), TilePos::new(60, 0)).unwrap();
-        net.build_road(&line, RoadKind::Small).unwrap();
-        let segment = net.segments().next().unwrap().0;
+        for (a, b) in roads {
+            let line = Line::between(TilePos::new(*a, 0), TilePos::new(*b, 0)).unwrap();
+            net.build_road(&line, RoadKind::Small).unwrap();
+        }
         let mut buildings = Buildings::default();
         let ids = xs
             .iter()
             .map(|x| {
                 let front = TilePos::new(*x, -1);
+                let segment = net.segments_through(TilePos::new(*x, 0))[0];
                 buildings.insert(Building {
                     zone: ZoneKind::Commercial,
                     area: TileRect::from_corners(front, front),
@@ -65,9 +72,21 @@ impl Street {
         ended
     }
 
-    /// 駐車場の整合。停めてある台数と押さえた台数の和は台数を超えず、押さえた台数は向かっている
-    /// 主体の数と同じで、駐車場は建っている建物にだけある。
+    /// 駐車場の整合と車間。停めてある台数と押さえた台数の和は台数を超えず、押さえた台数は向かっている
+    /// 主体の数と同じで、駐車場は建っている建物にだけある。同じ車線の車は車間を保つ。
     fn check(&self) {
+        let mut by_lane: Vec<(LaneId, LaneOffset)> = self
+            .trips
+            .iter()
+            .filter(|(_, t)| car::on_road(t))
+            .map(|(_, t)| (t.lane(), t.offset()))
+            .collect();
+        by_lane.sort();
+        for w in by_lane.windows(2) {
+            if w[0].0 == w[1].0 {
+                assert!(w[1].1.0 - w[0].1.0 >= CAR_LENGTH + MIN_GAP, "{w:?}");
+            }
+        }
         let mut holding = std::collections::BTreeMap::<BuildingId, u32>::new();
         for (_, t) in self.trips.iter() {
             if let Some(lot) = t.then.lot().filter(|b| self.buildings.get(*b).is_some()) {
@@ -165,6 +184,65 @@ fn leaving_cars_do_not_free_spaces_held_for_arriving_cars() {
     assert_eq!(lot(&s, near), (0, 1));
     s.run(coming);
     assert_eq!(lot(&s, shop), (1, 0));
+}
+
+#[test]
+fn two_cars_leaving_one_building_in_the_same_tick_do_not_overlap() {
+    let (mut s, ids) = Street::new(&[50, 5, 8]);
+    let (home, shop) = (ids[0], ids[1]);
+    let a = s.drive(home, shop).unwrap();
+    let b = s.drive(home, shop).unwrap();
+    // 1 tick 目で 2 台とも車に乗り、車間の検査は `step` のたびに走る。
+    s.step();
+    let on_road = |id| s.trips.get(id).is_some_and(|t| t.mode() == LaneMode::Car);
+    assert!(on_road(a) && on_road(b));
+    let mut ended = Vec::new();
+    for _ in 0..300 {
+        ended.extend(s.step());
+    }
+    ended.sort();
+    assert_eq!(ended, [a, b]);
+}
+
+#[test]
+fn an_unusable_nearest_lot_falls_back_to_the_next_one() {
+    // 西の道路は東の道路とつながっていない。
+    let (mut s, ids) = Street::with_roads(&[55, 40, 27, 54], &[(0, 28), (32, 60)]);
+    let (home, shop, cut_off, usable) = (ids[0], ids[1], ids[2], ids[3]);
+    s.drive(home, shop).unwrap();
+    // 店は満車で、いちばん近い 13 マス先の建物には行けないので、14 マス先の建物にする。
+    s.drive(home, shop).unwrap();
+    assert_eq!((lot(&s, cut_off), lot(&s, usable)), ((0, 0), (0, 1)));
+}
+
+#[test]
+fn a_trip_lost_on_reroute_returns_its_space() {
+    let (mut s, ids) = Street::new(&[50, 5]);
+    let (home, shop) = (ids[0], ids[1]);
+    let id = s.drive(home, shop).unwrap();
+    for _ in 0..3 {
+        s.step();
+    }
+    let all = TileRect::from_corners(TilePos::new(0, 0), TilePos::new(60, 0));
+    s.net.bulldoze(all).unwrap();
+    s.router.sync(&s.net);
+    assert_eq!(s.trips.reroute(&s.net, &mut s.router), [id]);
+    assert_eq!(lot(&s, shop), (0, 0));
+    s.check();
+}
+
+#[test]
+fn a_trip_without_a_next_leg_returns_its_space() {
+    let (mut s, ids) = Street::with_roads(&[50, 5], &[(0, 30), (30, 60)]);
+    let (home, shop) = (ids[0], ids[1]);
+    let id = s.drive(home, shop).unwrap();
+    // 歩いて駐車場へ向かうあいだに、店の前の道路を消す。家の前の歩きは続けられる。
+    let west = TileRect::from_corners(TilePos::new(5, 0), TilePos::new(5, 0));
+    s.net.bulldoze(west).unwrap();
+    s.router.sync(&s.net);
+    assert_eq!(s.trips.reroute(&s.net, &mut s.router), []);
+    assert_eq!(s.step(), [id]);
+    assert_eq!(lot(&s, shop), (0, 0));
 }
 
 #[test]
