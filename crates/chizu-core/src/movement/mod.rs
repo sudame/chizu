@@ -28,7 +28,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
-pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM};
+pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, OWNER_DRIVE_MIN_MM};
 pub use parking::{Lot, PARK_RADIUS, building_spot};
 pub use pos::SidewalkPos;
 

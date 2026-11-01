@@ -143,7 +143,7 @@ pub(super) fn place(
         .find_map(|l| Some((l, ix.room_behind(l, t.offset)?)));
     match found {
         Some((lane, at)) => {
-            (t.lane, t.offset, t.waiting) = (lane, at, false);
+            (t.lane, t.offset, t.waiting, t.stalled) = (lane, at, false, 0);
             ix.insert(lane, at);
             true
         }
@@ -452,8 +452,11 @@ pub(super) fn step(
         .filter(|i| rows[*i].as_ref().is_some_and(|t| t.waiting))
         .collect();
     let mut ix = LaneIndex::of(rows, None);
+    let mut still_waiting = Vec::new();
     for i in waiting {
-        place(rows, net, &mut ix, i);
+        if !place(rows, net, &mut ix, i) {
+            still_waiting.push(i);
+        }
     }
     let st = LaneState::of(rows);
     // 車線ごとに、前の車から順に並べる。
@@ -580,6 +583,15 @@ pub(super) fn step(
         }
         #[cfg(test)]
         check_lane(rows, lane);
+    }
+    // 満車の車線に出られないまま待ち続けた車も、止まったままの車と同じに扱う。
+    for i in still_waiting {
+        let t = rows[i].as_mut().expect("車の主体がない");
+        t.stalled = t.stalled.saturating_add(1);
+        if t.stalled > junction::RESCUE {
+            rescues.teleported = rescues.teleported.saturating_add(1);
+            arrived.push(i);
+        }
     }
     rescue_stalled(rows, &was, &mut arrived, rescues);
     arrived
