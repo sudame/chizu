@@ -1,6 +1,9 @@
 //! テストとベンチマークに使う、種から決定論的に作る街。
 
-use chizu_core::{Money, Population, RngPurpose, Tick, rng};
+use chizu_core::routing::RouteRequest;
+use chizu_core::{
+    LaneMode, Line, LinkId, Money, Network, Population, RngPurpose, RoadKind, Tick, TilePos, rng,
+};
 
 /// 1 世帯の住民の数の上限。
 pub const MAX_HOUSEHOLD_SIZE: u32 = 4;
@@ -34,9 +37,85 @@ pub fn synthetic_population(seed: u64, count: u32) -> Population {
     p
 }
 
+/// 格子状の道路網。`blocks` × `blocks` の街区で、1 街区の辺は `block_tiles` マスである。
+///
+/// `arterial_every` 本ごとに、東西を太い道路、南北を中くらいの道路にし、ほかは細い道路にする。
+pub fn grid_network(blocks: i64, block_tiles: i64, arterial_every: i64) -> Network {
+    let mut n = Network::new();
+    let side = blocks * block_tiles;
+    for i in 0..=blocks {
+        let at = i * block_tiles;
+        let arterial = i % arterial_every == 0;
+        let roads = [
+            (TilePos::new(0, at), TilePos::new(side, at), RoadKind::Large),
+            (
+                TilePos::new(at, 0),
+                TilePos::new(at, side),
+                RoadKind::Medium,
+            ),
+        ];
+        for (from, to, kind) in roads {
+            let kind = if arterial { kind } else { RoadKind::Small };
+            let line = Line::between(from, to).expect("格子の道路が引けない");
+            n.build_road(&line, kind).expect("格子の道路が重なった");
+        }
+    }
+    n
+}
+
+/// 人口 10 万の街の規模の格子。48 × 48 の街区（1 辺 96m、街全体で約 4.6km 四方）である。
+pub fn city_grid_100k() -> Network {
+    grid_network(48, 12, 4)
+}
+
+/// `count` 人ぶんの、家から職場への車の通勤の依頼。
+///
+/// 家はすべての車のリンクから一様に選ぶ。職場は車のリンクの約 1/10 に集まっているとし、そこから一様に選ぶ。
+/// 職場のリンクは 1 本ずつ 1/10 の確率で選ぶので、区間の向きに片寄らない。
+pub fn commute_requests(seed: u64, net: &Network, count: u32) -> Vec<RouteRequest> {
+    let links: Vec<LinkId> = net.links().filter(|l| l.mode == LaneMode::Car).collect();
+    let len = u32::try_from(links.len()).expect("リンクが多すぎる");
+    let mut offices: Vec<LinkId> = (0_u64..)
+        .zip(&links)
+        .filter(|(i, _)| rng(seed, RngPurpose::JobAssignment, *i, Tick(1)).chance(1, 10))
+        .map(|(_, l)| *l)
+        .collect();
+    if offices.is_empty() {
+        offices.extend(links.first());
+    }
+    let office_len = u32::try_from(offices.len()).expect("リンクが多すぎる");
+    (0..count)
+        .map(|i| {
+            let mut r = rng(seed, RngPurpose::JobAssignment, u64::from(i), Tick::ZERO);
+            RouteRequest {
+                from: links[r.below(len) as usize],
+                to: offices[r.below(office_len) as usize],
+                mode: LaneMode::Car,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chizu_core::Dir;
+    use chizu_core::routing::{AstarRouter, Router};
+
+    #[test]
+    fn grid_is_connected_for_commutes() {
+        let n = grid_network(6, 4, 3);
+        assert_eq!(n.nodes().count(), 49);
+        let reqs = commute_requests(1, &n, 500);
+        assert_eq!(reqs, commute_requests(1, &n, 500));
+        let routes = AstarRouter::new(&n).route_batch(&reqs);
+        assert!(routes.iter().all(Option::is_some));
+        let forward = reqs.iter().filter(|r| r.to.dir == Dir::Forward).count();
+        assert!(
+            (150..350).contains(&forward),
+            "職場の向きが片寄った {forward}"
+        );
+    }
     use chizu_core::state_hash_of;
 
     #[test]
