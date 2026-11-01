@@ -176,6 +176,8 @@ export type WorkerToMain =
   | { kind: "outcome"; id: number; seq?: number; outcome: Outcome; reason?: string }
   /** dev-spawn-walks で出せた人数。 */
   | { kind: "dev-spawned"; count: number }
+  /** Worker が受け取って使っている倍率。画面の表示はこの値を使う。 */
+  | { kind: "pace"; pace: number }
   | { kind: "error"; message: string };
 
 function isChunkData(value: unknown): value is ChunkData {
@@ -253,6 +255,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       return typeof v.state === "string" && v.commands instanceof ArrayBuffer;
     case "dev-spawned":
       return Number.isInteger(v.count);
+    case "pace":
+      return typeof v.pace === "number" && v.pace > 0 && v.pace <= 1;
     case "service-probe":
       return (
         typeof v.service === "string" &&

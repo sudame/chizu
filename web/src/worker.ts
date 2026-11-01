@@ -20,7 +20,7 @@ import type {
 } from "./protocol/messages.ts";
 import { layout } from "./protocol/snapshot.ts";
 import { startSimulation } from "./save/worker-side.ts";
-import { stepBudget } from "./speed.ts";
+import { stepBudget, tickRate } from "./speed.ts";
 
 const SUM_N = 10_000_000;
 const FRAME_MS = 1000 / 60;
@@ -125,7 +125,7 @@ function run(sim: Simulation): {
   let pace = 1;
   setInterval(() => {
     const now = performance.now();
-    const rate = perSecond * sim.speed() * pace;
+    const rate = tickRate(perSecond, sim.speed(), pace);
     const step = stepBudget(budget, now - last, rate, paused, MAX_BACKLOG_SECONDS);
     budget = step.budget;
     last = now;
@@ -143,6 +143,7 @@ function run(sim: Simulation): {
     },
     setPace: (p) => {
       pace = p;
+      reply({ kind: "pace", pace });
     },
   };
 }

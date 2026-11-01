@@ -93,8 +93,8 @@ function sendCommand(command: CommandMessage): void {
   send({ kind: "command", id, command });
 }
 
-// 1 倍より遅く進めているときの倍率。中核の速度は 1 のままなので、画面と Worker だけが持つ
-let pace = 1;
+// 1 倍より遅く進めているときの倍率。中核の速度は 1 のままなので、Worker だけが持つ。表示は Worker が返した値を使う
+let workerPace = 1;
 
 const pad = (n: number) => String(n).padStart(2, "0");
 
@@ -110,7 +110,7 @@ function draw(ctx: CanvasRenderingContext2D, header: SnapshotHeader): void {
   ctx.font = "20px sans-serif";
   ctx.fillText(describeClock(header), 12, 30);
   ctx.fillText(`お金 ${header.money.toLocaleString("ja-JP")}`, 12, 58);
-  const speed = shownSpeed(header.speed, pace);
+  const speed = shownSpeed(header.speed, workerPace);
   ctx.fillText(header.paused ? "一時停止中" : describeSpeed(speed), 12, 86);
   // test:wasm が読む
   canvas.dataset.tick = String(header.tick);
@@ -613,8 +613,7 @@ function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?:
 for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-speed]")) {
   button.addEventListener("click", () => {
     const { core, pace: next } = splitSpeed(Number(button.dataset.speed));
-    pace = next;
-    send({ kind: "pace", pace });
+    send({ kind: "pace", pace: next });
     sendCommand({ kind: "SetSimSpeed", speed: core });
   });
 }
@@ -622,6 +621,10 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-s
 worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   const message = event.data;
   if (!isWorkerToMain(message)) {
+    return;
+  }
+  if (message.kind === "pace") {
+    workerPace = message.pace;
     return;
   }
   if (message.kind === "chunks") {

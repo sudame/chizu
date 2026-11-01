@@ -216,6 +216,14 @@ try {
     `0.5 倍にすると等速の半分ほど進む（${half} tick、等速は ${normal} tick）`,
   );
 
+  await page.locator('button[data-speed="0.25"]').click();
+  await hud.and(page.locator('[data-speed="0.25"]')).waitFor({ timeout: TIMEOUT_MS });
+  const quarter = await ticksIn(2_000);
+  check(
+    quarter >= normal * 0.15 && quarter <= normal * 0.35,
+    `0.25 倍にすると等速の 4 分の 1 ほど進む（${quarter} tick、等速は ${normal} tick）`,
+  );
+
   await page.locator(`button[data-speed="${FAST_SPEED}"]`).click();
   await hud.and(page.locator(`[data-speed="${FAST_SPEED}"]`)).waitFor({ timeout: TIMEOUT_MS });
   const fast = await ticksIn(2_000);

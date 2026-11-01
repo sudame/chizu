@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeSpeed, shownSpeed, splitSpeed, stepBudget } from "./speed.ts";
+import { describeSpeed, shownSpeed, splitSpeed, stepBudget, tickRate } from "./speed.ts";
 
 const FRAME_MS = 1000 / 60;
 const PER_SECOND = 30;
@@ -25,6 +25,15 @@ describe("splitSpeed", () => {
   it("1 未満は中核の速度を 1 にして、倍率を Worker に渡す", () => {
     expect(splitSpeed(0.5)).toEqual({ core: 1, pace: 0.5 });
     expect(splitSpeed(0.25)).toEqual({ core: 1, pace: 0.25 });
+  });
+});
+
+describe("tickRate", () => {
+  it("中核の速度と倍率の積を、1 秒の tick 数にする", () => {
+    expect(tickRate(PER_SECOND, 1, 1)).toBe(30);
+    expect(tickRate(PER_SECOND, 1, 0.5)).toBe(15);
+    expect(tickRate(PER_SECOND, 1, 0.25)).toBe(7.5);
+    expect(tickRate(PER_SECOND, 48, 1)).toBe(1440);
   });
 });
 

@@ -24,6 +24,11 @@ export function describeSpeed(speed: number): string {
   return `速度 ${speed} 倍`;
 }
 
+/** 1 秒に進める tick 数。中核の速度と、1 倍より遅くする倍率の積。 */
+export function tickRate(perSecond: number, coreSpeed: number, pace: number): number {
+  return perSecond * coreSpeed * pace;
+}
+
 /**
  * 1 フレームぶんの tick 数を決める。budget は端数の持ち越しで、1 に満たないフレームは 0 tick になる。
  * 60 フレーム毎秒で、1 倍は 2 フレームに 1 tick、0.5 倍は 4 フレームに 1 tick、0.25 倍は 8 フレームに 1 tick 進む。
