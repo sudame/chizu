@@ -439,7 +439,7 @@ fn growth_builds_every_zone_and_removes_with_the_road() {
         .find(|s| s.name == "growth")
         .unwrap();
     let mut world = World::new(s.seed);
-    replay(&mut world, &s.log, 1_800);
+    replay(&mut world, &s.log, 1_799);
     let count =
         |w: &World, zone: ZoneKind| w.buildings().iter().filter(|(_, b)| b.zone == zone).count();
     for zone in ZoneKind::ALL {
@@ -547,11 +547,11 @@ fn replaying_twice_gives_the_same_hash() {
     }
 }
 
-/// 記録の各件を `f` で書き換えた記録。`None` を返した件は消す。
+/// 記録の各件を `f` で書き換えた記録。`None` を返した件は消し、番号は 0 から振り直す。
 fn rewrite(log: &CommandLog, f: impl Fn(RecordedCommand) -> Option<RecordedCommand>) -> CommandLog {
     let mut out = CommandLog::new();
     for e in log.entries().iter().copied().filter_map(f) {
-        out.push(e).unwrap();
+        out.record(e.tick, e.command).unwrap();
     }
     out
 }
