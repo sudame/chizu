@@ -93,6 +93,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "chizu-cli"
+version = "0.1.0"
+dependencies = [
+ "chizu-core",
+]
+
+[[package]]
 name = "chizu-core"
 version = "0.1.0"
 dependencies = [

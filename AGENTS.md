@@ -52,6 +52,9 @@ mise run dev           # WASM をビルドしてから Vite の開発サーバ�
 WASM のスレッドに要る rustflags は `.cargo/config.toml` で wasm32 のターゲットに限って効かせている。`build-std` は `build:wasm` タスクのコマンドで渡す。
 `crates/chizu-wasm` の `wasm-bindgen` の版と、`mise.toml` の `wasm-bindgen` の版はそろえる。
 
+決まった記録を再生した状態ハッシュは `crates/chizu-core/tests/golden/` に置いてある。
+シミュレーションや記録の形式を意図して変えたときは、`CHIZU_UPDATE_GOLDEN=1 cargo test -p chizu-core --test golden` で書き直し、同じ PR に含める。
+
 Rust のツールチェーンは `rust-toolchain.toml` で日付つきの nightly に固定している。
 mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファイルから版を読むので、`mise.toml` の `[tools]` には `rust` を書かない。
 
