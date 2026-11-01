@@ -1,7 +1,7 @@
 // WebGL2 でチャンクを描く。チャンクごとに 64×64 の整数テクスチャを 1 枚持ち、1 枚の四角に貼る。
 // 位置はカメラからの相対で CPU が求めて渡す。遠くの座標でも f32 の桁が足りるようにするためである。
 
-import { CHUNK_SIDE, TILE_WATER } from "../protocol/messages.ts";
+import { CHUNK_SIDE, TILE_WATER, TILE_ZONABLE, TILE_ZONE_SHIFT } from "../protocol/messages.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { chunkKey, type StoredChunk } from "./chunk-sync.ts";
 import { RoadLayer } from "./roads.ts";
@@ -22,11 +22,25 @@ const FRAGMENT = `#version 300 es
 precision mediump float;
 uniform mediump usampler2D u_tiles;
 uniform bool u_owned;
+uniform bool u_zonable;
 in vec2 v_uv;
 out vec4 color;
+// 区画の色は CS2 にならう。住宅は緑、商業は青、工業は黄、オフィスは水色
+const vec3 ZONE[4] = vec3[4](
+  vec3(0.15, 0.95, 0.15),
+  vec3(0.25, 0.45, 0.95),
+  vec3(0.95, 0.8, 0.2),
+  vec3(0.3, 0.85, 0.95)
+);
 void main() {
   uint tile = texture(u_tiles, v_uv).r;
   vec3 c = (tile & ${TILE_WATER}u) != 0u ? vec3(0.24, 0.48, 0.72) : vec3(0.56, 0.72, 0.42);
+  uint zone = (tile >> ${TILE_ZONE_SHIFT}u) & 7u;
+  if (zone >= 1u && zone <= 4u) {
+    c = mix(c, ZONE[zone - 1u], 0.55);
+  } else if (u_zonable && (tile & ${TILE_ZONABLE}u) != 0u) {
+    c = mix(c, vec3(1.0), 0.3);
+  }
   color = vec4(u_owned ? c : c * 0.45, 1.0);
 }`;
 
@@ -74,7 +88,12 @@ export class MapRenderer {
   /** 道路網と道具の仮の表示。チャンクの上に重ねて描く。 */
   readonly roads: RoadLayer;
   readonly #textures = new Map<string, Texture>();
-  readonly #u: Record<"offset" | "size" | "viewport" | "tiles" | "owned", WebGLUniformLocation>;
+  readonly #u: Record<
+    "offset" | "size" | "viewport" | "tiles" | "owned" | "zonable",
+    WebGLUniformLocation
+  >;
+  /** 区画を塗れるマスを明るく示すか。区画の道具を選んでいるあいだだけ true にする。 */
+  showZonable = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -93,6 +112,7 @@ export class MapRenderer {
       viewport: uniform(gl, program, "u_viewport"),
       tiles: uniform(gl, program, "u_tiles"),
       owned: uniform(gl, program, "u_owned"),
+      zonable: uniform(gl, program, "u_zonable"),
     };
     gl.uniform1i(this.#u.tiles, 0);
 
@@ -164,6 +184,7 @@ export class MapRenderer {
     gl.clear(gl.COLOR_BUFFER_BIT);
     gl.useProgram(this.#program);
     gl.bindVertexArray(this.#vao);
+    gl.uniform1i(this.#u.zonable, this.showZonable ? 1 : 0);
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     const size = CHUNK_SIDE * camera.zoom;
     gl.uniform1f(this.#u.size, size);

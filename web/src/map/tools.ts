@@ -1,6 +1,11 @@
 // 道具の操作をコマンドに直す部分。DOM に触らないので、Vitest で確かめられる。
 
-import { CHUNK_SIDE, type CommandMessage, type RoadKindName } from "../protocol/messages.ts";
+import {
+  CHUNK_SIDE,
+  type CommandMessage,
+  type RoadKindName,
+  type ZoneName,
+} from "../protocol/messages.ts";
 import type { Camera, Viewport } from "./camera.ts";
 import type { Tile } from "./roads.ts";
 
@@ -13,6 +18,7 @@ export type Tool =
   | { kind: "none" }
   | { kind: "road"; road: RoadKindName }
   | { kind: "bulldoze" }
+  | { kind: "zone"; zone: ZoneName }
   | { kind: "buy" };
 
 /** 画面の点（CSS ピクセル）の下にあるマス。 */
@@ -84,6 +90,28 @@ export function buildRoadCommand(kind: RoadKindName, from: Tile, to: Tile): Comm
 export function bulldozeCommand(a: Tile, b: Tile): CommandMessage {
   return {
     kind: "Bulldoze",
+    minX: Math.min(a.x, b.x),
+    minY: Math.min(a.y, b.y),
+    maxX: Math.max(a.x, b.x),
+    maxY: Math.max(a.y, b.y),
+  };
+}
+
+/** 1 回で塗れる区画の長方形の 1 辺の上限（マス）。chizu-core の MAX_ZONE_SIDE と同じ。 */
+export const MAX_ZONE_SIDE = 256;
+
+/** 始点から見たカーソルのマスを、長方形の 1 辺が max マスを超えないところで止める。 */
+export function clampArea(from: Tile, cursor: Tile, max: number): Tile {
+  const clamp = (start: number, v: number) =>
+    Math.min(Math.max(v, start - max + 1), start + max - 1);
+  return { x: clamp(from.x, cursor.x), y: clamp(from.y, cursor.y) };
+}
+
+/** 2 つの角のマスを両端に含む長方形に区画を塗る。Clear なら区画を消す。 */
+export function paintZoneCommand(zone: ZoneName, a: Tile, b: Tile): CommandMessage {
+  return {
+    kind: "PaintZone",
+    zone,
     minX: Math.min(a.x, b.x),
     minY: Math.min(a.y, b.y),
     maxX: Math.max(a.x, b.x),

@@ -1,6 +1,8 @@
 // メインスレッドと Worker のあいだでやりとりするメッセージ。
 
 export type RoadKindName = "Small" | "Medium" | "Large";
+/** 区画の種類。Clear は区画を消す。 */
+export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
 
 /** 画面から送るコマンド。chizu-wasm が Command に直し、検証する。座標はマスの座標。 */
 export type CommandMessage =
@@ -14,6 +16,14 @@ export type CommandMessage =
       toY: number;
     }
   | { kind: "Bulldoze"; minX: number; minY: number; maxX: number; maxY: number }
+  | {
+      kind: "PaintZone";
+      zone: ZoneName;
+      minX: number;
+      minY: number;
+      maxX: number;
+      maxY: number;
+    }
   | { kind: "BuyChunk"; cx: number; cy: number };
 
 /** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
@@ -27,8 +37,15 @@ export const NODE_STRIDE = 3;
 /** チャンクの 1 辺のマス数。chizu-core の CHUNK_SIDE と同じ。 */
 export const CHUNK_SIDE = 64;
 export const CHUNK_AREA = CHUNK_SIDE * CHUNK_SIDE;
-/** マスのバイトのうち、水辺を表すビット。chizu-wasm の sim::TILE_WATER と同じ。 */
+// マスのバイトの意味。chizu-wasm の sim::TILE_WATER などと同じ
+/** 水辺。 */
 export const TILE_WATER = 1;
+/** 道路が通っている。 */
+export const TILE_ROAD = 1 << 1;
+/** 区画を塗れる。 */
+export const TILE_ZONABLE = 1 << 2;
+/** 区画の種類（1 住宅、2 商業、3 工業、4 オフィス、なければ 0）を置くビットの位置。 */
+export const TILE_ZONE_SHIFT = 3;
 
 export type ChunkCoordMessage = { cx: number; cy: number };
 

@@ -32,7 +32,7 @@ const chunkSync = new ChunkSync();
 
 // 画面の手元と版の違うチャンクを送る。マスの配列は移譲するので、送ったあとの Worker の側には残らない
 function sendChunks(sim: Simulation): void {
-  const picked = chunkSync.collect((cx, cy) => sim.chunk_version(cx, cy), CHUNKS_PER_FRAME);
+  const picked = chunkSync.collect((cx, cy) => sim.chunk_tiles_version(cx, cy), CHUNKS_PER_FRAME);
   if (picked.length === 0) {
     return;
   }

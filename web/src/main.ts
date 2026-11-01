@@ -6,6 +6,9 @@ import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
+  clampArea,
+  MAX_ZONE_SIDE,
+  paintZoneCommand,
   parseRoadCostTable,
   type RoadCostTable,
   roadCost,
@@ -22,6 +25,7 @@ import {
   type Outcome,
   type RoadKindName,
   SEGMENT_STRIDE,
+  type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 
@@ -118,6 +122,9 @@ mapCanvas.addEventListener("webglcontextlost", (event) => {
 });
 mapCanvas.addEventListener("webglcontextrestored", () => {
   renderer = createRenderer();
+  if (renderer !== null) {
+    renderer.showZonable = tool.kind === "zone";
+  }
   for (const chunk of store.all()) {
     renderer?.upload(chunk);
   }
@@ -189,6 +196,14 @@ const ROAD_CODES: Record<RoadKindName, number> = { Small: 1, Medium: 2, Large: 3
 const PREVIEW_OK: Color = [0.3, 0.6, 1, 0.7];
 const PREVIEW_BAD: Color = [1, 0.3, 0.3, 0.7];
 const BULLDOZE_AREA: Color = [1, 0.3, 0.3, 0.35];
+// 区画を塗る長方形の色。renderer.ts の区画の色に合わせる
+const ZONE_AREA: Record<ZoneName, Color> = {
+  Residential: [0.15, 0.95, 0.15, 0.35],
+  Commercial: [0.25, 0.45, 0.95, 0.35],
+  Industrial: [0.95, 0.8, 0.2, 0.35],
+  Office: [0.3, 0.85, 0.95, 0.35],
+  Clear: [1, 1, 1, 0.35],
+};
 const BUY_AREA: Color = [1, 1, 1, 0.2];
 
 let tool: Tool = { kind: "none" };
@@ -227,13 +242,16 @@ function updatePreview(): void {
       mapCanvas.dataset.previewCost = String(cost);
     }
     geometry.square(from, half, PREVIEW_OK);
-  } else if (tool.kind === "bulldoze" && cursor !== null) {
+  } else if ((tool.kind === "bulldoze" || tool.kind === "zone") && cursor !== null) {
     const start = pointer?.mode === "area" ? pointer.start : cursor;
+    const end = tool.kind === "zone" ? clampArea(start, cursor, MAX_ZONE_SIDE) : cursor;
     geometry = new Geometry(start);
-    const c = bulldozeCommand(start, cursor);
-    if (c.kind === "Bulldoze") {
-      geometry.rect({ x: c.minX, y: c.minY }, { x: c.maxX, y: c.maxY }, BULLDOZE_AREA);
-    }
+    const color = tool.kind === "zone" ? ZONE_AREA[tool.zone] : BULLDOZE_AREA;
+    geometry.rect(
+      { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y) },
+      { x: Math.max(start.x, end.x), y: Math.max(start.y, end.y) },
+      color,
+    );
   } else if (tool.kind === "buy" && cursor !== null) {
     const c = buyChunkCommand(cursor);
     if (c.kind === "BuyChunk") {
@@ -261,6 +279,9 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
     b.setAttribute("aria-pressed", String(b === button));
   }
   mapCanvas.dataset.tool = button.dataset.tool;
+  if (renderer !== null) {
+    renderer.showZonable = next.kind === "zone";
+  }
   cancelTool();
 }
 
@@ -303,7 +324,8 @@ mapCanvas.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 && event.button !== 1) {
     return;
   }
-  const mode = event.button === 1 ? "pan" : tool.kind === "bulldoze" ? "area" : "click";
+  const area = tool.kind === "bulldoze" || tool.kind === "zone";
+  const mode = event.button === 1 ? "pan" : area ? "area" : "click";
   pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, mode, start: tileAt(event) };
   mapCanvas.setPointerCapture(event.pointerId);
   updatePreview();
@@ -338,7 +360,12 @@ mapCanvas.addEventListener("pointerup", (event) => {
   if (done.mode === "click") {
     clickTile(tileAt(event));
   } else if (done.mode === "area") {
-    sendCommand(bulldozeCommand(done.start, tileAt(event)));
+    const end = tileAt(event);
+    sendCommand(
+      tool.kind === "zone"
+        ? paintZoneCommand(tool.zone, done.start, clampArea(done.start, end, MAX_ZONE_SIDE))
+        : bulldozeCommand(done.start, end),
+    );
   }
   updatePreview();
 });
@@ -381,12 +408,15 @@ for (const button of toolButtons) {
   button.addEventListener("click", () => {
     const name = button.dataset.tool ?? "none";
     const road = name.startsWith("road-") ? (name.slice(5) as RoadKindName) : null;
+    const zone = name.startsWith("zone-") ? (name.slice(5) as ZoneName) : null;
     const next: Tool =
       road !== null
         ? { kind: "road", road }
-        : name === "bulldoze" || name === "buy"
-          ? { kind: name }
-          : { kind: "none" };
+        : zone !== null
+          ? { kind: "zone", zone }
+          : name === "bulldoze" || name === "buy"
+            ? { kind: name }
+            : { kind: "none" };
     selectTool(next, button);
   });
 }
@@ -395,6 +425,7 @@ const DONE: Record<CommandMessage["kind"], string> = {
   BuildRoad: "道路を引いた",
   Bulldoze: "道路を消した",
   BuyChunk: "土地を買った",
+  PaintZone: "区画を塗った",
   SetSimSpeed: "速度を変えた",
 };
 function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?: string): void {
