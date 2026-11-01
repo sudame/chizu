@@ -175,16 +175,18 @@ impl Simulation {
         self.0.set_paused(paused);
     }
 
-    /// フィードバックに添える状態。種、tick、所持金、状態ハッシュ（16 進の 16 桁）を JSON で返す。
+    /// フィードバックに添える状態。種、tick、所持金、状態ハッシュ（16 進の 16 桁）と、記録に入らない操作を
+    /// したか（`unrecordedOps`）を JSON で返す。`unrecordedOps` が true なら、記録を再生しても同じ状態にならない。
     /// 種と所持金は JS の数で誤差なく表せないことがあるので、文字列にする。
     pub fn feedback_state(&self) -> String {
         let w = self.0.world();
         format!(
-            "{{\"seed\":\"{}\",\"tick\":{},\"money\":\"{}\",\"stateHash\":\"{:016x}\"}}",
+            "{{\"seed\":\"{}\",\"tick\":{},\"money\":\"{}\",\"stateHash\":\"{:016x}\",\"unrecordedOps\":{}}}",
             w.seed(),
             w.tick().0,
             w.money().0,
-            w.state_hash()
+            w.state_hash(),
+            self.0.has_unrecorded_ops()
         )
     }
 

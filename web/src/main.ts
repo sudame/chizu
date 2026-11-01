@@ -338,6 +338,7 @@ function cancelTool(): void {
   if (pointer?.mode === "area") {
     pointer = null;
   }
+  devWalks.cancel();
   updatePreview();
 }
 
@@ -511,6 +512,7 @@ setupFeedback({
 const devWalks = setupDevWalks({
   button: element<HTMLButtonElement>(`button[data-tool="${DEV_WALK_TOOL}"]`),
   info: element<HTMLElement>("#dev-info"),
+  flag: element<HTMLElement>("#dev-flag"),
   map: mapCanvas,
   send,
 });

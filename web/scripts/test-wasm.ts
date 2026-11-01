@@ -137,9 +137,24 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   await waitMap("firstMover", spawned.firstMover ?? "", "ne");
   const moved = await map.getAttribute("data-first-mover");
   check(true, `時間を進めると移動体の位置が変わる（${spawned.firstMover} → ${moved}）`);
+  check(
+    await page.locator("#dev-flag").isVisible(),
+    "開発用の道具を使うと、再現できないことの印が出る",
+  );
+  // 48 倍で着くまで進めたあと、等速に戻しても描かれないことで、送られなくなったのではなく着いて消えたと分かる
   await setSpeed(48);
   await waitMap("drawnMovers", "0", "eq");
-  check(true, "行き先に着いた移動体は描かれなくなる");
+  await setSpeed(1);
+  const tickAtNormal = Number(await hud.getAttribute("data-tick"));
+  await page.waitForFunction(
+    (t) => Number(document.querySelector<HTMLElement>("#hud")?.dataset.tick) > t + 10,
+    tickAtNormal,
+    { timeout: TIMEOUT_MS },
+  );
+  check(
+    (await map.getAttribute("data-drawn-movers")) === "0",
+    "行き先に着いた移動体は消え、等速に戻しても描かれない",
+  );
 }
 
 const browser = await chromium.launch({ executablePath: findOnPath("chrome-headless-shell") });

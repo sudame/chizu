@@ -60,6 +60,12 @@
         background: #2d6cdf;
         color: #fff;
       }
+      #dev-flag {
+        margin: 0;
+        font-size: 12px;
+        font-weight: bold;
+        color: #a33;
+      }
       #dev-info {
         margin: 4px 0 0;
         font-size: 12px;
@@ -122,6 +128,7 @@
     <div id="overlay">
       <p id="status" data-state="loading">WASM を読み込んでいる</p>
       <canvas id="hud" width="480" height="96"></canvas>
+      <p id="dev-flag" hidden>開発用の操作あり：再現不可</p>
       <div id="city">
         <div>
           <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>

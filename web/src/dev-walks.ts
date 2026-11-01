@@ -18,15 +18,19 @@ export type DevWalks = {
   click: (at: Tile) => void;
   /** Worker が出した人数を返したときに呼ぶ。 */
   spawned: (count: number) => void;
+  /** 道具を切り替えたときや取り消したときに呼ぶ。選んだ出発のマスを忘れる。 */
+  cancel: () => void;
 };
 
 export function setupDevWalks(deps: {
   button: HTMLButtonElement;
   info: HTMLElement;
+  /** 一度でも使ったら出し続ける、再現できないことの印。 */
+  flag: HTMLElement;
   map: HTMLCanvasElement;
   send: (message: MainToWorker) => void;
 }): DevWalks {
-  const { button, info, map, send } = deps;
+  const { button, info, flag, map, send } = deps;
   // フィードバックを受けるサーバー（開発サーバーと preview）のときだけボタンを出す
   fetch("/__feedback")
     .then((response) => {
@@ -36,12 +40,6 @@ export function setupDevWalks(deps: {
 
   let start: Tile | null = null;
   const active = () => map.dataset.tool === DEV_WALK_TOOL;
-  for (const b of document.querySelectorAll<HTMLButtonElement>("button[data-tool]")) {
-    b.addEventListener("click", () => {
-      start = null;
-      info.textContent = b === button ? `出発のマスを選ぶ。${NOTICE}` : "";
-    });
-  }
   return {
     click(at) {
       if (!active()) {
@@ -55,8 +53,13 @@ export function setupDevWalks(deps: {
       send({ kind: "dev-spawn-walks", from: start, to: at, count: DEV_WALK_COUNT });
       start = null;
     },
+    cancel() {
+      start = null;
+      info.textContent = active() ? `出発のマスを選ぶ。${NOTICE}` : "";
+    },
     spawned(count) {
       info.textContent = `歩く人を ${count} 人出した。${NOTICE}`;
+      flag.hidden = false;
       // test:wasm が読む
       map.dataset.devWalks = String(Number(map.dataset.devWalks ?? 0) + count);
     },
