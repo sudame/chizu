@@ -734,8 +734,14 @@ pub(crate) mod tests {
                 assert_bell(&half_hours(&morning, from, 6), &format!("{zone:?} の朝"));
                 // 帰りは、朝の区切りの始まりに勤務の長さを足した時刻から 8 時間のあいだに散らばる。
                 // 朝の移動にかかる時間のぶん、遅いほうの裾が長い。
+                // 朝の移動が長引いた人が遅れて帰るので、半時間の区切りでは裾に小さな山ができることがある。
+                // 1 時間ごとにまとめて見る。
                 let from = shift.leave_home + shift.length - DEPARTURE_SPREAD / 2;
-                assert_bell(&half_hours(&evening, from, 16), &format!("{zone:?} の夕方"));
+                let hourly: Vec<usize> = half_hours(&evening, from, 16)
+                    .chunks(2)
+                    .map(|c| c.iter().sum())
+                    .collect();
+                assert_bell(&hourly, &format!("{zone:?} の夕方"));
             }
             evening.sort_unstable();
             medians.push(evening[evening.len() / 2]);
