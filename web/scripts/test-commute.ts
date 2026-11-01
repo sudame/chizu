@@ -2,6 +2,8 @@
 // chizu-core のゴールデンの通勤の記録（tests/golden/commute.rec）を、2 日目の朝の通勤のさなかの tick までの
 // 保存データとして IndexedDB に書き、読み込む。住民が自分で歩きと車で職場へ向かうので、
 // 歩く人と車のそれぞれの位置に移動体の画素が描かれることを見る。
+// `node scripts/test-commute.ts errand` では、買い物の記録（tests/golden/errand.rec）を 2 日目の正午まで読み込み、
+// 昼にも歩く人か車のどちらかが描かれることを見る。
 // Chrome は mise の tools で入れた chrome-headless-shell を PATH から探す。
 
 import { execFileSync } from "node:child_process";
@@ -16,8 +18,14 @@ const TIMEOUT_MS = 30_000;
 const TICKS_PER_DAY = 7_200;
 const GAME_SECONDS_PER_TICK = 12;
 const WORK_START = TICKS_PER_DAY / 3;
-// 2 日目の 8 時 12 分。出発のばらつきの 1 時間の中なので、歩く人も車もいる
-const TICK = TICKS_PER_DAY + WORK_START + 60;
+const SCENARIO = process.argv[2] ?? "commute";
+// commute は 2 日目の 8 時 12 分。出発のばらつきの 1 時間の中なので、歩く人も車もいる。
+// errand は 2 日目の正午。買い物に出た人がいる
+const NOON = TICKS_PER_DAY + TICKS_PER_DAY / 2;
+const TICK = SCENARIO === "errand" ? NOON : TICKS_PER_DAY + WORK_START + 60;
+// 描かれていなければならない移動体。errand ではどちらか一方でよい
+const NEED_BOTH = SCENARIO !== "errand";
+const WHEN = SCENARIO === "errand" ? "昼の買い物" : "朝の通勤";
 const SEED = "42";
 // web/src/map/movers.ts の色を足した明るさ（歩く人は約 678、車は約 655）より少し下
 const MOVER_BRIGHTNESS = 560;
@@ -42,7 +50,7 @@ function check(ok: boolean, label: string): void {
 }
 
 const repo = fileURLToPath(new URL("../..", import.meta.url));
-const recPath = join(repo, "crates/chizu-core/tests/golden/commute.rec");
+const recPath = join(repo, `crates/chizu-core/tests/golden/${SCENARIO}.rec`);
 const rec = readFileSync(recPath);
 // 記録の先頭は b"CHIZUREC"、版 u32、件数 u64 である（crates/chizu-core/src/record.rs）
 const formatVersion = rec.readUInt32LE(8);
@@ -120,14 +128,19 @@ try {
   );
   check(
     (await saveButton.getAttribute("data-rules-changed")) === "false",
-    `通勤の記録を朝まで読み込むと、chizu-cli と同じ状態ハッシュになる（${stateHash}）`,
+    `${WHEN}の記録を読み込むと、chizu-cli と同じ状態ハッシュになる（${stateHash}）`,
   );
 
-  // 歩く人と車がどちらも描かれるまで待ち、止めてから画素を読む
-  await waitFor(() => {
-    const d = document.querySelector<HTMLElement>("#map")?.dataset;
-    return (d?.firstWalker ?? "") !== "" && (d?.firstCar ?? "") !== "";
-  });
+  // 歩く人と車が描かれるまで待ち、止めてから画素を読む
+  await page.waitForFunction(
+    (both) => {
+      const d = document.querySelector<HTMLElement>("#map")?.dataset;
+      const [walker, car] = [(d?.firstWalker ?? "") !== "", (d?.firstCar ?? "") !== ""];
+      return both ? walker && car : walker || car;
+    },
+    NEED_BOTH,
+    { timeout: TIMEOUT_MS },
+  );
   await page.locator("#pause").click();
   await page
     .locator("#hud")
@@ -161,10 +174,13 @@ try {
     ["firstCar", "車"],
   ] as const) {
     const at = d[key] ?? "";
+    if (!NEED_BOTH && at === "") {
+      continue;
+    }
     const c = await pixel(screenOf(at));
     check(
       brightness(c) >= MOVER_BRIGHTNESS,
-      `朝の通勤で${label}の画素が描かれる（${at}、${c.join(", ")}、移動体 ${d.drawnMovers}）`,
+      `${WHEN}で${label}の画素が描かれる（${at}、${c.join(", ")}、移動体 ${d.drawnMovers}）`,
     );
   }
 } finally {

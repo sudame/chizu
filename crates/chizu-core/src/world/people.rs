@@ -125,13 +125,18 @@ impl World {
         s
     }
 
-    /// いま職場にいる住民の数。家へ向かって移動している住民は数えない。
+    /// いま職場にいる住民の数。移動している住民と、帰りに寄った店にいる住民は数えない。
     pub fn citizens_at_work(&self) -> usize {
         let p = &self.population;
         p.citizen_ids()
             .filter(|id| {
                 p.citizen(*id).is_some_and(|r| {
-                    r.workplace.is_some() && r.schedule.next == Activity::Home && r.trip.is_none()
+                    let here = match r.schedule.next {
+                        Activity::Home => self.errands.at_shop(*id).is_none(),
+                        Activity::Shop => true,
+                        Activity::Work => false,
+                    };
+                    r.workplace.is_some() && here && r.trip.is_none()
                 })
             })
             .count()
@@ -140,12 +145,14 @@ impl World {
     /// 1 tick ぶんの住民の処理。`step` から呼ぶ。
     pub(super) fn update_people(&mut self) {
         self.run_departures();
+        self.plan_daytime_errands();
         let tick = self.tick.0;
         if tick.is_multiple_of(MIGRATION_INTERVAL) {
             self.migrate();
         }
         if tick.is_multiple_of(JOB_INTERVAL) {
             self.update_jobs();
+            self.drop_stale_errands();
         }
         if tick.is_multiple_of(TICKS_PER_HOUR) {
             self.emigrate();
@@ -232,6 +239,7 @@ impl World {
                 },
                 (_, None) => ScheduleState::default(),
             };
+            let schedule = self.plan_errand(id, &row, schedule);
             self.population.set_schedule(id, schedule);
         }
     }
