@@ -6,6 +6,8 @@ import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
+  clampArea,
+  MAX_ZONE_SIDE,
   paintZoneCommand,
   parseRoadCostTable,
   type RoadCostTable,
@@ -242,11 +244,12 @@ function updatePreview(): void {
     geometry.square(from, half, PREVIEW_OK);
   } else if ((tool.kind === "bulldoze" || tool.kind === "zone") && cursor !== null) {
     const start = pointer?.mode === "area" ? pointer.start : cursor;
+    const end = tool.kind === "zone" ? clampArea(start, cursor, MAX_ZONE_SIDE) : cursor;
     geometry = new Geometry(start);
     const color = tool.kind === "zone" ? ZONE_AREA[tool.zone] : BULLDOZE_AREA;
     geometry.rect(
-      { x: Math.min(start.x, cursor.x), y: Math.min(start.y, cursor.y) },
-      { x: Math.max(start.x, cursor.x), y: Math.max(start.y, cursor.y) },
+      { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y) },
+      { x: Math.max(start.x, end.x), y: Math.max(start.y, end.y) },
       color,
     );
   } else if (tool.kind === "buy" && cursor !== null) {
@@ -360,7 +363,7 @@ mapCanvas.addEventListener("pointerup", (event) => {
     const end = tileAt(event);
     sendCommand(
       tool.kind === "zone"
-        ? paintZoneCommand(tool.zone, done.start, end)
+        ? paintZoneCommand(tool.zone, done.start, clampArea(done.start, end, MAX_ZONE_SIDE))
         : bulldozeCommand(done.start, end),
     );
   }

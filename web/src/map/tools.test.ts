@@ -4,7 +4,9 @@ import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
+  clampArea,
   MAX_ROAD_TILES,
+  MAX_ZONE_SIDE,
   paintZoneCommand,
   parseRoadCostTable,
   roadCost,
@@ -101,6 +103,18 @@ describe("コマンドの組み立て", () => {
       maxX: 3,
       maxY: 9,
     });
+  });
+
+  test("区画の長方形は 1 辺が上限を超えないところで止める", () => {
+    const from = { x: 10, y: -5 };
+    expect(clampArea(from, { x: 20, y: 0 }, MAX_ZONE_SIDE)).toEqual({ x: 20, y: 0 });
+    expect(clampArea(from, { x: 1000, y: -1000 }, MAX_ZONE_SIDE)).toEqual({ x: 265, y: -260 });
+    const end = clampArea(from, { x: -999, y: 999 }, MAX_ZONE_SIDE);
+    const c = paintZoneCommand("Residential", from, end);
+    expect(c.kind === "PaintZone" && [c.maxX - c.minX + 1, c.maxY - c.minY + 1]).toEqual([
+      MAX_ZONE_SIDE,
+      MAX_ZONE_SIDE,
+    ]);
   });
 
   test("土地はマスを含むチャンクを買う", () => {

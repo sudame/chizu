@@ -97,6 +97,16 @@ export function bulldozeCommand(a: Tile, b: Tile): CommandMessage {
   };
 }
 
+/** 1 回で塗れる区画の長方形の 1 辺の上限（マス）。chizu-core の MAX_ZONE_SIDE と同じ。 */
+export const MAX_ZONE_SIDE = 256;
+
+/** 始点から見たカーソルのマスを、長方形の 1 辺が max マスを超えないところで止める。 */
+export function clampArea(from: Tile, cursor: Tile, max: number): Tile {
+  const clamp = (start: number, v: number) =>
+    Math.min(Math.max(v, start - max + 1), start + max - 1);
+  return { x: clamp(from.x, cursor.x), y: clamp(from.y, cursor.y) };
+}
+
 /** 2 つの角のマスを両端に含む長方形に区画を塗る。Clear なら区画を消す。 */
 export function paintZoneCommand(zone: ZoneName, a: Tile, b: Tile): CommandMessage {
   return {

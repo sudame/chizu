@@ -1,12 +1,13 @@
 //! Worker が持つシミュレーションの本体。実時間は持たず、進める tick 数は呼び出し側が決める。
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use chizu_core::record::RecordError;
+use chizu_core::zone::{ZONE_DEPTH, near_road};
 use chizu_core::{
     ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
-    Layer, SegmentKind, TerrainTiles, TilePos, TileRect, TileUse, World, terrain,
+    Layer, Line, SegmentKind, TerrainTiles, TilePos, TileRect, TileUse, World, terrain,
 };
-
-use chizu_core::zone::near_road;
 
 use crate::snapshot::{Header, TripleBuffer};
 
@@ -17,6 +18,8 @@ pub struct Sim {
     snapshot: TripleBuffer,
     /// 適用したが、まだ画面に渡していない結果。
     reports: Vec<Report>,
+    /// 道路網が変わって、区画を塗れるマスが変わりうるチャンクに足していく数。画面向けの版に混ぜる。
+    near_road_changes: BTreeMap<ChunkCoord, u32>,
 }
 
 /// 記録したコマンドを適用した結果。
@@ -34,6 +37,7 @@ impl Sim {
             paused: false,
             snapshot: TripleBuffer::new(),
             reports: Vec::new(),
+            near_road_changes: BTreeMap::new(),
         }
     }
 
@@ -66,7 +70,11 @@ impl Sim {
     pub fn submit(&mut self, command: Command) -> Result<u64, RecordError> {
         command.validate().map_err(RecordError::Invalid)?;
         let seq = self.log.record(self.world.tick(), command)?;
+        let touched = self.lines_touched_by(&command);
         let outcome = self.world.apply_recorded(seq, &command);
+        if outcome == ApplyOutcome::Applied {
+            self.mark_near_road_changes(&touched);
+        }
         self.reports.push(Report { seq, outcome });
         Ok(seq)
     }
@@ -115,11 +123,59 @@ impl Sim {
         tiles
     }
 
-    /// [`Sim::chunk_tiles`] の中身が変わったかを見分ける版。チャンクの版と道路網の版から作る。
-    /// JS の数で誤差なく表せるよう、道路網の版は下位 21 ビットだけを使う。
+    /// [`Sim::chunk_tiles`] の中身が変わったかを見分ける版。チャンクの版と、そのチャンクの近くで
+    /// 道路網が変わった回数から作る。JS の数で誤差なく表せるよう、回数は下位 21 ビットだけを使う。
     pub fn chunk_tiles_version(&self, coord: ChunkCoord) -> f64 {
-        let network = self.network_version() & ((1 << 21) - 1);
-        f64::from(self.chunk_version(coord)) * f64::from(1_u32 << 21) + network as f64
+        let changes = self.near_road_changes.get(&coord).copied().unwrap_or(0) & ((1 << 21) - 1);
+        f64::from(self.chunk_version(coord)) * f64::from(1_u32 << 21) + f64::from(changes)
+    }
+
+    /// コマンドが道路網を変えるなら、変わりうる区間の直線。適用する前に呼ぶ。
+    /// ブルドーザは、長方形にかかる区間をすべて挙げる（消えない高速道路も含むが、多めに数えるだけである）。
+    fn lines_touched_by(&self, command: &Command) -> Vec<Line> {
+        match *command {
+            Command::BuildRoad { from, to, .. } => Line::between(from, to).into_iter().collect(),
+            Command::Bulldoze { area } => {
+                let network = self.world.network();
+                let (Some(c0), Some(c1)) = (area.min.chunk(), area.max.chunk()) else {
+                    return Vec::new();
+                };
+                let mut ids = BTreeSet::new();
+                for cy in c0.cy..=c1.cy {
+                    for cx in c0.cx..=c1.cx {
+                        ids.extend(network.segments_in_chunk(ChunkCoord::new(cx, cy)));
+                    }
+                }
+                ids.into_iter()
+                    .filter_map(|id| network.segment_line(id))
+                    .filter(|l| l.tiles().any(|t| rect_contains(area, t)))
+                    .collect()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// 直線の各マスから `ZONE_DEPTH` 以内にかかる、メモリにあるチャンクの画面向けの版を上げる。
+    /// メモリにない（買っていない）チャンクには塗れるマスがないので、道路網に左右されない。
+    fn mark_near_road_changes(&mut self, lines: &[Line]) {
+        let mut coords = BTreeSet::new();
+        for line in lines {
+            for t in line.tiles() {
+                for (dx, dy) in [(-1, -1), (1, -1), (-1, 1), (1, 1)] {
+                    let corner = TilePos::new(
+                        t.x.saturating_add(dx * ZONE_DEPTH),
+                        t.y.saturating_add(dy * ZONE_DEPTH),
+                    );
+                    coords.extend(corner.chunk());
+                }
+            }
+        }
+        for coord in coords {
+            if self.world.chunk(coord).is_some() {
+                let n = self.near_road_changes.entry(coord).or_insert(0);
+                *n = n.wrapping_add(1);
+            }
+        }
     }
 
     /// 一時停止していなければ `ticks` だけ進める。コマンドは受けたときに適用してあるので、tick を進めるだけである。
@@ -213,6 +269,10 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
     }
 }
 
+fn rect_contains(r: TileRect, t: TilePos) -> bool {
+    (r.min.x..=r.max.x).contains(&t.x) && (r.min.y..=r.max.y).contains(&t.y)
+}
+
 /// 画面に渡すマスのバイトのうち、水辺を表すビット。
 pub const TILE_WATER: u8 = 1;
 /// 道路が通っているマスのビット。
@@ -259,6 +319,94 @@ mod tests {
                 assert_eq!(water, expected.terrain().is_water(lx, ly), "({lx}, {ly})");
             }
         }
+    }
+
+    fn tiles_versions(sim: &Sim) -> Vec<(ChunkCoord, f64)> {
+        (-2..=2)
+            .flat_map(|cy| (-2..=2).map(move |cx| ChunkCoord::new(cx, cy)))
+            .map(|c| (c, sim.chunk_tiles_version(c)))
+            .collect()
+    }
+
+    fn changed(before: &[(ChunkCoord, f64)], after: &[(ChunkCoord, f64)]) -> Vec<ChunkCoord> {
+        before
+            .iter()
+            .zip(after)
+            .filter(|(b, a)| b.1 != a.1)
+            .map(|(b, _)| b.0)
+            .collect()
+    }
+
+    #[test]
+    fn only_chunks_near_a_changed_road_are_resent() {
+        let mut sim = Sim::new(0);
+        let before = tiles_versions(&sim);
+        sim.submit(road((10, 10), (20, 10))).unwrap();
+        let after = tiles_versions(&sim);
+        assert_eq!(changed(&before, &after), [ChunkCoord::new(0, 0)]);
+        // チャンクの境目から 6 マス以内なら、隣のチャンクも送り直す
+        sim.submit(road((60, 61), (62, 61))).unwrap();
+        let next = tiles_versions(&sim);
+        assert_eq!(
+            changed(&after, &next),
+            [
+                ChunkCoord::new(0, 0),
+                ChunkCoord::new(1, 0),
+                ChunkCoord::new(0, 1),
+                ChunkCoord::new(1, 1)
+            ]
+        );
+        // 消すときも、消した区間の近くだけを送り直す
+        sim.submit(Command::Bulldoze {
+            area: TileRect::from_corners(TilePos::new(15, 10), TilePos::new(15, 10)),
+        })
+        .unwrap();
+        assert_eq!(
+            changed(&next, &tiles_versions(&sim)),
+            [ChunkCoord::new(0, 0)]
+        );
+    }
+
+    #[test]
+    fn water_and_unowned_tiles_are_not_zonable() {
+        let zonable = |sim: &Sim, x: i64, y: i64| {
+            let t = TilePos::new(x, y);
+            let (lx, ly) = t.local();
+            sim.chunk_tiles(t.chunk().unwrap())[ly * CHUNK_SIDE + lx] & TILE_ZONABLE != 0
+        };
+        // 買った土地の右端（x = 127）に沿って道路を引くと、その右の買っていない土地は塗れない
+        let mut sim = Sim::new(0);
+        sim.submit(road((127, 20), (127, 30))).unwrap();
+        assert_eq!(sim.world().network().segments().count(), 2);
+        assert!(zonable(&sim, 126, 25));
+        assert!(!zonable(&sim, 128, 25));
+        // 水辺のあるチャンクを買い、水辺のマスの 2 マス先から道路を引いても、水辺のマスは塗れない
+        let east = ChunkCoord::new(2, 0);
+        let (mut sim, water) = (0..256)
+            .find_map(|seed| {
+                let sim = Sim::new(seed);
+                let tiles = sim.chunk_tiles(east);
+                let is_water = |x: usize, y: usize| tiles[y * CHUNK_SIDE + x] & TILE_WATER != 0;
+                let at = (0..CHUNK_SIDE)
+                    .flat_map(|y| (0..CHUNK_SIDE - 5).map(move |x| (x, y)))
+                    .find(|&(x, y)| is_water(x, y) && (1..=5).all(|d| !is_water(x + d, y)))?;
+                Some((seed, (128 + at.0 as i64, at.1 as i64)))
+            })
+            .map(|(seed, at)| {
+                let mut sim = Sim::new(seed);
+                sim.submit(Command::BuyChunk { coord: east }).unwrap();
+                sim.submit(road((at.0 + 2, at.1), (at.0 + 4, at.1)))
+                    .unwrap();
+                (sim, at)
+            })
+            .expect("水辺のあるチャンクが見つからない");
+        assert!(
+            sim.take_reports()
+                .iter()
+                .all(|r| r.outcome == ApplyOutcome::Applied)
+        );
+        assert!(!zonable(&sim, water.0, water.1));
+        assert!(zonable(&sim, water.0 + 1, water.1));
     }
 
     #[test]

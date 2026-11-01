@@ -134,7 +134,7 @@ impl Simulation {
         self.0.chunk_owned(ChunkCoord::new(cx, cy))
     }
 
-    /// `chunk_tiles` の中身が変わったかを見分ける版。チャンクの版と道路網の版から作る。
+    /// `chunk_tiles` の中身が変わったかを見分ける版。チャンクの版と、近くで道路網が変わった回数から作る。
     pub fn chunk_tiles_version(&self, cx: i32, cy: i32) -> f64 {
         self.0.chunk_tiles_version(ChunkCoord::new(cx, cy))
     }
