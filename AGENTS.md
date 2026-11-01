@@ -97,6 +97,30 @@ mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファ�
 cargo run -p chizu-cli -- feedback/<日時>-<番号>/commands.rec <seed> <tick>
 ```
 
+## 画面なしで遊ぶ
+
+`chizu-cli agent` を使うと、AI が Bash から 1 回ずつコマンドを打って、画面なしで街を作れる。
+セッションはディレクトリで持ち、中身はフィードバックと同じ `state.json` と `commands.rec` である。
+呼び出しのあいだに状態は持たず、毎回、種から作った街に記録を再生して作り直す。
+
+- 人間のフィードバックは書き換えない。続きを遊ぶときは `agent new <dir> --from <フィードバックのディレクトリ>` で種、tick、記録を写す。写すときに再生したハッシュが元と一致したかを出力に入れる。
+- act と advance が書くのは、`agent new` で作った（`state.json` に `agentSession` がある）ディレクトリだけである。
+- act と advance は、記録を再生したハッシュが `stateHash` と食い違えば、何も書かずに止まる。書き込みが途中で止まったときに気づくためである。止まったら `agent new <新しいディレクトリ> --from <dir>` で写し直せば、記録から作り直して続けられる。
+- 同じセッションに同時に打ってもよい。`session.lock` のロックで 1 つずつ動く。
+
+```sh
+cargo run -p chizu-cli -- agent new <dir> <seed>          # セッションを作る
+cargo run -p chizu-cli -- agent new <dir> --from <fb>     # フィードバックを写してセッションを作る
+cargo run -p chizu-cli -- agent act <dir> <commands.json> # いまの tick でコマンドを適用する
+cargo run -p chizu-cli -- agent advance <dir> <ticks>     # 時間を進める
+cargo run -p chizu-cli -- agent observe <dir>             # 街の様子を JSON で出す
+```
+
+コマンドの JSON の形と座標の意味は `cargo run -p chizu-cli -- agent --help` で出る。
+
+コマンドや、遊ぶ人が見て判断する状態（お金、需要、サービスなど）を足したり変えたりしたら、同じ PR で `chizu-cli agent` の act と observe を追従させる。
+コマンドと JSON を行き来する match はワイルドカードなしで書いてあるので、`Command` の種類や欄を足すと chizu-cli がコンパイルで止まる。
+
 ## 保存
 
 ブラウザの中の保存は、種、tick、コマンドの記録だけを IndexedDB（`chizu` の `saves`）に書く。
