@@ -197,22 +197,32 @@ impl World {
         if !tick.0.is_multiple_of(GROWTH_INTERVAL) {
             return;
         }
-        // 電気と水道が届き、住む世帯か働く住民で埋まった建物だけが、段階を上げる。
+        // 電気と水道が届き、住む世帯か働く住民で埋まり、その区画に需要のある建物だけが、段階を上げる。
         let occupants = self.occupants();
+        let mut stats = self.city_stats();
         let ids: Vec<BuildingId> = self.buildings.iter().map(|(id, _)| id).collect();
         for id in ids {
-            let b = self.buildings.get_mut(id).expect("建物がない");
+            let b = *self.buildings.get(id).expect("建物がない");
             let supplied = b.supply.power && b.supply.water;
             let full = occupants.get(&id).copied().unwrap_or(0) >= b.households() + b.workplaces();
-            if supplied && full && b.level < MAX_LEVEL && tick.since(b.leveled_at) >= LEVEL_UP_TICKS
+            let wanted = demand(&stats)[b.zone.index()] > 0;
+            if supplied
+                && full
+                && wanted
+                && b.level < MAX_LEVEL
+                && tick.since(b.leveled_at) >= LEVEL_UP_TICKS
             {
-                b.level += 1;
-                b.leveled_at = tick;
+                let up = Building {
+                    level: b.level + 1,
+                    leveled_at: tick,
+                    ..b
+                };
+                stats = stats.without(&b).with(&up);
+                *self.buildings.get_mut(id).expect("建物がない") = up;
                 // 需要が増えたので、次の tick の頭で供給を判定し直す。
                 self.supply_dirty = true;
             }
         }
-        let mut stats = self.city_stats();
         for zone in ZoneKind::ALL {
             for attempt in 0..SPAWN_PER_ZONE {
                 let list = &self.lots.by_zone[zone.index()];
@@ -581,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn services_supply_connected_buildings_so_they_fill_and_level_up() {
+    fn services_supply_only_connected_buildings() {
         let mut w = zoned_street();
         // 同じ種類の区画を、つながっていない別の通りにも塗る。
         let far = Command::BuildRoad {
@@ -630,7 +640,6 @@ mod tests {
             }
         }
         assert!(near > 0);
-        assert!(w.buildings().iter().any(|(_, b)| b.level >= 2));
         // 道路を施設の上に引くことはできない。
         let over = Command::BuildRoad {
             from: TilePos::new(1, 0),

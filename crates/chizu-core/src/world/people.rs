@@ -280,7 +280,7 @@ mod tests {
     /// 2 本の通り（y = 10、40）に区画を塗り、y = -40 の通りに発電所と浄水場を並べ、外の世界とつないだ街。
     /// 区画の種類は、4 つの帯を `zones` の順に繰り返して塗る。
     fn city(zones: &[ZoneKind]) -> World {
-        let mut w = World::new(3);
+        let mut w = World::new_with_money(3, crate::units::Money(100_000_000));
         for y in [-40, 10, 40] {
             road(&mut w, (-60, y), (20, y));
         }
@@ -398,6 +398,13 @@ mod tests {
             let late = w.city_stats();
             let d5 = demand(&late);
             assert!(late.citizens >= early.citizens, "{mix:?}：人口が減った");
+            // 4 種類そろった街は、働き口と住まいが互いを呼び合って、2 日目のあとも育ち続ける。
+            if mix.len() == 4 {
+                assert!(
+                    late.citizens > early.citizens * 3 / 2,
+                    "{mix:?}：{early:?} → {late:?}"
+                );
+            }
             for (i, (a, b)) in d4.iter().zip(&d5).enumerate() {
                 assert!(
                     b.abs() <= 150,

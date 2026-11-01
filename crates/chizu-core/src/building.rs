@@ -44,23 +44,23 @@ impl Building {
         w * h
     }
 
-    /// 住める世帯の数の上限。住宅でなければ 0 である。
+    /// 住める世帯の数の上限。4 マスあたり段階ぶんの世帯で、端数は切り上げる。住宅でなければ 0 である。
     pub fn households(&self) -> u64 {
         match self.zone {
-            ZoneKind::Residential => self.tile_count() * u64::from(self.level),
+            ZoneKind::Residential => (self.tile_count() * u64::from(self.level)).div_ceil(4),
             _ => 0,
         }
     }
 
     /// 職場の数の上限。住宅なら 0 である。
     pub fn workplaces(&self) -> u64 {
-        let per_tile = match self.zone {
-            ZoneKind::Residential => 0,
+        let per_four_tiles = match self.zone {
+            ZoneKind::Residential => return 0,
             ZoneKind::Commercial => 2,
             ZoneKind::Industrial => 3,
             ZoneKind::Office => 4,
         };
-        self.tile_count() * per_tile * u64::from(self.level)
+        (self.tile_count() * per_four_tiles * u64::from(self.level)).div_ceil(4)
     }
 }
 
@@ -194,6 +194,13 @@ pub struct CityStats {
 }
 
 impl CityStats {
+    /// 建物を 1 つ除いたときの値。
+    pub fn without(mut self, b: &Building) -> CityStats {
+        self.homes -= b.households();
+        self.workplaces[b.zone.index()] -= b.workplaces();
+        self
+    }
+
     /// 建物を 1 つ足したときの値。
     pub fn with(mut self, b: &Building) -> CityStats {
         self.homes += b.households();

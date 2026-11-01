@@ -4,7 +4,7 @@ use chizu_core::citizens::draw_household;
 use chizu_core::routing::RouteRequest;
 use chizu_core::{
     ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network, Population, RngPurpose, RoadKind,
-    Tick, TilePos, TileRect, World, ZoneKind, rng,
+    ServiceKind, Tick, TilePos, TileRect, World, ZoneKind, rng,
 };
 
 pub use chizu_core::citizens::MAX_HOUSEHOLD_SIZE;
@@ -32,7 +32,8 @@ pub fn synthetic_population(seed: u64, count: u32) -> Population {
 }
 
 /// 種 `seed` の街に、開始地点を中心とする 7×7 チャンクの土地を買い、12 マスごとの格子の道路を引き、
-/// 街区ごとに 4 種類の区画を順に塗った街。水辺にかかる道路と区画は飛ばす。建物はまだない。
+/// 街区ごとに 4 種類の区画を順に塗り、ところどころに発電所と浄水場を置き、外の世界とつないだ街。
+/// 水辺にかかる道路と区画は飛ばす。建物と住民はまだない。
 pub fn zoned_grid_city(seed: u64) -> World {
     let mut w = World::new_with_money(seed, Money(1_000_000_000));
     for ring in 2..=3_i32 {
@@ -86,6 +87,34 @@ pub fn zoned_grid_city(seed: u64) -> World {
                     TilePos::new(x + step - 1, y + step - 1),
                 ),
                 zone: Some(zone),
+            });
+            // ところどころの街区の北の辺に、発電所 1 つと浄水場 2 つを置く。
+            if (bx + by) % 4 == 0 && bx % 3 == 0 {
+                let place = |kind, dx| Command::PlaceBuilding {
+                    kind,
+                    at: TilePos::new(x + dx, y + 1),
+                    rotation: 0,
+                };
+                w.apply(&place(ServiceKind::PowerPlant, 4));
+                w.apply(&place(ServiceKind::WaterPump, 8));
+                w.apply(&place(ServiceKind::WaterPump, 10));
+            }
+        }
+    }
+    // 高速道路の内側のノードから、縦横いちばん近い格子の道路まで引いて、外の世界とつなぐ。
+    let inner = chizu_core::world::highway_line(seed).start;
+    let snap = |v: i64| min + (v - min).div_euclid(step) * step;
+    for to in [
+        TilePos::new(snap(inner.x), inner.y),
+        TilePos::new(snap(inner.x) + step, inner.y),
+        TilePos::new(inner.x, snap(inner.y)),
+        TilePos::new(inner.x, snap(inner.y) + step),
+    ] {
+        if to != inner {
+            w.apply(&Command::BuildRoad {
+                from: inner,
+                to,
+                kind: RoadKind::Small,
             });
         }
     }
