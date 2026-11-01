@@ -9,6 +9,8 @@
 //! - 職場：[`assign_jobs`] で割り当て、職場ができた住民に通勤の予定を立てる。
 //! - 予定：家にいる住民は朝に職場へ、職場にいる住民は夕方に家へ出発する。出発の tick は
 //!   出発の待ち行列に積み、時刻が来たら移動を始め（`world::commute`）、着いたら居場所を切り替える。
+//!   勤務の時間帯（[`Shift`]）は職場の区画で決まる。家を出る時刻は、その頂のまわりに山の形に散らす。
+//!   帰りに出る時刻は、職場に着いた時刻に勤務の長さと残業を足して決める。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -21,7 +23,7 @@ use crate::command::ZoneKind;
 use crate::happiness;
 use crate::id::{BuildingId, CitizenId, HouseholdId};
 use crate::jobs::{assign_jobs, workers_by_building};
-use crate::rng::{RngPurpose, rng};
+use crate::rng::{Pcg32, RngPurpose, rng};
 use crate::service::Components;
 use crate::units::Tick;
 use crate::world::economy::TICKS_PER_HOUR;
@@ -54,14 +56,53 @@ pub const HOMELESS_LEAVE_TICKS: u64 = TICKS_PER_DAY;
 /// 職場の割り当てを見直す間隔（tick）。等速で 10 秒に 1 回である。
 pub const JOB_INTERVAL: u64 = 300;
 
-/// 職場へ出発する時刻（1 日の中の tick）。8 時である。
-pub const WORK_START: u64 = TICKS_PER_DAY / 3;
+/// 職場の区画ごとの勤務の時間帯。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shift {
+    /// 家を出る時刻の山の頂（1 日の中の tick）。
+    pub leave_home: u64,
+    /// 職場に着いてから帰りに出るまでの、残業を除いた長さ（tick）。
+    pub length: u64,
+}
 
-/// 家へ出発する時刻（1 日の中の tick）。17 時である。
-pub const WORK_END: u64 = TICKS_PER_DAY * 17 / 24;
+impl Shift {
+    /// 職場の区画 `zone` の勤務の時間帯。工場は早く始まって早く終わり、店は遅く始まって遅く終わる。
+    /// 住宅は職場にならないが、オフィスと同じにしておく。
+    pub const fn of(zone: ZoneKind) -> Shift {
+        let (leave_home, length) = match zone {
+            ZoneKind::Industrial => (7 * TICKS_PER_HOUR, 8 * TICKS_PER_HOUR),
+            ZoneKind::Commercial => (9 * TICKS_PER_HOUR + TICKS_PER_HOUR / 2, 8 * TICKS_PER_HOUR),
+            ZoneKind::Office | ZoneKind::Residential => {
+                (8 * TICKS_PER_HOUR, 8 * TICKS_PER_HOUR + TICKS_PER_HOUR / 2)
+            }
+        };
+        Shift { leave_home, length }
+    }
+}
 
-/// 出発の時刻のばらつきの幅（tick）。1 時間である。
-pub const DEPARTURE_SPREAD: u32 = (TICKS_PER_DAY / 24) as u32;
+/// 家を出る時刻のばらつきの全幅（tick）。3 時間で、山の頂の前後 1 時間半に散らばる。
+pub const DEPARTURE_SPREAD: u64 = 3 * TICKS_PER_HOUR;
+
+/// 家を出る時刻のばらつきに足し合わせる一様乱数の数。3 つ足すと正規分布に近い釣鐘の形になる。
+/// 頂を挟む 1 時間に出る人は全体の 3 分の 2 ほどで、渋滞の種になるピークは残る。
+pub const DEPARTURE_DRAWS: u32 = 3;
+
+/// 帰りに出る時刻に足す残業の幅（tick）。1 時間である。
+pub const OVERTIME_SPREAD: u64 = TICKS_PER_HOUR;
+
+/// 残業に足し合わせる一様乱数の数。2 つで三角の形になり、30 分ほどが最も多い。
+pub const OVERTIME_DRAWS: u32 = 2;
+
+/// 一様乱数を `draws` 個足して `0..spread` に散らした値。真ん中が最も多い山の形になる。
+fn peaked(r: &mut Pcg32, spread: u64, draws: u32) -> u64 {
+    let each = u32::try_from(spread / u64::from(draws)).expect("ばらつきの幅があふれた");
+    (0..draws).map(|_| u64::from(r.below(each))).sum()
+}
+
+/// 勤務の時間帯 `shift` で、家を出る時刻（1 日の中の tick）。
+fn leave_home_at(shift: Shift, r: &mut Pcg32) -> u64 {
+    shift.leave_home - DEPARTURE_SPREAD / 2 + peaked(r, DEPARTURE_SPREAD, DEPARTURE_DRAWS)
+}
 
 /// `after` より後で、1 日の中の時刻が `at_in_day` になる最初の tick。
 fn next_time_of_day(after: Tick, at_in_day: u64) -> Tick {
@@ -204,14 +245,25 @@ impl World {
         }
     }
 
-    fn departure_jitter(&self, id: CitizenId) -> u64 {
-        let mut r = rng(
+    fn schedule_rng(&self, id: CitizenId) -> Pcg32 {
+        rng(
             self.seed,
             RngPurpose::DailySchedule,
             u64::from(id.index),
             self.tick,
-        );
-        u64::from(r.below(DEPARTURE_SPREAD))
+        )
+    }
+
+    /// 職場 `workplace` の勤務の時間帯。職場の建物が見つからなければオフィスと同じにする。
+    fn shift_at(&self, workplace: BuildingId) -> Shift {
+        let zone = self.buildings.get(workplace).map(|b| b.zone);
+        Shift::of(zone.unwrap_or(ZoneKind::Office))
+    }
+
+    /// 職場 `workplace` で働く住民 `id` が、いまより後で次に家を出る tick。
+    fn next_leave_home(&self, id: CitizenId, workplace: BuildingId) -> Tick {
+        let at = leave_home_at(self.shift_at(workplace), &mut self.schedule_rng(id));
+        next_time_of_day(self.tick, at)
     }
 
     /// 出発の時刻が来た住民の移動を始める。移動を作れなかった住民は、その場で居場所を切り替える。
@@ -225,17 +277,25 @@ impl World {
     pub(super) fn switch_places(&mut self, ids: Vec<CitizenId>) {
         for id in ids {
             let row = self.population.citizen(id).expect("出発する住民がいない");
-            let jitter = self.departure_jitter(id);
             let schedule = match (row.schedule.next, row.workplace) {
-                // 職場に着いた。夕方に家へ向かう。
-                (Activity::Work, Some(_)) => ScheduleState {
-                    next: Activity::Home,
-                    depart_at: Some(next_time_of_day(self.tick, WORK_END + jitter)),
-                },
+                // 職場に着いた。勤務の長さと残業のぶん働いてから家へ向かう。
+                (Activity::Work, Some(w)) => {
+                    let overtime =
+                        peaked(&mut self.schedule_rng(id), OVERTIME_SPREAD, OVERTIME_DRAWS);
+                    let at = self
+                        .tick
+                        .0
+                        .checked_add(self.shift_at(w).length + overtime)
+                        .expect("tick があふれた");
+                    ScheduleState {
+                        next: Activity::Home,
+                        depart_at: Some(Tick(at)),
+                    }
+                }
                 // 家に着いた。職場があれば翌朝に職場へ向かう。
-                (_, Some(_)) => ScheduleState {
+                (_, Some(w)) => ScheduleState {
                     next: Activity::Work,
-                    depart_at: Some(next_time_of_day(self.tick, WORK_START + jitter)),
+                    depart_at: Some(self.next_leave_home(id, w)),
                 },
                 (_, None) => ScheduleState::default(),
             };
@@ -378,12 +438,9 @@ impl World {
         for (id, workplace) in assign_jobs(&self.population, &self.buildings) {
             self.population.set_workplace(id, workplace);
             let schedule = match workplace {
-                Some(_) => ScheduleState {
+                Some(w) => ScheduleState {
                     next: Activity::Work,
-                    depart_at: Some(next_time_of_day(
-                        self.tick,
-                        WORK_START + self.departure_jitter(id),
-                    )),
+                    depart_at: Some(self.next_leave_home(id, w)),
                 },
                 None => ScheduleState::default(),
             };
@@ -482,10 +539,11 @@ pub(crate) mod tests {
 
     #[test]
     fn next_time_of_day_is_strictly_later() {
-        assert_eq!(next_time_of_day(Tick(0), WORK_START), Tick(WORK_START));
+        let eight = 8 * TICKS_PER_HOUR;
+        assert_eq!(next_time_of_day(Tick(0), eight), Tick(eight));
         assert_eq!(
-            next_time_of_day(Tick(WORK_START), WORK_START),
-            Tick(WORK_START + TICKS_PER_DAY)
+            next_time_of_day(Tick(eight), eight),
+            Tick(eight + TICKS_PER_DAY)
         );
         assert_eq!(
             next_time_of_day(Tick(TICKS_PER_DAY + 1), 0),
@@ -517,10 +575,10 @@ pub(crate) mod tests {
             .filter(|id| p.citizen(*id).unwrap().trip.is_some())
             .count();
         assert_eq!(p.departures().len() + moving, workers);
-        // 昼には職場にいて、夜には家にいる。出発から 4 時間待つ。移動は 1 tick に移動の 1 秒しか進まず、
+        // 正午には職場にいて、22 時には家にいる。工場の勤めの人が最も遅く家を出るのは 8 時半で、
+        // 最も遅く帰りに出るのは 19 時半ごろである。移動は 1 tick に移動の 1 秒しか進まず、
         // この街の徒歩の通勤は数百 tick かかる。
         let day_start = w.tick().0 - w.tick().0 % TICKS_PER_DAY;
-        let wait = 4 * u64::from(DEPARTURE_SPREAD);
         // 母数は判定する時点の働く住民である。朝の出発のあとに職場が決まり、次の朝を待っている住民は除く。
         let workers_now = |w: &World| {
             let p = w.population();
@@ -530,7 +588,7 @@ pub(crate) mod tests {
                 .filter(|r| r.schedule.next != Activity::Work || r.schedule.depart_at.is_none())
                 .count()
         };
-        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_START + wait {
+        while w.tick().0 < day_start + TICKS_PER_DAY + 12 * TICKS_PER_HOUR {
             w.step();
         }
         let workers = workers_now(&w);
@@ -539,7 +597,7 @@ pub(crate) mod tests {
             "朝に職場へ向かわない：{} / {workers}",
             w.citizens_at_work()
         );
-        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_END + wait {
+        while w.tick().0 < day_start + TICKS_PER_DAY + 22 * TICKS_PER_HOUR {
             w.step();
         }
         let workers = workers_now(&w);
@@ -548,6 +606,133 @@ pub(crate) mod tests {
             "夕方に家へ帰らない：{} / {workers}",
             w.citizens_at_work()
         );
+    }
+
+    /// 30 分ごとの区切りに数える。`times` は 1 日の中の tick、`from` は数え始める時刻（tick）である。
+    fn half_hours(times: &[u64], from: u64, bins: usize) -> Vec<usize> {
+        let mut out = vec![0; bins];
+        for t in times {
+            let i = t
+                .checked_sub(from)
+                .and_then(|d| usize::try_from(d / (TICKS_PER_HOUR / 2)).ok())
+                .filter(|i| *i < bins);
+            let i = i.unwrap_or_else(|| panic!("{t} が {from} からの {bins} 区切りに入らない"));
+            out[i] += 1;
+        }
+        out
+    }
+
+    /// 頂まで増え、頂から減る。頂から離れる向きに増えるのは、頂の 10 分の 1 までの揺れに限る。
+    /// 頂は外の区切りの 3 倍より多い。
+    fn assert_bell(counts: &[usize], label: &str) {
+        let top = (0..counts.len()).max_by_key(|i| counts[*i]).unwrap();
+        assert!(
+            0 < top && top + 1 < counts.len(),
+            "{label}：頂が端にある {counts:?}"
+        );
+        let wobble = counts[top] / 10;
+        for i in 0..top {
+            assert!(
+                counts[i] <= counts[i + 1] + wobble,
+                "{label}：頂の前で減る {counts:?}"
+            );
+        }
+        for i in top..counts.len() - 1 {
+            assert!(
+                counts[i] + wobble >= counts[i + 1],
+                "{label}：頂の後で増える {counts:?}"
+            );
+        }
+        let edge = counts[0].max(counts[counts.len() - 1]);
+        assert!(counts[top] > 3 * edge, "{label}：頂が平らすぎる {counts:?}");
+    }
+
+    #[test]
+    fn leaving_home_is_bell_shaped_around_the_shift() {
+        for zone in [ZoneKind::Industrial, ZoneKind::Commercial, ZoneKind::Office] {
+            let shift = Shift::of(zone);
+            let times: Vec<u64> = (0..20_000)
+                .map(|i| leave_home_at(shift, &mut rng(1, RngPurpose::DailySchedule, i, Tick(0))))
+                .collect();
+            let from = shift.leave_home - DEPARTURE_SPREAD / 2;
+            let counts = half_hours(&times, from, 6);
+            assert_bell(&counts, &format!("{zone:?}"));
+            // 頂を挟む 1 時間に、3 分の 2 ほどが出る。
+            let middle = counts[2] + counts[3];
+            assert!((12_000..14_500).contains(&middle), "{zone:?}：{counts:?}");
+        }
+    }
+
+    /// 住宅と区画 `work` の職場が通りを挟んで向き合う街で、3 日目の朝に `work` の職場へ向けて家を出る時刻と、
+    /// 夕方に職場を出る時刻（どちらも 1 日の中の tick）。
+    /// 職場に着いた住民の帰りに出る時刻が、着いた tick に勤務の長さと残業を足した範囲に入ることも確かめる。
+    fn commute_times(work: ZoneKind) -> (Vec<u64>, Vec<u64>) {
+        let mut w = city(&[ZoneKind::Residential, work]);
+        run_days(&mut w, 2);
+        let day_start = w.tick().0;
+        let works_here = |w: &World, r: &crate::citizens::CitizenRow| {
+            let b = r.workplace.and_then(|b| w.buildings().get(b));
+            b.is_some_and(|b| b.zone == work)
+        };
+        let departures = |w: &World, wanted: &[Activity]| -> Vec<u64> {
+            let p = w.population();
+            p.citizen_ids()
+                .map(|id| p.citizen(id).unwrap())
+                .filter(|r| works_here(w, r) && wanted.contains(&r.schedule.next))
+                .filter_map(|r| r.schedule.depart_at)
+                .map(|t| t.0 - day_start)
+                .collect()
+        };
+        let morning = departures(&w, &[Activity::Work]);
+        let length = Shift::of(work).length;
+        let mut next: BTreeMap<CitizenId, Activity> = BTreeMap::new();
+        while w.tick().0 < day_start + 14 * TICKS_PER_HOUR {
+            w.step();
+            let p = w.population();
+            for id in p.citizen_ids() {
+                let r = p.citizen(id).unwrap();
+                let before = next.insert(id, r.schedule.next);
+                let Some(t) = r.schedule.depart_at.filter(|_| works_here(&w, &r)) else {
+                    continue;
+                };
+                if before == Some(Activity::Work) && r.schedule.next != Activity::Work {
+                    let wait = t.0 - w.tick().0;
+                    assert!(
+                        (length..length + OVERTIME_SPREAD).contains(&wait),
+                        "{work:?}：着いてから {wait} tick で帰る"
+                    );
+                }
+            }
+        }
+        let evening = departures(&w, &[Activity::Home, Activity::Shop]);
+        (morning, evening)
+    }
+
+    /// 家を出る時刻と職場を出る時刻が、工場とオフィスで朝晩それぞれ山の形になる。
+    /// 店は働く人が少なく区切りごとの数が揺れるので、形は見ない。帰りは、工場、オフィス、店の順に遅い。
+    #[test]
+    fn commutes_peak_in_the_morning_and_the_evening() {
+        let mut medians = Vec::new();
+        for zone in [ZoneKind::Industrial, ZoneKind::Office, ZoneKind::Commercial] {
+            let shift = Shift::of(zone);
+            let (morning, mut evening) = commute_times(zone);
+            assert!(
+                morning.len() >= 50,
+                "{zone:?} で働く人が少ない：{}",
+                morning.len()
+            );
+            if zone != ZoneKind::Commercial {
+                let from = shift.leave_home - DEPARTURE_SPREAD / 2;
+                assert_bell(&half_hours(&morning, from, 6), &format!("{zone:?} の朝"));
+                // 帰りは、出発の頂に勤務の長さを足した時刻の 2 時間前から 8 時間のあいだに散らばる。
+                // 朝の移動にかかる時間のぶん、遅いほうの裾が長い。
+                let from = shift.leave_home + shift.length - 2 * TICKS_PER_HOUR;
+                assert_bell(&half_hours(&evening, from, 16), &format!("{zone:?} の夕方"));
+            }
+            evening.sort_unstable();
+            medians.push(evening[evening.len() / 2]);
+        }
+        assert!(medians.is_sorted(), "帰りの時刻の中央値：{medians:?}");
     }
 
     /// 区画の組み合わせごとに、早すぎる時点で止まらず、需要が 0 のまわりに収まっていくことを確かめる。
