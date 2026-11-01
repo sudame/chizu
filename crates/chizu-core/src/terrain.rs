@@ -13,16 +13,28 @@
 //! - 開始地点：始めたときに買ってあるチャンクには水辺を置かない。その外側の
 //!   [`START_MARGIN`] マスのあいだは、離れるほど海と川の閾値を本来の値に近づける。
 //!   閾値も座標だけで決まるので、境目のつながりは崩れない。
+//! - 高速道路：外部接続の高速道路の通り道から [`HIGHWAY_CLEARANCE`] マスのあいだには水辺を置かず、
+//!   その外側の [`HIGHWAY_MARGIN`] マスで閾値を本来の値に近づける。通り道も種だけで決まる。
+//!   橋を入れるまでは、高速道路を陸の上に通すためである。
 //!
 //! ここを変えると、同じ種から別の地形が生まれ、ゴールデンのハッシュがすべて変わる。
 
 use crate::rng::{RngPurpose, mix_words};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, local_index};
-use crate::world::START_CHUNK_RADIUS;
+use crate::world::{START_CHUNK_RADIUS, highway_line};
 
 /// 開始地点のまわりで水辺を抑える幅（マス）。
 pub const START_MARGIN: u64 = 64;
+
+/// 外部接続の高速道路の通り道から、水辺を置かない距離（マス）。
+pub const HIGHWAY_CLEARANCE: u64 = 3;
+
+/// 高速道路の通り道のまわりで、水辺を抑える幅（マス）。[`HIGHWAY_CLEARANCE`] の外側に置く。
+pub const HIGHWAY_MARGIN: u64 = 16;
+
+/// 水辺を抑える度合いの分母。閾値に `0..=SUPPRESSION_SCALE` の値を掛けて、この値で割る。
+const SUPPRESSION_SCALE: u64 = 64;
 
 /// ノイズの値の上限。ノイズは `0..=NOISE_MAX` の値をとる。
 const NOISE_MAX: u64 = 0xFFFF;
@@ -107,16 +119,41 @@ fn layered_noise(seed: u64, octaves: &[Octave], x: i64, y: i64) -> u64 {
 
 /// マスが水辺（海か川）か。種とワールド座標だけで決まる。
 pub fn is_water(seed: u64, tile: TilePos) -> bool {
-    let d = distance_from_start(tile).min(START_MARGIN);
+    let from_start = distance_from_start(tile).min(START_MARGIN) * SUPPRESSION_SCALE / START_MARGIN;
+    let from_highway = distance_from_highway(seed, tile)
+        .saturating_sub(HIGHWAY_CLEARANCE)
+        .min(HIGHWAY_MARGIN)
+        * SUPPRESSION_SCALE
+        / HIGHWAY_MARGIN;
+    let d = from_start.min(from_highway);
     if d == 0 {
         return false;
     }
     let (x, y) = (tile.x, tile.y);
-    if layered_noise(seed, &SEA_OCTAVES, x, y) < SEA_LEVEL * d / START_MARGIN {
+    if layered_noise(seed, &SEA_OCTAVES, x, y) < SEA_LEVEL * d / SUPPRESSION_SCALE {
         return true;
     }
     let mid = NOISE_MAX.div_ceil(2);
-    layered_noise(seed, &RIVER_OCTAVES, x, y).abs_diff(mid) < RIVER_HALF_WIDTH * d / START_MARGIN
+    layered_noise(seed, &RIVER_OCTAVES, x, y).abs_diff(mid)
+        < RIVER_HALF_WIDTH * d / SUPPRESSION_SCALE
+}
+
+/// 外部接続の高速道路の通り道からのチェビシェフ距離（マス）。
+fn distance_from_highway(seed: u64, tile: TilePos) -> u64 {
+    let line = highway_line(seed);
+    let (start, end) = (line.start, line.end());
+    let axis = |v: i64, a: i64, b: i64| {
+        let (lo, hi) = (a.min(b), a.max(b));
+        if v < lo {
+            lo.abs_diff(v)
+        } else if v > hi {
+            v.abs_diff(hi)
+        } else {
+            0
+        }
+    };
+    // 通り道は縦か横の直線なので、x と y の範囲の長方形からの距離になる。
+    axis(tile.x, start.x, end.x).max(axis(tile.y, start.y, end.y))
 }
 
 /// 始めたときに買ってあるチャンクからのチェビシェフ距離（マス）。中なら 0。
@@ -199,6 +236,29 @@ impl StateHash for TerrainTiles {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn highway_route_is_dry() {
+        let mut far_water = 0;
+        for seed in 0..32 {
+            let line = highway_line(seed);
+            for t in line.tiles() {
+                assert!(
+                    !is_water(seed, t),
+                    "種 {seed} の高速道路のマス {t:?} が水辺"
+                );
+            }
+            // 抑える幅の外では、水辺が残る。
+            let off = HIGHWAY_CLEARANCE + HIGHWAY_MARGIN;
+            let (sx, sy) = line.step;
+            let side = |k: u64| {
+                let t = line.tile(k);
+                TilePos::new(t.x + sy * off as i64, t.y + sx * off as i64)
+            };
+            far_water += (0..=line.len).filter(|k| is_water(seed, side(*k))).count();
+        }
+        assert!(far_water > 0);
+    }
 
     #[test]
     fn same_seed_and_coord_give_the_same_terrain() {

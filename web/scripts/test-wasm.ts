@@ -194,10 +194,10 @@ try {
     `画面の中心に買ってある陸が描かれる（${owned.join(", ")}）`,
   );
 
+  const initialSegments = Number(await map.getAttribute("data-road-segments"));
   check(
-    (await map.getAttribute("data-road-revision")) === "0" &&
-      (await map.getAttribute("data-road-segments")) === "0",
-    "起動すると、まだ道路のない道路網が届く",
+    (await map.getAttribute("data-road-revision")) === "0" && initialSegments > 0,
+    `起動すると、外部接続の高速道路のある道路網が届く（${initialSegments} 本）`,
   );
 
   // 道路を引く道具で、画面の中心の行に横の道路を引く

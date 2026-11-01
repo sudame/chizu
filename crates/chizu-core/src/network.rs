@@ -5,19 +5,19 @@
 //!
 //! 網は次の決まりを保つ。
 //! - 2 本の区間が同じマスを通るのは、そのマスが両方の端のノードのときだけである。
-//!   既存の区間の途中のマスを通る道路は引けない。
+//!   途中のマスで交わる道路を引くと、交わるマスで両方の区間を分ける。
 //! - 2 本の区間が同じ 1 歩（隣り合う 2 マスのあいだ）を通ることはない。
 //! - 斜めの区間どうしがマスの角で交わることはない。
 //! - どの区間にもつながっていないノードは残さない。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
 use crate::chunk::Layer;
 use crate::command::{InvalidCommand, NodeId, RoadKind};
 use crate::round;
 use crate::state_hash::{StateHash, StateHasher};
-use crate::tile::{TilePos, TileRect};
+use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect};
 use crate::units::{Mm, Money, WorldPos};
 
 /// 1 マスの辺の長さ（mm）。
@@ -183,6 +183,8 @@ pub enum NodeControl {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SegmentKind {
     Road(RoadKind),
+    /// 外部接続の高速道路。歩道はない。
+    Highway,
 }
 
 impl SegmentKind {
@@ -190,6 +192,7 @@ impl SegmentKind {
     pub fn car_lanes_per_side(self) -> u8 {
         match self {
             SegmentKind::Road(k) => k as u8,
+            SegmentKind::Highway => 2,
         }
     }
 
@@ -200,6 +203,7 @@ impl SegmentKind {
     fn code(self) -> u8 {
         match self {
             SegmentKind::Road(k) => k as u8,
+            SegmentKind::Highway => 0x10,
         }
     }
 }
@@ -210,6 +214,8 @@ pub struct Node {
     pub pos: WorldPos,
     pub layer: Layer,
     pub control: NodeControl,
+    /// 「外の世界」につながるノードか。
+    pub outside: bool,
     /// このノードを端に持つ区間。ID の順に並べる。
     pub segments: Vec<SegmentId>,
 }
@@ -259,8 +265,18 @@ pub struct Line {
 }
 
 impl Line {
-    /// `from` から `to` への直線。8 方向でない、長さが 0、または長すぎるときはエラー。
+    /// `from` から `to` への、プレイヤーが引ける道路の直線。8 方向でない、長さが 0、
+    /// または `MAX_ROAD_TILES` マスより長いときはエラー。
     pub fn between(from: TilePos, to: TilePos) -> Result<Line, InvalidCommand> {
+        let line = Line::straight(from, to)?;
+        if line.len > MAX_ROAD_TILES {
+            return Err(InvalidCommand::RoadTooLong { from, to });
+        }
+        Ok(line)
+    }
+
+    /// `from` から `to` への 8 方向の直線。長さの上限はない。網の中の区間に使う。
+    pub fn straight(from: TilePos, to: TilePos) -> Result<Line, InvalidCommand> {
         let dx = to.x.checked_sub(from.x);
         let dy = to.y.checked_sub(from.y);
         let (Some(dx), Some(dy)) = (dx, dy) else {
@@ -274,9 +290,6 @@ impl Line {
             return Err(InvalidCommand::RoadNotStraight { from, to });
         }
         let len = ax.max(ay);
-        if len > MAX_ROAD_TILES {
-            return Err(InvalidCommand::RoadTooLong { from, to });
-        }
         Ok(Line {
             start: from,
             step: (dx.signum(), dy.signum()),
@@ -357,8 +370,8 @@ pub enum RoadConflict {
     Overlap,
     /// 斜めの区間とマスの角で交わる。
     CornerCrossing,
-    /// 既存の区間の途中のマスを通る。
-    MidSegment,
+    /// 高速道路の途中につなごうとした。
+    Highway,
 }
 
 /// 道路と歩道の網。
@@ -367,6 +380,8 @@ pub struct Network {
     nodes: Arena<NodeId, Node>,
     segments: Arena<SegmentId, Segment>,
     lanes: Arena<LaneId, Lane>,
+    /// チャンクごとの、そのチャンクのマスを通る区間。ID の順に並べる。区間から作り直せるので、状態ハッシュには入れない。
+    index: BTreeMap<ChunkCoord, Vec<SegmentId>>,
 }
 
 impl Default for Network {
@@ -390,6 +405,7 @@ impl Network {
             nodes: Arena::new(),
             segments: Arena::new(),
             lanes: Arena::new(),
+            index: BTreeMap::new(),
         }
     }
 
@@ -420,12 +436,17 @@ impl Network {
         self.lanes.iter()
     }
 
+    /// チャンクのマスを通る区間。ID の順に並ぶ。
+    pub fn segments_in_chunk(&self, coord: ChunkCoord) -> &[SegmentId] {
+        self.index.get(&coord).map_or(&[], Vec::as_slice)
+    }
+
     /// 区間がノード `a` からノード `b` へ通るマスの直線。
     pub fn segment_line(&self, id: SegmentId) -> Option<Line> {
         let s = self.segment(id)?;
         let a = self.nodes.get(s.a).expect("区間の端のノードがない").tile();
         let b = self.nodes.get(s.b).expect("区間の端のノードがない").tile();
-        Some(Line::between(a, b).expect("区間が 8 方向の直線でない"))
+        Some(Line::straight(a, b).expect("区間が 8 方向の直線でない"))
     }
 
     /// 網のリンクを、区間の ID、向き、使うものの順に返す。
@@ -461,11 +482,19 @@ impl Network {
             })
     }
 
+    /// マス `t` を道路が通っているか。
+    pub fn is_road_tile(&self, t: TilePos) -> bool {
+        !self.segments_through(t).is_empty()
+    }
+
     /// マス `t` を通る区間。
     fn segments_through(&self, t: TilePos) -> Vec<SegmentId> {
-        self.segments
+        let Some(coord) = t.chunk() else {
+            return Vec::new();
+        };
+        self.segments_in_chunk(coord)
             .iter()
-            .map(|(id, _)| id)
+            .copied()
             .filter(|s| {
                 self.segment_line(*s)
                     .is_some_and(|l| l.position_of(t).is_some())
@@ -483,17 +512,18 @@ impl Network {
         })
     }
 
-    fn add_node(&mut self, t: TilePos) -> NodeId {
+    fn add_node(&mut self, t: TilePos, outside: bool) -> NodeId {
         self.nodes.insert(Node {
             pos: tile_center(t),
             layer: Layer::Ground,
             control: NodeControl::None,
+            outside,
             segments: Vec::new(),
         })
     }
 
     fn add_segment(&mut self, a: NodeId, b: NodeId, kind: SegmentKind) -> SegmentId {
-        let line = Line::between(self.nodes[a].tile(), self.nodes[b].tile())
+        let line = Line::straight(self.nodes[a].tile(), self.nodes[b].tile())
             .expect("区間が 8 方向の直線でない");
         let length = line.length();
         let id = self.segments.insert(Segment {
@@ -523,11 +553,17 @@ impl Network {
             let at = list.partition_point(|s| *s < id);
             list.insert(at, id);
         }
+        for coord in chunks_of(&line) {
+            let list = self.index.entry(coord).or_default();
+            let at = list.partition_point(|s| *s < id);
+            list.insert(at, id);
+        }
         id
     }
 
     /// 区間を消す。端のノードは残す。
     fn remove_segment(&mut self, id: SegmentId) -> Segment {
+        let line = self.segment_line(id).expect("消す区間がない");
         let s = self.segments.remove(id).expect("消す区間がない");
         for l in &s.lanes {
             self.lanes.remove(*l);
@@ -535,11 +571,46 @@ impl Network {
         for n in [s.a, s.b] {
             self.nodes[n].segments.retain(|x| *x != id);
         }
+        for coord in chunks_of(&line) {
+            if let Some(list) = self.index.get_mut(&coord) {
+                list.retain(|x| *x != id);
+                if list.is_empty() {
+                    self.index.remove(&coord);
+                }
+            }
+        }
         s
+    }
+
+    /// 区間をマス `t` で 2 つに分け、そこに置いたノードを返す。
+    fn split_segment(&mut self, id: SegmentId, t: TilePos) -> NodeId {
+        let s = self.remove_segment(id);
+        let n = self.add_node(t, false);
+        self.add_segment(s.a, n, s.kind);
+        self.add_segment(n, s.b, s.kind);
+        n
+    }
+
+    /// 外部接続の高速道路を置く。`inner` から `outer` へ延び、`outer` を「外の世界」ノードにする。
+    pub(crate) fn add_highway(&mut self, inner: TilePos, outer: TilePos) {
+        let a = self.add_node(inner, false);
+        let b = self.add_node(outer, true);
+        self.add_segment(a, b, SegmentKind::Highway);
     }
 
     /// 道路を引けるか確かめる。マスが建設できる土地かは呼ぶ側で確かめる。
     fn check_road(&self, line: &Line) -> Result<(), RoadConflict> {
+        for t in line.tiles() {
+            for s in self.segments_through(t) {
+                let seg = &self.segments[s];
+                let at_inner_node = [seg.a, seg.b]
+                    .iter()
+                    .any(|n| self.nodes[*n].tile() == t && !self.nodes[*n].outside);
+                if seg.kind == SegmentKind::Highway && !at_inner_node {
+                    return Err(RoadConflict::Highway);
+                }
+            }
+        }
         let shares_step = |p: TilePos, q: TilePos| {
             self.segments_through(p).iter().any(|s| {
                 self.segment_line(*s)
@@ -559,21 +630,16 @@ impl Network {
                 }
             }
         }
-        for t in line.tiles() {
-            if !self.segments_through(t).is_empty() && self.node_at(t).is_none() {
-                return Err(RoadConflict::MidSegment);
-            }
-        }
         Ok(())
     }
 
-    /// 道路を引く。途中で既存のノードを通ったら、そこで区間を分けてつなぐ。
+    /// 道路を引く。途中で既存の区間やノードに当たったら、そこで区間を分けてつなぐ。
     /// 引けないときは網を変えない。
     pub fn build_road(&mut self, line: &Line, kind: RoadKind) -> Result<(), RoadConflict> {
         self.check_road(line)?;
         let mut cuts = BTreeSet::from([0, line.len]);
         for k in 1..line.len {
-            if self.node_at(line.tile(k)).is_some() {
+            if !self.segments_through(line.tile(k)).is_empty() {
                 cuts.insert(k);
             }
         }
@@ -581,7 +647,13 @@ impl Network {
             .into_iter()
             .map(|k| {
                 let t = line.tile(k);
-                self.node_at(t).unwrap_or_else(|| self.add_node(t))
+                if let Some(n) = self.node_at(t) {
+                    n
+                } else if let Some(s) = self.segments_through(t).first() {
+                    self.split_segment(*s, t)
+                } else {
+                    self.add_node(t, false)
+                }
             })
             .collect();
         for w in nodes.windows(2) {
@@ -590,18 +662,28 @@ impl Network {
         Ok(())
     }
 
-    /// 長方形にかかる区間を消し、つながりのなくなったノードも消す。消した区間の数を返す。
-    pub fn bulldoze(&mut self, area: TileRect) -> usize {
-        let targets: Vec<SegmentId> = self
-            .segments
-            .iter()
-            .map(|(id, _)| id)
-            .filter(|s| {
+    /// 長方形にかかる道路の区間を消し、つながりのなくなったノードも消す。消した区間の直線を返す。
+    /// 高速道路は消さない。
+    pub fn bulldoze(&mut self, area: TileRect) -> Vec<Line> {
+        let mut targets = BTreeSet::new();
+        for (coord, list) in &self.index {
+            if !chunk_overlaps(*coord, area) {
+                continue;
+            }
+            for s in list {
+                let seg = &self.segments[*s];
+                if seg.kind == SegmentKind::Highway {
+                    continue;
+                }
                 let line = self.segment_line(*s).expect("区間がない");
-                line.tiles().any(|t| rect_contains(area, t))
-            })
-            .collect();
+                if line.tiles().any(|t| rect_contains(area, t)) {
+                    targets.insert(*s);
+                }
+            }
+        }
+        let mut removed = Vec::new();
         for s in &targets {
+            removed.push(self.segment_line(*s).expect("区間がない"));
             let seg = self.remove_segment(*s);
             for n in [seg.a, seg.b] {
                 if self.nodes.get(n).is_some_and(|n| n.segments.is_empty()) {
@@ -609,7 +691,7 @@ impl Network {
                 }
             }
         }
-        targets.len()
+        removed
     }
 }
 
@@ -643,11 +725,25 @@ fn rect_contains(r: TileRect, t: TilePos) -> bool {
     (r.min.x..=r.max.x).contains(&t.x) && (r.min.y..=r.max.y).contains(&t.y)
 }
 
+fn chunk_overlaps(coord: ChunkCoord, r: TileRect) -> bool {
+    let o = coord.origin();
+    let last = CHUNK_SIDE as i64 - 1;
+    o.x <= r.max.x && r.min.x <= o.x + last && o.y <= r.max.y && r.min.y <= o.y + last
+}
+
+/// 直線が通るチャンク。座標の順に並ぶ。
+fn chunks_of(line: &Line) -> BTreeSet<ChunkCoord> {
+    line.tiles()
+        .map(|t| t.chunk().expect("チャンクの座標が i32 に収まらないマス"))
+        .collect()
+}
+
 impl StateHash for Node {
     fn write_state(&self, h: &mut StateHasher) {
         h.write(&self.pos);
         h.write(&(self.layer as u8));
         h.write(&(self.control as u8));
+        h.write(&self.outside);
         h.write(&self.segments);
     }
 }
@@ -732,6 +828,8 @@ mod tests {
             }
         }
         let mut lane_count = 0;
+        // 索引は、区間から作り直したものと一致する。
+        let mut index = BTreeMap::<ChunkCoord, Vec<SegmentId>>::new();
         for (id, seg) in n.segments() {
             assert_ne!(seg.a, seg.b);
             for end in [seg.a, seg.b] {
@@ -743,6 +841,9 @@ mod tests {
                 assert_eq!((lane.segment, lane.length), (id, l.length()));
             }
             lane_count += seg.lanes.len();
+            for c in chunks_of(&l) {
+                index.entry(c).or_default().push(id);
+            }
             // 同じマスを通る別の区間とは、両方の端のノードでだけ交わる。
             for t in l.tiles() {
                 for other in n.segments_through(t) {
@@ -753,6 +854,7 @@ mod tests {
             }
         }
         assert_eq!(n.lanes().count(), lane_count);
+        assert_eq!(n.index, index);
     }
 
     #[test]
@@ -792,6 +894,28 @@ mod tests {
     }
 
     #[test]
+    fn joining_the_middle_of_a_segment_splits_it() {
+        let mut n = Network::new();
+        build(&mut n, 0, 0, 10, 0).unwrap();
+        build(&mut n, 5, 0, 5, 5).unwrap();
+        assert_eq!((n.segments().count(), n.nodes().count()), (3, 4));
+        assert_eq!(degree(&n, 5, 0), 3);
+        check_invariants(&n);
+    }
+
+    #[test]
+    fn crossing_roads_split_both() {
+        let mut n = Network::new();
+        build(&mut n, 0, 0, 10, 0).unwrap();
+        build(&mut n, 5, -5, 5, 5).unwrap();
+        // 斜めの道路も、マスの中心で交わればつながる。
+        build(&mut n, 0, -5, 10, 5).unwrap();
+        assert_eq!(degree(&n, 5, 0), 6);
+        assert_eq!((n.segments().count(), n.nodes().count()), (6, 7));
+        check_invariants(&n);
+    }
+
+    #[test]
     fn overlaps_and_corner_crossings_are_refused() {
         let mut n = Network::new();
         build(&mut n, 0, 0, 10, 0).unwrap();
@@ -800,8 +924,6 @@ mod tests {
         assert_eq!(build(&mut n, 3, 0, 20, 0), Err(RoadConflict::Overlap));
         assert_eq!(build(&mut n, 10, 0, 2, 0), Err(RoadConflict::Overlap));
         assert_eq!(build(&mut n, 1, 1, 0, 2), Err(RoadConflict::CornerCrossing));
-        assert_eq!(build(&mut n, 5, -5, 5, 5), Err(RoadConflict::MidSegment));
-        assert_eq!(build(&mut n, 5, 0, 5, 5), Err(RoadConflict::MidSegment));
         assert_eq!(n, before);
         // 端のノードで同じ向きにつなぐのは重なりではない。
         build(&mut n, 10, 0, 15, 0).unwrap();
@@ -810,32 +932,38 @@ mod tests {
     }
 
     #[test]
-    fn roads_through_a_node_are_cut_there() {
+    fn highway_connects_only_at_its_inner_node() {
         let mut n = Network::new();
-        build(&mut n, 0, 0, 10, 0).unwrap();
-        build(&mut n, 10, -5, 10, 5).unwrap();
+        n.add_highway(TilePos::new(0, 0), TilePos::new(100, 0));
+        let before = n.clone();
+        assert_eq!(build(&mut n, 50, -5, 50, 5), Err(RoadConflict::Highway));
+        assert_eq!(build(&mut n, 100, 0, 100, 5), Err(RoadConflict::Highway));
+        assert_eq!(n, before);
         build(&mut n, 0, 0, 0, 5).unwrap();
-        build(&mut n, 5, 5, 15, -5).unwrap();
-        assert_eq!(degree(&n, 10, 0), 5);
-        assert_eq!((n.segments().count(), n.nodes().count()), (6, 7));
+        assert_eq!(degree(&n, 0, 0), 2);
+        // 高速道路は消さない。
+        let all = TileRect::from_corners(TilePos::new(-10, -10), TilePos::new(200, 200));
+        assert_eq!(n.bulldoze(all).len(), 1);
+        assert_eq!(n.segments().count(), 1);
+        assert_eq!(n.nodes().count(), 2);
         check_invariants(&n);
     }
 
     #[test]
     fn bulldoze_removes_touched_segments_and_lonely_nodes() {
         let mut n = Network::new();
-        build(&mut n, 0, 0, 5, 0).unwrap();
-        build(&mut n, 5, 0, 10, 0).unwrap();
+        build(&mut n, 0, 0, 10, 0).unwrap();
         build(&mut n, 5, 0, 5, 5).unwrap();
         let area = TileRect::from_corners(TilePos::new(4, 3), TilePos::new(6, 3));
-        assert_eq!(n.bulldoze(area), 1);
+        assert_eq!(n.bulldoze(area).len(), 1);
         assert_eq!((n.segments().count(), n.nodes().count()), (2, 3));
         assert_eq!(degree(&n, 5, 0), 2);
-        assert_eq!(n.bulldoze(area), 0);
+        assert_eq!(n.bulldoze(area).len(), 0);
         check_invariants(&n);
         let all = TileRect::from_corners(TilePos::new(0, 0), TilePos::new(10, 0));
-        assert_eq!(n.bulldoze(all), 2);
+        assert_eq!(n.bulldoze(all).len(), 2);
         assert_eq!(n.nodes().count(), 0);
+        assert!(n.index.is_empty());
     }
 
     #[test]
@@ -872,15 +1000,47 @@ mod tests {
         assert_eq!(road_cost(RoadKind::Small, &line(0, 0, 1, 1)), Money(354));
     }
 
+    /// 高速道路が `inner` から `outer` への 1 本のまま残り、「外の世界」ノードには高速道路しか
+    /// つながっていないことを確かめる。
+    fn check_highway(n: &Network, inner: TilePos, outer: TilePos) {
+        let highways: Vec<_> = n
+            .segments()
+            .filter(|(_, s)| s.kind == SegmentKind::Highway)
+            .collect();
+        assert_eq!(highways.len(), 1, "高速道路が 1 本でない");
+        let (id, seg) = highways[0];
+        let (a, b) = (n.node(seg.a).unwrap(), n.node(seg.b).unwrap());
+        assert_eq!(
+            (a.tile(), b.tile()),
+            (inner, outer),
+            "高速道路の端が変わった"
+        );
+        assert!(!a.outside && b.outside);
+        assert_eq!(b.segments, [id], "外の世界ノードに高速道路以外がつながった");
+        let line = n.segment_line(id).unwrap();
+        for k in 1..line.len {
+            assert_eq!(
+                n.node_at(line.tile(k)),
+                None,
+                "高速道路の途中にノードがある"
+            );
+        }
+        let outside = n.nodes().filter(|(_, node)| node.outside).count();
+        assert_eq!(outside, 1);
+    }
+
     proptest! {
         #[test]
         fn edits_keep_the_network_consistent(
             edits in proptest::collection::vec(
-                (0_u8..5, 0_i64..12, 0_i64..12, -1_i64..=1, -1_i64..=1, 1_i64..8),
+                (0_u8..5, 56_i64..72, -8_i64..8, -1_i64..=1, -1_i64..=1, 1_i64..12),
                 1..40,
             )
         ) {
             let mut n = Network::new();
+            // 編集の範囲を横切り、外の世界ノードも範囲の端に入る高速道路。
+            let (inner, outer) = (TilePos::new(60, 0), TilePos::new(80, 0));
+            n.add_highway(inner, outer);
             for (op, x, y, sx, sy, len) in edits {
                 if op == 0 {
                     let area = TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + len / 2, y));
@@ -892,6 +1052,7 @@ mod tests {
                     }
                 }
                 check_invariants(&n);
+                check_highway(&n, inner, outer);
             }
         }
     }

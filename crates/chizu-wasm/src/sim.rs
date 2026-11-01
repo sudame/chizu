@@ -177,10 +177,11 @@ impl Sim {
     }
 }
 
-/// 画面に渡す区間の種類の番号。道路は `RoadKind` の値（1〜3）をそのまま使う。
+/// 画面に渡す区間の種類の番号。道路は `RoadKind` の値（1〜3）をそのまま使い、高速道路は 4 にする。
 pub fn segment_kind_code(kind: SegmentKind) -> u8 {
     match kind {
         SegmentKind::Road(k) => k as u8,
+        SegmentKind::Highway => 4,
     }
 }
 
@@ -195,7 +196,7 @@ fn denial_reason(world: &World, command: &Command) -> &'static str {
             Ok(line) if world.money() < road_cost(kind, &line) => "所持金が足りない",
             _ => "ほかの道路と重なるか、途中で交わる",
         },
-        Command::Bulldoze { .. } => "範囲に道路がない",
+        Command::Bulldoze { .. } => "範囲に消せる道路がない",
         Command::BuyChunk { coord } if !world.can_buy_chunk(coord) => {
             "買った土地に接していないか、もう買ってある"
         }
@@ -322,8 +323,12 @@ mod tests {
         assert!(sim.take_reports().is_empty());
         assert_eq!(sim.network_revision(), 1);
         assert!(sim.world().money() < money);
-        assert_eq!(sim.road_segments(), [0.0, 0.0, 4.0, 0.0, 1.0]);
-        assert_eq!(sim.road_nodes(), [0.0, 0.0, 1.0, 4.0, 0.0, 1.0]);
+        // 外部接続の高速道路は最初からあるので、引いた道路はそのあとに並ぶ
+        let segments = sim.road_segments();
+        assert_eq!(segments[4], 4.0);
+        assert_eq!(segments[segments.len() - 5..], [0.0, 0.0, 4.0, 0.0, 1.0]);
+        let nodes = sim.road_nodes();
+        assert_eq!(nodes[nodes.len() - 6..], [0.0, 0.0, 1.0, 4.0, 0.0, 1.0]);
 
         let far = (CHUNK_SIDE as i64) * 3;
         sim.submit(road((far, 0), (far + 2, 0))).unwrap();
@@ -337,7 +342,7 @@ mod tests {
             reasons,
             [
                 Some("買っていない土地か水辺を通る"),
-                Some("範囲に道路がない")
+                Some("範囲に消せる道路がない")
             ]
         );
         assert_eq!(sim.network_revision(), 1);
