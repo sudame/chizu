@@ -48,6 +48,107 @@ fn from_lane(conn: &[Connector], node: NodeId, from: LaneId) -> &[Connector] {
     &conn[lo..hi]
 }
 
+/// 車線の上を走っている車か。出発を待っている車は、まだ車線の上にいない。
+pub(super) fn on_road(t: &Trip) -> bool {
+    t.mode == LaneMode::Car && !t.waiting
+}
+
+/// 車線ごとの、車線の上の車の位置。前から順に並ぶ。
+#[derive(Default)]
+pub(super) struct LaneIndex(BTreeMap<LaneId, Vec<LaneOffset>>);
+
+impl LaneIndex {
+    /// 行 `skip` を除いた、車線の上の車の位置。
+    pub(super) fn of(rows: &[Option<Trip>], skip: Option<usize>) -> LaneIndex {
+        let mut ix = LaneIndex::default();
+        for (i, t) in rows.iter().enumerate() {
+            if let Some(t) = t.as_ref().filter(|t| on_road(t) && Some(i) != skip) {
+                ix.0.entry(t.lane).or_default().push(t.offset);
+            }
+        }
+        for v in ix.0.values_mut() {
+            v.sort_unstable_by(|a, b| b.cmp(a));
+        }
+        ix
+    }
+
+    fn count(&self, lane: LaneId) -> usize {
+        self.0.get(&lane).map_or(0, Vec::len)
+    }
+
+    /// 車線 `lane` で、位置 `at` から後ろへ下げていき、ほかの車と重ならない最初の位置。
+    fn room_behind(&self, lane: LaneId, at: LaneOffset) -> Option<LaneOffset> {
+        let mut p = at.0;
+        for c in self.0.get(&lane).into_iter().flatten() {
+            if c.0 >= p.saturating_add(SPACING) {
+                continue;
+            }
+            if c.0.saturating_add(SPACING) <= p {
+                break;
+            }
+            p = c.0.checked_sub(SPACING)?;
+        }
+        Some(LaneOffset(p))
+    }
+
+    fn insert(&mut self, lane: LaneId, at: LaneOffset) {
+        let v = self.0.entry(lane).or_default();
+        let k = v.partition_point(|c| *c > at);
+        v.insert(k, at);
+    }
+
+    /// 車の少ない順に並べた車線。同じなら番号の順にする。
+    fn by_count(&self, lanes: &[LaneId]) -> Vec<LaneId> {
+        let mut l = lanes.to_vec();
+        l.sort_by_key(|x| (self.count(*x), *x));
+        l
+    }
+}
+
+/// 行 `i` の車を、いまのリンクの車線に置く。車の少ない車線から順に、いまの位置から後ろへ下げて
+/// 空いた位置を探す。どの車線にも空きがなければ、出発を待たせて `false` を返す。
+/// `ix` は行 `i` を除いた車線の上の車で、置いたら行 `i` を足す。
+pub(super) fn place(
+    rows: &mut [Option<Trip>],
+    net: &Network,
+    ix: &mut LaneIndex,
+    i: usize,
+) -> bool {
+    let t = rows[i].as_mut().expect("置く車がない");
+    let lanes: Vec<LaneId> = net.link_lanes(t.link()).collect();
+    let found = ix
+        .by_count(&lanes)
+        .into_iter()
+        .find_map(|l| Some((l, ix.room_behind(l, t.offset)?)));
+    match found {
+        Some((lane, at)) => {
+            (t.lane, t.offset, t.waiting) = (lane, at, false);
+            ix.insert(lane, at);
+            true
+        }
+        None => {
+            t.waiting = true;
+            false
+        }
+    }
+}
+
+/// 探し直した行 `i` の車の車線を決める。前と同じ番号の車線に重ならずにいられればそこに、だめなら
+/// 重ならない車線のうち車の少ない車線に置く。どこも重なるなら、前と同じ番号の車線のままにする。
+pub(super) fn keep_lane(rows: &mut [Option<Trip>], net: &Network, i: usize, index: usize) {
+    let ix = LaneIndex::of(rows, Some(i));
+    let t = rows[i].as_ref().expect("置く車がない");
+    let lanes: Vec<LaneId> = net.link_lanes(t.link()).collect();
+    let same = lanes[index.min(lanes.len() - 1)];
+    let fits = |l: LaneId| ix.room_behind(l, t.offset) == Some(t.offset);
+    let others: Vec<LaneId> = lanes.iter().copied().filter(|l| *l != same).collect();
+    let lane = std::iter::once(same)
+        .chain(ix.by_count(&others))
+        .find(|l| fits(*l))
+        .unwrap_or(same);
+    rows[i].as_mut().expect("置く車がない").lane = lane;
+}
+
 /// 車線ごとの、いまの車の数と最後尾（位置と速さ）。
 #[derive(Default)]
 pub(super) struct LaneState {
@@ -58,7 +159,7 @@ pub(super) struct LaneState {
 impl LaneState {
     pub(super) fn of(rows: &[Option<Trip>]) -> LaneState {
         let mut st = LaneState::default();
-        for t in rows.iter().flatten().filter(|t| t.mode == LaneMode::Car) {
+        for t in rows.iter().flatten().filter(|t| on_road(t)) {
             *st.count.entry(t.lane).or_insert(0) += 1;
             let r = st.rear.entry(t.lane).or_insert((t.offset, t.speed));
             if t.offset < r.0 {
@@ -66,10 +167,6 @@ impl LaneState {
             }
         }
         st
-    }
-
-    pub(super) fn add(&mut self, lane: LaneId) {
-        *self.count.entry(lane).or_insert(0) += 1;
     }
 
     pub(super) fn count(&self, lane: LaneId) -> u32 {
@@ -125,10 +222,34 @@ fn braking_distance(v: i64) -> i64 {
     n * v - b * n * (n + 1) / 2
 }
 
+/// リンクの終わりまで `left` のとき、次のリンクの最高速度 `v_next` まで減速の上限で落としながら
+/// 入れる、いまのいちばん速い速さ。`v_next` より速いあいだに進む距離の和が `left` に届かない速さである。
+fn entry_speed(left: i64, v_next: i64) -> i64 {
+    let b = i64::from(CAR_DECEL);
+    let fast = |v: i64| {
+        let n = (v - v_next + b - 1) / b;
+        n * v - b * n * (n - 1) / 2
+    };
+    let (mut lo, mut hi) = (v_next, v_next + left.max(0));
+    while lo < hi {
+        let mid = lo + (hi - lo + 1) / 2;
+        if fast(mid) < left {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
 /// 前の車（位置 `at`、速さ `v_l`）に追突しない安全速度。Krauss 型と同じく、前の車がいまから減速の上限で
 /// 止まっても、自分も減速の上限で止まれば重ならない速さのうち、いちばん速いものを整数で求める。
 /// 1 tick を反応時間とし、この tick に進む距離と、そのあと止まるまでの距離の和が、車間と前の車が
 /// 止まるまでの距離の和を超えないようにする。前の tick にこの条件を満たしていれば、減速は上限に収まる。
+///
+/// 合流では減速の上限を破りうる。ノードで次の車線へ移るときに位置をずらされた車や、入れ替わった
+/// 最後尾は、前の tick の条件を満たしていないためである。重なりは起きない。信号と衝突区間の PR（13）で、
+/// ノードの手前で待たせる形にして直す。
 pub(super) fn safe_speed(me: LaneOffset, at: LaneOffset, v_l: MmPerTick) -> i64 {
     let gap = i64::from(at.0) - i64::from(SPACING) - i64::from(me.0);
     let budget = gap + braking_distance(i64::from(v_l.0.max(0)));
@@ -164,6 +285,12 @@ fn drive(
         let room = i64::from(at.0) - i64::from(SPACING) - i64::from(t.offset.0);
         v = v.min(safe_speed(t.offset, at, v_l)).min(room);
     }
+    if !t.last_leg() && near_end(net, t) {
+        let next = t.route.links[t.leg as usize + 1];
+        let next_kind = net.segment(next.segment).expect("リンクの区間がない").kind;
+        let left = i64::from(t.link_len.0) - i64::from(t.offset.0);
+        v = v.min(entry_speed(left, i64::from(speed_limit(next_kind).0)));
+    }
     if t.last_leg() {
         // 着く位置には、止まった前の車があるものとして近づき、残りが加速の幅に収まったら着く。
         let left = i64::from(t.dest_offset.0) - i64::from(t.offset.0);
@@ -192,7 +319,7 @@ fn check_lane(rows: &[Option<Trip>], lane: LaneId) {
     let mut at: Vec<u32> = rows
         .iter()
         .flatten()
-        .filter(|t| t.mode == LaneMode::Car && t.lane == lane)
+        .filter(|t| on_road(t) && t.lane == lane)
         .map(|t| t.offset.0)
         .collect();
     at.sort_unstable();
@@ -203,13 +330,21 @@ fn check_lane(rows: &[Option<Trip>], lane: LaneId) {
 
 /// 車を 1 tick 進め、着いた主体の行の番号を返す。
 pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector]) -> Vec<usize> {
+    // 出発を待っている車を、主体の番号の順に置き直す。
+    let waiting: Vec<usize> = (0..rows.len())
+        .filter(|i| rows[*i].as_ref().is_some_and(|t| t.waiting))
+        .collect();
+    let mut ix = LaneIndex::of(rows, None);
+    for i in waiting {
+        place(rows, net, &mut ix, i);
+    }
     let st = LaneState::of(rows);
     // 車線ごとに、前の車から順に並べる。
     let mut order: Vec<(LaneId, core::cmp::Reverse<LaneOffset>, usize)> = rows
         .iter()
         .enumerate()
         .filter_map(|(i, t)| {
-            let t = t.as_ref().filter(|t| t.mode == LaneMode::Car)?;
+            let t = t.as_ref().filter(|t| on_road(t))?;
             Some((t.lane, core::cmp::Reverse(t.offset), i))
         })
         .collect();
@@ -268,7 +403,7 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
     // 車線ごとの最後尾。リンクの終わりを越えた車は、移れずに終わりで止まるものとして数える。
     // こうしておくと、どの順に移しても、移った先の車間が保たれる。
     let mut rear = BTreeMap::<LaneId, LaneOffset>::new();
-    for t in rows.iter().flatten().filter(|t| t.mode == LaneMode::Car) {
+    for t in rows.iter().flatten().filter(|t| on_road(t)) {
         let at = t.offset.min(t.link_len);
         let r = rear.entry(t.lane).or_insert(at);
         *r = (*r).min(at);

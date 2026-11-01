@@ -37,6 +37,8 @@ pub struct Trip {
     lane: LaneId,
     /// 車の速さ。歩くときは使わない。
     speed: MmPerTick,
+    /// 出発の位置の車線に空きがなく、車線の上に出るのを待っている車か。
+    waiting: bool,
     /// いま歩いているリンクの、経路の中での番号。
     leg: u32,
     offset: LaneOffset,
@@ -270,21 +272,20 @@ impl Trips {
             .collect();
         let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
         let mut routes = plan(router, mode, &ends).into_iter();
-        // 車は、出発のリンクの車線のうち車の少ない車線から走り出す。
-        let mut lanes = car::LaneState::of(&self.rows);
+        // 車は、出発のリンクの車線のうち車の少ない車線に置く。前の車と重なるなら、その後ろの空いた
+        // 位置まで下げる。どの車線にも空きがなければ、空くまで待たせる。
+        let mut ix = car::LaneIndex::of(&self.rows, None);
         resolved
             .iter()
             .zip(walks)
             .map(|(e, (_, to))| {
                 let e = (*e)?;
                 let route = routes.next().expect("探した経路の数が合わない")?;
-                let mut t = make_trip(net, route, e, *to, now);
+                let id = self.insert(make_trip(net, route, e, *to, now));
                 if mode == LaneMode::Car {
-                    let choices: Vec<LaneId> = net.link_lanes(t.link()).collect();
-                    t.lane = car::emptiest(&choices, &lanes);
-                    lanes.add(t.lane);
+                    car::place(&mut self.rows, net, &mut ix, id.slot());
                 }
-                Some(self.insert(t))
+                Some(id)
             })
             .collect()
     }
@@ -354,10 +355,18 @@ impl Trips {
                     continue;
                 };
                 let old = self.get(id).expect("探し直す主体がない");
-                let (departed, speed) = (old.departed, old.speed);
+                let (departed, speed, waiting) = (old.departed, old.speed, old.waiting);
+                // 探し直す前の、リンクの中の車線の番号。網が変わると車線の ID も変わるので番号で覚える。
+                let index = net
+                    .link_lanes(old.link())
+                    .position(|l| l == old.lane)
+                    .unwrap_or(0);
                 let mut t = make_trip(net, route, ends, dest, departed);
-                t.speed = speed;
+                (t.speed, t.waiting) = (speed, waiting);
                 self.rows[id.slot()] = Some(t);
+                if mode == LaneMode::Car && !waiting {
+                    car::keep_lane(&mut self.rows, net, id.slot(), index);
+                }
             }
         }
         lost.sort();
@@ -370,6 +379,7 @@ impl Trips {
     /// ワールド座標の範囲 `[min, max)` にいる移動体を ID の順に返す。
     pub fn movers_in(&self, min: WorldPos, max: WorldPos) -> Vec<Mover> {
         self.iter()
+            .filter(|(_, t)| !t.waiting)
             .filter_map(|(id, t)| {
                 let pos = t.position().world();
                 let inside = (min.x..max.x).contains(&pos.x) && (min.y..max.y).contains(&pos.y);
@@ -397,6 +407,7 @@ fn make_trip(
         mode,
         lane: net.link_lanes(first).next().expect("リンクに車線がない"),
         speed: MmPerTick::ZERO,
+        waiting: false,
         route,
         leg: 0,
         offset: from,
@@ -416,6 +427,7 @@ impl StateHash for Trip {
         h.write(&(self.mode as u8));
         h.write(&self.lane);
         h.write(&self.speed);
+        h.write(&self.waiting);
         h.write_len(self.route.links.len());
         for l in &self.route.links {
             h.write(&l.segment);
