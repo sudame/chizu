@@ -2,7 +2,7 @@ import init, {
   initThreadPool,
   parallel_sum,
   road_cost_table,
-  Simulation,
+  type Simulation,
   service_table,
   snapshot_layout,
   thread_count,
@@ -18,6 +18,7 @@ import type {
   WorkerToMain,
 } from "./protocol/messages.ts";
 import { layout } from "./protocol/snapshot.ts";
+import { startSimulation } from "./save/worker-side.ts";
 
 const SUM_N = 10_000_000;
 const FRAME_MS = 1000 / 60;
@@ -138,7 +139,8 @@ const ready = (async () => {
   if (JSON.stringify(JSON.parse(snapshot_layout())) !== JSON.stringify(layout)) {
     throw new Error("三重バッファの配置が WASM と画面で食い違う。WASM をビルドし直す");
   }
-  const sim = new Simulation(0n);
+  // 新しく始めるか、保存データから作り直すかは画面が決める
+  const sim = await startSimulation();
   sim.advance(0);
   // 三重バッファを確保するとメモリが伸びることがある。伸びたあとの SharedArrayBuffer を渡す。
   // 枠の位置はこのあと変わらないので、のちにメモリが伸びても渡した SharedArrayBuffer の範囲に収まる

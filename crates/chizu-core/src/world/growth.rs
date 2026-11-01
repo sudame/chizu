@@ -20,6 +20,7 @@ use crate::command::ZoneKind;
 use crate::id::BuildingId;
 use crate::network::{DIAGONAL_TILE_MM, Dir, LaneMode, LinkId, TILE_MM};
 use crate::rng::{RngPurpose, rng};
+use crate::round;
 use crate::service::{Facility, Supply, evaluate_supply};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
 use crate::units::LaneOffset;
@@ -44,8 +45,21 @@ pub(super) struct LotFronts {
     by_zone: [BTreeSet<TilePos>; 4],
 }
 
-/// 1 回に、区画の種類ごとに建てる建物の数の上限。
+impl LotFronts {
+    /// 区画の種類 `zone` に、建てる候補の間口があるか。
+    pub(super) fn has_zone(&self, zone: ZoneKind) -> bool {
+        !self.by_zone[zone.index()].is_empty()
+    }
+}
+
+/// 需要があるときに、1 回に区画の種類ごとに建てる建物の数の下限。
 pub const SPAWN_PER_ZONE: u32 = 2;
+
+/// 1 回に建てる数に、需要の何分の 1 を足すか。需要が強いほど速く建つ。
+pub const SPAWN_PER_DEMAND: i64 = 8;
+
+/// 1 回に、区画の種類ごとに建てる建物の数の上限。
+pub const MAX_SPAWN_PER_ZONE: u32 = 16;
 
 /// 段階が 1 つ上がるまでの時間（tick）。
 pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;
@@ -258,24 +272,44 @@ impl World {
         if !tick.0.is_multiple_of(GROWTH_INTERVAL) {
             return;
         }
+        // 電気と水道が届き、住む世帯か働く住民で埋まり、その区画に需要のある建物だけが、段階を上げる。
+        let occupants = self.occupants();
+        let mut stats = self.city_stats();
         let ids: Vec<BuildingId> = self.buildings.iter().map(|(id, _)| id).collect();
         for id in ids {
-            let b = self.buildings.get_mut(id).expect("建物がない");
+            let b = *self.buildings.get(id).expect("建物がない");
             let supplied = b.supply.power && b.supply.water;
-            if supplied && b.level < MAX_LEVEL && tick.since(b.leveled_at) >= LEVEL_UP_TICKS {
-                b.level += 1;
-                b.leveled_at = tick;
+            let full = occupants.get(&id).copied().unwrap_or(0) >= b.households() + b.workplaces();
+            let wanted = demand(&stats)[b.zone.index()] > 0;
+            if supplied
+                && full
+                && wanted
+                && b.level < MAX_LEVEL
+                && tick.since(b.leveled_at) >= LEVEL_UP_TICKS
+            {
+                let up = Building {
+                    level: b.level + 1,
+                    leveled_at: tick,
+                    ..b
+                };
+                stats = stats.without(&b).with(&up);
+                *self.buildings.get_mut(id).expect("建物がない") = up;
                 // 需要が増えたので、次の tick の頭で供給を判定し直す。
                 self.supply_dirty = true;
             }
         }
         for zone in ZoneKind::ALL {
-            for attempt in 0..SPAWN_PER_ZONE {
+            let pull = round::div_floor(demand(&stats)[zone.index()].max(0), SPAWN_PER_DEMAND);
+            let spawns = u32::try_from(pull)
+                .unwrap_or(u32::MAX)
+                .saturating_add(SPAWN_PER_ZONE)
+                .min(MAX_SPAWN_PER_ZONE);
+            for attempt in 0..spawns {
                 let list = &self.lots.by_zone[zone.index()];
-                if list.is_empty() || demand(self.buildings.capacity())[zone.index()] <= 0 {
+                if list.is_empty() || demand(&stats)[zone.index()] <= 0 {
                     break;
                 }
-                let id = u64::from(zone as u8) * 16 + u64::from(attempt);
+                let id = u64::from(zone as u8) * u64::from(MAX_SPAWN_PER_ZONE) + u64::from(attempt);
                 let mut r = rng(self.seed, RngPurpose::BuildingGrowth, id, tick);
                 let len = u32::try_from(list.len()).expect("候補の数が u32 に収まらない");
                 let front = *list.iter().nth(r.below(len) as usize).expect("候補がない");
@@ -296,7 +330,8 @@ impl World {
                     .into_iter()
                     .find(|(w, k)| self.lot_fits(zone, front, toward_road, *w, *k));
                 if let Some((w, k)) = fit {
-                    self.place_building(zone, front, toward_road, w, k);
+                    let id = self.place_building(zone, front, toward_road, w, k);
+                    stats = stats.with(self.buildings.get(id).expect("建てた建物がない"));
                 }
             }
         }
@@ -309,7 +344,7 @@ impl World {
         toward_road: (i64, i64),
         w: u64,
         k: u64,
-    ) {
+    ) -> BuildingId {
         let tiles: Vec<TilePos> = lot_tiles(front, toward_road, w, k)
             .map(|(_, _, t)| t)
             .collect();
@@ -317,7 +352,7 @@ impl World {
         let (entrance, entrance_at) = self
             .frontage(front, toward_road)
             .expect("間口が道路に面していない");
-        self.buildings.insert(Building {
+        let id = self.buildings.insert(Building {
             zone,
             area: TileRect::from_corners(front, far),
             front,
@@ -330,6 +365,7 @@ impl World {
         });
         self.write_occupancy(tiles.into_iter().map(|t| (t, TileUse::Building)));
         self.supply_dirty = true;
+        id
     }
 
     /// 道路や区画が変わったあとに呼ぶ。条件の崩れた建物を消し、残った建物の出入口を付け直す。
@@ -429,6 +465,7 @@ impl World {
         }
         let all: Vec<(BuildingId, Building)> =
             self.buildings.iter().map(|(id, b)| (id, *b)).collect();
+        let mut removed = Vec::new();
         for (id, b) in all {
             let rect_tiles = crate::zone::tiles_of(b.area).collect::<Vec<_>>();
             let intact = rect_tiles
@@ -442,6 +479,7 @@ impl World {
                 }
                 None => {
                     self.buildings.remove(id);
+                    removed.push(id);
                     let freed: Vec<_> = rect_tiles
                         .into_iter()
                         .filter(|t| {
@@ -454,6 +492,7 @@ impl World {
                 }
             }
         }
+        self.vacate(&removed);
         // 道路と施設の変化は、その場で供給に映す。
         self.update_supply();
     }
@@ -510,6 +549,43 @@ mod tests {
             };
             assert_eq!(w.apply(&paint), ApplyOutcome::Applied);
         }
+        connect_to_outside(&mut w);
+        w
+    }
+
+    /// 高速道路の内側のノードから、y = 10 の通りまで道路を引く。
+    fn connect_to_outside(w: &mut World) {
+        let inner = crate::world::highway_line(w.seed()).start;
+        let corner = TilePos::new(inner.x, 10);
+        let mut road = |from: TilePos, to: TilePos| {
+            if from != to {
+                let c = Command::BuildRoad {
+                    from,
+                    to,
+                    kind: RoadKind::Small,
+                };
+                assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{from:?} → {to:?}");
+            }
+        };
+        road(inner, corner);
+        road(corner, TilePos::new(corner.x.clamp(0, 40), 10));
+    }
+
+    /// 通りに発電所と浄水場を置いた街。
+    fn served_street() -> World {
+        let mut w = zoned_street();
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (9, 9), 2),
+            ApplyOutcome::Applied
+        );
         w
     }
 
@@ -584,41 +660,34 @@ mod tests {
 
     #[test]
     fn houses_grow_along_a_zoned_street_within_minutes() {
-        let mut w = zoned_street();
+        let mut w = served_street();
         // 等速で 1 分。
         run(&mut w, 30 * 60);
         assert!(
-            w.buildings().len() >= 8,
+            w.buildings().len() >= 5,
             "{} 棟しか建たない",
             w.buildings().len()
         );
         assert!(w.buildings().capacity().households > 0);
+        assert!(w.population().citizen_count() > 0, "誰も移り住まない");
         check_buildings(&w);
         // 同じ種と操作からは同じ街になる。
-        let mut again = zoned_street();
+        let mut again = served_street();
         run(&mut again, 30 * 60);
         assert_eq!(again, w);
     }
 
     #[test]
-    fn buildings_level_up_once_a_day() {
-        let mut w = zoned_street();
-        // 電気と水道が届いていないと段階は上がらない。
-        assert_eq!(
-            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
-            ApplyOutcome::Applied
-        );
-        assert_eq!(
-            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
-            ApplyOutcome::Applied
-        );
-        run(&mut w, GROWTH_INTERVAL + 1);
-        let (id, b) = w.buildings().iter().next().map(|(id, b)| (id, *b)).unwrap();
-        assert_eq!(b.level, 1);
-        run(&mut w, LEVEL_UP_TICKS);
-        let after = w.buildings().get(id).unwrap();
-        assert_eq!(after.level, 2);
-        assert!(after.households() > b.households());
+    fn full_supplied_buildings_level_up_after_a_day() {
+        let mut w = served_street();
+        run(&mut w, 2 * LEVEL_UP_TICKS);
+        let occupants = w.occupants();
+        let leveled: Vec<_> = w.buildings().iter().filter(|(_, b)| b.level >= 2).collect();
+        assert!(!leveled.is_empty(), "段階の上がった建物がない");
+        // 段階が上がるのは、住む世帯で埋まった住宅か、働く住民で埋まった職場だけである。
+        for (id, b) in &leveled {
+            assert!(occupants.get(id).copied().unwrap_or(0) > 0, "{b:?}");
+        }
     }
 
     #[test]
@@ -663,7 +732,7 @@ mod tests {
     }
 
     #[test]
-    fn services_supply_connected_buildings_so_they_level_up() {
+    fn services_supply_only_connected_buildings() {
         let mut w = zoned_street();
         // 同じ種類の区画を、つながっていない別の通りにも塗る。
         let far = Command::BuildRoad {
@@ -683,24 +752,33 @@ mod tests {
             assert_eq!(w.apply(&paint), ApplyOutcome::Applied);
         }
         let money = w.money();
-        // 発電所は (0..=3, 6..=9)、浄水場は (6..=7, 8..=9) を占め、y = 10 の道路に面する。
-        assert_eq!(
-            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
-            ApplyOutcome::Applied
-        );
-        assert_eq!(
-            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
-            ApplyOutcome::Applied
-        );
+        // 発電所は (0..=3, 6..=9) と (10..=13, 6..=9)、浄水場は (6..=7, 8..=9) と (8..=9, 8..=9) を占め、
+        // y = 10 の道路に面する。
+        for x in [3, 13] {
+            assert_eq!(
+                place(&mut w, ServiceKind::PowerPlant, (x, 9), 2),
+                ApplyOutcome::Applied
+            );
+        }
+        for x in [7, 9] {
+            assert_eq!(
+                place(&mut w, ServiceKind::WaterPump, (x, 9), 2),
+                ApplyOutcome::Applied
+            );
+        }
         assert_eq!(
             w.money(),
-            money - ServiceKind::PowerPlant.cost() - ServiceKind::WaterPump.cost()
+            money
+                - ServiceKind::PowerPlant.cost()
+                - ServiceKind::PowerPlant.cost()
+                - ServiceKind::WaterPump.cost()
+                - ServiceKind::WaterPump.cost()
         );
         assert_eq!(
             w.tile_state(TilePos::new(0, 6)),
             Some((None, TileUse::Facility))
         );
-        run(&mut w, LEVEL_UP_TICKS + 2 * GROWTH_INTERVAL);
+        run(&mut w, 2 * LEVEL_UP_TICKS);
         check_buildings(&w);
         let mut near = 0;
         for (_, b) in w.buildings().iter() {
@@ -712,7 +790,6 @@ mod tests {
             }
         }
         assert!(near > 0);
-        assert!(w.buildings().iter().any(|(_, b)| b.level >= 2));
         // 道路を施設の上に引くことはできない。
         let over = Command::BuildRoad {
             from: TilePos::new(1, 0),

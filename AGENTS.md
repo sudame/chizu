@@ -45,9 +45,15 @@ mise run build         # build:wasm と build:web をまとめて回す
 mise run build:wasm    # chizu-wasm をスレッドつきでビルドし、wasm-bindgen で web/wasm につなぎのコードを作る
 mise run build:web     # Vite で web/dist にビルドする
 mise run dev           # WASM をビルドしてから Vite の開発サーバーを立てる
+mise run play          # 遊ぶ用の開発サーバーを立てっぱなしにし、origin の main が進んだら立て直す
+mise run test:play     # scripts/play.sh の小さな関数を確かめる
 mise run bench         # ネイティブのベンチマーク（criterion）。CI では回さない
 mise run build:bench   # ベンチマークをビルドだけする。CI はこれでベンチが壊れていないかを見る
 ```
+
+`mise run play` は `~/.cache/chizu-play` に origin を clone し、60 秒ごとに main を見て、進んでいたらビルドし直して立て直す。開いているページは自動で読み直され、右下に配信している版が出る。
+ビルドに失敗した版は飛ばし、前の版を配信し続ける。ポートは既定で 5173 で、`mise run play -- --port 5180` か `CHIZU_PLAY_PORT` で変える。フィードバックはリポジトリ本体の `feedback/` に書く。
+1 つの置き場所で動かせるのは 1 つだけで、2 つ動かすときは `CHIZU_PLAY_DIR` とポートを変える。
 
 `test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。
 
@@ -82,6 +88,18 @@ mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファ�
 ```sh
 cargo run -p chizu-cli -- feedback/<日時>-<番号>/commands.rec <seed> <tick>
 ```
+
+## 保存
+
+ブラウザの中の保存は、種、tick、コマンドの記録だけを IndexedDB（`chizu` の `saves`）に書く。
+読み込むときは、種から作った街に記録を再生して同じ状態を作り直す。
+
+- 枠は自動保存 1 つと手動保存 3 つである。自動保存は、ゲーム内の日が変わったときと、実時間で 1 分たって何か変わっていたときに走る。
+- 自動保存があるときに新しく始めると、前の自動保存を「自動保存（前の街）」の枠に退避する。
+- 自動保存の枠に書けるのは、Web Locks の `chizu-auto-save` を取れた 1 つのタブだけである。
+- 保存データを作るのと再生するのは `crates/chizu-wasm/src/save.rs`、画面の側は `web/src/save/` にある。IndexedDB に書くのはメインスレッドで、再生は Worker の中で少しずつ回す。
+- 記録の形式の版が違う保存データは読めないものとして断る。版の運用は `crates/chizu-core/src/record.rs` の先頭にある。
+- 保存データには状態ハッシュを添えてあり、読み込んで作り直した街のハッシュと食い違えば画面に示す。
 
 ## 依存の更新
 

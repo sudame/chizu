@@ -314,7 +314,7 @@ impl Sim {
             capacity.households as f64,
             capacity.workplaces.iter().sum::<u64>() as f64,
         ];
-        out.extend(demand(capacity).map(|d| d as f64));
+        out.extend(demand(&self.world.city_stats()).map(|d| d as f64));
         let [power, water, power_short, water_short] = crate::layers::utility_totals(&self.world);
         let need: u64 = buildings.iter().map(|(_, b)| building_demand(b)).sum();
         out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
@@ -594,6 +594,17 @@ mod tests {
     fn cached_buildings_version_follows_supply_changes() {
         let mut sim = Sim::new(0);
         sim.submit(road((10, 10), (30, 10))).unwrap();
+        // 段階が上がるには住む世帯で埋まる必要があるので、外の世界とつなぐ
+        let inner = chizu_core::world::highway_line(0).start;
+        let corner = (inner.x, 10);
+        for (from, to) in [
+            ((inner.x, inner.y), corner),
+            (corner, (inner.x.clamp(10, 30), 10)),
+        ] {
+            if from != to {
+                sim.submit(road(from, to)).unwrap();
+            }
+        }
         for (kind, x) in [(ServiceKind::PowerPlant, 16), (ServiceKind::WaterPump, 20)] {
             sim.submit(Command::PlaceBuilding {
                 kind,

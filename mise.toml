@@ -65,13 +65,17 @@ dir = "web"
 run = "pnpm exec vitest run"
 
 [tasks."test:wasm"]
-description = "ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかを確かめる"
+description = "ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかと、保存と読み込みを確かめる"
 depends = ["build:web"]
 dir = "web"
-run = "node scripts/test-wasm.ts"
+run = ["node scripts/test-wasm.ts", "node scripts/test-save.ts"]
+
+[tasks."test:play"]
+description = "scripts/play.sh の小さな関数を確かめる"
+run = "bash scripts/play-test.sh"
 
 [tasks.test]
-depends = ["test:rust", "test:web", "test:wasm"]
+depends = ["test:rust", "test:web", "test:wasm", "test:play"]
 
 [tasks.bench]
 description = "ネイティブのベンチマークを criterion で回す。CI では回さない"
@@ -100,3 +104,7 @@ depends = ["build:wasm", "build:web"]
 depends = ["install:web", "build:wasm"]
 dir = "web"
 run = "pnpm exec vite"
+
+[tasks.play]
+description = "遊ぶ用の開発サーバーを立てっぱなしにし、origin の main が進んだらビルドし直して配信し直す"
+run = "scripts/play.sh"

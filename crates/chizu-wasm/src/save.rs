@@ -236,15 +236,32 @@ pub struct SavePayload {
 
 #[wasm_bindgen]
 impl SavePayload {
-    /// 種、tick、記録の件数、状態ハッシュに、画面に並べる日、時刻、所持金を添えた JSON。
-    /// 種と所持金は JS の数で誤差なく表せないことがあるので、文字列にする。
+    /// [`Simulation::save_meta`] と同じ形の JSON。
     pub fn meta(&self) -> String {
         self.meta.clone()
     }
 
-    pub fn commands(&self) -> Vec<u8> {
-        self.commands.clone()
+    /// 記録のバイト列を取り出す。複製しないので、2 度目は空になる。
+    pub fn take_commands(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.commands)
     }
+}
+
+/// 記録のバイト列を除いた保存データの JSON。記録は encode しない。
+fn meta_json(sim: &Sim) -> String {
+    let w = sim.world();
+    let time = GameTime::at(w.tick());
+    format!(
+        "{{\"formatVersion\":{},\"seed\":\"{}\",\"tick\":{},\"commandCount\":{},\"stateHash\":\"{:016x}\",\"day\":{},\"secondOfDay\":{},\"money\":\"{}\"}}",
+        FORMAT_VERSION,
+        w.seed(),
+        w.tick().0,
+        sim.log().next_seq(),
+        w.state_hash(),
+        time.day,
+        time.second_of_day,
+        w.money().0,
+    )
 }
 
 #[wasm_bindgen]
@@ -256,24 +273,17 @@ impl Simulation {
         vec![w.tick().0 as f64, day as f64, self.0.log().len() as f64]
     }
 
+    /// 種、tick、記録の件数、状態ハッシュに、画面に並べる日、時刻、所持金を添えた JSON。
+    /// 種と所持金は JS の数で誤差なく表せないことがあるので、文字列にする。
+    pub fn save_meta(&self) -> String {
+        meta_json(&self.0)
+    }
+
     /// いまの状態の保存データ。メタデータと記録は同じ時点のものである。
     pub fn save(&self) -> SavePayload {
-        let data = SaveData::of(&self.0);
-        let time = GameTime::at(self.0.world().tick());
-        let meta = format!(
-            "{{\"formatVersion\":{},\"seed\":\"{}\",\"tick\":{},\"commandCount\":{},\"stateHash\":\"{:016x}\",\"day\":{},\"secondOfDay\":{},\"money\":\"{}\"}}",
-            data.format_version,
-            data.seed,
-            data.tick,
-            data.command_count,
-            data.state_hash,
-            time.day,
-            time.second_of_day,
-            self.0.world().money().0,
-        );
         SavePayload {
-            meta,
-            commands: data.commands,
+            meta: meta_json(&self.0),
+            commands: self.0.log().encode(),
         }
     }
 }
@@ -531,6 +541,22 @@ mod tests {
         );
         data.tick = MAX_SAVED_TICK;
         assert!(Restore::new(&data).is_ok());
+    }
+
+    #[test]
+    fn meta_matches_the_save_data() {
+        let mut sim = Sim::new(6);
+        build_city(&mut sim);
+        let data = SaveData::of(&sim);
+        let meta = meta_json(&sim);
+        for part in [
+            format!("\"seed\":\"{}\"", data.seed),
+            format!("\"tick\":{},", data.tick),
+            format!("\"commandCount\":{},", data.command_count),
+            format!("\"stateHash\":\"{:016x}\"", data.state_hash),
+        ] {
+            assert!(meta.contains(&part), "{meta} に {part} がない");
+        }
     }
 
     #[test]
