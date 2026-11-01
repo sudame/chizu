@@ -427,7 +427,7 @@ Rust のジョブは `~/.cargo` と `target` をキャッシュする。
 
 ## 9. 実装の順番
 
-1 本の PR は数百行を目安にする。各 PR で `mise run test` と `mise run lint` が通る状態を保つ。
+1 本の PR は、revert しても意味が通る 1 つの目的に絞る。各 PR で `mise run test` と `mise run lint` が通る状態を保つ。
 
 | # | PR | 主な中身 |
 |---|---|---|
