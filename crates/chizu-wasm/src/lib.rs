@@ -90,7 +90,7 @@ impl Simulation {
                     ApplyOutcome::Applied => "Applied",
                     ApplyOutcome::NotImplemented => "NotImplemented",
                     ApplyOutcome::Rejected => "Rejected",
-                    ApplyOutcome::Denied => "Denied",
+                    ApplyOutcome::Denied(_) => "Denied",
                 };
                 set(&o, "outcome", JsValue::from_str(outcome));
                 if let Some(reason) = r.reason {

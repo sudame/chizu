@@ -101,7 +101,7 @@ impl Sim {
                 && e.tick == self.world.tick()
             {
                 let outcome = self.world.apply(&e.command);
-                let reason = (outcome == ApplyOutcome::Denied)
+                let reason = matches!(outcome, ApplyOutcome::Denied(_))
                     .then(|| denial_reason(&self.world, &e.command));
                 if outcome == ApplyOutcome::Applied
                     && matches!(
@@ -314,7 +314,10 @@ mod tests {
                 .iter()
                 .map(|r| (r.seq, r.outcome))
                 .collect::<Vec<_>>(),
-            [(0, ApplyOutcome::Applied), (1, ApplyOutcome::Denied)]
+            [
+                (0, ApplyOutcome::Applied),
+                (1, ApplyOutcome::Denied(chizu_core::DenyReason::Overlap))
+            ]
         );
         assert_eq!(
             reports[1].reason,
