@@ -173,6 +173,8 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::NothingToBulldoze => "範囲に消せる道路がない",
         DenyReason::NotAdjacent => "買った土地に接していない",
         DenyReason::AlreadyOwned => "もう買ってある",
+        DenyReason::NoZonableTile => "道路沿いに区画を塗れるマスがない",
+        DenyReason::ZoneUnchanged => "変わるマスがない",
     }
 }
 

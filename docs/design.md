@@ -158,7 +158,7 @@ pub struct Households { pub home: Vec<BuildingId>, pub money: Vec<i64>, pub memb
 pub enum Command {
     BuildRoad { from: TilePos, to: TilePos, kind: RoadKind },
     Bulldoze { area: TileRect },
-    PaintZone { area: TileRect, zone: ZoneKind },
+    PaintZone { area: TileRect, zone: Option<ZoneKind> },   // None で区画を消す
     PlaceBuilding { kind: ServiceKind, at: TilePos, rotation: u8 },
     SetSignal { node: NodeId, on: bool },
     BuyChunk { coord: ChunkCoord },

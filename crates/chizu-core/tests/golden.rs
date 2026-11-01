@@ -59,6 +59,12 @@ fn scenarios() -> Vec<Scenario> {
             ticks: 400,
             log: road_network(42),
         },
+        Scenario {
+            name: "zoning",
+            seed: 42,
+            ticks: 300,
+            log: zoning(),
+        },
     ]
 }
 
@@ -99,6 +105,45 @@ fn road_network(seed: u64) -> CommandLog {
     rec(100, bulldoze((39, 10), (41, 12)));
     rec(100, bulldoze((-50, -50), (-40, -40)));
     rec(200, road((40, 0), (40, 30), RoadKind::Small));
+    log
+}
+
+/// 道路沿いに区画を塗り、消し、道路を消して区画が消える記録。塗れるマスがない場合と、
+/// 変わるマスがない場合の却下も混ぜる。
+fn zoning() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let road = |from: (i64, i64), to: (i64, i64)| Command::BuildRoad {
+        from: TilePos::new(from.0, from.1),
+        to: TilePos::new(to.0, to.1),
+        kind: RoadKind::Small,
+    };
+    let rect = |a: (i64, i64), b: (i64, i64)| {
+        TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1))
+    };
+    let paint = |a, b, zone| Command::PaintZone {
+        area: rect(a, b),
+        zone,
+    };
+    rec(10, road((0, 0), (30, 0)));
+    rec(10, road((0, 12), (30, 12)));
+    rec(20, paint((0, -6), (30, 18), Some(ZoneKind::Residential)));
+    rec(20, paint((0, -6), (30, -1), Some(ZoneKind::Office)));
+    rec(
+        30,
+        paint((100, 100), (110, 110), Some(ZoneKind::Commercial)),
+    );
+    rec(30, paint((0, -6), (30, -1), Some(ZoneKind::Office)));
+    rec(40, paint((0, 1), (5, 5), None));
+    rec(
+        100,
+        Command::Bulldoze {
+            area: rect((15, 12), (15, 12)),
+        },
+    );
+    rec(110, paint((0, 1), (5, 5), None));
     log
 }
 
@@ -154,7 +199,7 @@ fn clock_and_commands() -> CommandLog {
         0,
         Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(0, 1), TilePos::new(20, 4)),
-            zone: ZoneKind::Residential,
+            zone: Some(ZoneKind::Residential),
         },
     );
     rec(30, tax(ZoneKind::Residential, 120));
@@ -257,6 +302,32 @@ fn road_network_covers_the_rules() {
     let inner = net.segment_line(highway).unwrap().start;
     assert_eq!(degree(inner.x, inner.y), 2);
     assert!(world.money() < chizu_core::world::INITIAL_MONEY);
+}
+
+/// 区画の記録が、塗る、消す、道路を消したときの見直し、却下を通っていることを確かめる。
+#[test]
+fn zoning_covers_the_rules() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "zoning")
+        .unwrap();
+    let mut world = World::new(s.seed);
+    let stats = replay(&mut world, &s.log, s.ticks);
+    assert_eq!((stats.applied, stats.denied), (6, 3));
+    assert_denied_by(
+        &stats,
+        &[
+            (DenyReason::NoZonableTile, 1),
+            (DenyReason::ZoneUnchanged, 2),
+        ],
+    );
+    let zone = |x, y| world.zone_at(TilePos::new(x, y));
+    assert_eq!(zone(10, -3), Some(ZoneKind::Office));
+    assert_eq!(zone(10, 3), Some(ZoneKind::Residential));
+    assert_eq!(zone(3, 3), None);
+    // 消した道路にだけ面していたマスは消え、残った下の道路に面するマスは残る。
+    assert_eq!(zone(10, 15), None);
+    assert_eq!(zone(10, 6), Some(ZoneKind::Residential));
 }
 
 fn golden_dir() -> PathBuf {
