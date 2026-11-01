@@ -1,7 +1,11 @@
 //! 街全体の状態。
 
+use std::collections::BTreeMap;
+
+use crate::chunk::Chunk;
 use crate::command::{Command, SimSpeed, ZoneKind};
 use crate::state_hash::{StateHash, StateHasher};
+use crate::tile::ChunkCoord;
 use crate::units::{Money, Tick};
 
 /// 始めたときの所持金。
@@ -9,6 +13,15 @@ pub const INITIAL_MONEY: Money = Money(500_000);
 
 /// 始めたときの税率（‰）。
 pub const INITIAL_TAX_PERMILLE: u16 = 100;
+
+/// 始めたときに買ってあるチャンクの範囲。原点を中心とする 3×3 である。
+pub const START_CHUNK_RADIUS: i32 = 1;
+
+/// 最初に買うチャンクの値段。
+pub const CHUNK_BASE_PRICE: Money = Money(50_000);
+
+/// 1 つ買うごとに、次のチャンクの値段に足す額。
+pub const CHUNK_PRICE_STEP: Money = Money(25_000);
 
 /// コマンドを適用した結果。どの結果でも状態ハッシュには影響しない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,6 +33,8 @@ pub enum ApplyOutcome {
     /// 値が受け付ける範囲の外なので、何もしなかった。記録を通したコマンドは検証済みなので、
     /// 記録を通さずに直接渡された不正なコマンドだけがここに来る。
     Rejected,
+    /// 値は正しいが、いまの状態では受け付けられない（買えない土地、所持金の不足など）ので、何もしなかった。
+    Denied,
 }
 
 /// 街全体の状態の入れ物。
@@ -34,16 +49,31 @@ pub struct World {
     speed: SimSpeed,
     money: Money,
     tax_permille: [u16; 4],
+    /// メモリに置いているチャンク。いまは買った土地だけを置く。
+    chunks: BTreeMap<ChunkCoord, Chunk>,
+    /// 始めてから買ったチャンクの数。最初から買ってあるチャンクは数えない。
+    chunks_bought: u32,
 }
 
 impl World {
     pub fn new(seed: u64) -> World {
+        let r = START_CHUNK_RADIUS;
+        let chunks = (-r..=r)
+            .flat_map(|cy| (-r..=r).map(move |cx| ChunkCoord::new(cx, cy)))
+            .map(|coord| {
+                let mut chunk = Chunk::generate(seed, coord);
+                chunk.set_owned();
+                (coord, chunk)
+            })
+            .collect();
         World {
             seed,
             tick: Tick::ZERO,
             speed: SimSpeed::NORMAL,
             money: INITIAL_MONEY,
             tax_permille: [INITIAL_TAX_PERMILLE; 4],
+            chunks,
+            chunks_bought: 0,
         }
     }
 
@@ -68,6 +98,44 @@ impl World {
         self.tax_permille[zone.index()]
     }
 
+    pub fn chunk(&self, coord: ChunkCoord) -> Option<&Chunk> {
+        self.chunks.get(&coord)
+    }
+
+    /// メモリに置いているチャンクを座標の順に返す。
+    pub fn chunks(&self) -> impl Iterator<Item = &Chunk> {
+        self.chunks.values()
+    }
+
+    pub fn is_owned(&self, coord: ChunkCoord) -> bool {
+        self.chunk(coord).is_some_and(|c| c.owned())
+    }
+
+    /// 次に買うチャンクの値段。買うたびに一定額ずつ上がる。
+    pub fn next_chunk_price(&self) -> Money {
+        CHUNK_BASE_PRICE + Money(CHUNK_PRICE_STEP.0 * i64::from(self.chunks_bought))
+    }
+
+    /// まだ買っておらず、買った土地と辺を接するチャンクか。
+    pub fn can_buy_chunk(&self, coord: ChunkCoord) -> bool {
+        !self.is_owned(coord) && coord.edge_neighbors().any(|n| self.is_owned(n))
+    }
+
+    fn buy_chunk(&mut self, coord: ChunkCoord) -> ApplyOutcome {
+        let price = self.next_chunk_price();
+        if !self.can_buy_chunk(coord) || self.money < price {
+            return ApplyOutcome::Denied;
+        }
+        self.money = self.money - price;
+        self.chunks_bought += 1;
+        let seed = self.seed;
+        self.chunks
+            .entry(coord)
+            .or_insert_with(|| Chunk::generate(seed, coord))
+            .set_owned();
+        ApplyOutcome::Applied
+    }
+
     /// コマンドを 1 つ適用する。いまの tick の頭で呼ぶ。
     pub fn apply(&mut self, command: &Command) -> ApplyOutcome {
         if command.validate().is_err() {
@@ -82,12 +150,12 @@ impl World {
                 self.tax_permille[zone.index()] = permille;
                 ApplyOutcome::Applied
             }
+            Command::BuyChunk { coord } => self.buy_chunk(coord),
             Command::BuildRoad { .. }
             | Command::Bulldoze { .. }
             | Command::PaintZone { .. }
             | Command::PlaceBuilding { .. }
-            | Command::SetSignal { .. }
-            | Command::BuyChunk { .. } => ApplyOutcome::NotImplemented,
+            | Command::SetSignal { .. } => ApplyOutcome::NotImplemented,
         }
     }
 
@@ -111,14 +179,15 @@ impl StateHash for World {
         h.write(&self.speed.multiplier());
         h.write(&self.money);
         h.write(&self.tax_permille);
+        h.write(&self.chunks);
+        h.write(&self.chunks_bought);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::MAX_TAX_PERMILLE;
-    use crate::tile::ChunkCoord;
+    use crate::command::{MAX_TAX_PERMILLE, NodeId};
 
     #[test]
     fn step_advances_tick() {
@@ -182,10 +251,84 @@ mod tests {
     fn not_implemented_commands_leave_state_unchanged() {
         let mut w = World::new(0);
         let before = w.clone();
-        let cmd = Command::BuyChunk {
-            coord: ChunkCoord::new(1, -1),
+        let cmd = Command::SetSignal {
+            node: NodeId {
+                index: 0,
+                generation: 0,
+            },
+            on: true,
         };
         assert_eq!(w.apply(&cmd), ApplyOutcome::NotImplemented);
         assert_eq!(w, before);
+    }
+
+    fn buy(w: &mut World, cx: i32, cy: i32) -> ApplyOutcome {
+        w.apply(&Command::BuyChunk {
+            coord: ChunkCoord::new(cx, cy),
+        })
+    }
+
+    #[test]
+    fn starts_with_the_chunks_around_the_origin() {
+        let w = World::new(5);
+        let owned: Vec<_> = w.chunks().filter(|c| c.owned()).collect();
+        assert_eq!(owned.len(), 9);
+        for cx in -1..=1 {
+            for cy in -1..=1 {
+                assert!(w.is_owned(ChunkCoord::new(cx, cy)));
+            }
+        }
+        assert!(!w.is_owned(ChunkCoord::new(2, 0)));
+        assert_eq!(w.next_chunk_price(), CHUNK_BASE_PRICE);
+    }
+
+    #[test]
+    fn buying_an_adjacent_chunk_pays_and_generates_its_terrain() {
+        let mut w = World::new(5);
+        let before = w.state_hash();
+        assert_eq!(buy(&mut w, 2, 0), ApplyOutcome::Applied);
+        assert_eq!(w.money(), INITIAL_MONEY - CHUNK_BASE_PRICE);
+        let coord = ChunkCoord::new(2, 0);
+        let c = w.chunk(coord).unwrap();
+        assert!(c.owned());
+        assert_eq!(c.version(), 1);
+        assert_eq!(*c.terrain(), crate::terrain::terrain(5, coord));
+        assert_ne!(w.state_hash(), before);
+        // 買った土地の隣は、さらに買える。
+        assert_eq!(w.next_chunk_price(), CHUNK_BASE_PRICE + CHUNK_PRICE_STEP);
+        assert_eq!(buy(&mut w, 3, 0), ApplyOutcome::Applied);
+    }
+
+    #[test]
+    fn buying_is_denied_for_owned_detached_or_diagonal_chunks() {
+        let mut w = World::new(5);
+        let before = w.clone();
+        for (cx, cy) in [(0, 0), (1, 1), (3, 0), (2, 2), (-2, -2), (i32::MIN, 0)] {
+            assert_eq!(buy(&mut w, cx, cy), ApplyOutcome::Denied, "({cx}, {cy})");
+        }
+        assert_eq!(w, before);
+    }
+
+    #[test]
+    fn buying_is_denied_without_enough_money() {
+        let mut w = World::new(5);
+        let mut spent = Money::ZERO;
+        let mut bought = 0;
+        // 原点から右へ一列に買い進め、所持金が尽きたところで止まる。
+        for cx in 2..100 {
+            let price = w.next_chunk_price();
+            if w.money() < price {
+                let before = w.clone();
+                assert_eq!(buy(&mut w, cx, 0), ApplyOutcome::Denied);
+                assert_eq!(w, before);
+                break;
+            }
+            assert_eq!(buy(&mut w, cx, 0), ApplyOutcome::Applied);
+            spent = spent + price;
+            bought += 1;
+        }
+        assert!(bought > 0);
+        assert_eq!(w.money(), INITIAL_MONEY - spent);
+        assert!(w.money() < w.next_chunk_price());
     }
 }

@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use xxhash_rust::xxh3::Xxh3;
 
+use crate::tile::ChunkCoord;
 use crate::units::{LaneOffset, Mm, MmPerTick, Money, Tick, WorldPos};
 
 /// 状態ハッシュに書き出せる型。
@@ -209,6 +210,13 @@ impl StateHash for LaneOffset {
 impl StateHash for Money {
     fn write_state(&self, h: &mut StateHasher) {
         self.0.write_state(h);
+    }
+}
+
+impl StateHash for ChunkCoord {
+    fn write_state(&self, h: &mut StateHasher) {
+        self.cx.write_state(h);
+        self.cy.write_state(h);
     }
 }
 

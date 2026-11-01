@@ -8,3 +8,11 @@ publish = false
 
 [profile.release]
 overflow-checks = true
+
+# ゴールデンのテストは毎 tick 状態ハッシュをとるので、テストも最適化して回す。
+# dev の profile なので、overflow-checks と debug-assertions は有効なままである。
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
