@@ -75,6 +75,8 @@ impl Scratches {
 /// 時間帯は覚える範囲を区切る。
 #[derive(Clone, Debug)]
 pub struct AstarRouter {
+    /// グラフを作ったときの網の版。
+    version: u64,
     car: Graph,
     walk: Graph,
     connectors: Vec<Connector>,
@@ -100,6 +102,7 @@ type Solved = Vec<(RouteRequest, Option<Arc<Route>>)>;
 impl AstarRouter {
     pub fn new(net: &Network) -> AstarRouter {
         AstarRouter {
+            version: net.version(),
             car: Graph::build(net, LaneMode::Car),
             walk: Graph::build(net, LaneMode::Sidewalk),
             connectors: connectors(net),
@@ -108,6 +111,20 @@ impl AstarRouter {
             cache_limit: DEFAULT_CACHE_LIMIT,
             cache: BTreeMap::new(),
         }
+    }
+
+    /// グラフを作ったときの網の版。
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// 網の版が変わっていたら作り直す。作り直したら `true`。
+    pub fn sync(&mut self, net: &Network) -> bool {
+        if self.version == net.version() {
+            return false;
+        }
+        self.rebuild(net);
+        true
     }
 
     /// 1 対多の探索に束ねる依頼の数の下限を変える。`usize::MAX` なら束ねずにすべて A* で解く。
