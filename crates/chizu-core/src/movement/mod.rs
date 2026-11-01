@@ -3,12 +3,16 @@
 //! 移動の主体は、経路と、いまのリンクの上の位置（リンクの始まりからの距離）を持つ。
 //! 1 tick に移動の 1 秒ぶん進み、行き先に着いたら消える。歩行者どうしはぶつからない。
 //! 車は同じ車線の前の車との車間で速さを決め、ノードで次のリンクの車線へ移る。
+//! 交差点では、衝突する向きの車に譲ってノードの手前で待つ（`junction`）。
 //! 建物から建物へ車で向かう移動は、歩く → 車 → 歩く の 3 つの区切りを順に進む（`parking`）。
 
 mod car;
 #[cfg(test)]
 mod car_tests;
 mod commute;
+mod junction;
+#[cfg(test)]
+mod junction_tests;
 mod parking;
 #[cfg(test)]
 mod parking_tests;
@@ -46,6 +50,8 @@ pub struct Trip {
     speed: MmPerTick,
     /// 出発の位置の車線に空きがなく、車線の上に出るのを待っている車か。
     waiting: bool,
+    /// 交差点の手前で、ほかの車に譲って待った tick 数。ノードを抜けたら 0 に戻す。
+    waited: u32,
     /// いま歩いているリンクの、経路の中での番号。
     leg: u32,
     offset: LaneOffset,
@@ -450,15 +456,15 @@ impl Trips {
                     continue;
                 };
                 let old = self.get(id).expect("探し直す主体がない");
-                let (departed, speed, waiting, then) =
-                    (old.departed, old.speed, old.waiting, old.then);
+                let (departed, speed, waiting, waited, then) =
+                    (old.departed, old.speed, old.waiting, old.waited, old.then);
                 // 探し直す前の、リンクの中の車線の番号。網が変わると車線の ID も変わるので番号で覚える。
                 let index = net
                     .link_lanes(old.link())
                     .position(|l| l == old.lane)
                     .unwrap_or(0);
                 let mut t = make_trip(net, route, ends, dest, departed);
-                (t.speed, t.waiting, t.then) = (speed, waiting, then);
+                (t.speed, t.waiting, t.waited, t.then) = (speed, waiting, waited, then);
                 self.rows[id.slot()] = Some(t);
                 if mode == LaneMode::Car && !waiting {
                     car::keep_lane(&mut self.rows, net, id.slot(), index);
@@ -504,6 +510,7 @@ fn make_trip(
         lane: net.link_lanes(first).next().expect("リンクに車線がない"),
         speed: MmPerTick::ZERO,
         waiting: false,
+        waited: 0,
         route,
         leg: 0,
         offset: from,
@@ -525,6 +532,7 @@ impl StateHash for Trip {
         h.write(&self.lane);
         h.write(&self.speed);
         h.write(&self.waiting);
+        h.write(&self.waited);
         h.write_len(self.route.links.len());
         for l in &self.route.links {
             h.write(&l.segment);

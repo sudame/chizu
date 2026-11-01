@@ -4,8 +4,11 @@
 //!    速さは、加速の上限、道路の最高速度、前の車に対する安全速度（Krauss 型）、着く位置に近づく速さの
 //!    いちばん小さい値にする。前に車がなくリンクの先へ進む車は、次に入る車線の最後尾を前の車とみなす。
 //!    前の車がこの tick に止まっても重ならない距離までしか進まない。
+//!    交差点（`junction`）でほかの車に譲る車は、ノードの手前で止まる速さまでしか出さない。
 //! 2. リンクの終わりを越えた車を、ノード、主体の番号の順に 1 台ずつ次のリンクへ移す。
 //!    移る先の車線の最後尾との車間が足りなければ、リンクの終わりで止める。
+//!
+//! 1. の前に、前の tick の状態だけを読んで、交差点ごとに手前で止める車をノードの順に決める。
 
 use std::collections::BTreeMap;
 
@@ -13,6 +16,7 @@ use std::collections::BTreeMap;
 use rayon::prelude::*;
 
 use super::Trip;
+use super::junction::{self, Approach, Inside};
 use crate::command::NodeId;
 use crate::network::{Dir, LaneId, LaneMode, LinkId, Network};
 use crate::routing::{Connector, speed_limit};
@@ -174,14 +178,6 @@ impl LaneState {
     }
 }
 
-/// 候補の車線のうち、車の少ない車線。同じなら番号の小さい車線にする。
-pub(super) fn emptiest(lanes: &[LaneId], st: &LaneState) -> LaneId {
-    *lanes
-        .iter()
-        .min_by_key(|l| (st.count(**l), **l))
-        .expect("候補の車線がない")
-}
-
 /// `next` のリンクで入る車線。`from` からつながる車線のうち、その次のリンク `after` へつながる車線を選び、
 /// その中で車の少ない車線にする。`from` からつながる車線がなければ、`next` の車線から選ぶ。
 pub(super) fn choose_lane(
@@ -193,26 +189,31 @@ pub(super) fn choose_lane(
     next: LinkId,
     after: Option<LinkId>,
 ) -> LaneId {
-    let lanes: Vec<LaneId> = net.link_lanes(next).collect();
-    let mut cands: Vec<LaneId> = from_lane(conn, node, from)
-        .iter()
-        .map(|c| c.to)
-        .filter(|l| lanes.contains(l))
-        .collect();
-    if cands.is_empty() {
-        cands = lanes;
-    }
-    let lanes_after: Vec<LaneId> = after
-        .map(|a| net.link_lanes(a).collect())
-        .unwrap_or_default();
-    let reaches = |l: &LaneId| {
-        after.is_none()
-            || from_lane(conn, end_node(net, next), *l)
-                .iter()
-                .any(|c| lanes_after.contains(&c.to))
+    let on = |l: LaneId, link: LinkId| {
+        net.lane(l)
+            .is_some_and(|x| (x.segment, x.dir, x.mode) == (link.segment, link.dir, link.mode))
     };
-    let good: Vec<LaneId> = cands.iter().copied().filter(reaches).collect();
-    emptiest(if good.is_empty() { &cands } else { &good }, st)
+    let reaches = |l: &LaneId| {
+        after.is_none_or(|a| {
+            from_lane(conn, end_node(net, next), *l)
+                .iter()
+                .any(|c| on(c.to, a))
+        })
+    };
+    let joined = || {
+        from_lane(conn, node, from)
+            .iter()
+            .map(|c| c.to)
+            .filter(move |l| on(*l, next))
+    };
+    // 車の少ない車線。同じなら番号の小さい車線にする。
+    let best = |good: &mut dyn Iterator<Item = LaneId>| good.min_by_key(|l| (st.count(*l), *l));
+    let found = if joined().next().is_some() {
+        best(&mut joined().filter(reaches)).or_else(|| best(&mut joined()))
+    } else {
+        best(&mut net.link_lanes(next).filter(reaches)).or_else(|| best(&mut net.link_lanes(next)))
+    };
+    found.expect("候補の車線がない")
 }
 
 /// 速さ `v` から、1 tick に `CAR_DECEL` ずつ落として止まるまでに進む距離。
@@ -248,8 +249,11 @@ fn entry_speed(left: i64, v_next: i64) -> i64 {
 /// 止まるまでの距離の和を超えないようにする。前の tick にこの条件を満たしていれば、減速は上限に収まる。
 ///
 /// 合流では減速の上限を破りうる。ノードで次の車線へ移るときに位置をずらされた車や、入れ替わった
-/// 最後尾は、前の tick の条件を満たしていないためである。重なりは起きない。信号と衝突区間の PR（13）で、
-/// ノードの手前で待たせる形にして直す。
+/// 最後尾は、前の tick の条件を満たしていないためである。重なりは起きない。
+/// 交差点では、別のリンクから同じリンクへ入る車をノードの手前で待たせるので、横から入った車で
+/// 最後尾が入れ替わるのは、止まりきれない車どうしが同じ tick に入るときだけになる。
+/// 同じリンクの何本かの車線が 1 本へ寄るときと、先の車線の最後尾が見込みより進まずに位置を
+/// ずらされたときは、まだ破りうる。
 pub(super) fn safe_speed(me: LaneOffset, at: LaneOffset, v_l: MmPerTick) -> i64 {
     let gap = i64::from(at.0) - i64::from(SPACING) - i64::from(me.0);
     let budget = gap + braking_distance(i64::from(v_l.0.max(0)));
@@ -271,10 +275,12 @@ pub(super) fn safe_speed(me: LaneOffset, at: LaneOffset, v_l: MmPerTick) -> i64 
 
 /// 車の新しい速さと、リンクの始まりからの新しい位置。`leader` は前の車（いまのリンクの始まりから
 /// 数えた位置と速さ）。
+/// `held` なら、交差点でほかの車に譲り、ノードの手前で止まる。
 fn drive(
     net: &Network,
     t: &Trip,
     leader: Option<(LaneOffset, MmPerTick)>,
+    held: bool,
 ) -> (MmPerTick, LaneOffset) {
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
     let mut v = i64::from(t.speed.0)
@@ -291,6 +297,9 @@ fn drive(
         let left = i64::from(t.link_len.0) - i64::from(t.offset.0);
         v = v.min(entry_speed(left, i64::from(speed_limit(next_kind).0)));
     }
+    if held {
+        v = v.min(stop_speed(t));
+    }
     if t.last_leg() {
         // 着く位置には、止まった前の車があるものとして近づき、残りが加速の幅に収まったら着く。
         let left = i64::from(t.dest_offset.0) - i64::from(t.offset.0);
@@ -304,6 +313,76 @@ fn drive(
     }
     let v = MmPerTick(i32::try_from(v.max(0)).expect("速さが i32 に収まらない"));
     (v, t.offset.advance(v.distance(1)))
+}
+
+/// リンクの終わりに止まった車があるものとして近づき、リンクの終わりを越えない速さ。
+fn stop_speed(t: &Trip) -> i64 {
+    let left = i64::from(t.link_len.0) - i64::from(t.offset.0);
+    let line = LaneOffset(t.link_len.0.saturating_add(SPACING));
+    safe_speed(t.offset, line, MmPerTick::ZERO).min(left)
+}
+
+/// 位置を求める前に、車線の先頭の車ごとに見ておくこと。
+#[derive(Default)]
+struct Look {
+    /// リンクの先へ進む車が次に入る車線。リンクの終わりが止まれる距離より近いときだけ選ぶ。
+    next_lane: Option<LaneId>,
+    /// 交差点の手前まで来た車。
+    approach: Option<Approach>,
+    /// 交差点の中にいる車。
+    inside: Option<Inside>,
+}
+
+/// `order[k]` の車について [`Look`] を作る。`order` は車線ごとに前から並べた車である。
+fn look(
+    rows: &[Option<Trip>],
+    net: &Network,
+    conn: &[Connector],
+    st: &LaneState,
+    order: &[(LaneId, core::cmp::Reverse<LaneOffset>, usize)],
+    k: usize,
+) -> Look {
+    let (lane, _, i) = order[k];
+    let t = rows[i].as_ref().expect("車の主体がない");
+    let mut out = Look::default();
+    if t.leg > 0 && t.offset.0 < SPACING {
+        let prev = t.route.links[t.leg as usize - 1];
+        let node = end_node(net, prev);
+        if junction::is_junction(net, node) {
+            out.inside = Some((node, prev, t.link()));
+        }
+    }
+    // 後ろの車は前の車に追従するので、車線の先頭の車だけを見る。
+    let head = k == 0 || order[k - 1].0 != lane;
+    if !head || t.last_leg() || !near_end(net, t) {
+        return out;
+    }
+    let node = end_node(net, t.link());
+    let next = t.route.links[t.leg as usize + 1];
+    let after = t.route.links.get(t.leg as usize + 2).copied();
+    let to_lane = choose_lane(net, conn, st, t.lane, node, next, after);
+    out.next_lane = Some(to_lane);
+    if !junction::is_junction(net, node) {
+        return out;
+    }
+    // 先の車線の最後尾がこの tick も同じ速さで進むとして、入った車が交差点を抜けきれるか。
+    let room = st
+        .rear
+        .get(&to_lane)
+        .is_none_or(|(at, v)| i64::from(at.0) + i64::from(v.0) >= 2 * i64::from(SPACING));
+    let seg = net.segment(t.link().segment).expect("リンクの区間がない");
+    out.approach = Some(Approach {
+        id: k,
+        node,
+        from: t.link(),
+        to: next,
+        lane,
+        class: junction::class(seg.kind),
+        committed: stop_speed(t) < i64::from(t.speed.0) - i64::from(CAR_DECEL),
+        room,
+        waited: t.waited,
+    });
+    out
 }
 
 /// リンクの終わりまでが、最高速度から止まるまでの距離と車間より近いか。
@@ -350,6 +429,21 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
         .collect();
     order.sort_unstable();
     let rows_ro = &*rows;
+    let look_at = |k: usize| look(rows_ro, net, conn, &st, &order, k);
+    #[cfg(feature = "parallel")]
+    let looks: Vec<Look> = (0..order.len()).into_par_iter().map(look_at).collect();
+    #[cfg(not(feature = "parallel"))]
+    let looks: Vec<Look> = (0..order.len()).map(look_at).collect();
+    // 交差点の手前で止める車を、前の tick の状態だけからノードの順に決める。
+    let mut held = vec![false; order.len()];
+    let (cands, inside) = looks.iter().fold((Vec::new(), Vec::new()), |mut acc, l| {
+        acc.0.extend(l.approach);
+        acc.1.extend(l.inside);
+        acc
+    });
+    for k in junction::holds(net, cands, inside) {
+        held[k] = true;
+    }
     let plan = |k: usize| {
         let (lane, _, i) = order[k];
         let t = rows_ro[i].as_ref().expect("車の主体がない");
@@ -362,24 +456,15 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
                 (l.offset, l.speed)
             });
         // 前に車がなく、リンクの先へ進むなら、次に入る車線の最後尾を前の車とみなす。
-        let mut next_lane = None;
-        let leader = match ahead {
-            Some(l) => Some(l),
-            // 次の車線の最後尾がこの tick の速さに効くのは、リンクの終わりが止まれる距離より近いときだけである。
-            None if !t.last_leg() && near_end(net, t) => {
-                let node = end_node(net, t.link());
-                let next = t.route.links[t.leg as usize + 1];
-                let after = t.route.links.get(t.leg as usize + 2).copied();
-                let lane = choose_lane(net, conn, &st, t.lane, node, next, after);
-                next_lane = Some(lane);
-                st.rear
-                    .get(&lane)
-                    .map(|(at, v)| (LaneOffset(t.link_len.0.saturating_add(at.0)), *v))
-            }
-            None => None,
-        };
-        let (v, at) = drive(net, t, leader);
-        (i, v, at, next_lane)
+        // 次の車線の最後尾がこの tick の速さに効くのは、リンクの終わりが止まれる距離より近いときだけである。
+        let next_lane = looks[k].next_lane;
+        let leader = ahead.or_else(|| {
+            st.rear
+                .get(&next_lane?)
+                .map(|(at, v)| (LaneOffset(t.link_len.0.saturating_add(at.0)), *v))
+        });
+        let (v, at) = drive(net, t, leader, held[k]);
+        (i, v, at, next_lane, held[k])
     };
     #[cfg(feature = "parallel")]
     let moves: Vec<_> = (0..order.len()).into_par_iter().map(plan).collect();
@@ -388,14 +473,17 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
 
     let mut arrived = Vec::new();
     let mut crossing = Vec::new();
-    for (i, v, at, next_lane) in moves {
+    for (i, v, at, next_lane, held) in moves {
         let t = rows[i].as_mut().expect("車の主体がない");
         (t.speed, t.offset) = (v, at);
+        if held {
+            t.waited = t.waited.saturating_add(1);
+        }
         if t.last_leg() {
             if at >= t.dest_offset {
                 arrived.push(i);
             }
-        } else if at >= t.link_len {
+        } else if at >= t.link_len && !held {
             let lane = next_lane.expect("リンクの先の車線を選んでいない");
             crossing.push((end_node(net, t.link()), i, lane));
         }
@@ -429,6 +517,7 @@ pub(super) fn step(rows: &mut [Option<Trip>], net: &Network, conn: &[Connector])
             None => {}
         }
         t.leg += 1;
+        t.waited = 0;
         t.enter(net, place, Some(lane));
         let r = rear.entry(lane).or_insert(place);
         *r = (*r).min(place);
