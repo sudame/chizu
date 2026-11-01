@@ -5,6 +5,7 @@ pub mod chunk;
 pub mod citizens;
 pub mod clock;
 pub mod command;
+pub mod happiness;
 pub mod id;
 pub mod jobs;
 pub mod movement;
