@@ -7,3 +7,9 @@ publish.workspace = true
 [lints.clippy]
 float_arithmetic = "deny"
 disallowed_types = "deny"
+
+[dependencies]
+xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
+
+[dev-dependencies]
+proptest = "1.12.0"
