@@ -10,12 +10,19 @@
 //! - 海：間隔の広いノイズが低いところ。
 //! - 川：中くらいの間隔のノイズが真ん中の値をとる等高線のまわりの細い帯。滑らかなノイズの
 //!   等高線は途切れずにつながるので、蛇行する川になる。
+//! - 開始地点：始めたときに買ってあるチャンクには水辺を置かない。その外側の
+//!   [`START_MARGIN`] マスのあいだは、離れるほど海と川の閾値を本来の値に近づける。
+//!   閾値も座標だけで決まるので、境目のつながりは崩れない。
 //!
 //! ここを変えると、同じ種から別の地形が生まれ、ゴールデンのハッシュがすべて変わる。
 
 use crate::rng::{RngPurpose, mix_words};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, local_index};
+use crate::world::START_CHUNK_RADIUS;
+
+/// 開始地点のまわりで水辺を抑える幅（マス）。
+pub const START_MARGIN: u64 = 64;
 
 /// ノイズの値の上限。ノイズは `0..=NOISE_MAX` の値をとる。
 const NOISE_MAX: u64 = 0xFFFF;
@@ -100,12 +107,33 @@ fn layered_noise(seed: u64, octaves: &[Octave], x: i64, y: i64) -> u64 {
 
 /// マスが水辺（海か川）か。種とワールド座標だけで決まる。
 pub fn is_water(seed: u64, tile: TilePos) -> bool {
+    let d = distance_from_start(tile).min(START_MARGIN);
+    if d == 0 {
+        return false;
+    }
     let (x, y) = (tile.x, tile.y);
-    if layered_noise(seed, &SEA_OCTAVES, x, y) < SEA_LEVEL {
+    if layered_noise(seed, &SEA_OCTAVES, x, y) < SEA_LEVEL * d / START_MARGIN {
         return true;
     }
     let mid = NOISE_MAX.div_ceil(2);
-    layered_noise(seed, &RIVER_OCTAVES, x, y).abs_diff(mid) < RIVER_HALF_WIDTH
+    layered_noise(seed, &RIVER_OCTAVES, x, y).abs_diff(mid) < RIVER_HALF_WIDTH * d / START_MARGIN
+}
+
+/// 始めたときに買ってあるチャンクからのチェビシェフ距離（マス）。中なら 0。
+fn distance_from_start(tile: TilePos) -> u64 {
+    let side = CHUNK_SIDE as i64;
+    let r = i64::from(START_CHUNK_RADIUS);
+    let (min, max) = (-r * side, (r + 1) * side - 1);
+    let axis = |v: i64| {
+        if v < min {
+            min.abs_diff(v)
+        } else if v > max {
+            v.abs_diff(max)
+        } else {
+            0
+        }
+    };
+    axis(tile.x).max(axis(tile.y))
 }
 
 /// 1 つのチャンクの地形。
@@ -252,6 +280,39 @@ mod tests {
             }
         }
         assert!(crossings > 0, "境目を越える水辺が 1 つもない");
+    }
+
+    #[test]
+    fn start_chunks_have_no_water() {
+        let r = START_CHUNK_RADIUS;
+        let mut water_nearby = 0;
+        for seed in 0..32 {
+            for cx in -r..=r {
+                for cy in -r..=r {
+                    let t = terrain(seed, ChunkCoord::new(cx, cy));
+                    assert_eq!(t.water_count(), 0, "種 {seed}、({cx}, {cy})");
+                }
+            }
+            // すぐ外のチャンクには水辺が出てよい。
+            for c in [(r + 1, 0), (-r - 1, 0), (0, r + 1), (0, -r - 1)] {
+                water_nearby += terrain(seed, ChunkCoord::new(c.0, c.1)).water_count();
+            }
+        }
+        assert!(water_nearby > 0, "開始地点のすぐ外に水辺が 1 つもない");
+    }
+
+    #[test]
+    fn distance_from_start_is_zero_only_inside() {
+        let side = CHUNK_SIDE as i64;
+        let r = i64::from(START_CHUNK_RADIUS);
+        let (min, max) = (-r * side, (r + 1) * side - 1);
+        assert_eq!(distance_from_start(TilePos::new(min, max)), 0);
+        assert_eq!(distance_from_start(TilePos::new(min - 1, 0)), 1);
+        assert_eq!(distance_from_start(TilePos::new(0, max + 3)), 3);
+        assert_eq!(
+            distance_from_start(TilePos::new(i64::MIN, i64::MAX)),
+            min.abs_diff(i64::MIN)
+        );
     }
 
     #[test]

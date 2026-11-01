@@ -121,6 +121,7 @@ impl World {
         !self.is_owned(coord) && coord.edge_neighbors().any(|n| self.is_owned(n))
     }
 
+    // 人口のマイルストーンで買える枠が増える仕組みは、マイルストーンを入れるときに足す。
     fn buy_chunk(&mut self, coord: ChunkCoord) -> ApplyOutcome {
         let price = self.next_chunk_price();
         if !self.can_buy_chunk(coord) || self.money < price {
