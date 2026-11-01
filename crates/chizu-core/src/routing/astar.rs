@@ -65,7 +65,11 @@ pub fn astar(g: &Graph, from: LinkId, to: LinkId, s: &mut Scratch) -> Option<Rou
     let d0 = g.cost(src);
     s.set(src, d0, src);
     let h0 = g.heuristic(src, dst);
-    s.heap.push(Reverse((d0.checked_add(h0).expect("経路の費用があふれた"), h0, src)));
+    s.heap.push(Reverse((
+        d0.checked_add(h0).expect("経路の費用があふれた"),
+        h0,
+        src,
+    )));
     while let Some(Reverse((_, _, v))) = s.heap.pop() {
         if s.closed[v as usize] {
             continue;
