@@ -424,35 +424,21 @@ mod tests {
         row.chars().rev().nth(2).unwrap()
     }
 
+    /// 区間は座標で選ぶ。この街を再生した結果は決まっているので、段階ごとのマスが決まった文字になる。
+    /// (41, 70) は詰まった道、(68, 97) は混んだ道、(20, 97) は車のいない道、(41, 500) は高速道路である。
     #[test]
     fn traffic_layer_marks_jammed_and_free_roads() {
         let world = jammed_city();
-        let levels = world.road_congestion();
-        let network = world.network();
-        let at = |want: Congestion| {
-            // 中央のマスは、ほかの区間と交わらない（ほかの区間のマスにはならない）ものを選ぶ
-            network.segments().find_map(|(id, s)| {
-                let level = levels.get(&id).copied().unwrap_or_default();
-                if level != want || matches!(s.kind, SegmentKind::Highway) {
-                    return None;
-                }
-                let line = network.segment_line(id)?;
-                line.tiles()
-                    .find(|t| network.segments_through(*t).len() == 1)
-            })
-        };
-        let jammed = at(Congestion::Jammed).expect("詰まった区間がない");
-        let free = at(Congestion::Free).expect("空いている区間がない");
-        assert_eq!(glyph_at(&world, jammed, MapLayer::Traffic), 'X');
-        assert_eq!(glyph_at(&world, free, MapLayer::Traffic), '-');
+        let at = |x: i64, y: i64, layer| glyph_at(&world, TilePos::new(x, y), layer);
+        assert_eq!(at(41, 70, MapLayer::Traffic), 'X');
+        assert_eq!(at(68, 97, MapLayer::Traffic), '#');
+        assert_eq!(at(20, 97, MapLayer::Traffic), '-');
+        assert_eq!(at(41, 500, MapLayer::Traffic), 'H');
         // 層を付けなければ、道路の種類のまま
-        assert!(matches!(
-            glyph_at(&world, jammed, MapLayer::Terrain),
-            '1'..='3'
-        ));
+        assert!(matches!(at(41, 70, MapLayer::Terrain), '1'..='3'));
         let text = render(
             &world,
-            TileRect::from_corners(TilePos::new(jammed.x - 2, jammed.y), jammed),
+            TileRect::from_corners(TilePos::new(39, 70), TilePos::new(43, 70)),
             1,
             MapLayer::Traffic,
         )
