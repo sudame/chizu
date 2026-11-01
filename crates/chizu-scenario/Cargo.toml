@@ -15,5 +15,9 @@ chizu-core = { path = "../chizu-core" }
 name = "citizen_bucket"
 harness = false
 
+[[bench]]
+name = "route_batch"
+harness = false
+
 [dev-dependencies]
 criterion = "0.8.2"
