@@ -143,11 +143,13 @@ pub struct World {
     /// 適用済みの記録の次の番号。記録から続きを回すときは、この番号から適用する。
     next_seq: u64,
     trips: Trips,
+    errands: errand::Errands,
     router: RouterSlot,
 }
 
 mod commute;
 pub mod economy;
+mod errand;
 pub mod growth;
 pub mod people;
 
@@ -240,6 +242,7 @@ impl World {
             lots: Default::default(),
             next_seq: 0,
             trips: Trips::default(),
+            errands: Default::default(),
             router,
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
@@ -685,6 +688,7 @@ impl StateHash for World {
         h.write(&self.network);
         h.write(&self.population);
         h.write(&self.trips);
+        h.write(&self.errands);
         h.write(&self.buildings);
         h.write(&self.facilities);
         h.write(&self.supply_dirty);
