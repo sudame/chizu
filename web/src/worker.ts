@@ -1,13 +1,20 @@
 import init, {
   initThreadPool,
   parallel_sum,
+  road_cost_table,
   Simulation,
   snapshot_layout,
   thread_count,
   ticks_per_second,
 } from "../wasm/chizu_wasm.js";
 import { ChunkSync } from "./map/chunk-sync.ts";
-import type { ChunkData, MainToWorker, WorkerToMain } from "./protocol/messages.ts";
+import type {
+  ChunkData,
+  CommandMessage,
+  MainToWorker,
+  Outcome,
+  WorkerToMain,
+} from "./protocol/messages.ts";
 import { layout } from "./protocol/snapshot.ts";
 
 const SUM_N = 10_000_000;
@@ -42,6 +49,41 @@ function sendChunks(sim: Simulation): void {
   );
 }
 
+// 記録したコマンドの番号と種類。結果が届いたら、どのコマンドの結果かを画面に伝える
+const pending = new Map<number, CommandMessage["kind"]>();
+
+function submit(sim: Simulation, command: CommandMessage): void {
+  try {
+    pending.set(sim.submit(command), command.kind);
+  } catch (error) {
+    reply({ kind: "outcome", command: command.kind, outcome: "Rejected", reason: String(error) });
+  }
+}
+
+function sendOutcomes(sim: Simulation): void {
+  for (const report of sim.take_reports() as { seq: number; outcome: Outcome; reason?: string }[]) {
+    const command = pending.get(report.seq);
+    pending.delete(report.seq);
+    if (command !== undefined) {
+      reply({ kind: "outcome", command, outcome: report.outcome, reason: report.reason });
+    }
+  }
+}
+
+// 道路網は版が変わったときだけ、全体を送り直す。区間が増えて送る量が問題になったら、
+// 見えているチャンクにかかる区間だけを、チャンクの版と一緒に送る形に変える
+let sentNetworkRevision = -1;
+function sendRoads(sim: Simulation): void {
+  const revision = sim.network_revision();
+  if (revision === sentNetworkRevision) {
+    return;
+  }
+  sentNetworkRevision = revision;
+  const segments = sim.road_segments();
+  const nodes = sim.road_nodes();
+  reply({ kind: "roads", revision, segments, nodes }, [segments.buffer, nodes.buffer]);
+}
+
 // 実時間に合わせて tick を進める。何 tick 進めるかはここで決め、中核には整数の tick 数だけを渡す
 function run(sim: Simulation): (paused: boolean) => void {
   const perSecond = ticks_per_second();
@@ -58,6 +100,8 @@ function run(sim: Simulation): (paused: boolean) => void {
     const ticks = Math.floor(budget);
     budget -= ticks;
     sim.advance(ticks);
+    sendOutcomes(sim);
+    sendRoads(sim);
     sendChunks(sim);
   }, FRAME_MS);
   return (p) => {
@@ -89,6 +133,7 @@ const ready = (async () => {
     crossOriginIsolated: self.crossOriginIsolated,
     n: SUM_N,
     sum: parallel_sum(SUM_N),
+    roadCosts: [...road_cost_table()],
   });
   return { sim, setPaused };
 })();
@@ -101,7 +146,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
     const { sim, setPaused } = await ready;
     switch (message.kind) {
       case "command":
-        sim.submit(message.command);
+        submit(sim, message.command);
         break;
       case "pause":
         setPaused(message.paused);

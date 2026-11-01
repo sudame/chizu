@@ -1,7 +1,28 @@
 // メインスレッドと Worker のあいだでやりとりするメッセージ。
 
-/** 画面から送るコマンド。chizu-wasm が Command に直し、検証する。 */
-export type CommandMessage = { kind: "SetSimSpeed"; speed: number };
+export type RoadKindName = "Small" | "Medium" | "Large";
+
+/** 画面から送るコマンド。chizu-wasm が Command に直し、検証する。座標はマスの座標。 */
+export type CommandMessage =
+  | { kind: "SetSimSpeed"; speed: number }
+  | {
+      kind: "BuildRoad";
+      road: RoadKindName;
+      fromX: number;
+      fromY: number;
+      toX: number;
+      toY: number;
+    }
+  | { kind: "Bulldoze"; minX: number; minY: number; maxX: number; maxY: number }
+  | { kind: "BuyChunk"; cx: number; cy: number };
+
+/** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
+export type Outcome = "Applied" | "Denied" | "Rejected" | "NotImplemented";
+
+/** 区間 1 本の数の個数。chizu-wasm の road_segments と同じ。 */
+export const SEGMENT_STRIDE = 5;
+/** ノード 1 つの数の個数。chizu-wasm の road_nodes と同じ。 */
+export const NODE_STRIDE = 3;
 
 /** チャンクの 1 辺のマス数。chizu-core の CHUNK_SIDE と同じ。 */
 export const CHUNK_SIDE = 64;
@@ -39,8 +60,13 @@ export type WorkerToMain =
       crossOriginIsolated: boolean;
       n: number;
       sum: bigint;
+      /** chizu-wasm の road_cost_table。 */
+      roadCosts: number[];
     }
   | { kind: "chunks"; chunks: ChunkData[] }
+  /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
+  | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
+  | { kind: "outcome"; command: CommandMessage["kind"]; outcome: Outcome; reason?: string }
   | { kind: "error"; message: string };
 
 function isChunkData(value: unknown): value is ChunkData {
@@ -71,10 +97,25 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         typeof v.threads === "number" &&
         typeof v.crossOriginIsolated === "boolean" &&
         typeof v.n === "number" &&
-        typeof v.sum === "bigint"
+        typeof v.sum === "bigint" &&
+        Array.isArray(v.roadCosts)
       );
     case "chunks":
       return Array.isArray(v.chunks) && v.chunks.every(isChunkData);
+    case "roads":
+      return (
+        typeof v.revision === "number" &&
+        v.segments instanceof Float64Array &&
+        v.segments.length % SEGMENT_STRIDE === 0 &&
+        v.nodes instanceof Float64Array &&
+        v.nodes.length % NODE_STRIDE === 0
+      );
+    case "outcome":
+      return (
+        typeof v.command === "string" &&
+        typeof v.outcome === "string" &&
+        (v.reason === undefined || typeof v.reason === "string")
+      );
     case "error":
       return typeof v.message === "string";
     default:

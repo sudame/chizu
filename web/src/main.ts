@@ -1,7 +1,13 @@
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { MapRenderer } from "./map/renderer.ts";
-import { CHUNK_SIDE, isWorkerToMain, type MainToWorker } from "./protocol/messages.ts";
+import { type Geometry, roadGeometry } from "./map/roads.ts";
+import {
+  CHUNK_SIDE,
+  isWorkerToMain,
+  type MainToWorker,
+  SEGMENT_STRIDE,
+} from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 
 function element<T extends Element>(selector: string): T {
@@ -74,6 +80,8 @@ function createRenderer(): MapRenderer | null {
   }
 }
 let renderer = createRenderer();
+// 最後に届いた道路網。コンテキストを失ったあとに貼り直す
+let roads: Geometry | null = null;
 
 // コンテキストが戻ったら作り直し、手元のチャンクを貼り直す
 mapCanvas.addEventListener("webglcontextlost", (event) => {
@@ -84,6 +92,9 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
   renderer = createRenderer();
   for (const chunk of store.all()) {
     renderer?.upload(chunk);
+  }
+  if (roads !== null) {
+    renderer?.roads.setRoads(roads);
   }
 });
 
@@ -212,6 +223,18 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     for (const chunk of store.receive(message.chunks)) {
       renderer?.upload(chunk);
     }
+    return;
+  }
+  if (message.kind === "roads") {
+    roads = roadGeometry(message.segments, message.nodes);
+    renderer?.roads.setRoads(roads);
+    // test:wasm が読む
+    mapCanvas.dataset.roadRevision = String(message.revision);
+    mapCanvas.dataset.roadSegments = String(message.segments.length / SEGMENT_STRIDE);
+    return;
+  }
+  if (message.kind === "outcome") {
+    // 結果を画面に出すのは、道具を入れるときに足す
     return;
   }
   if (message.kind === "error") {
