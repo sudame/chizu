@@ -485,3 +485,35 @@ fn a_car_slows_down_before_a_slower_road() {
         assert!(w[0] - w[1] <= CAR_DECEL, "{w:?}");
     }
 }
+
+#[test]
+fn cars_pull_out_and_park_on_either_side_of_the_road() {
+    // 行き止まりの道で、東向きの側の建物から、西の東向きの側の建物へ向かう。
+    // 同じ側に限ると、東の端で折り返し、西の端でもう一度折り返して戻る。どちらの側からも
+    // 出て着けるなら、西向きの車線を 1 本走るだけで着く。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let id = c.drive(at(10, 0, (1, 0), 0), at(3, 0, (1, 0), 0));
+    let t = c.trips.get(id).unwrap();
+    assert_eq!(t.route().links.len(), 1);
+    assert_eq!(t.link().dir, Dir::Backward);
+    let mut ticks = 0;
+    while c.trips.get(id).is_some() {
+        c.step();
+        ticks += 1;
+        assert!(ticks < 100, "着かない");
+    }
+}
+
+#[test]
+fn a_car_keeps_its_side_when_it_drives_toward_the_destination() {
+    // 同じ側のまま前へ進めば着くときは、向きを変えない。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let id = c.drive(at(3, 0, (1, 0), 0), at(10, 0, (1, 0), 0));
+    let t = c.trips.get(id).unwrap();
+    assert_eq!(t.route().links.len(), 1);
+    assert_eq!(t.link().dir, Dir::Forward);
+}

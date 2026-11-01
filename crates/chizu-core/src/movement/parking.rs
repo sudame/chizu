@@ -201,7 +201,7 @@ fn reachable(
     to: SidewalkPos,
 ) -> bool {
     let ends = from.resolve_on(net, mode).zip(to.resolve_on(net, mode));
-    ends.is_some_and(|e| plan(router, net, mode, &[e])[0].is_some())
+    ends.is_some_and(|e| plan(router, net, mode, &[e], false)[0].is_some())
 }
 
 impl Trip {
@@ -345,7 +345,7 @@ impl Trips {
                 .map(|(_, a, b, _)| a.resolve_on(net, mode).zip(b.resolve_on(net, mode)))
                 .collect();
             let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
-            let mut routes = plan(router, net, mode, &ends).into_iter();
+            let mut routes = plan(router, net, mode, &ends, false).into_iter();
             // 置き直す行はまだ歩いているので、車線の上の車には入らない。
             let mut ix = (mode == LaneMode::Car).then(|| car::LaneIndex::of(&self.rows, None));
             for ((i, _, to, then), e) in legs.into_iter().zip(resolved) {
