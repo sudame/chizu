@@ -6,12 +6,17 @@
 //!
 //! 標準出力には状態ハッシュを 16 進の 16 桁で 1 行だけ書く。
 //! 適用したコマンドの件数は標準エラーに書く。
+//!
+//! 画面なしで遊ぶときは `chizu-cli agent` を使う。使い方は `chizu-cli agent --help` で出る。
+
+mod agent;
 
 use std::process::ExitCode;
 
 use chizu_core::{CommandLog, DenyReason, World, replay};
 
-const USAGE: &str = "使い方: chizu-cli <記録ファイル> <種> <tick 数>";
+const USAGE: &str =
+    "使い方: chizu-cli <記録ファイル> <種> <tick 数>\n       chizu-cli agent --help";
 
 fn run(args: &[String]) -> Result<String, String> {
     let [path, seed, ticks] = args else {
@@ -43,9 +48,13 @@ fn run(args: &[String]) -> Result<String, String> {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match run(&args) {
-        Ok(hash) => {
-            println!("{hash}");
+    let result = match args.split_first() {
+        Some((first, rest)) if first == "agent" => agent::run(rest),
+        _ => run(&args),
+    };
+    match result {
+        Ok(out) => {
+            println!("{out}");
             ExitCode::SUCCESS
         }
         Err(e) => {

@@ -153,6 +153,8 @@ name = "chizu-cli"
 version = "0.1.0"
 dependencies = [
  "chizu-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
