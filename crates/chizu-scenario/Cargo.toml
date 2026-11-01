@@ -24,6 +24,10 @@ name = "growth"
 harness = false
 
 [[bench]]
+name = "population"
+harness = false
+
+[[bench]]
 name = "walk_tick"
 harness = false
 

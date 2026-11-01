@@ -6,9 +6,27 @@
 use smallvec::SmallVec;
 
 use crate::id::{BuildingId, CitizenId, HouseholdId, Slots, TripId};
+use crate::rng::Pcg32;
 use crate::schedule::DepartureQueue;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::units::{Money, Tick};
+
+/// 1 世帯の住民の数の上限。
+pub const MAX_HOUSEHOLD_SIZE: u32 = 4;
+
+/// 働く年齢の範囲（歳）。
+pub const WORKING_AGES: core::ops::RangeInclusive<u8> = 18..=64;
+
+/// 1 つの世帯の所持金と住民の年齢を引く。人数は 1〜[`MAX_HOUSEHOLD_SIZE`] 人を引いてから `limit` で削る。
+/// 最初の 1 人は 18〜79 歳、残りは 0〜79 歳である。引く順番は人数、所持金、年齢の順に決めてある。
+pub fn draw_household(r: &mut Pcg32, limit: u32) -> (Money, SmallVec<[u8; 4]>) {
+    let size = (1 + r.below(MAX_HOUSEHOLD_SIZE)).min(limit);
+    let money = Money(i64::from(r.below(100_000)));
+    let ages = (0..size)
+        .map(|i| if i == 0 { 18 + r.below(62) } else { r.below(80) } as u8)
+        .collect();
+    (money, ages)
+}
 
 /// 幸福度の要素の点数の上限。点数は `0..=HAPPINESS_MAX` である。
 pub const HAPPINESS_MAX: u8 = 100;
@@ -140,6 +158,8 @@ pub struct Households {
     slots: Slots,
     /// 住んでいる建物。建物の表ができるまでは、どの世帯も `None` である。
     home: Vec<Option<BuildingId>>,
+    /// 家がないなら、家を失った（または家なしと分かった）tick。家があれば `None` である。
+    homeless_since: Vec<Option<Tick>>,
     money: Vec<Money>,
     /// 世帯の住民。加わった順に並ぶ。
     members: Vec<SmallVec<[CitizenId; 4]>>,
@@ -184,6 +204,43 @@ impl Population {
         })
     }
 
+    /// いる世帯の ID を ID の順に返す。
+    pub fn household_ids(&self) -> impl Iterator<Item = HouseholdId> + '_ {
+        let slots = &self.households.slots;
+        (0..slots.len()).filter_map(|slot| {
+            let (index, generation) = slots.current(slot)?;
+            Some(HouseholdId { index, generation })
+        })
+    }
+
+    /// 世帯の住む家を決める。家をなくすなら、すでに家なしでない限り `now` から家なしとする。
+    /// 世帯がなければ何もしない。
+    pub(crate) fn set_home(&mut self, id: HouseholdId, home: Option<BuildingId>, now: Tick) {
+        if self.contains_household(id) {
+            let h = &mut self.households;
+            h.home[id.slot()] = home;
+            let since = &mut h.homeless_since[id.slot()];
+            *since = if home.is_some() {
+                None
+            } else {
+                since.or(Some(now))
+            };
+        }
+    }
+
+    /// 世帯が家なしになった tick。家があるか、家なしとまだ分かっていなければ `Some(None)` である。
+    pub fn homeless_since(&self, id: HouseholdId) -> Option<Option<Tick>> {
+        self.contains_household(id)
+            .then(|| self.households.homeless_since[id.slot()])
+    }
+
+    /// 住民の職場を決める。住民がいなければ何もしない。
+    pub(crate) fn set_workplace(&mut self, id: CitizenId, workplace: Option<BuildingId>) {
+        if self.contains_citizen(id) {
+            self.citizens.workplace[id.slot()] = workplace;
+        }
+    }
+
     pub fn members(&self, id: HouseholdId) -> Option<&[CitizenId]> {
         self.contains_household(id)
             .then(|| self.households.members[id.slot()].as_slice())
@@ -209,6 +266,7 @@ impl Population {
         let ((index, generation), grew) = h.slots.alloc();
         if grew {
             h.home.push(None);
+            h.homeless_since.push(None);
             h.money.push(money);
             h.members.push(SmallVec::new());
         } else {
@@ -229,6 +287,7 @@ impl Population {
         let h = &mut self.households;
         h.slots.release(id.index, id.generation);
         h.home[slot] = None;
+        h.homeless_since[slot] = None;
         h.money[slot] = Money::ZERO;
         true
     }
@@ -337,6 +396,7 @@ impl StateHash for Households {
     fn write_state(&self, h: &mut StateHasher) {
         h.write(&self.slots);
         h.write(&self.home);
+        h.write(&self.homeless_since);
         h.write(&self.money);
         h.write_len(self.members.len());
         for m in &self.members {
@@ -439,10 +499,16 @@ mod tests {
                 depart_at: Some(Tick(3)),
             },
         );
-        p.households.home[h.slot()] = Some(BuildingId {
+        let home = BuildingId {
             index: 1,
             generation: 0,
-        });
+        };
+        p.set_home(h, Some(home), Tick(1));
+        assert_eq!(p.homeless_since(h), Some(None));
+        p.set_home(h, None, Tick(2));
+        p.set_home(h, None, Tick(3));
+        assert_eq!(p.homeless_since(h), Some(Some(Tick(2))));
+        p.set_home(h, Some(home), Tick(4));
         assert!(p.remove_household(h));
         assert!(p.departures().is_empty());
         assert_eq!(p.citizen(a), None);
@@ -451,6 +517,7 @@ mod tests {
         assert_eq!((g.index, g.generation), (h.index, h.generation + 1));
         assert_eq!(p.members(g), Some(&[][..]));
         assert_eq!(p.home(g), Some(None));
+        assert_eq!(p.homeless_since(g), Some(None));
         assert_eq!(p.household_money(g), Some(Money(4)));
         assert_eq!(p.members(h), None);
     }
