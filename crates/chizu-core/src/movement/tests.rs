@@ -436,3 +436,82 @@ fn world_walks_do_not_depend_on_threads_or_the_view() {
         assert_eq!(pool.install(|| walking_world_hash(300, false)), base);
     }
 }
+
+/// 東西に 30 マスの道路を引いた街で、西の端から東の端の 1 マス手前まで歩く人を作る。
+fn world_with_a_walker() -> (crate::world::World, TripId) {
+    use crate::command::Command;
+    use crate::world::{ApplyOutcome, World};
+    let mut w = World::new(7);
+    let c = Command::BuildRoad {
+        from: TilePos::new(0, 0),
+        to: TilePos::new(30, 0),
+        kind: RoadKind::Small,
+    };
+    assert_eq!(w.apply(&c), ApplyOutcome::Applied);
+    let id = w
+        .spawn_walk(at(0, 0, (1, 0), 0), at(29, 0, (1, 0), 0))
+        .unwrap();
+    (w, id)
+}
+
+/// 歩く人が着いて消えるまでの tick 数。`edit` は 30 tick めの頭で呼ぶ。
+fn world_ticks_to_arrive(edit: impl FnOnce(&mut crate::world::World)) -> u64 {
+    let (mut w, id) = world_with_a_walker();
+    let mut edit = Some(edit);
+    for t in 1..1_000 {
+        if t == 30 {
+            (edit.take().unwrap())(&mut w);
+        }
+        w.step();
+        if w.trips().get(id).is_none() {
+            return t;
+        }
+    }
+    panic!("着かない");
+}
+
+#[test]
+fn world_walkers_keep_walking_across_a_split_and_arrive_on_time() {
+    use crate::command::Command;
+    // 29 マスを時速 5km で歩くと、232m ÷ 1,389mm を切り上げた tick で着く。
+    let plain = world_ticks_to_arrive(|_| {});
+    assert_eq!(plain, walk_ticks(29 * 8_000));
+    let split = world_ticks_to_arrive(|w| {
+        for x in [3, 20] {
+            let c = Command::BuildRoad {
+                from: TilePos::new(x, -5),
+                to: TilePos::new(x, 5),
+                kind: RoadKind::Small,
+            };
+            assert_eq!(w.apply(&c), crate::world::ApplyOutcome::Applied);
+        }
+    });
+    assert_eq!(split, plain);
+}
+
+#[test]
+fn world_walkers_on_a_removed_road_vanish() {
+    use crate::command::Command;
+    let (mut w, id) = world_with_a_walker();
+    for _ in 0..10 {
+        w.step();
+    }
+    let c = Command::Bulldoze {
+        area: TileRect::from_corners(TilePos::new(5, 0), TilePos::new(5, 0)),
+    };
+    assert_eq!(w.apply(&c), crate::world::ApplyOutcome::Applied);
+    w.step();
+    assert!(w.trips().get(id).is_none());
+}
+
+#[test]
+fn world_movers_in_accepts_any_area() {
+    let (w, id) = world_with_a_walker();
+    let all = TileRect::from_corners(
+        TilePos::new(i64::MIN, i64::MIN),
+        TilePos::new(i64::MAX, i64::MAX),
+    );
+    let m = w.movers_in(all);
+    assert_eq!(m.len(), 1);
+    assert_eq!(m[0].id, id);
+}

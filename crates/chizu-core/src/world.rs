@@ -11,10 +11,10 @@ use crate::id::{CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
 use crate::rng::{RngPurpose, mix_words};
-use crate::routing::{AstarRouter, Router};
+use crate::routing::AstarRouter;
 use crate::schedule::{bucket_at, update_citizen};
 use crate::state_hash::{StateHash, StateHasher};
-use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
+use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, WORLD_LIMIT, local_index};
 use crate::units::{Mm, Money, Tick, WorldPos};
 use crate::zone::{around, near_road, tiles_of};
 
@@ -130,8 +130,6 @@ pub mod growth;
 /// 網から作り直せる経路探索。状態に入れず、`World` どうしを比べるときも見ない。
 #[derive(Clone, Debug)]
 struct RouterSlot {
-    /// グラフを作ったときの網の版。
-    version: u64,
     router: AstarRouter,
 }
 
@@ -188,7 +186,6 @@ impl World {
         let highway = highway_line(seed);
         network.add_highway(highway.start, highway.end());
         let router = RouterSlot {
-            version: network.version(),
             router: AstarRouter::new(&network),
         };
         let mut world = World {
@@ -437,12 +434,9 @@ impl World {
 
     /// 網が変わっていたら経路探索を作り直し、通れなくなった移動を探し直す。
     fn sync_router(&mut self) {
-        if self.router.version == self.network.version() {
-            return;
+        if self.router.router.sync(&self.network) {
+            self.trips.reroute(&self.network, &mut self.router.router);
         }
-        self.router.version = self.network.version();
-        self.router.router.rebuild(&self.network);
-        self.trips.reroute(&self.network, &mut self.router.router);
     }
 
     /// `from` から `to` へ歩く移動を作る。住民の予定とつなぐまで、テストとシナリオから移動を作る入口にする。
@@ -456,9 +450,16 @@ impl World {
 
     /// マスの範囲 `rect` にいる移動体を ID の順に返す。状態は変えない。
     pub fn movers_in(&self, rect: TileRect) -> Vec<Mover> {
-        let edge = |t: i64| Mm(t.checked_mul(TILE_MM).expect("座標があふれた"));
+        // 範囲はコマンドで指せる広さに切り詰める。その外にマスはないので、結果は変わらない。
+        let edge = |t: i64| {
+            let t = t.clamp(-WORLD_LIMIT, WORLD_LIMIT + 1);
+            Mm(t.checked_mul(TILE_MM).expect("座標があふれた"))
+        };
         let min = WorldPos::new(edge(rect.min.x), edge(rect.min.y));
-        let max = WorldPos::new(edge(rect.max.x + 1), edge(rect.max.y + 1));
+        let max = WorldPos::new(
+            edge(rect.max.x.saturating_add(1)),
+            edge(rect.max.y.saturating_add(1)),
+        );
         self.trips.movers_in(min, max)
     }
 
