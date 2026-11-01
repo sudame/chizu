@@ -14,6 +14,7 @@ const record: SaveRecord = {
     formatVersion: 1,
     seed: "0",
     tick: 7_500,
+    commandCount: 3,
     day: 1,
     secondOfDay: 3_600 * 13 + 60 * 7,
     money: "1234567",

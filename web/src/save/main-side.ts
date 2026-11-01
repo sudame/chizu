@@ -200,12 +200,12 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
         const loaded = message.loaded;
         if (loaded !== null && loading !== null) {
           // test:wasm が読む
-          saveButton.dataset.loadedHash = loaded.stateHash;
-          saveButton.dataset.loadedMoney = loaded.money;
-          notice.textContent =
-            loaded.stateHash === loading.meta.stateHash
-              ? `${SLOT_NAMES[loading.slot]}を読み込んだ`
-              : `${SLOT_NAMES[loading.slot]}を読み込んだが、保存したときと違う街になった（中核の版が変わったため）`;
+          saveButton.dataset.rulesChanged = String(loaded.rulesChanged);
+          saveButton.dataset.loadedHash = loaded.meta.stateHash;
+          saveButton.dataset.loadedMoney = loaded.meta.money;
+          notice.textContent = loaded.rulesChanged
+            ? `${SLOT_NAMES[loading.slot]}を読み込んだが、シミュレーションの規則が変わったので、保存したときと違う街になった`
+            : `${SLOT_NAMES[loading.slot]}を読み込んだ`;
         }
         break;
       }

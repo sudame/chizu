@@ -4,11 +4,13 @@
 export const SLOTS = ["auto", "manual-1", "manual-2", "manual-3"] as const;
 export type SlotId = (typeof SLOTS)[number];
 
-/** chizu-wasm の save_meta。 */
+/** chizu-wasm の SavePayload の meta。 */
 export type SaveMeta = {
   formatVersion: number;
   seed: string;
   tick: number;
+  /** 記録の件数。読み込むときに記録と突き合わせる。 */
+  commandCount: number;
   day: number;
   secondOfDay: number;
   money: string;
@@ -35,8 +37,11 @@ export type SaveFromWorker =
   | { kind: "save:progress"; tick: number; target: number }
   /** 読み込めなかった。Worker は次の save:start を待つ。 */
   | { kind: "save:load-error"; message: string }
-  /** 街ができた。読み込んだときは、作り直した街の数を添える。 */
-  | { kind: "save:started"; loaded: SaveMeta | null }
+  /**
+   * 街ができた。読み込んだときは、作り直した街の meta を添える。rulesChanged は、作り直した街の
+   * 状態ハッシュが保存したときと違う（シミュレーションの規則が変わった）こと。
+   */
+  | { kind: "save:started"; loaded: { meta: SaveMeta; rulesChanged: boolean } | null }
   | { kind: "save:data"; slot: SlotId; meta: SaveMeta; commands: ArrayBuffer };
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -53,6 +58,7 @@ export function isSaveMeta(value: unknown): value is SaveMeta {
     Number.isInteger(value.formatVersion) &&
     typeof value.seed === "string" &&
     Number.isInteger(value.tick) &&
+    Number.isInteger(value.commandCount) &&
     Number.isInteger(value.day) &&
     Number.isInteger(value.secondOfDay) &&
     typeof value.money === "string" &&
@@ -98,7 +104,12 @@ export function isSaveFromWorker(value: unknown): value is SaveFromWorker {
     case "save:load-error":
       return typeof value.message === "string";
     case "save:started":
-      return value.loaded === null || isSaveMeta(value.loaded);
+      return (
+        value.loaded === null ||
+        (isObject(value.loaded) &&
+          isSaveMeta(value.loaded.meta) &&
+          typeof value.loaded.rulesChanged === "boolean")
+      );
     case "save:data":
       return (
         isSlotId(value.slot) && isSaveMeta(value.meta) && value.commands instanceof ArrayBuffer

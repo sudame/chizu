@@ -24,9 +24,20 @@ function post(message: SaveFromWorker, transfer: Transferable[] = []): void {
 
 const yieldToEvents = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-async function restore(save: { meta: SaveMeta; commands: ArrayBuffer }): Promise<Simulation> {
+/** 作り直した街と、状態ハッシュが保存したときと違うか（シミュレーションの規則が変わったか）。 */
+async function restore(save: {
+  meta: SaveMeta;
+  commands: ArrayBuffer;
+}): Promise<{ sim: Simulation; rulesChanged: boolean }> {
   const { meta } = save;
-  const r = new Restoring(meta.formatVersion, meta.seed, meta.tick, new Uint8Array(save.commands));
+  const r = new Restoring(
+    meta.formatVersion,
+    meta.seed,
+    meta.tick,
+    meta.commandCount,
+    meta.stateHash,
+    new Uint8Array(save.commands),
+  );
   post({ kind: "save:progress", tick: r.tick(), target: r.target() });
   while (!r.done()) {
     const start = performance.now();
@@ -36,12 +47,29 @@ async function restore(save: { meta: SaveMeta; commands: ArrayBuffer }): Promise
     post({ kind: "save:progress", tick: r.tick(), target: r.target() });
     await yieldToEvents();
   }
-  return r.finish();
+  const restored = r.finish();
+  try {
+    return { sim: restored.take(), rulesChanged: restored.rules_changed() };
+  } finally {
+    restored.free();
+  }
 }
 
+// メタデータと記録は同じ時点のものを 1 回で取る
+function payloadOf(sim: Simulation): { meta: SaveMeta; commands: ArrayBuffer } {
+  const payload = sim.save();
+  try {
+    const meta = JSON.parse(payload.meta()) as SaveMeta;
+    return { meta, commands: payload.commands().buffer as ArrayBuffer };
+  } finally {
+    payload.free();
+  }
+}
+
+const metaOf = (sim: Simulation) => payloadOf(sim).meta;
+
 function sendSave(sim: Simulation, slot: SlotId): void {
-  const meta = JSON.parse(sim.save_meta()) as SaveMeta;
-  const commands = sim.encode_log().buffer as ArrayBuffer;
+  const { meta, commands } = payloadOf(sim);
   post({ kind: "save:data", slot, meta, commands }, [commands]);
 }
 
@@ -76,12 +104,13 @@ export function startSimulation(): Promise<Simulation> {
     const begin = async (message: Extract<SaveToWorker, { kind: "save:start" }>) => {
       starting = true;
       try {
-        const created =
-          message.save === null ? new Simulation(NEW_GAME_SEED) : await restore(message.save);
+        const loaded = message.save === null ? null : await restore(message.save);
+        const created = loaded?.sim ?? new Simulation(NEW_GAME_SEED);
         sim = created;
         post({
           kind: "save:started",
-          loaded: message.save === null ? null : (JSON.parse(created.save_meta()) as SaveMeta),
+          loaded:
+            loaded === null ? null : { meta: metaOf(created), rulesChanged: loaded.rulesChanged },
         });
         startAutoSave(created);
         resolve(created);

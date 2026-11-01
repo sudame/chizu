@@ -132,6 +132,7 @@ try {
               formatVersion: 999,
               seed: "0",
               tick: 0,
+              commandCount: 0,
               day: 0,
               secondOfDay: 0,
               money: "0",
@@ -178,8 +179,43 @@ try {
   const tickAfter = Number(await hud.getAttribute("data-tick"));
   check(tickAfter >= savedTick, `読み込んだ tick から続く（${savedTick} → ${tickAfter}）`);
   check(
-    ((await page.locator("#save-notice").textContent()) ?? "").includes("読み込んだ"),
-    "読み込んだと示される",
+    (await saveButton.getAttribute("data-rules-changed")) === "false" &&
+      ((await page.locator("#save-notice").textContent()) ?? "").includes("読み込んだ"),
+    "読み込んだと示され、規則が変わったとは示されない",
+  );
+
+  // 状態ハッシュだけを変えた保存 1 の写しを保存 3 に書き、規則が変わったときの表示を確かめる
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        const open = indexedDB.open("chizu");
+        open.onsuccess = () => {
+          const store = open.result.transaction("saves", "readwrite").objectStore("saves");
+          const get = store.get("manual-1");
+          get.onsuccess = () => {
+            const copy = get.result;
+            copy.slot = "manual-3";
+            copy.meta.stateHash = "0000000000000000";
+            const put = store.put(copy);
+            put.onsuccess = () => resolve();
+            put.onerror = () => reject(put.error);
+          };
+        };
+        open.onerror = () => reject(open.error);
+      }),
+  );
+  await page.reload();
+  await start.and(page.locator("[open]")).waitFor({ timeout: TIMEOUT_MS });
+  await start.locator('button[data-load="manual-3"]').click();
+  await running();
+  await waitFor(
+    () => document.querySelector<HTMLElement>("#save-open")?.dataset.rulesChanged !== undefined,
+  );
+  check(
+    (await saveButton.getAttribute("data-rules-changed")) === "true" &&
+      (await saveButton.getAttribute("data-loaded-hash")) === savedHash &&
+      ((await page.locator("#save-notice").textContent()) ?? "").includes("規則が変わった"),
+    "状態ハッシュが食い違っても読み込み、規則が変わったと示す",
   );
 } finally {
   await browser.close();
