@@ -10,6 +10,7 @@ pub mod network;
 pub mod record;
 pub mod rng;
 pub mod round;
+pub mod routing;
 pub mod schedule;
 pub mod service;
 pub mod state_hash;
