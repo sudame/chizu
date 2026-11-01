@@ -356,4 +356,31 @@ mod tests {
         assert_eq!(w.chunk_slots(), MILESTONES[0].1);
         assert_eq!(buy(&mut w, next), ApplyOutcome::Applied);
     }
+
+    /// 一度届いた段階は、人口が減っても戻らない。
+    #[test]
+    fn milestones_stay_after_the_population_falls() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        while w.milestone() == 0 {
+            w.step();
+        }
+        let (reached, slots) = (w.milestone(), w.chunk_slots());
+        // 区画を消して建物をなくすと、住民はみな家を失う。
+        let area = crate::tile::TileRect::from_corners(TilePos::new(-59, 4), TilePos::new(19, 46));
+        let clear = Command::PaintZone { area, zone: None };
+        assert_eq!(w.apply(&clear), ApplyOutcome::Applied);
+        for _ in 0..2 * TICKS_PER_HOUR {
+            w.step();
+        }
+        assert_eq!(w.housed_citizens(), 0);
+        assert_eq!((w.milestone(), w.chunk_slots()), (reached, slots));
+    }
+
+    #[test]
+    #[should_panic(expected = "始めたあとでは決められない")]
+    fn unlimited_land_cannot_be_set_after_starting() {
+        let mut w = World::new(3);
+        w.step();
+        let _ = w.with_unlimited_land();
+    }
 }

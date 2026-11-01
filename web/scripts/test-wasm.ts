@@ -233,7 +233,22 @@ try {
     return { cost, result: await nextOutcome(before) };
   };
 
+  // ゲーム内の 1 時間（300 tick）ごとに収支を精算する。この時点の収支は 40 マスの小さい道路 1 本の維持費
+  // （建設費 10,000 の 1%/日）だけなので、`since` からの精算 1 回ごとに、1 日 100 の 1/24 を切り上げた額まで減ってよい
+  const upkeepPerHour = Math.ceil((40 * 250) / 100 / 24);
+  const waitMoney = (expected: number, since: number) =>
+    page.waitForFunction(
+      ({ expected, since, upkeepPerHour }) => {
+        const hud = document.querySelector<HTMLElement>("#hud");
+        const money = Number(hud?.dataset.money);
+        const settled = Math.ceil(Number(hud?.dataset.tick) / 300) - Math.ceil(since / 300);
+        return money <= expected && money >= expected - settled * upkeepPerHour;
+      },
+      { expected, since, upkeepPerHour },
+      { timeout: TIMEOUT_MS },
+    );
   await page.locator('button[data-tool="road-Small"]').click();
+  const tickBefore = await tick();
   const moneyBefore = await moneyNow();
   const built = await drawRoad();
   check(
@@ -254,14 +269,7 @@ try {
     (await roadSegments()) === initialSegments + 1,
     `引いた道路の区間が届く（${await roadSegments()} 本）`,
   );
-  await page.waitForFunction(
-    // ゲーム内の 1 時間ごとに税収と維持費を精算するので、その分のずれは許す
-    (expected) =>
-      Math.abs(Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) - expected) <=
-      2_000,
-    moneyBefore - built.cost,
-    { timeout: TIMEOUT_MS },
-  );
+  await waitMoney(moneyBefore - built.cost, tickBefore);
   check(true, `所持金が見積もりの分だけ減る（${moneyBefore} → ${await moneyNow()}）`);
   // 道路はマス (12, 32) から (52, 32) へ、マスの中心を通る。カメラは (32, 32) を画面の中心に、
   // 1 マスを 4 ピクセルで描くので、マス (x, y) の中心は画面の (cx + (x - 31.5) × 4, cy + (y - 31.5) × 4) にある
@@ -349,20 +357,14 @@ try {
   };
   const east = chunkPoint(2, 0);
   const eastBefore = await pixel(east.x, east.y);
+  const tickBeforeBuy = await tick();
   const moneyBeforeBuy = await moneyNow();
   const bought = await buy(2, 0);
   check(
     bought.command === "BuyChunk" && bought.outcome === "Applied",
     `隣のチャンクを買える（${bought.text}）`,
   );
-  await page.waitForFunction(
-    // ゲーム内の 1 時間ごとに税収と維持費を精算するので、その分のずれは許す
-    (expected) =>
-      Math.abs(Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) - expected) <=
-      2_000,
-    moneyBeforeBuy - 50_000,
-    { timeout: TIMEOUT_MS },
-  );
+  await waitMoney(moneyBeforeBuy - 50_000, tickBeforeBuy);
   check(true, `所持金が値段の分だけ減る（${moneyBeforeBuy} → ${await moneyNow()}）`);
   await page.waitForFunction(
     ({ x, y, before }) => {
