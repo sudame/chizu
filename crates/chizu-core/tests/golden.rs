@@ -12,9 +12,9 @@
 use std::path::PathBuf;
 
 use chizu_core::{
-    BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneOffset, Money, RecordedCommand,
-    ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed, StateHasher,
-    TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind, replay, rng,
+    Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneMode, LaneOffset, Money,
+    RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed,
+    StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind, replay, rng,
 };
 
 /// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
@@ -100,6 +100,13 @@ fn scenarios() -> Vec<Scenario> {
             seed: 42,
             ticks: 2 * chizu_core::TICKS_PER_DAY,
             log: economy(),
+            money: None,
+        },
+        Scenario {
+            name: "commute",
+            seed: 42,
+            ticks: COMMUTE_TICKS,
+            log: commute(),
             money: None,
         },
         Scenario {
@@ -330,6 +337,142 @@ fn economy() -> CommandLog {
     )
     .unwrap();
     log
+}
+
+/// 通勤のシナリオを回す長さ。2 日目の朝の通勤が終わる 11 時までである。
+const COMMUTE_TICKS: u64 = TICKS_PER_DAY + TICKS_PER_DAY * 11 / 24;
+
+/// 住宅の帯の近くと遠くに工業の帯を塗った通りの記録。近くの職場へは歩き、遠くの職場へは車で通う。
+fn commute() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let rect = |a: (i64, i64), b: (i64, i64)| {
+        TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1))
+    };
+    // 通りの両端を、北側の通りでつないで輪にする。
+    let corners = [(-40, 0), (100, 0), (100, 20), (-40, 20), (-40, 0)];
+    for w in corners.windows(2) {
+        rec(
+            1,
+            Command::BuildRoad {
+                from: TilePos::new(w[0].0, w[0].1),
+                to: TilePos::new(w[1].0, w[1].1),
+                kind: RoadKind::Small,
+            },
+        );
+    }
+    for (area, zone) in [
+        (rect((-20, -6), (20, -1)), ZoneKind::Residential),
+        (rect((-40, -6), (-22, -1)), ZoneKind::Industrial),
+        (rect((60, -6), (100, -1)), ZoneKind::Industrial),
+    ] {
+        rec(
+            2,
+            Command::PaintZone {
+                area,
+                zone: Some(zone),
+            },
+        );
+    }
+    for c in connect_to_outside(42, 0, -40, 100) {
+        rec(3, c);
+    }
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, -37),
+        (ServiceKind::WaterPump, -33),
+    ] {
+        rec(
+            3,
+            Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, 1),
+                rotation: 0,
+            },
+        );
+    }
+    log
+}
+
+/// 通勤のシナリオで、朝に住民が歩きと車の両方で職場へ向かい、着いたら職場にいることを確かめる。
+/// 移動している住民は、住民の表の `trip` と移動の主体の両方から互いを指す。
+#[test]
+fn commuters_walk_and_drive_to_work_in_the_morning() {
+    let log = commute();
+    let mut world = World::new(42);
+    let (mut walking, mut driving) = (0, 0);
+    for _ in 0..COMMUTE_TICKS {
+        replay(&mut world, &log, 1);
+        let trips = world.trips();
+        for (id, t) in trips.iter() {
+            let Some(c) = trips.commuter(id) else {
+                continue;
+            };
+            let row = world
+                .population()
+                .citizen(c.citizen)
+                .expect("移動している住民がいない");
+            assert_eq!(row.trip, Some(id));
+            match t.mode() {
+                LaneMode::Car => driving += 1,
+                LaneMode::Sidewalk => walking += 1,
+            }
+        }
+        let p = world.population();
+        for id in p.citizen_ids() {
+            if let Some(t) = p.citizen(id).unwrap().trip {
+                assert_eq!(world.trips().commuter(t).map(|c| c.citizen), Some(id));
+            }
+        }
+    }
+    assert!(walking > 0 && driving > 0, "歩き {walking}、車 {driving}");
+    let p = world.population();
+    // 朝のあとに職場が決まり、翌朝に出発する住民は数えない。
+    let workers = p
+        .citizen_ids()
+        .map(|id| p.citizen(id).unwrap())
+        .filter(|r| r.workplace.is_some())
+        .filter(|r| r.schedule.next != Activity::Work || r.schedule.depart_at.is_none())
+        .count();
+    assert!(workers > 0, "誰も働いていない");
+    assert!(
+        world.citizens_at_work() * 10 >= workers * 9,
+        "朝に職場へ着かない：{} / {workers}",
+        world.citizens_at_work()
+    );
+}
+
+/// 通勤のシナリオを 20 日回しても、駐車場に停めてある車が増え続けない。停めてある車はどれも、
+/// 住民が自分の車として覚えている 1 台で、停めてある台数は住民の数を超えない。
+#[test]
+fn parked_cars_do_not_pile_up_over_days() {
+    let log = commute();
+    let mut world = World::new(42);
+    let mut by_day = Vec::new();
+    for day in 1..=20 {
+        replay(&mut world, &log, TICKS_PER_DAY);
+        let parked: u64 = world.trips().lots().map(|(_, l)| u64::from(l.parked)).sum();
+        let p = world.population();
+        let owned = p
+            .citizen_ids()
+            .filter_map(|id| world.trips().parked_car(id))
+            .filter(|b| world.buildings().get(*b).is_some())
+            .count() as u64;
+        assert_eq!(parked, owned, "{day} 日目：持ち主のいない車が停めてある");
+        assert!(
+            parked <= p.citizen_count() as u64,
+            "{day} 日目：{parked} 台"
+        );
+        by_day.push(parked);
+    }
+    let early = by_day[4..10].iter().max().copied().unwrap();
+    let late = by_day[14..].iter().max().copied().unwrap();
+    assert!(early > 0, "車が停められていない {by_day:?}");
+    assert!(
+        late * 4 <= early * 5,
+        "停めてある台数が増え続ける {by_day:?}"
+    );
 }
 
 /// 始めたときの枠のぶんだけチャンクを買い、次の 1 つは枠で断られ、
@@ -968,11 +1111,13 @@ fn driving_golden() {
     const TICKS: u64 = 2_600;
     let (got, spawned, end) = driving_checkpoints(SEED, TICKS);
     assert!(spawned > 300, "作れた移動が少ない {spawned}");
-    assert!(
-        end.trips().len() < 30,
-        "着かずに残った移動が多い {}",
-        end.trips().len()
-    );
+    // 朝の通勤の移動は数えない。
+    let left = end
+        .trips()
+        .iter()
+        .filter(|(id, _)| end.trips().commuter(*id).is_none())
+        .count();
+    assert!(left < 30, "着かずに残った移動が多い {left}");
     assert!(end.trips().lots().any(|(_, l)| l.parked > 0));
     assert_eq!(driving_checkpoints(SEED, TICKS).0, got);
     compare_golden("driving", &got);

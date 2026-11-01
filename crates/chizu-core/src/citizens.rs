@@ -241,6 +241,13 @@ impl Population {
         }
     }
 
+    /// 住民がいま乗っている移動を決める。住民がいなければ何もしない。
+    pub(crate) fn set_trip(&mut self, id: CitizenId, trip: Option<TripId>) {
+        if self.contains_citizen(id) {
+            self.citizens.trip[id.slot()] = trip;
+        }
+    }
+
     pub fn members(&self, id: HouseholdId) -> Option<&[CitizenId]> {
         self.contains_household(id)
             .then(|| self.households.members[id.slot()].as_slice())

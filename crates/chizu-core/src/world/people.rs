@@ -8,7 +8,7 @@
 //!   幸福度の平均は住宅の需要にも効く。
 //! - 職場：[`assign_jobs`] で割り当て、職場ができた住民に通勤の予定を立てる。
 //! - 予定：家にいる住民は朝に職場へ、職場にいる住民は夕方に家へ出発する。出発の tick は
-//!   出発の待ち行列に積み、時刻が来たら居場所を切り替える。移動そのものはまだ作らない。
+//!   出発の待ち行列に積み、時刻が来たら移動を始め（`world::commute`）、着いたら居場所を切り替える。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -125,13 +125,14 @@ impl World {
         s
     }
 
-    /// いま職場にいる住民の数。
+    /// いま職場にいる住民の数。家へ向かって移動している住民は数えない。
     pub fn citizens_at_work(&self) -> usize {
         let p = &self.population;
         p.citizen_ids()
             .filter(|id| {
-                p.citizen(*id)
-                    .is_some_and(|r| r.workplace.is_some() && r.schedule.next == Activity::Home)
+                p.citizen(*id).is_some_and(|r| {
+                    r.workplace.is_some() && r.schedule.next == Activity::Home && r.trip.is_none()
+                })
             })
             .count()
     }
@@ -192,7 +193,7 @@ impl World {
             })
             .collect();
         for h in leaving {
-            self.population.remove_household(h);
+            self.remove_household(h);
         }
     }
 
@@ -206,9 +207,16 @@ impl World {
         u64::from(r.below(DEPARTURE_SPREAD))
     }
 
-    /// 出発の時刻が来た住民の居場所を切り替え、次の出発を積む。
+    /// 出発の時刻が来た住民の移動を始める。移動を作れなかった住民は、その場で居場所を切り替える。
     fn run_departures(&mut self) {
-        for id in self.population.pop_departures(self.tick) {
+        let due = self.population.pop_departures(self.tick);
+        let stuck = self.start_commutes(due);
+        self.switch_places(stuck);
+    }
+
+    /// 行き先に着いた住民の居場所を切り替え、次の出発を積む。
+    pub(super) fn switch_places(&mut self, ids: Vec<CitizenId>) {
+        for id in ids {
             let row = self.population.citizen(id).expect("出発する住民がいない");
             let jitter = self.departure_jitter(id);
             let schedule = match (row.schedule.next, row.workplace) {
@@ -304,7 +312,7 @@ impl World {
         for h in homeless {
             match self.population.homeless_since(h).flatten() {
                 Some(since) if self.tick.since(since) >= HOMELESS_LEAVE_TICKS => {
-                    self.population.remove_household(h);
+                    self.remove_household(h);
                 }
                 _ => {
                     self.population.set_home(h, None, self.tick);
@@ -491,25 +499,47 @@ pub(crate) mod tests {
         }
         let stats = w.city_stats();
         assert!(stats.employed > 0, "誰も働いていない");
-        // 職場のある住民は、出発の待ち行列にちょうど 1 回入っている。
+        // 職場のある住民は、移動しているか、出発の待ち行列にちょうど 1 回入っている。
         let workers = p
             .citizen_ids()
             .filter(|id| p.citizen(*id).unwrap().workplace.is_some())
             .count();
-        assert_eq!(p.departures().len(), workers);
-        // 昼には職場にいて、夜には家にいる。
+        let moving = p
+            .citizen_ids()
+            .filter(|id| p.citizen(*id).unwrap().trip.is_some())
+            .count();
+        assert_eq!(p.departures().len() + moving, workers);
+        // 昼には職場にいて、夜には家にいる。出発から 4 時間待つ。移動は 1 tick に移動の 1 秒しか進まず、
+        // 歩道は片側を一方の向きにしか歩けないので、この街の徒歩の通勤は回り道で 1,000 tick 近くかかる。
         let day_start = w.tick().0 - w.tick().0 % TICKS_PER_DAY;
-        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_START + u64::from(DEPARTURE_SPREAD) {
+        let wait = 4 * u64::from(DEPARTURE_SPREAD);
+        // 母数は判定する時点の働く住民である。朝の出発のあとに職場が決まり、次の朝を待っている住民は除く。
+        let workers_now = |w: &World| {
+            let p = w.population();
+            p.citizen_ids()
+                .map(|id| p.citizen(id).unwrap())
+                .filter(|r| r.workplace.is_some())
+                .filter(|r| r.schedule.next != Activity::Work || r.schedule.depart_at.is_none())
+                .count()
+        };
+        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_START + wait {
             w.step();
         }
+        let workers = workers_now(&w);
         assert!(
             w.citizens_at_work() * 10 >= workers * 9,
-            "朝に職場へ向かわない"
+            "朝に職場へ向かわない：{} / {workers}",
+            w.citizens_at_work()
         );
-        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_END + u64::from(DEPARTURE_SPREAD) {
+        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_END + wait {
             w.step();
         }
-        assert!(w.citizens_at_work() * 10 <= workers, "夕方に家へ帰らない");
+        let workers = workers_now(&w);
+        assert!(
+            w.citizens_at_work() * 10 <= workers,
+            "夕方に家へ帰らない：{} / {workers}",
+            w.citizens_at_work()
+        );
     }
 
     /// 区画の組み合わせごとに、早すぎる時点で止まらず、需要が 0 のまわりに収まっていくことを確かめる。

@@ -8,6 +8,7 @@
 mod car;
 #[cfg(test)]
 mod car_tests;
+mod commute;
 mod parking;
 #[cfg(test)]
 mod parking_tests;
@@ -21,6 +22,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
+pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM};
 pub use parking::{Lot, PARK_RADIUS, building_spot};
 pub use pos::SidewalkPos;
 
@@ -131,6 +133,7 @@ pub struct Trips {
     slots: Slots,
     rows: Vec<Option<Trip>>,
     parking: parking::Parking,
+    commuters: commute::Commuters,
 }
 
 /// 画面に描く移動体。
@@ -465,5 +468,6 @@ impl StateHash for Trips {
         h.write(&self.slots);
         h.write(&self.rows);
         h.write(&self.parking);
+        h.write(&self.commuters);
     }
 }

@@ -3,7 +3,7 @@ import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
-import { moverArea } from "./map/movers.ts";
+import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
 import { MapRenderer } from "./map/renderer.ts";
 import {
   buildingGeometry,
@@ -203,6 +203,12 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   mapCanvas.dataset.drawnMovers = String(movers);
   const first = renderer?.movers.first;
   mapCanvas.dataset.firstMover = first ? `${first.x},${first.y}` : "";
+  const firstOf = (kind: number) => {
+    const p = renderer?.movers.firstOf.get(kind);
+    return p ? `${p.x},${p.y}` : "";
+  };
+  mapCanvas.dataset.firstWalker = firstOf(KIND_WALK);
+  mapCanvas.dataset.firstCar = firstOf(KIND_CAR);
   mapCanvas.dataset.drawnChunks = String(drawn);
   mapCanvas.dataset.visibleChunks = String(
     (range.maxCx - range.minCx + 1) * (range.maxCy - range.minCy + 1),
