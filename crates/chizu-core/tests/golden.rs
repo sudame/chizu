@@ -40,7 +40,41 @@ fn scenarios() -> Vec<Scenario> {
             ticks: 600,
             log: land_purchase(),
         },
+        Scenario {
+            name: "road_network",
+            seed: 42,
+            ticks: 400,
+            log: road_network(),
+        },
     ]
+}
+
+/// 道路を引き、ノードでつなぎ、消して、また引く記録。重なり、既存の区間の途中、
+/// 買っていない土地、何もない場所を消す操作で却下される場合も混ぜる。
+fn road_network() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let road = |from: (i64, i64), to: (i64, i64), kind| Command::BuildRoad {
+        from: TilePos::new(from.0, from.1),
+        to: TilePos::new(to.0, to.1),
+        kind,
+    };
+    let bulldoze = |a: (i64, i64), b: (i64, i64)| Command::Bulldoze {
+        area: TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1)),
+    };
+    rec(10, road((0, 0), (40, 0), RoadKind::Small));
+    rec(10, road((40, 0), (40, 20), RoadKind::Medium));
+    rec(20, road((20, -20), (20, 20), RoadKind::Small));
+    rec(20, road((40, -20), (40, 0), RoadKind::Large));
+    rec(20, road((0, 0), (30, 30), RoadKind::Large));
+    rec(20, road((10, 0), (30, 0), RoadKind::Small));
+    rec(30, road((100, 0), (140, 0), RoadKind::Small));
+    rec(100, bulldoze((39, 10), (41, 12)));
+    rec(100, bulldoze((-50, -50), (-40, -40)));
+    rec(200, road((40, 0), (40, 30), RoadKind::Small));
+    log
 }
 
 /// 土地を買い進める記録。買える場合と、買った土地・離れた土地・角だけで接する土地・
@@ -158,6 +192,26 @@ fn land_purchase_covers_water_and_the_rules() {
     let water: u32 = world.chunks().map(|c| c.terrain().water_count()).sum();
     assert!(water > 0, "買った土地に水辺が 1 マスもない");
     assert_eq!(checkpoints_and_world(s.seed, &s.log, s.ticks).1, world);
+}
+
+/// 道路の記録が、ノードでのつなぎ、却下、消したあとの引き直しを通っていることを確かめる。
+#[test]
+fn road_network_covers_the_rules() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "road_network")
+        .unwrap();
+    let mut world = World::new(s.seed);
+    let stats = replay(&mut world, &s.log, s.ticks);
+    assert_eq!((stats.applied, stats.denied), (6, 4));
+    let net = world.network();
+    let degree = |x, y| {
+        let node = net.node_at(TilePos::new(x, y)).unwrap();
+        net.node(node).unwrap().segments.len()
+    };
+    assert_eq!((degree(40, 0), degree(0, 0)), (3, 2));
+    assert_eq!(net.segments().count(), 4);
+    assert!(world.money() < chizu_core::world::INITIAL_MONEY);
 }
 
 fn golden_dir() -> PathBuf {
