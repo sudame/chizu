@@ -16,7 +16,7 @@ use std::sync::Arc;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-pub use car::{CAR_ACCEL, CAR_LENGTH, MIN_GAP};
+pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
 pub use pos::SidewalkPos;
 
 use crate::id::{Slots, TripId};
@@ -270,13 +270,21 @@ impl Trips {
             .collect();
         let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
         let mut routes = plan(router, mode, &ends).into_iter();
+        // 車は、出発のリンクの車線のうち車の少ない車線から走り出す。
+        let mut lanes = car::LaneState::of(&self.rows);
         resolved
             .iter()
             .zip(walks)
             .map(|(e, (_, to))| {
                 let e = (*e)?;
                 let route = routes.next().expect("探した経路の数が合わない")?;
-                Some(self.insert(make_trip(net, route, e, *to, now)))
+                let mut t = make_trip(net, route, e, *to, now);
+                if mode == LaneMode::Car {
+                    let choices: Vec<LaneId> = net.link_lanes(t.link()).collect();
+                    t.lane = car::emptiest(&choices, &lanes);
+                    lanes.add(t.lane);
+                }
+                Some(self.insert(t))
             })
             .collect()
     }
