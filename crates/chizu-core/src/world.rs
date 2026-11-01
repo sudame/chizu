@@ -482,6 +482,37 @@ mod tests {
         );
     }
 
+    proptest::proptest! {
+        /// 引く・消すを任意に並べても、チャンクの境目のまわりのマスの使い道が網と一致する。
+        #[test]
+        fn road_tiles_match_the_network(
+            edits in proptest::collection::vec(
+                (0_u8..4, -8_i64..8, -8_i64..8, -1_i64..=1, -1_i64..=1, 1_i64..10),
+                1..30,
+            )
+        ) {
+            let mut w = World::new(0);
+            for (op, x, y, sx, sy, len) in edits {
+                if op == 0 {
+                    let area = TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + len / 2, y));
+                    w.apply(&Command::Bulldoze { area });
+                } else if (sx, sy) != (0, 0) {
+                    road(&mut w, (x, y), (x + sx * len, y + sy * len), RoadKind::Small);
+                }
+            }
+            for x in -20..20 {
+                for y in -20..20 {
+                    let expected = if w.network().is_road_tile(TilePos::new(x, y)) {
+                        TileUse::Road
+                    } else {
+                        TileUse::Empty
+                    };
+                    proptest::prop_assert_eq!(tile_use(&w, x, y), expected, "({}, {})", x, y);
+                }
+            }
+        }
+    }
+
     #[test]
     fn roads_are_denied_off_the_owned_land_on_water_and_without_money() {
         let mut w = World::new(42);

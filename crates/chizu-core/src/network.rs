@@ -997,7 +997,7 @@ mod tests {
         #[test]
         fn edits_keep_the_network_consistent(
             edits in proptest::collection::vec(
-                (0_u8..5, 0_i64..12, 0_i64..12, -1_i64..=1, -1_i64..=1, 1_i64..8),
+                (0_u8..5, 56_i64..72, -8_i64..8, -1_i64..=1, -1_i64..=1, 1_i64..12),
                 1..40,
             )
         ) {
