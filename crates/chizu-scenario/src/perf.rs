@@ -7,8 +7,8 @@ use std::hint::black_box;
 
 use chizu_core::routing::{AstarRouter, Router};
 use chizu_core::{
-    Activity, CitizenChange, CitizenId, CitizenRow, RngPurpose, ScheduleState, TICKS_PER_DAY, Tick,
-    Trips, bucket_at, rng,
+    Activity, BUCKET_COUNT, CitizenChange, CitizenId, CitizenRow, RngPurpose, ScheduleState,
+    TICKS_PER_DAY, Tick, Trips, bucket_at, rng,
 };
 
 use crate::{city_grid_100k, commute_requests, synthetic_population, walk_ends, zoned_grid_city};
@@ -70,9 +70,11 @@ impl TickStats {
 ///
 /// 1 tick は、[`zoned_grid_city`] の `World::step`（建物が建つ処理）と、住民の表の 1 組を
 /// [`rng_write`] で更新する処理である。住民の表は `World` の外に持つ。街と住民の表を作る時間は測らない。
+/// 道路を引いたあとの最初の `World::step` は経路のグラフを作り直すので、1 回進めてから測り始める。
 /// `left` は建った建物の数である。
 pub fn day(citizens: u32, ticks: u64, now: &dyn Fn() -> u64) -> TickStats {
     let mut w = zoned_grid_city(SEED);
+    w.step();
     let mut p = synthetic_population(SEED, citizens);
     let mut tick = Tick::ZERO;
     let mut worst = 0;
@@ -108,7 +110,7 @@ pub fn movers(each: u32, ticks: u64, now: &dyn Fn() -> u64) -> TickStats {
     let start = now();
     for _ in 0..ticks {
         let t = now();
-        black_box(trips.step(&net, router.connectors()));
+        black_box(trips.step(&net, &mut router));
         worst = u64::max(worst, now() - t);
     }
     TickStats {
@@ -162,13 +164,25 @@ pub fn route_batch(requests: u32, runs: u32, now: &dyn Fn() -> u64) -> BatchStat
     }
 }
 
+/// 測る項目を小さい規模で一度ずつ回す。
+///
+/// V8 は WASM をまず速くコンパイルする Liftoff で動かし、よく呼ぶ関数を TurboFan でコンパイルし直す。
+/// 先に回しておき、コンパイルし直す時間を測った値に入れない。
+pub fn warm_up(now: &dyn Fn() -> u64) {
+    black_box(day(10_000, 2 * u64::from(BUCKET_COUNT), now));
+    black_box(movers(500, 20, now));
+    black_box(route_batch(1_000, 1, now));
+}
+
 /// 測る項目をすべて回し、JSON の 1 つのオブジェクトにする。
+/// 始めに [`warm_up`] を回す。
 ///
 /// `memory` は、項目を回すたびに呼ぶメモリの大きさ（バイト）の読み取りである。
 /// WASM の線形メモリは縮まないので、ある項目のあとの値は、そこまでで最も大きかったときの値になる。
 pub fn run_all(now: &dyn Fn() -> u64, memory: &dyn Fn() -> Option<u64>) -> String {
     let json_mem = |m: Option<u64>| m.map_or("null".to_string(), |b| b.to_string());
     let base = memory();
+    warm_up(now);
     let day_100k = day(100_000, TICKS_PER_DAY, now);
     let mem_100k = memory();
     // 100 万人は 1 日を回すと長すぎるので、1/10 日で 1 日を見積もる。
