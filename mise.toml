@@ -37,6 +37,10 @@ run = [
   "scripts/check-no-float.sh",
 ]
 
+[tasks."lint:wasm"]
+# lint:rust はネイティブでしか回らず、wasm32 に限った cfg の中を見ない。build:wasm と同じ条件で clippy を回す
+run = "cargo clippy --package chizu-wasm --target wasm32-unknown-unknown -Z build-std=panic_abort,std -- -D warnings"
+
 [tasks."install:web"]
 dir = "web"
 run = "pnpm install --frozen-lockfile"
@@ -48,7 +52,7 @@ dir = "web"
 run = ["biome check .", "pnpm exec tsc --noEmit"]
 
 [tasks.lint]
-depends = ["lint:md", "lint:actions", "lint:rust", "lint:web"]
+depends = ["lint:md", "lint:actions", "lint:rust", "lint:wasm", "lint:web"]
 
 [tasks."test:rust"]
 run = "cargo test --workspace"

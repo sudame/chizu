@@ -37,6 +37,7 @@ mise run test:rust     # cargo test --workspace
 mise run lint:md       # markdown の検査（rumdl）
 mise run lint:actions  # ワークフローの検査（jactionlint）
 mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core の浮動小数点の検査
+mise run lint:wasm     # wasm32 のターゲットで chizu-wasm に cargo clippy
 mise run lint:web      # Biome と tsc --noEmit
 mise run test:web      # Vitest
 mise run test:wasm     # ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかを確かめる
