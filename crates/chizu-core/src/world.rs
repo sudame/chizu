@@ -7,7 +7,7 @@ use crate::building::Buildings;
 use crate::chunk::{Chunk, Layer, TileUse};
 use crate::citizens::{CitizenChange, CitizenRow, Population};
 use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
-use crate::id::{CitizenId, TripId};
+use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
 use crate::rng::{RngPurpose, mix_words};
@@ -454,6 +454,21 @@ impl World {
             .spawn(&self.network, &mut self.router.router, from, to, now)
     }
 
+    /// 建物 `from` から建物 `to` へ車で向かう移動を作る。行き先の近くの駐車場まで走り、そこから歩く。
+    /// `spawn_walk` と同じく、住民の予定とつなぐまでの入口である。
+    pub fn spawn_drive(&mut self, from: BuildingId, to: BuildingId) -> Option<TripId> {
+        self.sync_router();
+        let now = self.tick;
+        self.trips.spawn_drive_between(
+            &self.network,
+            &mut self.router.router,
+            &self.buildings,
+            from,
+            to,
+            now,
+        )
+    }
+
     /// マスの範囲 `rect` にいる移動体を ID の順に返す。状態は変えない。
     pub fn movers_in(&self, rect: TileRect) -> Vec<Mover> {
         let edge = |t: i64| Mm(t.checked_mul(TILE_MM).expect("座標があふれた"));
@@ -575,7 +590,7 @@ impl World {
         self.population
             .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
         self.trips
-            .step(&self.network, self.router.router.connectors());
+            .step(&self.network, &mut self.router.router);
         self.grow_buildings();
         self.tick = tick.next();
     }

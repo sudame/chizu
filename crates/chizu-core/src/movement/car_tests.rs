@@ -40,7 +40,7 @@ impl Cars {
     }
 
     fn step(&mut self) -> Vec<TripId> {
-        let arrived = self.trips.step(&self.net, self.router.connectors());
+        let arrived = self.trips.step(&self.net, &mut self.router);
         check_spacing(&self.trips);
         arrived
     }
@@ -265,4 +265,90 @@ fn car_positions_resolve_on_the_car_link_of_the_same_side() {
         (walk.segment, Dir::Backward, LaneMode::Car)
     );
     assert_eq!(off, woff);
+}
+
+/// 東西の道路の北側に、1 マスの建物を `xs` のマスに並べる。どれも駐車場は 1 台ぶんである。
+fn street_with_buildings(xs: &[i64]) -> (Network, crate::building::Buildings, Vec<crate::id::BuildingId>) {
+    use crate::building::{Building, Buildings};
+    use crate::command::ZoneKind;
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (40, 0), RoadKind::Small);
+    let seg = n.segments().next().unwrap().0;
+    let mut b = Buildings::default();
+    let ids = xs
+        .iter()
+        .map(|x| {
+            let front = TilePos::new(*x, -1);
+            b.insert(Building {
+                zone: ZoneKind::Commercial,
+                area: TileRect::from_corners(front, front),
+                front,
+                toward_road: (0, 1),
+                entrance: LinkId {
+                    segment: seg,
+                    dir: Dir::Backward,
+                    mode: LaneMode::Sidewalk,
+                },
+                level: 1,
+                leveled_at: Tick::ZERO,
+            })
+        })
+        .collect();
+    (n, b, ids)
+}
+
+#[test]
+fn a_car_parks_at_the_destination_or_nearby_and_walks_the_rest() {
+    let (n, b, ids) = street_with_buildings(&[30, 5, 9, 39]);
+    let (home, shop, near, far) = (ids[0], ids[1], ids[2], ids[3]);
+    let mut c = Cars::new(n);
+    let first = c
+        .trips
+        .spawn_drive_between(&c.net, &mut c.router, &b, home, shop, Tick::ZERO)
+        .unwrap();
+    assert_eq!(c.trips.parked(shop), 1);
+    // 行き先が満車なので、近いほうの建物に停めて歩く。
+    let second = c
+        .trips
+        .spawn_drive_between(&c.net, &mut c.router, &b, far, shop, Tick::ZERO)
+        .unwrap();
+    assert_eq!(c.trips.parked(near), 1);
+    // どこも満車（遠い建物は範囲の外）なので、行き先の前で車は消える。
+    let third = c
+        .trips
+        .spawn_drive_between(&c.net, &mut c.router, &b, home, shop, Tick::ZERO)
+        .unwrap();
+    assert_eq!((c.trips.parked(home), c.trips.parked(far)), (0, 0));
+    let mut walked = false;
+    let mut arrived = Vec::new();
+    for _ in 0..300 {
+        arrived.extend(c.step());
+        walked |= c
+            .trips
+            .get(second)
+            .is_some_and(|t| t.mode() == LaneMode::Sidewalk);
+    }
+    assert!(walked, "近くに停めた車から降りて歩かなかった");
+    arrived.sort();
+    let mut want = vec![first, second, third];
+    want.sort();
+    assert_eq!(arrived, want);
+    // 停めた車が出ると、その駐車場が空く。
+    c.trips
+        .spawn_drive_between(&c.net, &mut c.router, &b, shop, home, Tick::ZERO)
+        .unwrap();
+    assert_eq!((c.trips.parked(shop), c.trips.parked(home)), (0, 1));
+}
+
+#[test]
+fn building_spots_sit_on_the_road_in_front() {
+    let (n, b, ids) = street_with_buildings(&[0, 7, 40]);
+    for id in ids {
+        let bl = b.get(id).unwrap();
+        let p = building_spot(&n, bl).unwrap();
+        let (link, off) = p.resolve(&n).unwrap();
+        assert_eq!(link, bl.entrance);
+        // 西向きの歩道なので、始まり（東の端）からの距離は (40 - x) マスである。
+        assert_eq!(off, LaneOffset(u32::try_from(40 - bl.front.x).unwrap() * 8_000));
+    }
 }

@@ -7,6 +7,7 @@
 mod car;
 #[cfg(test)]
 mod car_tests;
+mod parking;
 mod pos;
 #[cfg(test)]
 mod tests;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 pub use car::{CAR_ACCEL, CAR_LENGTH, MIN_GAP};
+pub use parking::{PARK_RADIUS, building_spot};
 pub use pos::SidewalkPos;
 
 use crate::id::{Slots, TripId};
@@ -48,6 +50,8 @@ pub struct Trip {
     /// 行き先の出入口と、経路の最後のリンクの上でのその位置。
     dest: SidewalkPos,
     dest_offset: LaneOffset,
+    /// 車を降りたあと、歩いて向かう行き先。
+    then: Option<SidewalkPos>,
     departed: Tick,
 }
 
@@ -121,6 +125,7 @@ impl Trip {
 pub struct Trips {
     slots: Slots,
     rows: Vec<Option<Trip>>,
+    parking: parking::Parking,
 }
 
 /// 画面に描く移動体。
@@ -279,9 +284,48 @@ impl Trips {
             .collect()
     }
 
-    /// 1 tick 進め、着いた主体を消して、その ID の順に返す。`connectors` はノードでの車線のつながりで、
-    /// 車が次のリンクの車線を選ぶのに使う。
-    pub fn step(&mut self, net: &Network, connectors: &[Connector]) -> Vec<TripId> {
+    /// 1 tick 進め、着いた主体を消して、その ID の順に返す。車を降りて歩く主体は、その場で歩き始める。
+    /// 歩く経路が見つからなければ、その主体も消す。
+    pub fn step(&mut self, net: &Network, router: &mut AstarRouter) -> Vec<TripId> {
+        let arrived = self.advance_all(net, router.connectors());
+        let (walk_on, done): (Vec<usize>, Vec<usize>) = arrived
+            .into_iter()
+            .partition(|i| self.rows[*i].as_ref().is_some_and(|t| t.then.is_some()));
+        let mut gone = done;
+        let walks: Vec<(usize, Option<Ends>, SidewalkPos)> = walk_on
+            .iter()
+            .map(|i| {
+                let t = self.rows[*i].as_ref().expect("降りる主体がない");
+                let to = t.then.expect("歩く行き先がない");
+                let ends = t.position().resolve(net).zip(to.resolve(net));
+                (*i, ends, to)
+            })
+            .collect();
+        let ends: Vec<Ends> = walks.iter().filter_map(|w| w.1).collect();
+        let mut routes = plan(router, LaneMode::Sidewalk, &ends).into_iter();
+        for (i, e, to) in walks {
+            let route = e.and_then(|_| routes.next().expect("探した経路の数が合わない"));
+            match (e, route) {
+                (Some(e), Some(route)) => {
+                    let departed = self.rows[i].as_ref().expect("降りる主体がない").departed;
+                    self.rows[i] = Some(make_trip(net, route, e, to, departed));
+                }
+                _ => gone.push(i),
+            }
+        }
+        gone.sort_unstable();
+        gone.into_iter()
+            .map(|i| {
+                let (index, generation) = self.slots.current(i).expect("着いた主体がない");
+                let id = TripId { index, generation };
+                self.remove(id);
+                id
+            })
+            .collect()
+    }
+
+    /// 歩く人と車を 1 tick 進め、着いた主体の行の番号を返す。
+    fn advance_all(&mut self, net: &Network, connectors: &[Connector]) -> Vec<usize> {
         let advance = |(i, t): (usize, &mut Option<Trip>)| {
             let t = t.as_mut()?;
             (t.mode == LaneMode::Sidewalk && t.advance(net)).then_some(i)
@@ -304,14 +348,6 @@ impl Trips {
         arrived.extend(car::step(&mut self.rows, net, connectors));
         arrived.sort_unstable();
         arrived
-            .into_iter()
-            .map(|i| {
-                let (index, generation) = self.slots.current(i).expect("着いた主体がない");
-                let id = TripId { index, generation };
-                self.remove(id);
-                id
-            })
-            .collect()
     }
 
     /// 網が変わったあとに呼ぶ。残りの経路に消えたリンクがある主体を、いまの位置から探し直す。
@@ -342,9 +378,9 @@ impl Trips {
                     continue;
                 };
                 let old = self.get(id).expect("探し直す主体がない");
-                let (departed, speed) = (old.departed, old.speed);
+                let (departed, speed, then) = (old.departed, old.speed, old.then);
                 let mut t = make_trip(net, route, ends, dest, departed);
-                t.speed = speed;
+                (t.speed, t.then) = (speed, then);
                 self.rows[id.slot()] = Some(t);
             }
         }
@@ -393,6 +429,7 @@ fn make_trip(
         step: (0, 0),
         dest,
         dest_offset: to,
+        then: None,
         departed: now,
     };
     t.enter(net, from, None);
@@ -418,6 +455,7 @@ impl StateHash for Trip {
         h.write(&self.step);
         h.write(&self.dest);
         h.write(&self.dest_offset);
+        h.write(&self.then);
         h.write(&self.departed);
     }
 }
@@ -426,5 +464,6 @@ impl StateHash for Trips {
     fn write_state(&self, h: &mut StateHasher) {
         h.write(&self.slots);
         h.write(&self.rows);
+        h.write(&self.parking);
     }
 }

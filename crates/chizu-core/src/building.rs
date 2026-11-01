@@ -59,6 +59,11 @@ impl Building {
         };
         self.tile_count() * per_tile * u64::from(self.level)
     }
+
+    /// 駐車場の台数。1 マスに段階の数だけ停められるとする。
+    pub fn parking_spaces(&self) -> u32 {
+        u32::try_from(self.tile_count() * u64::from(self.level)).unwrap_or(u32::MAX)
+    }
 }
 
 impl StateHash for Building {

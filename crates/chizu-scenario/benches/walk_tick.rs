@@ -17,7 +17,7 @@ fn walk_tick(c: &mut Criterion) {
     c.bench_function("walk_tick_10k", |b| {
         b.iter_batched(
             || trips.clone(),
-            |mut t| black_box(t.step(&net, &[])),
+            |mut t| black_box(t.step(&net, &mut router)),
             BatchSize::LargeInput,
         );
     });
