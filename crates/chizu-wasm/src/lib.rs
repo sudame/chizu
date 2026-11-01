@@ -66,7 +66,7 @@ impl Simulation {
         self.0.snapshot().byte_offset()
     }
 
-    /// 画面から届いたコマンドを `Command` に直し、検証して記録する。記録した番号を返す。
+    /// 画面から届いたコマンドを `Command` に直し、検証して記録し、その場で適用する。記録した番号を返す。
     pub fn submit(&mut self, command: JsValue) -> Result<f64, JsError> {
         let command = command_from_js(&command)?;
         self.0
@@ -93,17 +93,17 @@ impl Simulation {
                     ApplyOutcome::Denied(_) => "Denied",
                 };
                 set(&o, "outcome", JsValue::from_str(outcome));
-                if let Some(reason) = r.reason {
-                    set(&o, "reason", JsValue::from_str(reason));
+                if let ApplyOutcome::Denied(reason) = r.outcome {
+                    set(&o, "reason", JsValue::from_str(sim::deny_text(reason)));
                 }
                 JsValue::from(o)
             })
             .collect()
     }
 
-    /// 道路網を変えた回数。変わったときだけ道路の形を読み直す。
-    pub fn network_revision(&self) -> u32 {
-        self.0.network_revision()
+    /// 道路網の版。変わったときだけ道路の形を読み直す。
+    pub fn network_version(&self) -> f64 {
+        self.0.network_version() as f64
     }
 
     /// 区間ごとに `[a の x, a の y, b の x, b の y, 種類]`。座標はマスの座標で、種類は `sim::segment_kind_code`。

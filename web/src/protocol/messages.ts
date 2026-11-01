@@ -42,7 +42,8 @@ export type ChunkData = {
 };
 
 export type MainToWorker =
-  | { kind: "command"; command: CommandMessage }
+  /** id は画面が振る番号で、結果の通知で返ってくる。 */
+  | { kind: "command"; id: number; command: CommandMessage }
   | { kind: "pause"; paused: boolean }
   /**
    * visible はいま見えているチャンクを先に送ってほしい順に並べたもの。
@@ -66,7 +67,11 @@ export type WorkerToMain =
   | { kind: "chunks"; chunks: ChunkData[] }
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
   | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
-  | { kind: "outcome"; command: CommandMessage["kind"]; outcome: Outcome; reason?: string }
+  /**
+   * id は画面が振ったコマンドの番号、seq は記録の通し番号。
+   * 記録する前に受け付けなかったコマンドには seq がない。
+   */
+  | { kind: "outcome"; id: number; seq?: number; outcome: Outcome; reason?: string }
   | { kind: "error"; message: string };
 
 function isChunkData(value: unknown): value is ChunkData {
@@ -112,7 +117,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "outcome":
       return (
-        typeof v.command === "string" &&
+        Number.isInteger(v.id) &&
+        (v.seq === undefined || Number.isInteger(v.seq)) &&
         typeof v.outcome === "string" &&
         (v.reason === undefined || typeof v.reason === "string")
       );

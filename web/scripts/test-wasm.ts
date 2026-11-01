@@ -3,6 +3,7 @@
 // スレッドつきの WASM が Worker で動き、正しい和を返すかを確かめる。
 // 三重バッファから読んだ時計が実時間に合わせて進み、速度と一時停止のボタンに従うかも確かめる。
 // チャンクが Worker から届いて描かれること、ドラッグとホイールでカメラが動くことも確かめる。
+// 道路の道具で道路を引くと描かれて所持金が減ること、断られると理由が出ること、ブルドーザで消せることも確かめる。
 // Chrome は mise の tools で入れた chrome-headless-shell を PATH から探す。
 
 import { accessSync, constants } from "node:fs";
@@ -195,9 +196,209 @@ try {
 
   const initialSegments = Number(await map.getAttribute("data-road-segments"));
   check(
-    (await map.getAttribute("data-road-revision")) === "0" && initialSegments > 0,
+    initialSegments > 0,
     `起動すると、外部接続の高速道路のある道路網が届く（${initialSegments} 本）`,
   );
+
+  // 道路を引く道具で、画面の中心の行に横の道路を引く
+  const message = page.locator("#tool-message");
+  const outcomeCount = async () => Number((await message.getAttribute("data-count")) ?? 0);
+  const nextOutcome = async (before: number) => {
+    await page.waitForFunction(
+      (n) => Number(document.querySelector<HTMLElement>("#tool-message")?.dataset.count ?? 0) > n,
+      before,
+      { timeout: TIMEOUT_MS },
+    );
+    return {
+      command: await message.getAttribute("data-command"),
+      outcome: await message.getAttribute("data-outcome"),
+      text: await message.textContent(),
+    };
+  };
+  const roadSegments = async () => Number((await map.getAttribute("data-road-segments")) ?? 0);
+  const moneyNow = async () => Number(await hud.getAttribute("data-money"));
+  const drawRoad = async () => {
+    await page.mouse.click(cx - 80, cy);
+    await page.mouse.move(cx + 80, cy + 6, { steps: 4 });
+    const cost = Number(await map.getAttribute("data-preview-cost"));
+    const before = await outcomeCount();
+    await page.mouse.click(cx + 80, cy + 6);
+    await page.keyboard.press("Escape");
+    return { cost, result: await nextOutcome(before) };
+  };
+
+  await page.locator('button[data-tool="road-Small"]').click();
+  const moneyBefore = await moneyNow();
+  const built = await drawRoad();
+  check(
+    built.result.outcome === "Applied",
+    `道路を引くと受け付けられる（${built.result.outcome}：${built.result.text}）`,
+  );
+  // 縦に 1.5 マスずらした終点は横に寄せるので、40 マスの小さい道路になる
+  check(built.cost === 40 * 250, `引く前に費用が見積もられる（${built.cost}）`);
+  const waitSegments = (n: number) =>
+    page.waitForFunction(
+      (expected) =>
+        Number(document.querySelector<HTMLElement>("#map")?.dataset.roadSegments) === expected,
+      n,
+      { timeout: TIMEOUT_MS },
+    );
+  await waitSegments(initialSegments + 1);
+  check(
+    (await roadSegments()) === initialSegments + 1,
+    `引いた道路の区間が届く（${await roadSegments()} 本）`,
+  );
+  await page.waitForFunction(
+    (expected) => Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) === expected,
+    moneyBefore - built.cost,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, `所持金が見積もりの分だけ減る（${moneyBefore} → ${await moneyNow()}）`);
+  // 道路はマス (12, 32) から (52, 32) へ、マスの中心を通る。カメラは (32, 32) を画面の中心に、
+  // 1 マスを 4 ピクセルで描くので、マス (x, y) の中心は画面の (cx + (x - 31.5) × 4, cy + (y - 31.5) × 4) にある
+  await page.waitForTimeout(100);
+  const zoom = first.zoom;
+  const tileCenter = (x: number, y: number) => ({
+    x: cx + (x + 0.5 - first.x) * zoom,
+    y: cy + (y + 0.5 - first.y) * zoom,
+  });
+  // 道路とノードは灰色、地面は緑が強い
+  const isRoad = (c: number[]) =>
+    Math.abs((c[1] ?? 0) - (c[0] ?? 0)) < 20 && Math.abs((c[2] ?? 0) - (c[1] ?? 0)) < 20;
+  const isGround = (c: number[]) => (c[1] ?? 0) > (c[0] ?? 0) + 30;
+  const colorAt = async (x: number, y: number) => {
+    const p = tileCenter(x, y);
+    return pixel(p.x, p.y);
+  };
+  for (const [x, y, road, label] of [
+    [32, 32, true, "道路の途中のマスの中心"],
+    [12, 32, true, "始点のマスの中心"],
+    [52, 32, true, "終点のマスの中心"],
+    [32, 31, false, "1 つ上のマスの中心"],
+    [32, 33, false, "1 つ下のマスの中心"],
+    [10, 32, false, "始点の 2 つ左のマスの中心"],
+    [54, 32, false, "終点の 2 つ右のマスの中心"],
+  ] as const) {
+    const c = await colorAt(x, y);
+    check(
+      road ? isRoad(c) : isGround(c),
+      `${label} (${x}, ${y}) が${road ? "道路" : "地面"}の色で描かれる（${c.join(", ")}）`,
+    );
+  }
+
+  const again = await drawRoad();
+  check(
+    again.result.outcome === "Denied" && (again.result.text ?? "").includes("重なる"),
+    `同じ場所に引くと理由つきで断られる（${again.result.text}）`,
+  );
+
+  await page.locator('button[data-tool="bulldoze"]').click();
+  const beforeBulldoze = await outcomeCount();
+  await page.mouse.move(cx - 100, cy - 20);
+  await page.mouse.down();
+  await page.mouse.move(cx + 100, cy + 20, { steps: 4 });
+  await page.mouse.up();
+  const bulldozed = await nextOutcome(beforeBulldoze);
+  check(
+    bulldozed.command === "Bulldoze" && bulldozed.outcome === "Applied",
+    `ブルドーザで長方形の中の道路を消せる（${bulldozed.text}）`,
+  );
+  await waitSegments(initialSegments);
+  check((await roadSegments()) === initialSegments, "消した道路は描かれなくなる");
+
+  // CS2 と同じく、一時停止したままでも建てられる
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
+  await page.locator('button[data-tool="road-Small"]').click();
+  const pausedAt = await tick();
+  const pausedBuild = await drawRoad();
+  await waitSegments(initialSegments + 1);
+  check(
+    pausedBuild.result.outcome === "Applied" && (await tick()) === pausedAt,
+    `一時停止したままでも道路を引ける（${pausedBuild.result.text}、tick ${pausedAt}）`,
+  );
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
+
+  // 土地を買う道具。地図を左へ 400 ピクセル引きずり、右隣のチャンクが見えるようにする
+  await page.locator('button[data-tool="buy"]').click();
+  await page.mouse.move(cx + 200, cy);
+  await page.mouse.down();
+  await page.mouse.move(cx - 200, cy, { steps: 5 });
+  await page.mouse.up();
+  const view = await mapState();
+  // チャンク (ccx, ccy) の真ん中のマスの、画面の位置
+  const chunkPoint = (ccx: number, ccy: number) => ({
+    x: cx + (ccx * 64 + 32.5 - view.x) * view.zoom,
+    y: cy + (ccy * 64 + 32.5 - view.y) * view.zoom,
+  });
+  const buy = async (ccx: number, ccy: number) => {
+    const p = chunkPoint(ccx, ccy);
+    const before = await outcomeCount();
+    await page.mouse.click(p.x, p.y);
+    return nextOutcome(before);
+  };
+  const east = chunkPoint(2, 0);
+  const eastBefore = await pixel(east.x, east.y);
+  const moneyBeforeBuy = await moneyNow();
+  const bought = await buy(2, 0);
+  check(
+    bought.command === "BuyChunk" && bought.outcome === "Applied",
+    `隣のチャンクを買える（${bought.text}）`,
+  );
+  await page.waitForFunction(
+    (expected) => Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) === expected,
+    moneyBeforeBuy - 50_000,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, `所持金が値段の分だけ減る（${moneyBeforeBuy} → ${await moneyNow()}）`);
+  await page.waitForFunction(
+    ({ x, y, before }) => {
+      const canvas = document.querySelector<HTMLCanvasElement>("#map");
+      const gl = canvas?.getContext("webgl2");
+      if (canvas === null || canvas === undefined || gl === null || gl === undefined) {
+        return false;
+      }
+      const out = new Uint8Array(4);
+      const dpr = window.devicePixelRatio;
+      gl.readPixels(
+        Math.floor(x * dpr),
+        canvas.height - 1 - Math.floor(y * dpr),
+        1,
+        1,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        out,
+      );
+      return (out[0] ?? 0) + (out[1] ?? 0) + (out[2] ?? 0) > before * 1.5;
+    },
+    { x: east.x, y: east.y, before: brightness(eastBefore) },
+    { timeout: TIMEOUT_MS },
+  );
+  const eastAfter = await pixel(east.x, east.y);
+  check(
+    brightness(eastAfter) > brightness(eastBefore) * 1.5,
+    `買ったチャンクが明るく描き直される（${eastBefore.join(", ")} → ${eastAfter.join(", ")}）`,
+  );
+  const far = await buy(3, 1);
+  check(
+    far.outcome === "Denied" && (far.text ?? "").includes("接していない"),
+    `買った土地に接していないチャンクは理由つきで断られる（${far.text}）`,
+  );
+  // 75,000、100,000、125,000 で買い進めると、残りは次の 150,000 に届かない
+  for (const [ccx, ccy] of [
+    [3, 0],
+    [2, 1],
+    [3, 1],
+  ] as const) {
+    await buy(ccx, ccy);
+  }
+  const poor = await buy(4, 0);
+  check(
+    poor.outcome === "Denied" && (poor.text ?? "").includes("所持金"),
+    `所持金が足りないと理由つきで断られる（${poor.text}、所持金 ${await moneyNow()}）`,
+  );
+  await page.locator('button[data-tool="none"]').click();
 
   await page.mouse.move(cx, cy);
   for (let i = 0; i < 20; i++) {
