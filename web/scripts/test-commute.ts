@@ -17,12 +17,14 @@ const TIMEOUT_MS = 30_000;
 // chizu-core の clock.rs と world/people.rs の値
 const TICKS_PER_DAY = 7_200;
 const GAME_SECONDS_PER_TICK = 12;
-const WORK_START = TICKS_PER_DAY / 3;
+const TICKS_PER_HOUR = TICKS_PER_DAY / 24;
+// 工場で働く人が家を出る時刻の山の頂（Shift::of の Industrial）。通勤の記録の職場は工場だけである
+const INDUSTRIAL_LEAVE_HOME = 7 * TICKS_PER_HOUR;
 const SCENARIO = process.argv[2] ?? "commute";
-// commute は 2 日目の 8 時 12 分。出発のばらつきの 1 時間の中なので、歩く人も車もいる。
+// commute は 2 日目の 7 時 12 分。家を出る人が最も多い時間帯なので、歩く人も車もいる。
 // errand は 2 日目の正午。買い物に出た人がいる
 const NOON = TICKS_PER_DAY + TICKS_PER_DAY / 2;
-const TICK = SCENARIO === "errand" ? NOON : TICKS_PER_DAY + WORK_START + 60;
+const TICK = SCENARIO === "errand" ? NOON : TICKS_PER_DAY + INDUSTRIAL_LEAVE_HOME + 60;
 // 描かれていなければならない移動体。errand ではどちらか一方でよい
 const NEED_BOTH = SCENARIO !== "errand";
 const WHEN = SCENARIO === "errand" ? "昼の買い物" : "朝の通勤";

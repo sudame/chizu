@@ -98,7 +98,8 @@ impl World {
 mod tests {
     use crate::clock::TICKS_PER_DAY;
     use crate::command::ZoneKind;
-    use crate::world::people::WORK_START;
+    use crate::world::economy::TICKS_PER_HOUR;
+    use crate::world::people::Shift;
     use crate::world::people::tests::{city, run_days};
 
     /// 朝の通勤のさなかまで回した街の状態ハッシュと、移動している住民の数。
@@ -110,7 +111,8 @@ mod tests {
         pool.install(|| {
             let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
             run_days(&mut w, 1);
-            while w.tick().0 < TICKS_PER_DAY + WORK_START + 150 {
+            let peak = Shift::of(ZoneKind::Industrial).leave_home;
+            while w.tick().0 < TICKS_PER_DAY + peak + TICKS_PER_HOUR / 2 {
                 w.step();
             }
             let p = w.population();
