@@ -149,6 +149,18 @@ fn continues_from_feedback_dir() {
     assert_eq!(chizu_core::CommandLog::decode(&log).unwrap().len(), 1);
 }
 
+/// もうファイルのあるディレクトリには new を断り、ロックのファイルも足さない。
+#[test]
+fn new_refuses_existing_dir_without_adding_files() {
+    let fb = make_feedback("agent-new-existing", 0);
+    let f = fb.to_str().unwrap();
+    let before = files(&fb);
+    cli_fails(&["agent", "new", f, "--from", f]);
+    cli_fails(&["agent", "new", f, "9"]);
+    assert_eq!(files(&fb), before);
+    assert!(!fb.join("session.lock").exists());
+}
+
 /// 記録に残らない操作のあったフィードバックは、食い違うのが当然であることを添える。
 #[test]
 fn notes_unrecorded_ops_when_copying() {
@@ -217,6 +229,7 @@ fn refuses_when_record_and_hash_disagree() {
     for args in [vec!["act", d, &cmd], vec!["advance", d, "5"]] {
         let err = cli_fails(&[&["agent"], args.as_slice()].concat());
         assert!(err.contains("observe"), "{err}");
+        assert!(err.contains("--from"), "{err}");
     }
     assert_eq!(std::fs::read(dir.join("commands.rec")).unwrap(), rec);
     assert_eq!(std::fs::read(dir.join("state.json")).unwrap(), old_state);

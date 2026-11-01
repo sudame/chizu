@@ -178,11 +178,19 @@ fn tmp_path(path: &Path) -> PathBuf {
 impl Session {
     /// 空のディレクトリに、新しいセッションを作る。
     fn create(dir: &Path, saved: Saved) -> Result<Session, String> {
+        let taken = || {
+            if dir.join(STATE_FILE).exists() || dir.join(RECORD_FILE).exists() {
+                Err(format!("{} にはもうセッションがある", dir.display()))
+            } else {
+                Ok(())
+            }
+        };
+        // ロックのファイルを作る前に断り、フィードバックなどのディレクトリに何も足さない。
+        taken()?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{} を作れない: {e}", dir.display()))?;
         let lock = lock(dir, true, true)?;
-        if dir.join(STATE_FILE).exists() || dir.join(RECORD_FILE).exists() {
-            return Err(format!("{} にはもうセッションがある", dir.display()));
-        }
+        // 確かめてからロックを取るまでのあいだに、ほかの new が作ったかもしれない。
+        taken()?;
         let mut state = saved.state;
         // 画面の側だけで変えた操作の数で、作り直した街には当てはまらない。
         state.remove("unrecordedOps");
@@ -216,9 +224,11 @@ impl Session {
             return Err(format!(
                 "{STATE_FILE} の stateHash {:?} と、記録を tick {} まで再生したハッシュ {hash} が食い違うので書き込まない。\
                  前の書き込みが途中で止まったか、シミュレーションの規則が変わったおそれがある。\
-                 中身は chizu-cli agent observe {} で見られる",
+                 中身は chizu-cli agent observe {} で見られる。\
+                 chizu-cli agent new <新しいディレクトリ> --from {} で写し直せば、記録から作り直して続けられる",
                 saved.saved_hash().unwrap_or(""),
                 saved.tick,
+                dir.display(),
                 dir.display()
             ));
         }
@@ -489,6 +499,8 @@ pub fn run(args: &[String]) -> Result<String, String> {
     match args.as_slice() {
         [] | ["help" | "--help" | "-h"] => Ok(USAGE.trim_end().to_string()),
         ["new", dir, "--from", from] => {
+            // 写し元がセッションなら、observe と同じく共有ロックを取ってから読む。
+            let _from_lock = lock(Path::new(from), false, false)?;
             let saved = read_saved(Path::new(from))?;
             Ok(print(&new_session(dir, saved, Some(from))?))
         }

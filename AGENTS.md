@@ -105,7 +105,7 @@ cargo run -p chizu-cli -- feedback/<日時>-<番号>/commands.rec <seed> <tick>
 
 - 人間のフィードバックは書き換えない。続きを遊ぶときは `agent new <dir> --from <フィードバックのディレクトリ>` で種、tick、記録を写す。写すときに再生したハッシュが元と一致したかを出力に入れる。
 - act と advance が書くのは、`agent new` で作った（`state.json` に `agentSession` がある）ディレクトリだけである。
-- act と advance は、記録を再生したハッシュが `stateHash` と食い違えば、何も書かずに止まる。書き込みが途中で止まったときに気づくためである。
+- act と advance は、記録を再生したハッシュが `stateHash` と食い違えば、何も書かずに止まる。書き込みが途中で止まったときに気づくためである。止まったら `agent new <新しいディレクトリ> --from <dir>` で写し直せば、記録から作り直して続けられる。
 - 同じセッションに同時に打ってもよい。`session.lock` のロックで 1 つずつ動く。
 
 ```sh
