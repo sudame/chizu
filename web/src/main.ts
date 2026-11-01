@@ -1,8 +1,9 @@
+import { parseCityStats, renderCityStats } from "./city-panel.ts";
 import { setupFeedback } from "./feedback.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { MapRenderer } from "./map/renderer.ts";
-import { type Color, Geometry, halfWidthOf, roadGeometry } from "./map/roads.ts";
+import { buildingGeometry, type Color, Geometry, halfWidthOf, roadGeometry } from "./map/roads.ts";
 import {
   buildRoadCommand,
   bulldozeCommand,
@@ -113,8 +114,9 @@ function createRenderer(): MapRenderer | null {
   }
 }
 let renderer = createRenderer();
-// 最後に届いた道路網。コンテキストを失ったあとに貼り直す
+// 最後に届いた道路網と建物。コンテキストを失ったあとに貼り直す
 let roads: Geometry | null = null;
+let buildings: Geometry | null = null;
 
 // コンテキストが戻ったら作り直し、手元のチャンクを貼り直す
 mapCanvas.addEventListener("webglcontextlost", (event) => {
@@ -131,6 +133,9 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
   }
   if (roads !== null) {
     renderer?.roads.setRoads(roads);
+  }
+  if (buildings !== null) {
+    renderer?.roads.setBuildings(buildings);
   }
   updatePreview();
 });
@@ -483,6 +488,14 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);
     mapCanvas.dataset.roadSegments = String(message.segments.length / SEGMENT_STRIDE);
+    return;
+  }
+  if (message.kind === "buildings") {
+    buildings = buildingGeometry(message.buildings);
+    renderer?.roads.setBuildings(buildings);
+    renderCityStats(parseCityStats(message.stats));
+    // test:wasm が読む
+    mapCanvas.dataset.firstBuilding = Array.from(message.buildings.subarray(0, 4)).join(",");
     return;
   }
   if (message.kind === "outcome") {

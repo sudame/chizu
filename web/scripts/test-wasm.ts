@@ -474,6 +474,37 @@ try {
     farZone.outcome === "Denied" && (farZone.text ?? "").includes("塗れるマスがない"),
     `道路から離れた場所は理由つきで断られる（${farZone.text}）`,
   );
+
+  // 道路の上側に住宅の区画を塗り、時間を進めて建物が建つのを待つ
+  await page.locator('button[data-tool="zone-Residential"]').click();
+  const r0 = tilePoint(14, 26);
+  const r1 = tilePoint(30, 31);
+  await page.mouse.move(r0.x, r0.y);
+  await page.mouse.down();
+  await page.mouse.move(r1.x, r1.y, { steps: 4 });
+  await page.mouse.up();
+  const cityNumbers = page.locator("#city-numbers");
+  await page.waitForFunction(
+    () => Number(document.querySelector<HTMLElement>("#city-numbers")?.dataset.buildings ?? 0) > 0,
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const firstBuilding = ((await map.getAttribute("data-first-building")) ?? "")
+    .split(",")
+    .map(Number);
+  const [bx = 0, by = 0] = firstBuilding;
+  check(
+    Number(await cityNumbers.getAttribute("data-buildings")) > 0,
+    `時間を進めると住宅が建ち、数が出る（${await cityNumbers.textContent()}）`,
+  );
+  await page.waitForTimeout(100);
+  const house = await colorOfTile(bx, by);
+  check(
+    (house[1] ?? 0) > (house[0] ?? 0) + 50 && brightness(house) < 250,
+    `建物が住宅の濃い緑で描かれる（マス (${bx}, ${by})、${house.join(", ")}）`,
+  );
+  const residentialDemand = await page.locator("#demand .bar").first().getAttribute("data-demand");
+  check(residentialDemand !== null, `住宅の需要の棒が出る（${residentialDemand}）`);
   await page.locator('button[data-tool="none"]').click();
 
   await page.mouse.move(cx, cy);

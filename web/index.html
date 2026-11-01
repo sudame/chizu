@@ -62,8 +62,37 @@
         background: rgb(255 255 255 / 85%);
         border-radius: 4px;
       }
-      #status {
+      #status,
+      #city-numbers {
         margin: 0;
+      }
+      #city {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin: 4px 0;
+      }
+      #demand {
+        display: flex;
+        gap: 4px;
+        align-items: flex-end;
+      }
+      #demand .slot {
+        position: relative;
+        width: 12px;
+        height: 40px;
+        border-bottom: 1px solid #888;
+        background: linear-gradient(transparent 19px, #888 19px, #888 20px, transparent 20px);
+      }
+      #demand .bar {
+        position: absolute;
+        left: 0;
+        width: 12px;
+        height: 0;
+      }
+      #demand .label {
+        font-size: 11px;
+        text-align: center;
       }
     </style>
   </head>
@@ -72,6 +101,15 @@
     <div id="overlay">
       <p id="status" data-state="loading">WASM を読み込んでいる</p>
       <canvas id="hud" width="480" height="96"></canvas>
+      <div id="city">
+        <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
+        <div id="demand" title="区画の種類ごとの需要">
+          <div><div class="slot"><div class="bar" style="background: #26f226"></div></div><div class="label">住</div></div>
+          <div><div class="slot"><div class="bar" style="background: #4073f2"></div></div><div class="label">商</div></div>
+          <div><div class="slot"><div class="bar" style="background: #f2cc33"></div></div><div class="label">工</div></div>
+          <div><div class="slot"><div class="bar" style="background: #4dd9f2"></div></div><div class="label">オ</div></div>
+        </div>
+      </div>
       <div id="controls">
         <button type="button" id="pause">一時停止</button>
         <button type="button" data-speed="1">1 倍</button>

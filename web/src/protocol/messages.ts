@@ -31,6 +31,8 @@ export type Outcome = "Applied" | "Denied" | "Rejected" | "NotImplemented";
 
 /** 区間 1 本の数の個数。chizu-wasm の road_segments と同じ。 */
 export const SEGMENT_STRIDE = 5;
+/** 建物 1 つの数の個数。chizu-wasm の buildings と同じ。 */
+export const BUILDING_STRIDE = 6;
 /** ノード 1 つの数の個数。chizu-wasm の road_nodes と同じ。 */
 export const NODE_STRIDE = 3;
 
@@ -91,6 +93,11 @@ export type WorkerToMain =
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
   | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
   /**
+   * 建物と街の数字。建物の表が変わったときだけ送る。stats は chizu-wasm の city_stats で、
+   * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並ぶ。
+   */
+  | { kind: "buildings"; buildings: Float64Array; stats: number[] }
+  /**
    * id は画面が振ったコマンドの番号、seq は記録の通し番号。
    * 記録する前に受け付けなかったコマンドには seq がない。
    */
@@ -137,6 +144,13 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.segments.length % SEGMENT_STRIDE === 0 &&
         v.nodes instanceof Float64Array &&
         v.nodes.length % NODE_STRIDE === 0
+      );
+    case "buildings":
+      return (
+        v.buildings instanceof Float64Array &&
+        v.buildings.length % BUILDING_STRIDE === 0 &&
+        Array.isArray(v.stats) &&
+        v.stats.length === 7
       );
     case "outcome":
       return (
