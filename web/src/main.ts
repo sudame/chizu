@@ -60,7 +60,32 @@ const WHEEL_LINE_PIXELS = 16;
 // 開始地点の買ってあるチャンク（-1〜1）の真ん中から見始める
 const camera = new Camera(CHUNK_SIDE / 2, CHUNK_SIDE / 2, 4);
 const store = new ChunkStore();
-const renderer = new MapRenderer(mapCanvas);
+
+// WebGL2 を使えなくても、時計と操作は動かす
+let mapError: string | null = null;
+function createRenderer(): MapRenderer | null {
+  try {
+    const created = new MapRenderer(mapCanvas);
+    mapError = null;
+    return created;
+  } catch (error) {
+    mapError = `地図を描けない：${String(error)}`;
+    return null;
+  }
+}
+let renderer = createRenderer();
+
+// コンテキストが戻ったら作り直し、手元のチャンクを貼り直す
+mapCanvas.addEventListener("webglcontextlost", (event) => {
+  event.preventDefault();
+  renderer = null;
+});
+mapCanvas.addEventListener("webglcontextrestored", () => {
+  renderer = createRenderer();
+  for (const chunk of store.all()) {
+    renderer?.upload(chunk);
+  }
+});
 
 const viewport = (): Viewport => ({
   width: mapCanvas.clientWidth,
@@ -78,7 +103,7 @@ function sendView(range: ChunkRange): void {
   }
   sentRange = key;
   for (const removed of store.evict((cx, cy) => inRange(range, cx, cy), MAX_STORED_CHUNKS)) {
-    renderer.remove(removed.cx, removed.cy);
+    renderer?.remove(removed.cx, removed.cy);
   }
   const center = { x: camera.x, y: camera.y };
   send({ kind: "view", chunks: store.known(chunksByDistance(range, center)) });
@@ -88,7 +113,7 @@ function drawMap(): void {
   const vp = viewport();
   const range = camera.visibleChunks(vp);
   sendView(range);
-  const drawn = renderer.draw(camera, vp, range);
+  const drawn = renderer?.draw(camera, vp, range) ?? 0;
   // test:wasm が読む
   mapCanvas.dataset.drawnChunks = String(drawn);
   mapCanvas.dataset.visibleChunks = String(
@@ -139,7 +164,12 @@ mapCanvas.addEventListener(
   "wheel",
   (event) => {
     event.preventDefault();
-    const pixels = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? WHEEL_LINE_PIXELS : 1;
+    const pixels =
+      event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? WHEEL_LINE_PIXELS
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? mapCanvas.clientHeight
+          : 1;
     const rect = mapCanvas.getBoundingClientRect();
     camera.zoomAt(
       event.clientX - rect.left,
@@ -174,7 +204,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "chunks") {
     for (const chunk of store.receive(message.chunks)) {
-      renderer.upload(chunk);
+      renderer?.upload(chunk);
     }
     return;
   }
@@ -191,7 +221,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     status.dataset.state = "error";
     return;
   }
-  status.textContent = `動いている（スレッド ${message.threads} 本）`;
+  status.textContent = `動いている（スレッド ${message.threads} 本）${mapError === null ? "" : `。${mapError}`}`;
   status.dataset.state = "running";
   status.dataset.n = String(message.n);
   status.dataset.sum = String(message.sum);

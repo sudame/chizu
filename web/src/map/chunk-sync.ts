@@ -55,6 +55,10 @@ export class ChunkStore {
     return this.#chunks.get(chunkKey(cx, cy));
   }
 
+  all(): IterableIterator<StoredChunk> {
+    return this.#chunks.values();
+  }
+
   /** 届いたチャンクで手元を書き換え、書き換えたものを返す。手元と同じ版のものは無視する。 */
   receive(chunks: ChunkData[]): StoredChunk[] {
     const updated: StoredChunk[] = [];
