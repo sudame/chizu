@@ -5,6 +5,7 @@ import {
   bulldozeCommand,
   buyChunkCommand,
   MAX_ROAD_TILES,
+  paintZoneCommand,
   parseRoadCostTable,
   roadCost,
   screenToTile,
@@ -88,6 +89,17 @@ describe("コマンドの組み立て", () => {
       minY: -1,
       maxX: 4,
       maxY: 3,
+    });
+  });
+
+  test("区画は角の順番によらず min と max をそろえて塗る", () => {
+    expect(paintZoneCommand("Office", { x: 3, y: 9 }, { x: -1, y: 2 })).toEqual({
+      kind: "PaintZone",
+      zone: "Office",
+      minX: -1,
+      minY: 2,
+      maxX: 3,
+      maxY: 9,
     });
   });
 

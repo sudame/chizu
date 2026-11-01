@@ -398,6 +398,76 @@ try {
     poor.outcome === "Denied" && (poor.text ?? "").includes("所持金"),
     `所持金が足りないと理由つきで断られる（${poor.text}、所持金 ${await moneyNow()}）`,
   );
+
+  // 区画の道具。(12, 32) から (52, 32) の道路の下側に商業の区画を塗る
+  await page.locator('button[data-tool="zone-Commercial"]').click();
+  const tilePoint = (x: number, y: number) => ({
+    x: cx + (x + 0.5 - view.x) * view.zoom,
+    y: cy + (y + 0.5 - view.y) * view.zoom,
+  });
+  const colorOfTile = (x: number, y: number) => {
+    const p = tilePoint(x, y);
+    return pixel(p.x, p.y);
+  };
+  await page.waitForTimeout(100);
+  const zonable = await colorOfTile(45, 37);
+  const tooFar = await colorOfTile(45, 45);
+  check(
+    brightness(zonable) > brightness(tooFar) + 30,
+    `区画の道具を選ぶと、道路から 6 マス以内のマスが明るく示される（${zonable.join(", ")} と ${tooFar.join(", ")}）`,
+  );
+  const beforeZone = await outcomeCount();
+  const z0 = tilePoint(40, 33);
+  const z1 = tilePoint(50, 36);
+  await page.mouse.move(z0.x, z0.y);
+  await page.mouse.down();
+  await page.mouse.move(z1.x, z1.y, { steps: 4 });
+  await page.mouse.up();
+  const zoned = await nextOutcome(beforeZone);
+  check(
+    zoned.command === "PaintZone" && zoned.outcome === "Applied",
+    `区画を塗れる（${zoned.text}）`,
+  );
+  await page.waitForFunction(
+    (at) => {
+      const canvas = document.querySelector<HTMLCanvasElement>("#map");
+      const gl = canvas?.getContext("webgl2");
+      if (canvas === null || canvas === undefined || gl === null || gl === undefined) {
+        return false;
+      }
+      const out = new Uint8Array(4);
+      gl.readPixels(
+        Math.floor(at.x * window.devicePixelRatio),
+        canvas.height - 1 - Math.floor(at.y * window.devicePixelRatio),
+        1,
+        1,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        out,
+      );
+      return (out[2] ?? 0) > (out[0] ?? 0) + 50;
+    },
+    tilePoint(45, 34),
+    { timeout: TIMEOUT_MS },
+  );
+  const commercial = await colorOfTile(45, 34);
+  check(
+    (commercial[2] ?? 0) > (commercial[0] ?? 0) + 50 && (commercial[2] ?? 0) > (commercial[1] ?? 0),
+    `塗ったマスが商業の青で描かれる（${commercial.join(", ")}）`,
+  );
+  const farZone = await (async () => {
+    const before = await outcomeCount();
+    const a = tilePoint(45, 45);
+    await page.mouse.move(a.x, a.y);
+    await page.mouse.down();
+    await page.mouse.move(a.x + 8, a.y + 8, { steps: 2 });
+    await page.mouse.up();
+    return nextOutcome(before);
+  })();
+  check(
+    farZone.outcome === "Denied" && (farZone.text ?? "").includes("塗れるマスがない"),
+    `道路から離れた場所は理由つきで断られる（${farZone.text}）`,
+  );
   await page.locator('button[data-tool="none"]').click();
 
   await page.mouse.move(cx, cy);

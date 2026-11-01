@@ -3,8 +3,10 @@
 use chizu_core::record::RecordError;
 use chizu_core::{
     ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
-    SegmentKind, TerrainTiles, World, terrain,
+    Layer, SegmentKind, TerrainTiles, TilePos, TileRect, TileUse, World, terrain,
 };
+
+use chizu_core::zone::near_road;
 
 use crate::snapshot::{Header, TripleBuffer};
 
@@ -78,13 +80,46 @@ impl Sim {
         self.world.is_owned(coord)
     }
 
-    /// チャンクのマスを 1 マス 1 バイトで、行ごとに並べて返す。ビットの意味は [`TILE_WATER`] にある。
+    /// チャンクのマスを 1 マス 1 バイトで、行ごとに並べて返す。ビットの意味は [`TILE_WATER`] などにある。
     /// メモリに置いていないチャンクは、種から地形を作って返す。中核の状態は変えない。
+    ///
+    /// 区画を塗れるかは、隣のチャンクの道路にも左右される。チャンクの版だけでは変わったことが
+    /// 分からないので、画面に送るかどうかは [`Sim::chunk_tiles_version`] で見分ける。
     pub fn chunk_tiles(&self, coord: ChunkCoord) -> Vec<u8> {
-        match self.world.chunk(coord) {
-            Some(chunk) => encode_tiles(chunk.terrain()),
-            None => encode_tiles(&terrain(self.world.seed(), coord)),
+        let Some(chunk) = self.world.chunk(coord) else {
+            return encode_terrain(&terrain(self.world.seed(), coord));
+        };
+        let mut tiles = encode_terrain(chunk.terrain());
+        let Some(layer) = chunk.layer(Layer::Ground) else {
+            return tiles;
+        };
+        let side = CHUNK_SIDE as i64;
+        let min = TilePos::new(i64::from(coord.cx) * side, i64::from(coord.cy) * side);
+        let max = TilePos::new(min.x + side - 1, min.y + side - 1);
+        let near = chunk
+            .owned()
+            .then(|| near_road(self.world.network(), TileRect { min, max }));
+        for (i, tile) in tiles.iter_mut().enumerate() {
+            let road = layer.occupancy[i] == TileUse::Road;
+            if road {
+                *tile |= TILE_ROAD;
+            }
+            if let Some(zone) = layer.zone[i] {
+                *tile |= (zone as u8) << TILE_ZONE_SHIFT;
+            }
+            let zonable = near.as_ref().is_some_and(|n| n[i]) && !road && *tile & TILE_WATER == 0;
+            if zonable {
+                *tile |= TILE_ZONABLE;
+            }
         }
+        tiles
+    }
+
+    /// [`Sim::chunk_tiles`] の中身が変わったかを見分ける版。チャンクの版と道路網の版から作る。
+    /// JS の数で誤差なく表せるよう、道路網の版は下位 21 ビットだけを使う。
+    pub fn chunk_tiles_version(&self, coord: ChunkCoord) -> f64 {
+        let network = self.network_version() & ((1 << 21) - 1);
+        f64::from(self.chunk_version(coord)) * f64::from(1_u32 << 21) + network as f64
     }
 
     /// 一時停止していなければ `ticks` だけ進める。コマンドは受けたときに適用してあるので、tick を進めるだけである。
@@ -180,8 +215,14 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
 
 /// 画面に渡すマスのバイトのうち、水辺を表すビット。
 pub const TILE_WATER: u8 = 1;
+/// 道路が通っているマスのビット。
+pub const TILE_ROAD: u8 = 1 << 1;
+/// 区画を塗れる（道路から奥行きの範囲にある、買った陸の空き）マスのビット。
+pub const TILE_ZONABLE: u8 = 1 << 2;
+/// 区画の種類（`ZoneKind` の値、なければ 0）を置くビットの位置。3 ビットを使う。
+pub const TILE_ZONE_SHIFT: u8 = 3;
 
-fn encode_tiles(terrain: &TerrainTiles) -> Vec<u8> {
+fn encode_terrain(terrain: &TerrainTiles) -> Vec<u8> {
     let mut tiles = vec![0; CHUNK_AREA];
     for (i, tile) in tiles.iter_mut().enumerate() {
         if terrain.is_water(i % CHUNK_SIDE, i / CHUNK_SIDE) {
@@ -195,7 +236,7 @@ fn encode_tiles(terrain: &TerrainTiles) -> Vec<u8> {
 mod tests {
     use super::*;
     use chizu_core::command::MAX_TAX_PERMILLE;
-    use chizu_core::{Chunk, RoadKind, SimSpeed, Tick, TilePos, TileRect, ZoneKind};
+    use chizu_core::{Chunk, RoadKind, SimSpeed, Tick, ZoneKind};
 
     fn has_water(sim: &Sim, coord: ChunkCoord) -> bool {
         sim.chunk_tiles(coord).iter().any(|t| t & TILE_WATER != 0)
@@ -218,6 +259,36 @@ mod tests {
                 assert_eq!(water, expected.terrain().is_water(lx, ly), "({lx}, {ly})");
             }
         }
+    }
+
+    #[test]
+    fn tiles_carry_roads_zones_and_zonable_tiles() {
+        let mut sim = Sim::new(0);
+        let origin = ChunkCoord::new(0, 0);
+        // 道路の 6 マス先は塗れて、7 マス先は塗れない
+        sim.submit(road((10, 10), (20, 10))).unwrap();
+        let tile = |sim: &Sim, x: usize, y: usize| sim.chunk_tiles(origin)[y * CHUNK_SIDE + x];
+        assert_ne!(tile(&sim, 15, 10) & TILE_ROAD, 0);
+        assert_eq!(tile(&sim, 15, 10) & TILE_ZONABLE, 0);
+        assert_ne!(tile(&sim, 15, 16) & TILE_ZONABLE, 0);
+        assert_eq!(tile(&sim, 15, 17) & TILE_ZONABLE, 0);
+        let before = sim.chunk_tiles_version(origin);
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(12, 11), TilePos::new(14, 12)),
+            zone: Some(ZoneKind::Commercial),
+        })
+        .unwrap();
+        assert_eq!(
+            tile(&sim, 13, 12) >> TILE_ZONE_SHIFT,
+            ZoneKind::Commercial as u8
+        );
+        assert_ne!(sim.chunk_tiles_version(origin), before);
+        // 隣のチャンクのすぐそばに道路を引くと、こちらのチャンクの版が変わらなくても送り直す
+        let east = ChunkCoord::new(1, 0);
+        let east_before = sim.chunk_tiles_version(east);
+        sim.submit(road((60, 30), (60, 40))).unwrap();
+        assert_ne!(sim.chunk_tiles_version(east), east_before);
+        assert_ne!(sim.chunk_tiles(east)[30 * CHUNK_SIDE] & TILE_ZONABLE, 0);
     }
 
     #[test]
