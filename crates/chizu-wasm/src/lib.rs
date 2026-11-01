@@ -116,6 +116,21 @@ impl Simulation {
         self.0.road_nodes()
     }
 
+    /// 建物の表の版。変わったときだけ建物を読み直す。
+    pub fn buildings_version(&self) -> f64 {
+        self.0.buildings_version()
+    }
+
+    /// 建物ごとに `[min の x, min の y, max の x, max の y, 区画の種類, 段階]`。
+    pub fn buildings(&self) -> Vec<f64> {
+        self.0.buildings()
+    }
+
+    /// `[建物の数, 世帯の上限, 職場の上限, 住宅・商業・工業・オフィスの需要]`。
+    pub fn city_stats(&self) -> Vec<f64> {
+        self.0.city_stats()
+    }
+
     pub fn set_paused(&mut self, paused: bool) {
         self.0.set_paused(paused);
     }

@@ -1,7 +1,7 @@
 // 道路網と、道具の仮の表示を WebGL2 で描く。
 // 頂点の位置は、まとめて送った基準のマスからの相対で持つ。遠くの座標でも f32 の桁が足りるようにするためである。
 
-import { NODE_STRIDE, SEGMENT_STRIDE } from "../protocol/messages.ts";
+import { BUILDING_STRIDE, NODE_STRIDE, SEGMENT_STRIDE } from "../protocol/messages.ts";
 import type { Camera, Viewport } from "./camera.ts";
 
 /** マスの座標。 */
@@ -98,10 +98,10 @@ export class Geometry {
     v(1, 1);
   }
 
-  /** 角のマスを両端に含む長方形。 */
-  rect(min: Tile, max: Tile, color: Color): void {
+  /** 角のマスを両端に含む長方形。inset（マス）だけ内側に縮める。 */
+  rect(min: Tile, max: Tile, color: Color, inset = 0): void {
     const v = (x: number, y: number) => this.#vertex(x, y, 0, 0, 0, color);
-    const [x0, y0, x1, y1] = [min.x, min.y, max.x + 1, max.y + 1];
+    const [x0, y0, x1, y1] = [min.x + inset, min.y + inset, max.x + 1 - inset, max.y + 1 - inset];
     v(x0, y0);
     v(x1, y0);
     v(x0, y1);
@@ -117,6 +117,36 @@ export class Geometry {
 
 export function halfWidthOf(kindCode: number): number {
   return HALF_WIDTH[kindCode] ?? 0.4;
+}
+
+// 建物の色。区画の色（renderer.ts）を暗くし、段階が上がるほど明るくする
+const BUILDING_BASE: Record<number, readonly [number, number, number]> = {
+  1: [0.15, 0.95, 0.15],
+  2: [0.25, 0.45, 0.95],
+  3: [0.95, 0.8, 0.2],
+  4: [0.3, 0.85, 0.95],
+};
+const BUILDING_INSET = 0.15;
+
+/** 段階 level（1〜5）の建物の色。 */
+export function buildingColor(zone: number, level: number): Color {
+  const [r, g, b] = BUILDING_BASE[zone] ?? [0.6, 0.6, 0.6];
+  const k = 0.35 + 0.1 * Math.min(Math.max(level, 1), 5);
+  return [r * k, g * k, b * k, 1];
+}
+
+/** Worker から届いた建物を頂点に直す。隣の建物と見分けられるよう、少し内側に縮めて描く。 */
+export function buildingGeometry(buildings: Float64Array): Geometry {
+  const geometry = new Geometry({ x: buildings[0] ?? 0, y: buildings[1] ?? 0 });
+  for (let i = 0; i + BUILDING_STRIDE <= buildings.length; i += BUILDING_STRIDE) {
+    const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, zone = 0, level = 1] = buildings.subarray(
+      i,
+      i + BUILDING_STRIDE,
+    );
+    const color = buildingColor(zone, level);
+    geometry.rect({ x: x0, y: y0 }, { x: x1, y: y1 }, color, BUILDING_INSET);
+  }
+  return geometry;
 }
 
 /** Worker から届いた道路網の形を頂点に直す。基準のマスは最初のノードにする。 */
@@ -135,10 +165,12 @@ export function roadGeometry(segments: Float64Array, nodes: Float64Array): Geome
 
 type Mesh = { buffer: WebGLBuffer; vao: WebGLVertexArrayObject; count: number; origin: Tile };
 
+// 道路と建物は、1 つ変わるたびに全体を受け取り直して頂点を作り直す。重くなったらチャンクごとのメッシュに分ける。
 export class RoadLayer {
   readonly #gl: WebGL2RenderingContext;
   readonly #program: WebGLProgram;
   readonly #u: Record<"offset" | "zoom" | "viewport", WebGLUniformLocation | null>;
+  readonly #buildings: Mesh;
   readonly #roads: Mesh;
   readonly #preview: Mesh;
 
@@ -153,6 +185,7 @@ export class RoadLayer {
       zoom: gl.getUniformLocation(this.#program, "u_zoom"),
       viewport: gl.getUniformLocation(this.#program, "u_viewport"),
     };
+    this.#buildings = this.#mesh();
     this.#roads = this.#mesh();
     this.#preview = this.#mesh();
   }
@@ -187,6 +220,10 @@ export class RoadLayer {
     mesh.origin = geometry.origin;
   }
 
+  setBuildings(geometry: Geometry): void {
+    this.#upload(this.#buildings, geometry);
+  }
+
   setRoads(geometry: Geometry): void {
     this.#upload(this.#roads, geometry);
   }
@@ -202,7 +239,7 @@ export class RoadLayer {
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    for (const mesh of [this.#roads, this.#preview]) {
+    for (const mesh of [this.#buildings, this.#roads, this.#preview]) {
       if (mesh.count === 0) {
         continue;
       }

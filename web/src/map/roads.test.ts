@@ -1,5 +1,28 @@
 import { describe, expect, test } from "vitest";
-import { Geometry, roadGeometry, VERTEX_FLOATS } from "./roads.ts";
+import { buildingColor, buildingGeometry, Geometry, roadGeometry, VERTEX_FLOATS } from "./roads.ts";
+
+describe("建物", () => {
+  const brightness = (c: readonly number[]) => (c[0] ?? 0) + (c[1] ?? 0) + (c[2] ?? 0);
+
+  test("段階が上がるほど明るく、区画の色を保つ", () => {
+    for (let level = 1; level < 5; level++) {
+      expect(brightness(buildingColor(2, level + 1))).toBeGreaterThan(
+        brightness(buildingColor(2, level)),
+      );
+    }
+    const [r = 0, g = 0, b = 0] = buildingColor(2, 3);
+    expect(b).toBeGreaterThan(r);
+    expect(b).toBeGreaterThan(g);
+  });
+
+  test("建物ごとに 6 頂点で、少し内側に縮めて描く", () => {
+    const g = buildingGeometry(new Float64Array([10, 20, 12, 21, 1, 1, 30, 20, 30, 20, 3, 5]));
+    expect(g.vertexCount).toBe(12);
+    const data = g.build();
+    expect(data[0]).toBeCloseTo(0.15);
+    expect(data[VERTEX_FLOATS]).toBeCloseTo(3 - 0.15);
+  });
+});
 
 describe("Geometry", () => {
   test("区間は 2 つの三角形で、位置は基準のマスからの相対でマスの中心に置く", () => {

@@ -26,6 +26,14 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ kind: "chunks", chunks: [chunk] })).toBe(true);
     expect(isWorkerToMain({ kind: "chunks", chunks: [] })).toBe(true);
     expect(isWorkerToMain(roads)).toBe(true);
+    const buildings = {
+      kind: "buildings",
+      buildings: new Float64Array(6),
+      stats: [1, 2, 3, 4, 5, 6, 7],
+    };
+    expect(isWorkerToMain(buildings)).toBe(true);
+    expect(isWorkerToMain({ ...buildings, buildings: new Float64Array(5) })).toBe(false);
+    expect(isWorkerToMain({ ...buildings, stats: [1, 2] })).toBe(false);
     expect(isWorkerToMain({ kind: "outcome", id: 3, seq: 1, outcome: "Denied", reason: "x" })).toBe(
       true,
     );
