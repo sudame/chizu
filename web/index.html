@@ -49,9 +49,25 @@
         width: 28em;
         height: 6em;
       }
+      #dev-tools {
+        position: fixed;
+        top: 40px;
+        right: 8px;
+        max-width: 20em;
+        text-align: right;
+      }
+      #dev-tools button[aria-pressed="true"] {
+        background: #2d6cdf;
+        color: #fff;
+      }
       #dev-info {
+        margin: 4px 0 0;
         font-size: 12px;
         color: #a33;
+        background: rgb(255 255 255 / 85%);
+      }
+      #dev-info:empty {
+        display: none;
       }
       #tool-info,
       #tool-message {
@@ -66,8 +82,38 @@
         background: rgb(255 255 255 / 85%);
         border-radius: 4px;
       }
-      #status {
+      #status,
+      #city-numbers,
+      #city-utilities {
         margin: 0;
+      }
+      #city {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin: 4px 0;
+      }
+      #demand {
+        display: flex;
+        gap: 4px;
+        align-items: flex-end;
+      }
+      #demand .slot {
+        position: relative;
+        width: 12px;
+        height: 40px;
+        border-bottom: 1px solid #888;
+        background: linear-gradient(transparent 19px, #888 19px, #888 20px, transparent 20px);
+      }
+      #demand .bar {
+        position: absolute;
+        left: 0;
+        width: 12px;
+        height: 0;
+      }
+      #demand .label {
+        font-size: 11px;
+        text-align: center;
       }
     </style>
   </head>
@@ -76,6 +122,18 @@
     <div id="overlay">
       <p id="status" data-state="loading">WASM を読み込んでいる</p>
       <canvas id="hud" width="480" height="96"></canvas>
+      <div id="city">
+        <div>
+          <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
+          <p id="city-utilities">電気 0 / 需要 0・水道 0 / 需要 0</p>
+        </div>
+        <div id="demand" title="区画の種類ごとの需要">
+          <div><div class="slot"><div class="bar" style="background: #26f226"></div></div><div class="label">住</div></div>
+          <div><div class="slot"><div class="bar" style="background: #4073f2"></div></div><div class="label">商</div></div>
+          <div><div class="slot"><div class="bar" style="background: #f2cc33"></div></div><div class="label">工</div></div>
+          <div><div class="slot"><div class="bar" style="background: #4dd9f2"></div></div><div class="label">オ</div></div>
+        </div>
+      </div>
       <div id="controls">
         <button type="button" id="pause">一時停止</button>
         <button type="button" data-speed="1">1 倍</button>
@@ -95,13 +153,17 @@
       <button type="button" data-tool="zone-Industrial" aria-pressed="false">工業</button>
       <button type="button" data-tool="zone-Office" aria-pressed="false">オフィス</button>
       <button type="button" data-tool="zone-Clear" aria-pressed="false">区画を消す</button>
+      <button type="button" data-tool="service-PowerPlant" aria-pressed="false">発電所</button>
+      <button type="button" data-tool="service-WaterPump" aria-pressed="false">浄水場</button>
       <button type="button" data-tool="buy" aria-pressed="false">土地を買う</button>
-      <button type="button" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>
-      <span id="dev-info"></span>
       <span id="tool-info"></span>
       <span id="tool-message" aria-live="polite"></span>
     </div>
     <button type="button" id="feedback-open" hidden>フィードバック</button>
+    <div id="dev-tools">
+      <button type="button" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>
+      <p id="dev-info"></p>
+    </div>
     <dialog id="feedback">
       <form method="dialog">
         <p>気づいたことを書く。画面、状態、これまでの操作の記録と一緒に保存する。</p>

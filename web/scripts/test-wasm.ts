@@ -12,7 +12,7 @@ import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "playwright-core";
+import { chromium, type Page } from "playwright-core";
 import { preview } from "vite";
 
 const TIMEOUT_MS = 30_000;
@@ -63,6 +63,85 @@ const url = givenUrl ?? server?.resolvedUrls?.local[0];
 if (url === undefined) {
   throw new Error("preview の URL が分からない");
 }
+// 開発用の道具で歩く人を出し、描かれること、時間を進めると動くこと、着くと消えることを確かめる。
+// 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その左寄りと右寄りのマスのあいだに出す
+async function checkDevWalks(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  const map = page.locator("#map");
+  const hud = page.locator("#hud");
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  const waitMap = (key: string, expected: string, op: "eq" | "gt" | "ne") =>
+    page.waitForFunction(
+      ([k, v, o]) => {
+        const d = document.querySelector<HTMLElement>("#map")?.dataset[k] ?? "";
+        return o === "eq" ? d === v : o === "gt" ? Number(d) > Number(v) : d !== v;
+      },
+      [key, expected, op] as const,
+      { timeout: TIMEOUT_MS },
+    );
+  const setSpeed = async (speed: number) => {
+    await page.locator(`button[data-speed="${speed}"]`).click();
+    await hud.and(page.locator(`[data-speed="${speed}"]`)).waitFor({ timeout: TIMEOUT_MS });
+  };
+  const pause = async (paused: boolean) => {
+    await page.locator("#pause").click();
+    await hud.and(page.locator(`[data-paused=${paused}]`)).waitFor({ timeout: TIMEOUT_MS });
+  };
+  // 外部接続の高速道路が届いてから、引く前の区間の数を読む
+  await waitMap("roadSegments", "0", "gt");
+  const size = page.viewportSize() ?? { width: 1280, height: 720 };
+  const d0 = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  const zoom = Number(d0.zoom);
+  const tileCenter = (x: number, y: number) => ({
+    x: size.width / 2 + (x + 0.5 - Number(d0.cameraX)) * zoom,
+    y: size.height / 2 + (y + 0.5 - Number(d0.cameraY)) * zoom,
+  });
+  const pixel = (p: { x: number; y: number }) =>
+    map.evaluate((el, q) => {
+      const canvas = el as HTMLCanvasElement;
+      const gl = canvas.getContext("webgl2");
+      const out = new Uint8Array(4);
+      const dpr = window.devicePixelRatio;
+      const [x, y] = [Math.floor(q.x * dpr), canvas.height - 1 - Math.floor(q.y * dpr)];
+      gl?.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
+      return [...out];
+    }, p);
+  const brightness = (c: number[]) => (c[0] ?? 0) + (c[1] ?? 0) + (c[2] ?? 0);
+
+  await setSpeed(1);
+  await pause(true);
+  const segments = d0.roadSegments ?? "0";
+  await page.locator('button[data-tool="road-Small"]').click();
+  const [from, to] = [tileCenter(12, 32), tileCenter(52, 32)];
+  await page.mouse.click(from.x, from.y);
+  await page.mouse.click(to.x, to.y);
+  await page.keyboard.press("Escape");
+  await waitMap("roadSegments", segments, "gt");
+  await page.waitForTimeout(100);
+  const walkFrom = tileCenter(14, 32);
+  const walkTo = tileCenter(50, 32);
+  const roadColor = await pixel(walkFrom);
+  await page.locator('button[data-tool="dev-walks"]').click();
+  await page.mouse.click(walkFrom.x, walkFrom.y);
+  await page.mouse.click(walkTo.x, walkTo.y);
+  await waitMap("devWalks", "0", "gt");
+  await waitMap("drawnMovers", "0", "gt");
+  const spawned = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  const walkerColor = await pixel(walkFrom);
+  check(
+    brightness(walkerColor) > brightness(roadColor) + 200,
+    `歩く人を出すと移動体の点が描かれる（${spawned.drawnMovers} 人、${roadColor.join(", ")} → ${walkerColor.join(", ")}）`,
+  );
+  await pause(false);
+  await waitMap("firstMover", spawned.firstMover ?? "", "ne");
+  const moved = await map.getAttribute("data-first-mover");
+  check(true, `時間を進めると移動体の位置が変わる（${spawned.firstMover} → ${moved}）`);
+  await setSpeed(48);
+  await waitMap("drawnMovers", "0", "eq");
+  check(true, "行き先に着いた移動体は描かれなくなる");
+}
+
 const browser = await chromium.launch({ executablePath: findOnPath("chrome-headless-shell") });
 
 try {
@@ -326,60 +405,6 @@ try {
   await page.locator("#pause").click();
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
 
-  // 開発用の道具で、いま引いた道路の左寄りのマスと右寄りのマスのあいだに歩く人を出す。
-  // 止めたまま出し、出発のマスの中心に移動体の明るい点が描かれるのを確かめる
-  const setSpeed = async (speed: number) => {
-    await page.locator(`button[data-speed="${speed}"]`).click();
-    await hud.and(page.locator(`[data-speed="${speed}"]`)).waitFor({ timeout: TIMEOUT_MS });
-  };
-  const moverState = async () => {
-    const d = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
-    return { drawn: Number(d.drawnMovers ?? 0), first: d.firstMover ?? "" };
-  };
-  await setSpeed(1);
-  await page.locator("#pause").click();
-  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
-  const walkFrom = tileCenter(14, 32);
-  const walkTo = tileCenter(50, 32);
-  const roadColor = await pixel(walkFrom.x, walkFrom.y);
-  await page.locator('button[data-tool="dev-walks"]').click();
-  await page.mouse.click(walkFrom.x, walkFrom.y);
-  await page.mouse.click(walkTo.x, walkTo.y);
-  await page.waitForFunction(
-    () => Number(document.querySelector<HTMLElement>("#map")?.dataset.devWalks ?? 0) > 0,
-    undefined,
-    { timeout: TIMEOUT_MS },
-  );
-  await page.waitForFunction(
-    () => Number(document.querySelector<HTMLElement>("#map")?.dataset.drawnMovers ?? 0) > 0,
-    undefined,
-    { timeout: TIMEOUT_MS },
-  );
-  const spawned = await moverState();
-  const walkerColor = await pixel(walkFrom.x, walkFrom.y);
-  check(
-    spawned.drawn > 0 && brightness(walkerColor) > brightness(roadColor) + 200,
-    `歩く人を出すと移動体の点が描かれる（${spawned.drawn} 人、${roadColor.join(", ")} → ${walkerColor.join(", ")}）`,
-  );
-  await page.locator("#pause").click();
-  await page.waitForFunction(
-    (before) => document.querySelector<HTMLElement>("#map")?.dataset.firstMover !== before,
-    spawned.first,
-    { timeout: TIMEOUT_MS },
-  );
-  check(
-    true,
-    `時間を進めると移動体の位置が変わる（${spawned.first} → ${(await moverState()).first}）`,
-  );
-  await setSpeed(FAST_SPEED);
-  await page.waitForFunction(
-    () => document.querySelector<HTMLElement>("#map")?.dataset.drawnMovers === "0",
-    undefined,
-    { timeout: TIMEOUT_MS },
-  );
-  check(true, "行き先に着いた移動体は描かれなくなる");
-  await page.locator('button[data-tool="none"]').click();
-
   // 土地を買う道具。地図を左へ 400 ピクセル引きずり、右隣のチャンクが見えるようにする
   await page.locator('button[data-tool="buy"]').click();
   await page.mouse.move(cx + 200, cy);
@@ -528,6 +553,132 @@ try {
     farZone.outcome === "Denied" && (farZone.text ?? "").includes("塗れるマスがない"),
     `道路から離れた場所は理由つきで断られる（${farZone.text}）`,
   );
+
+  // 道路の上側に住宅の区画を塗り、時間を進めて建物が建つのを待つ
+  await page.locator('button[data-tool="zone-Residential"]').click();
+  const r0 = tilePoint(14, 26);
+  const r1 = tilePoint(30, 31);
+  await page.mouse.move(r0.x, r0.y);
+  await page.mouse.down();
+  await page.mouse.move(r1.x, r1.y, { steps: 4 });
+  await page.mouse.up();
+  const cityNumbers = page.locator("#city-numbers");
+  await page.waitForFunction(
+    () => Number(document.querySelector<HTMLElement>("#city-numbers")?.dataset.buildings ?? 0) > 0,
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const firstBuilding = ((await map.getAttribute("data-first-building")) ?? "")
+    .split(",")
+    .map(Number);
+  const [bx = 0, by = 0] = firstBuilding;
+  check(
+    Number(await cityNumbers.getAttribute("data-buildings")) > 0,
+    `時間を進めると住宅が建ち、数が出る（${await cityNumbers.textContent()}）`,
+  );
+  await page.waitForTimeout(100);
+  // 印と重ならない、左上のマスの下寄りを読む
+  const house = await pixel(
+    cx + (bx + 0.5 - view.x) * view.zoom,
+    cy + (by + 0.8 - view.y) * view.zoom,
+  );
+  check(
+    (house[1] ?? 0) > (house[0] ?? 0) + 50 && brightness(house) < 250,
+    `建物が住宅の濃い緑で描かれる（マス (${bx}, ${by})、${house.join(", ")}）`,
+  );
+  const residentialDemand = await page.locator("#demand .bar").first().getAttribute("data-demand");
+  check(residentialDemand !== null, `住宅の需要の棒が出る（${residentialDemand}）`);
+
+  // 電気と水道。施設がないので、建物には届いていない印が出る
+  const unsupplied = async () => Number((await map.getAttribute("data-unsupplied")) ?? 0);
+  const waitUnsupplied = (test: "zero" | "some") =>
+    page.waitForFunction(
+      (t) => {
+        const n = Number(document.querySelector<HTMLElement>("#map")?.dataset.unsupplied ?? 0);
+        return t === "zero" ? n === 0 : n > 0;
+      },
+      test,
+      { timeout: TIMEOUT_MS },
+    );
+  // 電気の印は建物の左上のマスの (0.25, 0.3) を中心に置く（roads.ts の markCenter）。
+  // 縮小すると水道の印と重なるので、左の端寄りを読む
+  const markPixel = () =>
+    pixel(cx + (bx + 0.1 - view.x) * view.zoom, cy + (by + 0.3 - view.y) * view.zoom);
+  const isYellow = (c: number[]) => (c[0] ?? 0) > 200 && (c[1] ?? 0) > 180 && (c[2] ?? 0) < 100;
+  const markBefore = await markPixel();
+  check(
+    (await unsupplied()) > 0 && isYellow(markBefore),
+    `電気の届かない建物に黄色の印が出る（${await unsupplied()} 棟、${markBefore.join(", ")}）`,
+  );
+  // 道路を (52, 32) から (60, 32) へ延ばし、その下に発電所と浄水場を置く
+  await page.locator('button[data-tool="road-Small"]').click();
+  for (const [x, y] of [
+    [52, 32],
+    [60, 32],
+  ] as const) {
+    const p = tilePoint(x, y);
+    await page.mouse.click(p.x, p.y);
+  }
+  await page.keyboard.press("Escape");
+  // カーソルのマスで中核に置けるかを問い合わせ、答えが届くまで待つ
+  const hoverService = async (service: string, x: number, y: number) => {
+    await page.locator(`button[data-tool="service-${service}"]`).click();
+    const p = tilePoint(x, y);
+    await page.mouse.move(p.x - 8, p.y);
+    await page.mouse.move(p.x, p.y);
+    await page.waitForFunction(
+      () => document.querySelector<HTMLElement>("#tool-info")?.textContent?.includes("費用"),
+      undefined,
+      { timeout: TIMEOUT_MS },
+    );
+    await page.waitForTimeout(200);
+    return {
+      placeable: await map.getAttribute("data-service-placeable"),
+      rotation: await map.getAttribute("data-service-rotation"),
+      info: await page.locator("#tool-info").textContent(),
+    };
+  };
+  const away = await hoverService("WaterPump", 45, 45);
+  check(
+    away.placeable === "false" && (away.info ?? "").includes("置けない"),
+    `道路に面していない場所では、置けないと示す（${away.info}）`,
+  );
+  const place = async (service: string, x: number, y: number) => {
+    const hovered = await hoverService(service, x, y);
+    check(
+      hovered.placeable === "true" && hovered.rotation === "0",
+      `${service} は道路に向く向きが自動で選ばれる（向き ${hovered.rotation}）`,
+    );
+    const p = tilePoint(x, y);
+    const before = await outcomeCount();
+    await page.mouse.click(p.x, p.y);
+    return nextOutcome(before);
+  };
+  const plant = await place("PowerPlant", 53, 33);
+  const pump = await place("WaterPump", 57, 33);
+  check(
+    plant.outcome === "Applied" && pump.outcome === "Applied",
+    `発電所と浄水場を置ける（${plant.text}、${pump.text}）`,
+  );
+  await waitUnsupplied("zero");
+  await page.waitForTimeout(100);
+  const markAfter = await markPixel();
+  const plantColor = await colorOfTile(54, 34);
+  check(
+    !isYellow(markAfter) && (plantColor[0] ?? 0) > 200 && (plantColor[2] ?? 0) < 100,
+    `施設が橙で描かれ、建物に供給が届いて印が消える（施設 ${plantColor.join(", ")}、印の場所 ${markAfter.join(", ")}）`,
+  );
+  // 施設の前の道路を消すと、つながりが切れて印がまた出る
+  await page.locator('button[data-tool="bulldoze"]').click();
+  const cut = tilePoint(59, 32);
+  const beforeCut = await outcomeCount();
+  await page.mouse.click(cut.x, cut.y);
+  const cutResult = await nextOutcome(beforeCut);
+  await waitUnsupplied("some");
+  check(
+    cutResult.outcome === "Applied" && (await unsupplied()) > 0,
+    `施設の前の道路を消すと印がまた出る（${await unsupplied()} 棟）`,
+  );
   await page.locator('button[data-tool="none"]').click();
 
   await page.mouse.move(cx, cy);
@@ -655,6 +806,10 @@ try {
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   const afterClose = await ticksIn(500);
   check(afterClose > 0, `フィードバックの欄を閉じると再開する（${afterClose} tick）`);
+
+  // 歩く人を出す道具は記録に入らず、上の再生の確かめと食い違うので、新しいページで確かめる
+  await page.close();
+  await checkDevWalks(await browser.newPage(), url);
 } finally {
   await browser.close();
   await server?.close();

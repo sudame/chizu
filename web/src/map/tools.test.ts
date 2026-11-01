@@ -4,13 +4,17 @@ import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
+  chooseRotation,
   clampArea,
   MAX_ROAD_TILES,
   MAX_ZONE_SIDE,
   paintZoneCommand,
   parseRoadCostTable,
+  parseServiceTable,
+  placeServiceCommand,
   roadCost,
   screenToTile,
+  serviceFootprint,
   snapToEightDirections,
 } from "./tools.ts";
 
@@ -121,5 +125,57 @@ describe("コマンドの組み立て", () => {
     expect(buyChunkCommand({ x: 64, y: -1 })).toEqual({ kind: "BuyChunk", cx: 1, cy: -1 });
     expect(buyChunkCommand({ x: 63, y: -64 })).toEqual({ kind: "BuyChunk", cx: 0, cy: -1 });
     expect(buyChunkCommand({ x: -65, y: 0 })).toEqual({ kind: "BuyChunk", cx: -2, cy: 0 });
+  });
+});
+
+describe("施設", () => {
+  test("向きごとの占める長方形は、間口が道路に沿い、奥行きが道路から離れる", () => {
+    const at = { x: 10, y: 10 };
+    // 0：道路は上。間口は右へ、奥行きは下へ
+    expect(serviceFootprint(at, 0, 4, 2)).toEqual({ min: { x: 10, y: 10 }, max: { x: 13, y: 11 } });
+    // 1：道路は右。間口は下へ、奥行きは左へ
+    expect(serviceFootprint(at, 1, 4, 2)).toEqual({ min: { x: 9, y: 10 }, max: { x: 10, y: 13 } });
+    // 2：道路は下。間口は左へ、奥行きは上へ
+    expect(serviceFootprint(at, 2, 4, 2)).toEqual({ min: { x: 7, y: 9 }, max: { x: 10, y: 10 } });
+    // 3：道路は左。間口は上へ、奥行きは右へ
+    expect(serviceFootprint(at, 3, 4, 2)).toEqual({ min: { x: 10, y: 7 }, max: { x: 11, y: 10 } });
+  });
+
+  test("中核が置けるとした最初の向きを選び、どれも置けなければ置けないものとして返す", () => {
+    // 高速道路の脇：北（0）は歩道がなくて置けず、東（1）の普通の道路には置ける
+    const probe = ["道路に面していない", null, "ほかの施設か道路がある", "道路に面していない"];
+    expect(chooseRotation(probe, null)).toEqual({ rotation: 1, placeable: true, reason: null });
+    const none = ["道路に面していない", "道路に面していない", "水辺を通る", "道路に面していない"];
+    expect(chooseRotation(none, null)).toEqual({
+      rotation: 0,
+      placeable: false,
+      reason: "道路に面していない",
+    });
+  });
+
+  test("手で回した向きは、置けなくてもそのまま使う", () => {
+    const probe = [null, "道路に面していない", null, null];
+    expect(chooseRotation(probe, 1)).toEqual({
+      rotation: 1,
+      placeable: false,
+      reason: "道路に面していない",
+    });
+    expect(chooseRotation([], null).placeable).toBe(false);
+  });
+
+  test("施設の表を読み、置くコマンドを組み立てる", () => {
+    expect(parseServiceTable([60000, 4, 4, 25000, 2, 2]).WaterPump).toEqual({
+      cost: 25000,
+      width: 2,
+      depth: 2,
+    });
+    expect(() => parseServiceTable([1, 2])).toThrow();
+    expect(placeServiceCommand("PowerPlant", { x: -3, y: 4 }, 2)).toEqual({
+      kind: "PlaceBuilding",
+      service: "PowerPlant",
+      atX: -3,
+      atY: 4,
+      rotation: 2,
+    });
   });
 });

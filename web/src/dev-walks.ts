@@ -36,15 +36,15 @@ export function setupDevWalks(deps: {
 
   let start: Tile | null = null;
   const active = () => map.dataset.tool === DEV_WALK_TOOL;
-  button.addEventListener("click", () => {
-    start = null;
-    info.textContent = `出発のマスを選ぶ。${NOTICE}`;
-  });
+  for (const b of document.querySelectorAll<HTMLButtonElement>("button[data-tool]")) {
+    b.addEventListener("click", () => {
+      start = null;
+      info.textContent = b === button ? `出発のマスを選ぶ。${NOTICE}` : "";
+    });
+  }
   return {
     click(at) {
       if (!active()) {
-        start = null;
-        info.textContent = "";
         return;
       }
       if (start === null) {

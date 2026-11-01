@@ -32,6 +32,8 @@ pub enum TileUse {
     Road = 1,
     /// 区画に建った建物がある。
     Building = 2,
+    /// プレイヤーが置いた公共の施設がある。
+    Facility = 3,
 }
 
 /// 1 つの層のマスの表。

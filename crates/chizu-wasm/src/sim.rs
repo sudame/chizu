@@ -1,12 +1,17 @@
 //! Worker が持つシミュレーションの本体。実時間は持たず、進める tick 数は呼び出し側が決める。
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
+use chizu_core::building::demand;
 use chizu_core::record::RecordError;
+use chizu_core::service::building_demand;
+use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::zone::{ZONE_DEPTH, near_road};
 use chizu_core::{
     ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
-    Layer, Line, SegmentKind, TerrainTiles, TilePos, TileRect, TileUse, World, terrain,
+    Layer, Line, SegmentKind, ServiceKind, StateHasher, TerrainTiles, TilePos, TileRect, TileUse,
+    World, terrain,
 };
 
 use crate::snapshot::{Header, TripleBuffer};
@@ -22,6 +27,8 @@ pub struct Sim {
     near_road_changes: BTreeMap<ChunkCoord, u32>,
     /// 移動体を描く範囲。画面だけが決め、中核には渡さない。`None` なら移動体を書かない。
     mover_view: Option<TileRect>,
+    /// 建物の表の版の控え。`(記録の件数, 建つ・育つが走った回数, 版)` で、前の 2 つが変わったときだけ計算し直す。
+    buildings_version: Cell<Option<(usize, u64, f64)>>,
 }
 
 /// 記録したコマンドを適用した結果。
@@ -41,6 +48,7 @@ impl Sim {
             reports: Vec::new(),
             near_road_changes: BTreeMap::new(),
             mover_view: None,
+            buildings_version: Cell::new(None),
         }
     }
 
@@ -239,6 +247,100 @@ impl Sim {
         crate::movers::spawn_dev_walks(&mut self.world, from, to, count)
     }
 
+    /// 建物の表の版。建物が建つ、消える、段階が上がるたびに変わる。表の状態ハッシュの下位 52 ビットを使う。
+    /// 施設も、建物の供給の有無も含む。
+    ///
+    /// 建物の表が変わるのは、コマンドを適用したときと、建つ・育つが走る tick（`GROWTH_INTERVAL` の倍数）と、
+    /// その次の tick だけである。次の tick の頭では、建つ・育つで変わった需要に合わせて供給を判定し直す。
+    /// 表全体のハッシュは重いので、そのどれかが起きたときだけ計算し直す。
+    pub fn buildings_version(&self) -> f64 {
+        let key = (self.log.len(), self.growth_runs());
+        if let Some((commands, growth, version)) = self.buildings_version.get()
+            && (commands, growth) == key
+        {
+            return version;
+        }
+        let version = self.buildings_hash();
+        self.buildings_version.set(Some((key.0, key.1, version)));
+        version
+    }
+
+    /// 建物と施設の表の状態ハッシュの下位 52 ビット。
+    fn buildings_hash(&self) -> f64 {
+        let mut h = StateHasher::new();
+        h.write(self.world.buildings());
+        h.write(self.world.facilities());
+        (h.finish() & ((1 << 52) - 1)) as f64
+    }
+
+    /// これまでに進めた tick のうち、建物の表が変わりうる tick の数。`GROWTH_INTERVAL` で割った余りが
+    /// 0（建つ・育つ）か 1（供給の判定し直し）の tick を数える。
+    fn growth_runs(&self) -> u64 {
+        let ticks = self.world.tick().0;
+        ticks.div_ceil(GROWTH_INTERVAL) + ticks.saturating_sub(1).div_ceil(GROWTH_INTERVAL)
+    }
+
+    /// 建物を、1 つにつき `[min の x, min の y, max の x, max の y, 区画の種類, 段階, 供給]` の 7 つの数で返す。
+    /// 区画の種類は `ZoneKind` の値、供給は電気が届いていれば 1、水道が届いていれば 2 を足した値である。
+    pub fn buildings(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for (_, b) in self.world.buildings().iter() {
+            let a = b.area;
+            out.extend([a.min.x, a.min.y, a.max.x, a.max.y].map(|v| v as f64));
+            let supply = u8::from(b.supply.power) + 2 * u8::from(b.supply.water);
+            out.extend([b.zone as u8, b.level, supply].map(f64::from));
+        }
+        out
+    }
+
+    /// 施設を `at` に置けるかを、向き 0〜3 のそれぞれについて中核の判定で調べる。状態は変えない。
+    pub fn service_probe(&self, kind: ServiceKind, at: TilePos) -> [Result<(), DenyReason>; 4] {
+        [0, 1, 2, 3].map(|r| self.world.check_service(kind, at, r).map(|_| ()))
+    }
+
+    /// 施設を、1 つにつき `[min の x, min の y, max の x, max の y, 種類]` の 5 つの数で返す。
+    /// 種類は `ServiceKind` の値である。
+    pub fn facilities(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for f in self.world.facilities() {
+            let a = f.area;
+            out.extend([a.min.x, a.min.y, a.max.x, a.max.y].map(|v| v as f64));
+            out.push(f64::from(f.kind as u8));
+        }
+        out
+    }
+
+    /// 街の数字を次の 10 個の数で返す。建物の数、世帯の上限、職場の上限、
+    /// 住宅・商業・工業・オフィスの需要、電気の供給量、水道の供給量、電気と水道の需要。
+    /// 供給量は置いた施設の合計で、道路網でつながっているかは問わない。
+    pub fn city_stats(&self) -> Vec<f64> {
+        let buildings = self.world.buildings();
+        let capacity = buildings.capacity();
+        let mut out = vec![
+            buildings.len() as f64,
+            capacity.households as f64,
+            capacity.workplaces.iter().sum::<u64>() as f64,
+        ];
+        out.extend(demand(capacity).map(|d| d as f64));
+        let supply_of = |kind: ServiceKind| -> u64 {
+            let facilities = self.world.facilities().iter();
+            facilities
+                .filter(|f| f.kind == kind)
+                .map(|f| f.kind.capacity())
+                .sum()
+        };
+        let need: u64 = buildings.iter().map(|(_, b)| building_demand(b)).sum();
+        out.extend(
+            [
+                supply_of(ServiceKind::PowerPlant),
+                supply_of(ServiceKind::WaterPump),
+                need,
+            ]
+            .map(|v| v as f64),
+        );
+        out
+    }
+
     /// いまの状態を三重バッファに書く。
     pub fn publish(&mut self) {
         let (base, movers) = self
@@ -284,6 +386,8 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::AlreadyOwned => "もう買ってある",
         DenyReason::NoZonableTile => "道路沿いに区画を塗れるマスがない",
         DenyReason::ZoneUnchanged => "変わるマスがない",
+        DenyReason::Occupied => "ほかの施設か道路がある",
+        DenyReason::NoRoadAccess => "道路に面していない",
     }
 }
 
@@ -425,6 +529,160 @@ mod tests {
         );
         assert!(!zonable(&sim, water.0, water.1));
         assert!(zonable(&sim, water.0 + 1, water.1));
+    }
+
+    #[test]
+    fn buildings_and_city_stats_follow_growth() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        let version = sim.buildings_version();
+        assert!(sim.buildings().is_empty());
+        assert_eq!(sim.city_stats()[..3], [0.0, 0.0, 0.0]);
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+        let buildings = sim.buildings();
+        let count = sim.world().buildings().len();
+        assert!(count > 0, "住宅が建たない");
+        assert_eq!(buildings.len(), count * 7);
+        assert_eq!(buildings[4], f64::from(ZoneKind::Residential as u8));
+        assert_eq!(buildings[5], 1.0);
+        assert_eq!(buildings[6], 0.0, "施設がないので電気も水道も届かない");
+        // 道路の下側に発電所と浄水場を置くと、どちらも届き、版が変わる
+        let before = sim.buildings_version();
+        for (kind, x) in [(ServiceKind::PowerPlant, 16), (ServiceKind::WaterPump, 20)] {
+            sim.submit(Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, 9),
+                rotation: 2,
+            })
+            .unwrap();
+        }
+        assert!(
+            sim.take_reports()
+                .iter()
+                .all(|r| r.outcome == ApplyOutcome::Applied)
+        );
+        assert_ne!(sim.buildings_version(), before);
+        assert_eq!(sim.buildings()[6], 3.0);
+        assert_eq!(
+            sim.facilities()[4],
+            f64::from(ServiceKind::PowerPlant as u8)
+        );
+        assert_eq!(sim.facilities().len(), 10);
+        let stats = sim.city_stats();
+        assert_eq!(stats[7..9], [400.0, 300.0]);
+        assert!(stats[9] > 0.0);
+        let stats = sim.city_stats();
+        assert_eq!(stats[0], count as f64);
+        assert!(stats[1] > 0.0);
+        assert_ne!(sim.buildings_version(), version);
+    }
+
+    #[test]
+    fn service_probe_does_not_count_the_highway_as_a_road() {
+        // 高速道路が東へ出ていく種を選び、その先のチャンクを買って高速道路の脇に置けるようにする
+        let seed = (0..256)
+            .find(|s| {
+                let line = chizu_core::world::highway_line(*s);
+                // 南に 10 マスの道路を引くので、同じチャンクの中に収まる位置を選ぶ
+                line.step == (1, 0) && line.start.y <= 50
+            })
+            .expect("東へ出る高速道路の種がない");
+        let a = chizu_core::world::highway_line(seed).start.y;
+        let mut sim = Sim::new(seed);
+        sim.submit(Command::BuyChunk {
+            coord: ChunkCoord::new(2, 0),
+        })
+        .unwrap();
+        // 高速道路のすぐ南で、東の縦の普通の道路にも面するマス
+        sim.submit(road((132, a + 1), (132, a + 10))).unwrap();
+        let outcomes: Vec<_> = sim.take_reports().iter().map(|r| r.outcome).collect();
+        assert!(
+            outcomes.iter().all(|o| *o == ApplyOutcome::Applied),
+            "{seed} {a} {outcomes:?}"
+        );
+        let probe = sim.service_probe(ServiceKind::WaterPump, TilePos::new(131, a + 1));
+        // 0（北の高速道路に向く）は置けず、1（東の普通の道路に向く）は置ける
+        assert!(probe[0].is_err());
+        assert_eq!(probe[1], Ok(()));
+        // 高速道路にしか面していないマスには、どの向きでも置けない。高速道路には歩道がないので、
+        // 北に向けると「道路に面していない」になる
+        let lonely = sim.service_probe(ServiceKind::WaterPump, TilePos::new(150, a + 1));
+        assert_eq!(lonely[0], Err(DenyReason::NoRoadAccess));
+        assert!(lonely.iter().all(Result::is_err), "{lonely:?}");
+    }
+
+    #[test]
+    fn cached_buildings_version_follows_supply_changes() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        for (kind, x) in [(ServiceKind::PowerPlant, 16), (ServiceKind::WaterPump, 20)] {
+            sim.submit(Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, 9),
+                rotation: 2,
+            })
+            .unwrap();
+        }
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        // 建つ、供給が届く、段階が上がって需要が増える、を 1 tick ずつ確かめる
+        let mut supplied = false;
+        for _ in 0..(chizu_core::TICKS_PER_DAY + GROWTH_INTERVAL * 3) {
+            sim.advance(1);
+            assert_eq!(
+                sim.buildings_version(),
+                sim.buildings_hash(),
+                "tick {}",
+                sim.world().tick().0
+            );
+            supplied |= sim.world().buildings().iter().any(|(_, b)| b.supply.power);
+        }
+        assert!(supplied, "供給が届かない");
+        assert!(
+            sim.world().buildings().iter().any(|(_, b)| b.level > 1),
+            "段階が上がらない"
+        );
+    }
+
+    #[test]
+    fn cached_buildings_version_never_misses_a_change() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        let fresh = |sim: &Sim| sim.buildings_hash();
+        let mut changes = 0;
+        let mut last = sim.buildings_version();
+        for _ in 0..(GROWTH_INTERVAL * 5) {
+            sim.advance(1);
+            let v = sim.buildings_version();
+            assert_eq!(v, fresh(&sim), "tick {}", sim.world().tick().0);
+            if v != last {
+                changes += 1;
+            }
+            last = v;
+        }
+        assert!(changes > 0, "建物が建たない");
+        // 道路を消すと建物も消え、版が変わり、数字は 0 に戻る
+        sim.submit(Command::Bulldoze {
+            area: TileRect::from_corners(TilePos::new(10, 10), TilePos::new(30, 10)),
+        })
+        .unwrap();
+        assert!(sim.world().buildings().is_empty());
+        assert_ne!(sim.buildings_version(), last);
+        assert_eq!(sim.buildings_version(), fresh(&sim));
+        assert_eq!(sim.city_stats()[..3], [0.0, 0.0, 0.0]);
     }
 
     #[test]

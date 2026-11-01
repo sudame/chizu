@@ -6,7 +6,7 @@ pub mod sim;
 pub mod snapshot;
 
 use chizu_core::network::{DIAGONAL_TILE_MM, TILE_MM, road_cost_per_tile};
-use chizu_core::{ApplyOutcome, ChunkCoord, Command, RoadKind, TilePos, TileRect};
+use chizu_core::{ApplyOutcome, ChunkCoord, Command, RoadKind, ServiceKind, TilePos, TileRect};
 use command_input::Field;
 use js_sys::Reflect;
 use rayon::prelude::*;
@@ -48,6 +48,18 @@ pub fn road_cost_table() -> Vec<f64> {
         .map(|k| road_cost_per_tile(k).0 as f64)
         .into_iter()
         .chain([TILE_MM as f64, DIAGONAL_TILE_MM as f64])
+        .collect()
+}
+
+/// 施設の表。`[発電所の費用, 間口, 奥行き, 浄水場の費用, 間口, 奥行き]`。
+#[wasm_bindgen]
+pub fn service_table() -> Vec<f64> {
+    [ServiceKind::PowerPlant, ServiceKind::WaterPump]
+        .into_iter()
+        .flat_map(|k| {
+            let (w, d) = k.size();
+            [k.cost().0 as f64, w as f64, d as f64]
+        })
         .collect()
 }
 
@@ -115,6 +127,48 @@ impl Simulation {
     /// ノードごとに `[x, y, つながる区間の数]`。
     pub fn road_nodes(&self) -> Vec<f64> {
         self.0.road_nodes()
+    }
+
+    /// 建物の表の版。変わったときだけ建物を読み直す。
+    pub fn buildings_version(&self) -> f64 {
+        self.0.buildings_version()
+    }
+
+    /// 建物ごとに `[min の x, min の y, max の x, max の y, 区画の種類, 段階, 供給]`。
+    pub fn buildings(&self) -> Vec<f64> {
+        self.0.buildings()
+    }
+
+    /// 施設を間口のマス (x, y) に置けるかを、向き 0〜3 の順に返す。置けるなら null、置けないなら理由の文。
+    /// `service` は `ServiceKind` の値である。
+    pub fn service_probe(&self, service: u8, x: f64, y: f64) -> Result<js_sys::Array, JsError> {
+        let kind = ServiceKind::from_code(service).ok_or_else(|| JsError::new("知らない施設"))?;
+        let coord = |v: f64| {
+            (v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0)
+                .then_some(v as i64)
+                .ok_or_else(|| JsError::new("マスの座標が整数でない"))
+        };
+        let at = chizu_core::TilePos::new(coord(x)?, coord(y)?);
+        Ok(self
+            .0
+            .service_probe(kind, at)
+            .iter()
+            .map(|r| match r {
+                Ok(()) => JsValue::NULL,
+                Err(reason) => JsValue::from_str(sim::deny_text(*reason)),
+            })
+            .collect())
+    }
+
+    /// 施設ごとに `[min の x, min の y, max の x, max の y, 種類]`。
+    pub fn facilities(&self) -> Vec<f64> {
+        self.0.facilities()
+    }
+
+    /// `[建物の数, 世帯の上限, 職場の上限, 住宅・商業・工業・オフィスの需要, 電気の供給量,
+    /// 水道の供給量, 電気と水道の需要]`。
+    pub fn city_stats(&self) -> Vec<f64> {
+        self.0.city_stats()
     }
 
     pub fn set_paused(&mut self, paused: bool) {
