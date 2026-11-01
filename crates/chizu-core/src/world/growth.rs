@@ -1,23 +1,29 @@
 //! 建物が建つ・育つ・消える処理。
 //!
 //! 建物は、道路に縦か横で面した区画のマスを間口にして、奥へ向かって建つ。間口と奥行きは
-//! 1〜[`MAX_LOT_SIDE`] マスで、種から引いた大きさが収まらなければ小さくする。斜めの道路沿いには
-//! まだ建たない。道路か区画が消えて建物の条件が崩れたら、建物も消える。
+//! 1〜[`MAX_LOT_SIDE`] マスで、種から引いた大きさが収まらなければ小さくする。
+//!
+//! 斜めの道路は階段状にマスを通るので、その脇のマスは縦と横の 2 辺で道路のマスに接する。
+//! このマスを間口にして、道路から離れる向きへ 1 辺 1〜[`DIAGONAL_LOT_SIDE`] マスの正方形の建物を
+//! 建てる。2×2 と 1×1 が道路に沿って階段状に並ぶ。出入口は、接する 2 マスのあいだの歩道に付ける。
+//!
+//! 道路か区画が消えて建物の条件が崩れたら、建物も消える。
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
-use crate::building::{Building, MAX_LEVEL, MAX_LOT_SIDE, demand};
+use crate::building::{Building, DIAGONAL_LOT_SIDE, MAX_LEVEL, MAX_LOT_SIDE, demand};
 use crate::chunk::{Layer, TileUse};
 use crate::clock::TICKS_PER_DAY;
 use crate::command::ServiceKind;
 use crate::command::ZoneKind;
 use crate::id::BuildingId;
-use crate::network::{Dir, LaneMode, LinkId};
+use crate::network::{DIAGONAL_TILE_MM, Dir, LaneMode, LinkId, TILE_MM};
 use crate::rng::{RngPurpose, rng};
 use crate::round;
 use crate::service::{Facility, Supply, evaluate_supply};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
+use crate::units::LaneOffset;
 use crate::world::{ApplyOutcome, DenyReason};
 use crate::zone::ZONE_DEPTH;
 
@@ -27,13 +33,13 @@ pub const GROWTH_INTERVAL: u64 = 30;
 /// 建物の奥行きの上限（マス）。区画の奥行きいっぱいまで建つので、奥に空きのマスが残らない。
 pub const MAX_LOT_DEPTH: u64 = ZONE_DEPTH as u64;
 
-/// 建てる候補の間口のマス。道路に縦か横で面した、区画のある空きマスである。
+/// 建てる候補の間口のマス。道路に面した、区画のある空きマスである。
 ///
 /// 道路、区画、マスの使い道が変わるたびに、変わったマスのまわりだけを [`World::refresh_lot_fronts`] で直す。
 /// 区画とマスの使い道と網から作り直せるので、状態ハッシュには入れない。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct LotFronts {
-    /// 間口のマスと、その区画の種類と、道路へ向かう向き（`DIRS` の添え字）。
+    /// 間口のマスと、その区画の種類と、道路へ向かう向き（`FRONT_DIRS` の添え字）。
     fronts: BTreeMap<TilePos, (ZoneKind, u8)>,
     /// 区画の種類ごとの間口のマス。添え字は [`ZoneKind::index`]。
     by_zone: [BTreeSet<TilePos>; 4],
@@ -61,6 +67,23 @@ pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;
 /// 間口のマスから道路へ向かう 1 歩の候補。この順に調べる。`PlaceBuilding` の `rotation` もこの順である。
 pub(super) const DIRS: [(i64, i64); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
 
+/// 建てる候補の間口から道路へ向かう向き。この順に調べるので、縦横の道路にも斜めの道路にも
+/// 面したマスは、大きな建物の建つ縦横の道路に向く。
+const FRONT_DIRS: [(i64, i64); 8] = [
+    (0, -1),
+    (1, 0),
+    (0, 1),
+    (-1, 0),
+    (1, -1),
+    (1, 1),
+    (-1, 1),
+    (-1, -1),
+];
+
+fn is_diagonal(d: (i64, i64)) -> bool {
+    d.0 != 0 && d.1 != 0
+}
+
 fn step(t: TilePos, d: (i64, i64), k: i64) -> TilePos {
     let at = |v: i64, s: i64| {
         s.checked_mul(k)
@@ -71,14 +94,19 @@ fn step(t: TilePos, d: (i64, i64), k: i64) -> TilePos {
 }
 
 /// 間口 `w`、奥行き `k` の敷地のマス。`(i, j)` は間口に沿って `i`、奥へ `j` 進んだマスである。
+/// 斜めの道路に向くときは、x の向きに道路から `i`、y の向きに道路から `j` 離れたマスである。
 fn lot_tiles(
     front: TilePos,
     toward_road: (i64, i64),
     w: u64,
     k: u64,
 ) -> impl Iterator<Item = (u64, u64, TilePos)> {
-    let along = (-toward_road.1, toward_road.0);
-    let back = (-toward_road.0, -toward_road.1);
+    let (tx, ty) = toward_road;
+    let (along, back) = if is_diagonal(toward_road) {
+        ((-tx, 0), (0, -ty))
+    } else {
+        ((-ty, tx), (-tx, -ty))
+    };
     (0..k).flat_map(move |j| {
         (0..w).map(move |i| {
             let t = step(step(front, along, i as i64), back, j as i64);
@@ -96,33 +124,53 @@ impl World {
         Some((tiles.zone[i], tiles.occupancy[i]))
     }
 
-    /// `front` から `toward_road` へ 1 歩のマスを通る、歩道のある縦か横の区間の、`front` の側の歩道のリンク。
-    fn frontage(&self, front: TilePos, toward_road: (i64, i64)) -> Option<LinkId> {
-        let road = step(front, toward_road, 1);
-        let inward = (-toward_road.0, -toward_road.1);
-        self.network
-            .segments_through(road)
-            .into_iter()
-            .find_map(|s| {
-                if !self.network.segment(s)?.kind.has_sidewalks() {
-                    return None;
-                }
-                let (sx, sy) = self.network.segment_line(s)?.step;
-                if sx * toward_road.0 + sy * toward_road.1 != 0 {
-                    return None;
-                }
-                // y が下向きの座標なので、進む向きの右は (-sy, sx) である。
-                let dir = if (-sy, sx) == inward {
-                    Dir::Forward
-                } else {
-                    Dir::Backward
-                };
-                Some(LinkId {
-                    segment: s,
-                    dir,
-                    mode: LaneMode::Sidewalk,
-                })
-            })
+    /// `front` が `toward_road` の向きで面する、歩道のある区間の、`front` の側の歩道のリンクと、
+    /// その始まりから出入口までの距離。
+    ///
+    /// 縦か横なら、1 歩先のマスを横切る区間に面する。出入口はそのマスの中心である。
+    /// 斜め `(dx, dy)` なら、`(dx, 0)` と `(0, dy)` の 1 歩先の 2 マスを続けて通る斜めの区間に面する。
+    /// 出入口は 2 マスの中心のあいだの点である。
+    fn frontage(&self, front: TilePos, toward_road: (i64, i64)) -> Option<(LinkId, LaneOffset)> {
+        let (tx, ty) = toward_road;
+        let diagonal = is_diagonal(toward_road);
+        let (p, q) = if diagonal {
+            (step(front, (tx, 0), 1), step(front, (0, ty), 1))
+        } else {
+            let road = step(front, toward_road, 1);
+            (road, road)
+        };
+        self.network.segments_through(p).into_iter().find_map(|s| {
+            if !self.network.segment(s)?.kind.has_sidewalks() {
+                return None;
+            }
+            let line = self.network.segment_line(s)?;
+            let (kp, kq) = (line.position_of(p)?, line.position_of(q)?);
+            let (sx, sy) = line.step;
+            if !diagonal && sx * tx + sy * ty != 0 {
+                return None;
+            }
+            // y が下向きの座標なので、進む向きの右は (-sy, sx) である。建物は道路から
+            // (-tx, -ty) の側にあり、右との内積の符号で側が決まる。斜めでは内積は ±2 になる。
+            let dir = if sy * tx - sx * ty > 0 {
+                Dir::Forward
+            } else {
+                Dir::Backward
+            };
+            let per = u64::try_from(if diagonal { DIAGONAL_TILE_MM } else { TILE_MM })
+                .expect("1 歩の長さが負");
+            let steps = match dir {
+                Dir::Forward => kp.min(kq),
+                Dir::Backward => line.len.checked_sub(kp.max(kq))?,
+            };
+            let half = if diagonal { per / 2 } else { 0 };
+            let at = steps.checked_mul(per)?.checked_add(half)?;
+            let link = LinkId {
+                segment: s,
+                dir,
+                mode: LaneMode::Sidewalk,
+            };
+            Some((link, LaneOffset(u32::try_from(at).ok()?)))
+        })
     }
 
     /// 敷地に `zone` の建物を建てられるか。
@@ -134,9 +182,11 @@ impl World {
         w: u64,
         k: u64,
     ) -> bool {
-        lot_tiles(front, toward_road, w, k).all(|(_, j, t)| {
+        // 縦横なら間口の列のどのマスも、斜めなら角のマスだけが道路に面する。
+        let facing = |i: u64, j: u64| j == 0 && (i == 0 || !is_diagonal(toward_road));
+        lot_tiles(front, toward_road, w, k).all(|(i, j, t)| {
             self.tile_state(t) == Some((Some(zone), TileUse::Empty))
-                && (j > 0 || self.frontage(t, toward_road).is_some())
+                && (!facing(i, j) || self.frontage(t, toward_road).is_some())
         })
     }
 
@@ -174,6 +224,10 @@ impl World {
 
     /// `tiles` とそのまわり 4 マスについて、建てる候補の間口かどうかを見直す。
     /// 道路、区画、マスの使い道を変えたら、変えたマスを渡して呼ぶ。
+    ///
+    /// 間口かどうかは、そのマスと、縦横に隣り合うマスを通る区間だけで決まる。斜めの道路に面する
+    /// ときも、接する 2 マスはどちらも縦横の隣である。区間が分かれても通るマスは変わらないので、
+    /// 道路を引いたり消したりしたマスのまわりを見直せば足りる。
     pub(super) fn refresh_lot_fronts(&mut self, tiles: impl IntoIterator<Item = TilePos>) {
         let mut around = BTreeSet::new();
         for t in tiles {
@@ -187,11 +241,18 @@ impl World {
             let Some((Some(zone), TileUse::Empty)) = self.tile_state(t) else {
                 continue;
             };
-            if let Some(d) = (0..DIRS.len()).find(|d| self.frontage(t, DIRS[*d]).is_some()) {
-                self.lots.fronts.insert(t, (zone, d as u8));
+            if let Some(d) = self.front_dir(t) {
+                self.lots.fronts.insert(t, (zone, d));
                 self.lots.by_zone[zone.index()].insert(t);
             }
         }
+    }
+
+    /// マス `t` が道路に面するなら、その向きの `FRONT_DIRS` の添え字。
+    fn front_dir(&self, t: TilePos) -> Option<u8> {
+        (0..FRONT_DIRS.len())
+            .find(|d| self.frontage(t, FRONT_DIRS[*d]).is_some())
+            .map(|d| d as u8)
     }
 
     /// チャンクの中で書き換えたマスの位置。
@@ -252,12 +313,21 @@ impl World {
                 let mut r = rng(self.seed, RngPurpose::BuildingGrowth, id, tick);
                 let len = u32::try_from(list.len()).expect("候補の数が u32 に収まらない");
                 let front = *list.iter().nth(r.below(len) as usize).expect("候補がない");
-                let toward_road = DIRS[usize::from(self.lots.fronts[&front].1)];
-                // 間口は引いた幅から、奥行きは区画の奥行きいっぱいから、収まるまで小さくする。
-                let wt = 1 + u64::from(r.below(MAX_LOT_SIDE as u32));
-                let fit = (1..=wt)
-                    .rev()
-                    .flat_map(|w| (1..=MAX_LOT_DEPTH).rev().map(move |k| (w, k)))
+                let toward_road = FRONT_DIRS[usize::from(self.lots.fronts[&front].1)];
+                let sizes: Vec<(u64, u64)> = if is_diagonal(toward_road) {
+                    // 斜めの道路沿いは、引いた 1 辺の正方形から、収まるまで小さくする。
+                    let side = 1 + u64::from(r.below(DIAGONAL_LOT_SIDE as u32));
+                    (1..=side).rev().map(|s| (s, s)).collect()
+                } else {
+                    // 間口は引いた幅から、奥行きは区画の奥行きいっぱいから、収まるまで小さくする。
+                    let wt = 1 + u64::from(r.below(MAX_LOT_SIDE as u32));
+                    (1..=wt)
+                        .rev()
+                        .flat_map(|w| (1..=MAX_LOT_DEPTH).rev().map(move |k| (w, k)))
+                        .collect()
+                };
+                let fit = sizes
+                    .into_iter()
                     .find(|(w, k)| self.lot_fits(zone, front, toward_road, *w, *k));
                 if let Some((w, k)) = fit {
                     let id = self.place_building(zone, front, toward_road, w, k);
@@ -279,7 +349,7 @@ impl World {
             .map(|(_, _, t)| t)
             .collect();
         let far = *tiles.last().expect("敷地が空");
-        let entrance = self
+        let (entrance, entrance_at) = self
             .frontage(front, toward_road)
             .expect("間口が道路に面していない");
         let id = self.buildings.insert(Building {
@@ -288,6 +358,7 @@ impl World {
             front,
             toward_road,
             entrance,
+            entrance_at,
             level: 1,
             leveled_at: self.tick,
             supply: Supply::default(),
@@ -329,7 +400,7 @@ impl World {
         if !lot_tiles(at, toward_road, w, k).all(|(_, _, t)| free(t)) {
             return Err(DenyReason::Occupied);
         }
-        let entrance = self
+        let (entrance, _) = self
             .frontage(at, toward_road)
             .ok_or(DenyReason::NoRoadAccess)?;
         if lot_tiles(at, toward_road, w, 1).any(|(_, _, t)| self.frontage(t, toward_road).is_none())
@@ -387,7 +458,7 @@ impl World {
         let facilities: Vec<Option<LinkId>> = self
             .facilities
             .iter()
-            .map(|f| self.frontage(f.front, f.toward_road))
+            .map(|f| self.frontage(f.front, f.toward_road).map(|(link, _)| link))
             .collect();
         for (f, entrance) in self.facilities.iter_mut().zip(facilities) {
             f.entrance = entrance;
@@ -401,8 +472,10 @@ impl World {
                 .iter()
                 .all(|t| self.tile_state(*t) == Some((Some(b.zone), TileUse::Building)));
             match self.frontage(b.front, b.toward_road).filter(|_| intact) {
-                Some(entrance) => {
-                    self.buildings.get_mut(id).expect("建物がない").entrance = entrance;
+                Some((entrance, entrance_at)) => {
+                    let b = self.buildings.get_mut(id).expect("建物がない");
+                    b.entrance = entrance;
+                    b.entrance_at = entrance_at;
                 }
                 None => {
                     self.buildings.remove(id);
@@ -449,7 +522,8 @@ impl World {
 mod tests {
     use super::*;
     use crate::command::{Command, RoadKind};
-    use crate::units::{Money, Tick};
+    use crate::movement::SidewalkPos;
+    use crate::units::{Mm, Money, Tick, WorldPos};
     use crate::world::ApplyOutcome;
 
     fn rect(a: (i64, i64), b: (i64, i64)) -> TileRect {
@@ -529,7 +603,31 @@ mod tests {
             for t in crate::zone::tiles_of(b.area) {
                 assert_eq!(w.tile_state(t), Some((Some(b.zone), TileUse::Building)));
             }
-            assert_eq!(w.frontage(b.front, b.toward_road), Some(b.entrance));
+            assert_eq!(
+                w.frontage(b.front, b.toward_road),
+                Some((b.entrance, b.entrance_at))
+            );
+            // 出入口は、間口のマスの中心から道路へ向かって、縦横なら 1 マス、斜めなら
+            // x と y にそれぞれ半マス進んだ点にある。
+            let reach = if is_diagonal(b.toward_road) {
+                TILE_MM / 2
+            } else {
+                TILE_MM
+            };
+            let at = |v: i64, d: i64| Mm(v * TILE_MM + TILE_MM / 2 + d * reach);
+            let door = SidewalkPos::on_link(w.network(), b.entrance, b.entrance_at).unwrap();
+            assert_eq!(
+                door.world(),
+                WorldPos::new(
+                    at(b.front.x, b.toward_road.0),
+                    at(b.front.y, b.toward_road.1)
+                ),
+                "{b:?}"
+            );
+            if is_diagonal(b.toward_road) {
+                let (w, h) = crate::zone::rect_size(b.area).unwrap();
+                assert!(w == h && w <= DIAGONAL_LOT_SIDE, "{b:?}");
+            }
             covered += b.tile_count();
         }
         let mut building_tiles = 0;
@@ -551,8 +649,8 @@ mod tests {
                     continue;
                 };
                 let t = World::tile_of(c.coord(), i);
-                if let Some(d) = (0..DIRS.len()).find(|d| w.frontage(t, DIRS[*d]).is_some()) {
-                    rebuilt.fronts.insert(t, (zone, d as u8));
+                if let Some(d) = w.front_dir(t) {
+                    rebuilt.fronts.insert(t, (zone, d));
                     rebuilt.by_zone[zone.index()].insert(t);
                 }
             }
@@ -837,7 +935,7 @@ mod tests {
             place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
             ApplyOutcome::Applied
         );
-        let entrance = w.frontage(TilePos::new(20, 9), (0, 1)).unwrap();
+        let (entrance, entrance_at) = w.frontage(TilePos::new(20, 9), (0, 1)).unwrap();
         // 16 マスで段階 5 の建物を 4 棟置くと、需要は 320 になる。電気（400）は足り、水道（300）は足りない。
         for i in 0..4 {
             w.buildings.insert(Building {
@@ -846,6 +944,7 @@ mod tests {
                 front: TilePos::new(10 + 4 * i, 9),
                 toward_road: (0, 1),
                 entrance,
+                entrance_at,
                 level: MAX_LEVEL,
                 leveled_at: Tick::ZERO,
                 supply: Supply::default(),
@@ -860,6 +959,134 @@ mod tests {
                     water: false
                 }
             );
+        }
+    }
+
+    fn paint(w: &mut World, a: (i64, i64), b: (i64, i64), zone: ZoneKind) {
+        let c = Command::PaintZone {
+            area: rect(a, b),
+            zone: Some(zone),
+        };
+        assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+    }
+
+    #[test]
+    fn houses_grow_along_a_diagonal_street_and_vanish_with_it() {
+        let mut w = World::new(7);
+        build(&mut w, (0, 0), (30, 30));
+        paint(&mut w, (-6, -6), (36, 36), ZoneKind::Residential);
+        check_buildings(&w);
+        run(&mut w, 30 * 60);
+        check_buildings(&w);
+        assert!(
+            w.buildings().len() >= 8,
+            "{} 棟しか建たない",
+            w.buildings().len()
+        );
+        // 道路の両側に建ち、どれも斜めの道路に向く。
+        let side = |b: &Building| b.front.x > b.front.y;
+        assert!(w.buildings().iter().any(|(_, b)| side(b)));
+        assert!(w.buildings().iter().any(|(_, b)| !side(b)));
+        assert!(
+            w.buildings()
+                .iter()
+                .all(|(_, b)| is_diagonal(b.toward_road))
+        );
+        // 区間を途中で分けても、出入口を付け直して残る。
+        let before = w.buildings().len();
+        build(&mut w, (15, 15), (15, 25));
+        check_buildings(&w);
+        assert!(w.buildings().len() >= before - 2);
+        // 斜めの道路を消すと、建物も消える。
+        let bulldoze = Command::Bulldoze {
+            area: rect((0, 0), (30, 30)),
+        };
+        assert_eq!(w.apply(&bulldoze), ApplyOutcome::Applied);
+        assert!(w.buildings().is_empty());
+        check_buildings(&w);
+    }
+
+    #[test]
+    fn buildings_agree_where_straight_and_diagonal_roads_cross() {
+        let mut w = World::new(3);
+        build(&mut w, (0, 15), (40, 15));
+        build(&mut w, (5, 0), (35, 30));
+        build(&mut w, (30, 0), (30, 30));
+        paint(&mut w, (-6, -6), (46, 36), ZoneKind::Residential);
+        paint(&mut w, (21, 16), (46, 36), ZoneKind::Industrial);
+        check_buildings(&w);
+        run(&mut w, 30 * 60);
+        check_buildings(&w);
+        let diagonal = |w: &World| {
+            w.buildings()
+                .iter()
+                .filter(|(_, b)| is_diagonal(b.toward_road))
+                .count()
+        };
+        assert!(diagonal(&w) > 0 && diagonal(&w) < w.buildings().len());
+        // 交わる 2 か所のあいだの斜めの区間だけを消すと、そこに面した建物だけが消える。
+        let cut = Command::Bulldoze {
+            area: rect((25, 20), (25, 20)),
+        };
+        assert_eq!(w.apply(&cut), ApplyOutcome::Applied);
+        check_buildings(&w);
+        assert!(w.buildings().iter().all(|(_, b)| {
+            let (x, y) = (b.front.x, b.front.y);
+            !(is_diagonal(b.toward_road) && 20 < x && x < 31 && 15 < y && y < 26)
+        }));
+        // 引き直すと、また建つ。
+        build(&mut w, (20, 15), (30, 25));
+        check_buildings(&w);
+        run(&mut w, 30 * 60);
+        check_buildings(&w);
+        assert!(diagonal(&w) > 0);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        /// チャンクの境目のまわりで、斜めを含む道路を引く・消す・分ける、区画を塗る、時間を進めるを
+        /// 任意に並べても、毎回、増分の候補が全体から作り直したものと一致し、建物が網と食い違わない。
+        #[test]
+        fn lot_fronts_match_a_full_rebuild_across_chunk_borders(
+            edits in proptest::collection::vec(
+                (0_u8..6, 0_usize..4, -8_i64..8, -8_i64..8, -1_i64..=1, -1_i64..=1, 1_i64..10),
+                1..24,
+            )
+        ) {
+            let mut w = World::new(0);
+            w.money = Money(1_000_000_000);
+            // 間口のマスと、道路の側の 2 マスが別のチャンクに分かれるよう、境目の角のまわりを使う。
+            let corners = [(0, 0), (64, 0), (0, 64), (64, 64)];
+            for (op, c, dx, dy, sx, sy, len) in edits {
+                let (x, y) = (corners[c].0 + dx, corners[c].1 + dy);
+                match op {
+                    0 => {
+                        let area = rect((x, y), (x + len / 3, y + len / 3));
+                        w.apply(&Command::Bulldoze { area });
+                    }
+                    1 => {
+                        let zone = [None, Some(ZoneKind::Residential), Some(ZoneKind::Industrial)]
+                            [(sx + 1) as usize];
+                        w.apply(&Command::PaintZone {
+                            area: rect((x - len, y - len), (x + len, y + len)),
+                            zone,
+                        });
+                    }
+                    2 => run(&mut w, GROWTH_INTERVAL),
+                    _ if (sx, sy) != (0, 0) => {
+                        // 斜めを多めに引く。縦横の道路を引くと、斜めの区間を分けることもある。
+                        let (sx, sy) = if op == 3 && sx * sy == 0 { (sx | 1, sy | 1) } else { (sx, sy) };
+                        w.apply(&Command::BuildRoad {
+                            from: TilePos::new(x, y),
+                            to: TilePos::new(x + sx * len, y + sy * len),
+                            kind: RoadKind::Small,
+                        });
+                    }
+                    _ => {}
+                }
+                check_buildings(&w);
+            }
         }
     }
 }
