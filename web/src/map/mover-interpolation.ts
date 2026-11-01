@@ -1,6 +1,9 @@
 // 移動体の位置を、前の tick と今の tick のあいだで補間する。
-// 前の位置は移動体の ID ごとに画面の側で覚える。三重バッファは今の tick の位置だけを持つ。
+// 前の位置は移動体ごとに画面の側で覚える。三重バッファは今の tick の位置だけを持つ。
 // 位置は基準のチャンクが変わっても比べられるよう、ワールド座標（マス）の f64 で持つ。
+//
+// 補間の区間の長さは、速度の値からではなく、tick が届いた時刻の差から測る。
+// Worker が tick を間引いて遅い速度を作るときや、重くて公称の速さで進めないときも、実際の間隔に追いつく。
 
 import { CHUNK_SIDE } from "../protocol/messages.ts";
 import { layout } from "../protocol/snapshot.ts";
@@ -8,8 +11,14 @@ import { layout } from "../protocol/snapshot.ts";
 /** 等速（1 倍）で 1 秒に進む tick の数。chizu-core の TICKS_PER_SECOND_AT_NORMAL_SPEED と同じ。 */
 export const TICKS_PER_SECOND = 30;
 
-/** これより長く間が空いた tick は、補間せずその場に置く（保存データの読み込みや長い停止のあと）。 */
-const MAX_INTERPOLATED_SECONDS = 0.5;
+/** これより長い区間になる tick の進みは、補間せずその場に置く（保存データの読み込みなど）。 */
+const MAX_INTERPOLATED_MS = 500;
+/** 1 tick あたりの間隔を、届いた時刻の差から均すときの、新しい値の重み。 */
+const SMOOTHING = 0.2;
+/** 測った間隔が、均した値のこの倍数より外れたら、速度が切り替わったとみなして測り直す。 */
+const OUTLIER_RATIO = 3;
+/** 前の tick からこれより空いたら、止まっていたとみなし、測った間隔を使わない。 */
+const MAX_MEASURED_GAP_MS = 1000;
 
 /** 補間の入力になる、1 枠ぶんの移動体の語の読み方。 */
 export type MoverFrame = {
@@ -25,14 +34,22 @@ export type MoverFrame = {
   floats: Float32Array;
 };
 
+/**
+ * 移動を区別する鍵。添え字は使い回されるので世代と組にし、車と歩く人も混ぜない。
+ * 2^32 × 2^16 × 4 は 2^50 で、f64 に収まる。
+ */
+export function moverKey(index: number, generation: number, kind: number): number {
+  return (index * 65536 + (generation & 0xffff)) * 4 + (kind & 3);
+}
+
 export class MoverInterpolator {
   #tick = -1;
   #count = 0;
-  // 今の tick の位置。次に tick が進んだとき、これが前の位置になる
-  #ids = new Uint32Array(0);
+  // 今の tick の位置
+  #keys = new Float64Array(0);
   #x = new Float64Array(0);
   #y = new Float64Array(0);
-  // 前の tick の位置。#ids と同じ並びではなく、#prevIndex で ID から引く
+  // 前の位置。今の並びと同じではなく、#prevIndex で鍵から引く
   #prevX = new Float64Array(0);
   #prevY = new Float64Array(0);
   #prevIndex = new Map<number, number>();
@@ -40,9 +57,12 @@ export class MoverInterpolator {
   #fromX = new Float64Array(0);
   #fromY = new Float64Array(0);
   #aligned = false;
-  // 今の tick に着いた時刻と、次の tick が来るはずの間隔（ミリ秒）
+  // 今の tick に着いた時刻と、補間にかける時間（ミリ秒）
   #since = 0;
   #span = 0;
+  // 前に tick が進んだ枠が届いた時刻と、1 tick あたりの間隔の均した値（ミリ秒）
+  #lastArrival = Number.NaN;
+  #msPerTick = 0;
 
   /** 補間の割合（0 で前の tick の位置、1 で今の tick の位置）。 */
   fraction(now: number, paused: boolean): number {
@@ -63,10 +83,17 @@ export class MoverInterpolator {
     const oy = frame.baseCy * CHUNK_SIDE;
     this.#grow(n);
 
+    const keyAt = (i: number) =>
+      moverKey(
+        frame.words[i * stride + layout.mover.id] ?? 0,
+        frame.words[i * stride + layout.mover.generation] ?? 0,
+        (frame.words[i * stride + layout.mover.headingKind] ?? 0) >>> 16,
+      );
+
     let sameOrder = this.#aligned && n === this.#count;
     if (sameOrder) {
       for (let i = 0; i < n; i++) {
-        if (frame.words[i * stride + layout.mover.id] !== this.#ids[i]) {
+        if (keyAt(i) !== this.#keys[i]) {
           sameOrder = false;
           break;
         }
@@ -78,17 +105,17 @@ export class MoverInterpolator {
       sameOrder = false;
     }
 
-    // 今の位置を覚える。ID の並びが変わったときは、前の位置も今の並びに合わせ直す
+    // 今の位置を覚える。並びが変わったときは、前の位置も今の並びに合わせ直す
     for (let i = 0; i < n; i++) {
       const at = i * stride;
-      this.#ids[i] = frame.words[at + layout.mover.id] ?? 0;
+      this.#keys[i] = keyAt(i);
       this.#x[i] = ox + (frame.floats[at + layout.mover.x] ?? 0);
       this.#y[i] = oy + (frame.floats[at + layout.mover.y] ?? 0);
     }
     this.#count = n;
     if (!sameOrder) {
       for (let i = 0; i < n; i++) {
-        const j = this.#prevIndex.get(this.#ids[i] ?? 0);
+        const j = this.#prevIndex.get(this.#keys[i] ?? 0);
         // 前の位置がない（新しく出た）移動体は、その場に描く
         this.#fromX[i] = j === undefined ? (this.#x[i] ?? 0) : (this.#prevX[j] ?? 0);
         this.#fromY[i] = j === undefined ? (this.#y[i] ?? 0) : (this.#prevY[j] ?? 0);
@@ -108,49 +135,70 @@ export class MoverInterpolator {
     }
   }
 
-  // tick が進んだ。今の位置を前の位置に回し、次の tick までの間隔を決める
+  // tick が進んだ。いま見えている位置を前の位置にし、補間にかける時間を決める
   #advance(frame: MoverFrame, now: number): void {
     const delta = frame.tick - this.#tick;
-    const rate = TICKS_PER_SECOND * frame.speed;
-    const seconds = rate > 0 ? delta / rate : Infinity;
+    const nominal = 1000 / (TICKS_PER_SECOND * Math.max(frame.speed, 1e-6));
+    const valid = this.#tick >= 0 && delta > 0;
+    this.#updateInterval(valid ? delta : 0, now, nominal);
     this.#prevIndex.clear();
-    if (this.#tick < 0 || delta <= 0 || seconds > MAX_INTERPOLATED_SECONDS) {
+    const span = this.#msPerTick * delta;
+    if (!valid || span > MAX_INTERPOLATED_MS || delta * nominal > MAX_INTERPOLATED_MS) {
       // 最初の枠、巻き戻し、長い間: 前の位置は持たず、その場に描く
       this.#span = 0;
       this.#since = now;
     } else {
-      [this.#prevX, this.#x] = [this.#x, this.#prevX];
-      [this.#prevY, this.#y] = [this.#y, this.#prevY];
+      // 区間の途中で次の tick が届いても、いま見えている位置から動き出し、跳ばないようにする
+      const t = this.fraction(now, false);
       for (let i = 0; i < this.#count; i++) {
-        this.#prevIndex.set(this.#ids[i] ?? 0, i);
+        const x = this.#x[i] ?? 0;
+        const y = this.#y[i] ?? 0;
+        const fx = this.#fromX[i] ?? x;
+        const fy = this.#fromY[i] ?? y;
+        this.#prevX[i] = fx + (x - fx) * t;
+        this.#prevY[i] = fy + (y - fy) * t;
+        this.#prevIndex.set(this.#keys[i] ?? 0, i);
       }
-      const span = seconds * 1000;
-      // 前の区間が終わる頃に次の tick が届いたなら、区間をつなげて速さが揺れないようにする
-      const expected = this.#since + this.#span;
-      const late = now - expected;
-      this.#since = this.#span > 0 && late >= 0 && late < span ? expected : now;
       this.#span = span;
+      this.#since = now;
     }
     this.#tick = frame.tick;
   }
 
-  #grow(n: number): void {
-    if (this.#ids.length >= n) {
+  #updateInterval(delta: number, now: number, nominal: number): void {
+    const gap = now - this.#lastArrival;
+    this.#lastArrival = now;
+    if (delta <= 0 || this.#msPerTick <= 0 || !(gap > 0) || gap > MAX_MEASURED_GAP_MS) {
+      // 測れる前の到着がない、または止まっていたあと: 公称の間隔から始める
+      this.#msPerTick = nominal;
       return;
     }
-    const size = Math.max(n, this.#ids.length * 2, 256);
-    const widen = <T extends Uint32Array | Float64Array>(old: T, make: (size: number) => T): T => {
-      const next = make(size);
+    const sample = gap / delta;
+    if (sample > this.#msPerTick * OUTLIER_RATIO || sample < this.#msPerTick / OUTLIER_RATIO) {
+      // 速度が切り替わった: 測った値で測り直す
+      this.#msPerTick = sample;
+      return;
+    }
+    this.#msPerTick += (sample - this.#msPerTick) * SMOOTHING;
+  }
+
+  #grow(n: number): void {
+    if (this.#keys.length >= n) {
+      return;
+    }
+    const size = Math.max(n, this.#keys.length * 2, 256);
+    const widen = (old: Float64Array<ArrayBuffer>): Float64Array<ArrayBuffer> => {
+      const next = new Float64Array(size);
       next.set(old);
       return next;
     };
-    this.#ids = widen(this.#ids, (s) => new Uint32Array(s));
-    this.#x = widen(this.#x, (s) => new Float64Array(s));
-    this.#y = widen(this.#y, (s) => new Float64Array(s));
-    this.#prevX = widen(this.#prevX, (s) => new Float64Array(s));
-    this.#prevY = widen(this.#prevY, (s) => new Float64Array(s));
-    this.#fromX = new Float64Array(size);
-    this.#fromY = new Float64Array(size);
+    this.#keys = widen(this.#keys);
+    this.#x = widen(this.#x);
+    this.#y = widen(this.#y);
+    this.#prevX = widen(this.#prevX);
+    this.#prevY = widen(this.#prevY);
+    this.#fromX = widen(this.#fromX);
+    this.#fromY = widen(this.#fromY);
     this.#aligned = false;
   }
 }
