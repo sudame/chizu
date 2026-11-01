@@ -4,16 +4,47 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>chizu</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #1a1a1f;
+      }
+      #map {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+        cursor: grab;
+      }
+      #overlay {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        padding: 4px 8px;
+        background: rgb(255 255 255 / 85%);
+        border-radius: 4px;
+      }
+      #status {
+        margin: 0;
+      }
+    </style>
   </head>
   <body>
-    <p id="status" data-state="loading">WASM を読み込んでいる</p>
-    <canvas id="hud" width="480" height="96"></canvas>
-    <div id="controls">
-      <button type="button" id="pause">一時停止</button>
-      <button type="button" data-speed="1">1 倍</button>
-      <button type="button" data-speed="4">4 倍</button>
-      <button type="button" data-speed="16">16 倍</button>
-      <button type="button" data-speed="48">48 倍</button>
+    <canvas id="map"></canvas>
+    <div id="overlay">
+      <p id="status" data-state="loading">WASM を読み込んでいる</p>
+      <canvas id="hud" width="480" height="96"></canvas>
+      <div id="controls">
+        <button type="button" id="pause">一時停止</button>
+        <button type="button" data-speed="1">1 倍</button>
+        <button type="button" data-speed="4">4 倍</button>
+        <button type="button" data-speed="16">16 倍</button>
+        <button type="button" data-speed="48">48 倍</button>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

@@ -268,11 +268,13 @@ impl Population {
         let Some(row) = self.citizen(id) else {
             return false;
         };
-        if let Some(t) = row.schedule.depart_at {
-            self.departures.remove(t, id);
-        }
-        if let Some(t) = schedule.depart_at {
-            self.departures.insert(t, id);
+        if row.schedule.depart_at != schedule.depart_at {
+            if let Some(t) = row.schedule.depart_at {
+                self.departures.remove(t, id);
+            }
+            if let Some(t) = schedule.depart_at {
+                self.departures.insert(t, id);
+            }
         }
         self.citizens.schedule[id.slot()] = schedule;
         true
