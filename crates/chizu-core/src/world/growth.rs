@@ -272,10 +272,12 @@ impl World {
         if !tick.0.is_multiple_of(GROWTH_INTERVAL) {
             return;
         }
-        // 電気と水道が届き、住む世帯か働く住民で埋まり、その区画に需要のある建物だけが、段階を上げる。
+        // 電気と水道が届き、住む世帯か働く住民で埋まり、その区画に需要があり、網に余りのある建物だけが、段階を上げる。
         let occupants = self.occupants();
         let mut stats = self.city_stats();
         let ids: Vec<BuildingId> = self.buildings.iter().map(|(id, _)| id).collect();
+        // 段階を上げると需要が増えるので、その網の電気と水道に増分の余りがあるときだけ上げる。
+        let mut level_room = Headroom::of(&self.network, &self.facilities, &self.buildings);
         for id in ids {
             let b = *self.buildings.get(id).expect("建物がない");
             let supplied = b.supply.power && b.supply.water;
@@ -286,6 +288,7 @@ impl World {
                 && wanted
                 && b.level < MAX_LEVEL
                 && tick.since(b.leveled_at) >= LEVEL_UP_TICKS
+                && level_room.take(&self.network, b.entrance, b.tile_count())
             {
                 let up = Building {
                     level: b.level + 1,
@@ -1149,6 +1152,30 @@ mod tests {
         assert!(!water(small), "収まらない建物より遠い建物に届いた");
         let on = w.buildings().iter().filter(|(_, b)| b.supply.water).count();
         assert_eq!(on, 9);
+    }
+
+    /// 足りない網の代表のマスは、需要が最も大きい建物のマスで、同点なら ID の小さい建物のマスである。
+    #[test]
+    fn balance_spot_is_the_biggest_building_then_the_smallest_id() {
+        let spot = |w: &World| {
+            let b = crate::service::supply_balance(w.network(), w.facilities(), w.buildings());
+            // 建物のある網は 1 つだけである。
+            let spots: Vec<TilePos> = b.spots.into_iter().flatten().collect();
+            assert!(spots.len() <= 1, "{spots:?}");
+            spots.first().copied()
+        };
+        let mut w = World::new(0);
+        street(&mut w, 0, 80);
+        // 同じ需要の 2 棟なら、先に置いた（ID の小さい）ほう。
+        insert_square(&mut w, (10, 9), (0, 1), 4, 2);
+        insert_square(&mut w, (30, 9), (0, 1), 4, 2);
+        assert_eq!(spot(&w), Some(TilePos::new(10, 9)));
+        // 需要の大きい棟が後から来ても、そちらを選ぶ。
+        insert_square(&mut w, (50, 9), (0, 1), 4, 3);
+        assert_eq!(spot(&w), Some(TilePos::new(50, 9)));
+        // 同じ需要の棟がもう 1 棟あっても、ID の小さい棟のままである。
+        insert_square(&mut w, (70, 9), (0, 1), 4, 3);
+        assert_eq!(spot(&w), Some(TilePos::new(50, 9)));
     }
 
     /// 道のりが同じ建物は、建物の ID の小さい順に届く。

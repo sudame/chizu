@@ -8,6 +8,7 @@ import {
   formatUtilities,
   parseCityStats,
   utilityLowHeadroom,
+  utilityNotice,
   utilityShortage,
 } from "./city-panel.ts";
 
@@ -68,6 +69,17 @@ describe("街の数字", () => {
     expect(utilityLowHeadroom(stats(3600, 3600, 3300))?.reasons).toHaveLength(2);
     // 需要が供給量を超えたら、これは出さずに足りない知らせに任せる。
     expect(utilityLowHeadroom(stats(3600, 3000, 3100))).toBeNull();
+  });
+
+  test("電気が足りなくても、水道の余りが少ない知らせは隠れない", () => {
+    // 電気は 3,000 に対して需要 3,100 で足りず、水道は 3,300 に対して余り 6% である。
+    const stats = parseCityStats([5, 0, 0, 0, 0, 0, 0, 3000, 3300, 3100, 1, 0, 0, 0, 100, 0]);
+    const shortage = utilityShortage(stats, 4);
+    expect(shortage).not.toBeNull();
+    expect(utilityNotice(stats, shortage)?.reasons).toEqual([
+      ...(shortage?.reasons ?? []),
+      "水道の余りが 6% になった。浄水場を足す用意をする",
+    ]);
   });
 
   test("棒は住宅・商業・工業・オフィスの順に並び、正は上、負は下へ伸びる", () => {

@@ -176,3 +176,40 @@ fn a_town_without_facilities_barely_grows() {
     let people = |w: &World| w.city_stats().citizens;
     assert!(people(&served_town) > 10 * people(&bare));
 }
+
+/// 余りのない網では段階が上がらず、届く建物の数は減らない。施設を足すと、また上がりはじめる。
+#[test]
+fn levels_rise_only_while_the_network_has_room() {
+    let mut w = town();
+    add_facility(&mut w, ServiceKind::PowerPlant);
+    add_facility(&mut w, ServiceKind::WaterPump);
+    let mut settled = 0;
+    for day in 1..=10 {
+        run_day(&mut w);
+        // 需要が供給量（と新築の許容 48）を超えて伸びない。
+        let cap = ServiceKind::WaterPump.capacity();
+        assert!(demand(&w) <= cap + 48, "{day} 日め：{}", demand(&w));
+        // 届いていた建物がまとめて届かなくなることはない。
+        let n = w.buildings().len();
+        assert!(
+            served(&w) * 10 >= n * 8,
+            "{day} 日め：{} / {n} 棟",
+            served(&w)
+        );
+        settled = demand(&w);
+    }
+    // 施設を足すと、段階が上がって需要が伸びる。
+    for _ in 0..3 {
+        add_facility(&mut w, ServiceKind::PowerPlant);
+        add_facility(&mut w, ServiceKind::WaterPump);
+    }
+    for _ in 0..4 {
+        run_day(&mut w);
+    }
+    assert!(
+        demand(&w) > settled + 500,
+        "{} から {}",
+        settled,
+        demand(&w)
+    );
+}

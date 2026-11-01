@@ -124,6 +124,18 @@ export function utilityLowHeadroom(stats: CityStats): UtilityShortage | null {
   return { headline: "電気か水道の余りが少なくなっている", reasons };
 }
 
+/** 足りない知らせと、足りていないほうの余りの知らせを並べる。どちらもなければ null。 */
+export function utilityNotice(
+  stats: CityStats,
+  shortage: UtilityShortage | null,
+): UtilityShortage | null {
+  const low = utilityLowHeadroom(stats);
+  if (shortage !== null && low !== null) {
+    return { headline: shortage.headline, reasons: [...shortage.reasons, ...low.reasons] };
+  }
+  return shortage ?? low;
+}
+
 export type BarLayout = { value: number; top: number; height: number };
 
 /** 住宅・商業・工業・オフィスの順の棒の位置。正の需要は真ん中の線から上へ、負の需要は下へ伸ばす。 */
@@ -147,7 +159,7 @@ export function renderCityStats(stats: CityStats, unsupplied = 0): void {
     utilities.textContent = formatUtilities(stats);
   }
   const shortage = utilityShortage(stats, unsupplied);
-  const shown = shortage ?? utilityLowHeadroom(stats);
+  const shown = utilityNotice(stats, shortage);
   const notice = document.querySelector<HTMLElement>("#city-shortage");
   if (notice !== null) {
     notice.hidden = shown === null;

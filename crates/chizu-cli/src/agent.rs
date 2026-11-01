@@ -37,7 +37,7 @@ map のほかのサブコマンドは、結果を 1 行の JSON で標準出力�
 
 observe の utilities（power と water）:
   capacity と demand 道路網をまたいだ供給量と需要の合計、headroom その差（負なら足りない）、
-  headroomPermille 供給量に対する余りの千分率（供給量 0 なら null）、lowHeadroom 余りが 1 割を切った（画面の前もっての知らせと同じ）。
+  headroomPermille 供給量に対する余りの千分率（供給量 0 なら null）、lowHeadroom 余りが 0 以上 1 割未満（画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）。
   shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at
   （網の中で需要が最も大きい建物の道路に面したマス）。at を map で見れば、どの網かが分かる。
 
@@ -534,7 +534,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "demand": need,
             "headroom": headroom,
             "headroomPermille": permille,
-            "lowHeadroom": need > 0 && permille.is_some_and(|p| p < 100),
+            "lowHeadroom": need > 0 && headroom >= 0 && permille.is_some_and(|p| p < 100),
             "shortNetworks": short.len(),
             "shortAt": short,
         })
