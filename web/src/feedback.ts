@@ -1,9 +1,12 @@
 // 遊びながらフィードバックを残す欄。送ると、書いた文、地図のスクリーンショット、状態、記録を
 // 開発サーバー（feedback-plugin.ts）へ送り、feedback/ に保存させる。
 
+/** Worker の返事を待つ時間の上限（ミリ秒）。 */
+const STATE_TIMEOUT_MS = 5_000;
+
 export type FeedbackDeps = {
-  /** ゲームを一時停止する。 */
-  pause: () => void;
+  isPaused: () => boolean;
+  setPaused: (paused: boolean) => void;
   /** Worker に状態と記録を求める。 */
   requestState: () => Promise<{ state: string; commands: ArrayBuffer }>;
   /** 地図の canvas。描画の結果は preserveDrawingBuffer で残っている。 */
@@ -33,12 +36,32 @@ export function setupFeedback(deps: FeedbackDeps): void {
   const sendButton = find<HTMLButtonElement>("#feedback-send");
   const result = find<HTMLElement>("#feedback-result");
 
+  // フィードバックを受けるサーバー（開発サーバーと preview）のときだけボタンを出す
+  fetch("/__feedback")
+    .then((response) => {
+      open.hidden = response.status !== 204;
+    })
+    .catch(() => {});
+
+  // 開く前に止まっていたかを覚えておき、閉じたら（Esc で閉じても）元に戻す
+  let wasPaused = false;
   open.addEventListener("click", () => {
-    deps.pause();
+    wasPaused = deps.isPaused();
+    deps.setPaused(true);
     result.textContent = "";
+    delete result.dataset.saved;
     dialog.showModal();
     note.focus();
   });
+  dialog.addEventListener("close", () => deps.setPaused(wasPaused));
+
+  const requestState = () =>
+    Promise.race([
+      deps.requestState(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("WASM から返事がない")), STATE_TIMEOUT_MS),
+      ),
+    ]);
 
   sendButton.addEventListener("click", async (event) => {
     event.preventDefault();
@@ -48,7 +71,7 @@ export function setupFeedback(deps: FeedbackDeps): void {
     }
     sendButton.disabled = true;
     try {
-      const { state, commands } = await deps.requestState();
+      const { state, commands } = await requestState();
       const screenshot = deps.map.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
       const response = await fetch("/__feedback", {
         method: "POST",

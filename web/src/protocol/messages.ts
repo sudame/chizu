@@ -69,6 +69,8 @@ export type WorkerToMain =
   | { kind: "chunks"; chunks: ChunkData[] }
   /** state は chizu-wasm の feedback_state の JSON、commands は記録を encode したもの。 */
   | { kind: "feedback"; state: string; commands: ArrayBuffer }
+  /** フィードバックの状態を返せなかった。 */
+  | { kind: "feedback-error"; message: string }
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
   | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
   /**
@@ -128,6 +130,7 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "feedback":
       return typeof v.state === "string" && v.commands instanceof ArrayBuffer;
+    case "feedback-error":
     case "error":
       return typeof v.message === "string";
     default:

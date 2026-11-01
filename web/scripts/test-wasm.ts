@@ -526,6 +526,11 @@ try {
     replayed === fb.stateHash,
     `保存した記録を chizu-cli で再生すると同じ状態ハッシュになる（${replayed} と ${fb.stateHash}、tick ${fb.tick}）`,
   );
+  // 開く前は動いていたので、閉じると再開する
+  await page.locator('#feedback button[value="close"]').click();
+  await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
+  const afterClose = await ticksIn(500);
+  check(afterClose > 0, `フィードバックの欄を閉じると再開する（${afterClose} tick）`);
 } finally {
   await browser.close();
   await server?.close();

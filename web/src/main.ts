@@ -379,13 +379,16 @@ function setPaused(next: boolean): void {
 }
 pauseButton.addEventListener("click", () => setPaused(!paused));
 
-// Worker に求めたフィードバックの状態。届いたら解決する
-let feedbackWaiter: ((value: { state: string; commands: ArrayBuffer }) => void) | null = null;
+// Worker に求めたフィードバックの状態。届いたら解決し、失敗の返事なら断る
+type FeedbackState = { state: string; commands: ArrayBuffer };
+let feedbackWaiter: { resolve: (v: FeedbackState) => void; reject: (e: Error) => void } | null =
+  null;
 setupFeedback({
-  pause: () => setPaused(true),
+  isPaused: () => paused,
+  setPaused,
   requestState: () =>
-    new Promise((resolve) => {
-      feedbackWaiter = resolve;
+    new Promise((resolve, reject) => {
+      feedbackWaiter = { resolve, reject };
       send({ kind: "feedback" });
     }),
   map: mapCanvas,
@@ -460,7 +463,12 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   if (message.kind === "feedback") {
-    feedbackWaiter?.({ state: message.state, commands: message.commands });
+    feedbackWaiter?.resolve({ state: message.state, commands: message.commands });
+    feedbackWaiter = null;
+    return;
+  }
+  if (message.kind === "feedback-error") {
+    feedbackWaiter?.reject(new Error(message.message));
     feedbackWaiter = null;
     return;
   }

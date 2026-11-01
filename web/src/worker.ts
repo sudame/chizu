@@ -167,5 +167,9 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
     }
   } catch (error) {
     console.error(`操作を受け付けなかった：${String(error)}`);
+    // 画面は返事を待っているので、失敗しても返す
+    if (message.kind === "feedback") {
+      reply({ kind: "feedback-error", message: String(error) });
+    }
   }
 });
