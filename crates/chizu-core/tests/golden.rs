@@ -110,6 +110,13 @@ fn scenarios() -> Vec<Scenario> {
             money: None,
         },
         Scenario {
+            name: "errand",
+            seed: 42,
+            ticks: ERRAND_TICKS,
+            log: errand(),
+            money: None,
+        },
+        Scenario {
             name: "land_slots",
             seed: 42,
             ticks: 2 * TICKS_PER_DAY + 600,
@@ -441,6 +448,54 @@ fn commuters_walk_and_drive_to_work_in_the_morning() {
         "朝に職場へ着かない：{} / {workers}",
         world.citizens_at_work()
     );
+}
+
+/// 買い物のシナリオを回す長さ。2 日目の 19 時、仕事の帰りに店へ寄る住民が出るまでである。
+const ERRAND_TICKS: u64 = TICKS_PER_DAY + TICKS_PER_DAY * 19 / 24;
+
+/// 通勤のシナリオの通りの、住宅の向かいに商業の帯を塗った記録。
+fn errand() -> CommandLog {
+    let mut log = commute();
+    let area = TileRect::from_corners(TilePos::new(-20, 1), TilePos::new(20, 6));
+    log.record(
+        Tick(3),
+        Command::PaintZone {
+            area,
+            zone: Some(ZoneKind::Commercial),
+        },
+    )
+    .unwrap();
+    log
+}
+
+/// 買い物のシナリオで、2 日目の昼に働いていない住民が店へ向かい、夕方には仕事の帰りに店へ寄る住民がいる。
+/// 店から家へ帰る移動もある。
+#[test]
+fn citizens_go_shopping_by_day_and_after_work() {
+    let log = errand();
+    let mut world = World::new(42);
+    let (mut daytime, mut evening, mut home_by_day) = (0, 0, 0);
+    let mut noon_movers = 0;
+    let hour = |h: u64| TICKS_PER_DAY + TICKS_PER_DAY * h / 24;
+    for t in 0..ERRAND_TICKS {
+        replay(&mut world, &log, 1);
+        let trips = world.trips();
+        if t == hour(12) {
+            noon_movers = trips.iter().count();
+        }
+        for (id, _) in trips.iter() {
+            match trips.commuter(id).map(|c| c.to) {
+                Some(Activity::Shop) if (hour(9)..hour(16)).contains(&t) => daytime += 1,
+                Some(Activity::Shop) if t >= hour(17) => evening += 1,
+                Some(Activity::Home) if (hour(10)..hour(16)).contains(&t) => home_by_day += 1,
+                _ => {}
+            }
+        }
+    }
+    assert!(daytime > 0, "昼に誰も店へ向かわない");
+    assert!(evening > 0, "仕事の帰りに誰も店へ寄らない");
+    assert!(home_by_day > 0, "昼に店から家へ帰らない");
+    assert!(noon_movers > 0, "正午に街を誰も動いていない");
 }
 
 /// 始めたときの枠のぶんだけチャンクを買い、次の 1 つは枠で断られ、
