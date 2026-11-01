@@ -1,0 +1,13 @@
+# wasm-bindgen-rayon でスレッドを使うための設定。ネイティブのビルドに効かないよう、wasm32 のターゲットに限る。
+# build-std はここに書くとネイティブのビルドにも効いてしまうので、mise の build:wasm タスクで -Z build-std として渡す
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "target-feature=+atomics,+bulk-memory",
+  "-C", "link-arg=--shared-memory",
+  "-C", "link-arg=--max-memory=1073741824",
+  "-C", "link-arg=--import-memory",
+  "-C", "link-arg=--export=__wasm_init_tls",
+  "-C", "link-arg=--export=__tls_size",
+  "-C", "link-arg=--export=__tls_align",
+  "-C", "link-arg=--export=__tls_base",
+]
