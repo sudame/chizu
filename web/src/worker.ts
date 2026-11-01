@@ -115,9 +115,9 @@ function sendBuildings(sim: Simulation): void {
 // 一時停止中は街が進まないので、最初の 1 回のあとは送らない。最初の 1 回を画面は基準にする
 const OVERVIEW_INTERVAL_MS = 500;
 let overviewSentAt = Number.NEGATIVE_INFINITY;
-function sendOverview(sim: Simulation, now: number, paused: boolean): void {
+function sendOverview(sim: Simulation, now: number, paused: boolean, force = false): void {
   const first = overviewSentAt === Number.NEGATIVE_INFINITY;
-  if (!first && (paused || now - overviewSentAt < OVERVIEW_INTERVAL_MS)) {
+  if (!force && !first && (paused || now - overviewSentAt < OVERVIEW_INTERVAL_MS)) {
     return;
   }
   overviewSentAt = now;
@@ -196,6 +196,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         sendOutcomes(sim);
         sendRoads(sim);
         sendBuildings(sim);
+        sendOverview(sim, performance.now(), false, true);
         layerSender.send(sim, reply, CHUNKS_PER_FRAME);
         break;
       case "layers":

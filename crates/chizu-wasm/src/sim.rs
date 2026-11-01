@@ -399,11 +399,11 @@ impl Sim {
     /// 次の段階に届く人口、いまの段階までで買える枠の数、次の段階で買える枠の数。
     /// 建物の表が変わらなくても動く値なので、街の数字（[`Sim::city_stats`]）とは別に返す。
     pub fn overview(&self) -> Vec<f64> {
-        let parts = self.world.happiness_averages();
+        let (happiness, parts) = self.world.happiness_summary();
         let step = self.world.milestone();
         vec![
             self.world.housed_citizens() as f64,
-            f64::from(chizu_core::happiness::total(parts)),
+            f64::from(happiness),
             f64::from(parts.commute),
             f64::from(parts.services),
             f64::from(parts.wealth),

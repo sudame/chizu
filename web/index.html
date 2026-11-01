@@ -189,9 +189,10 @@
       }
       #milestone-notice {
         position: fixed;
-        top: 8px;
+        bottom: 64px;
         left: 50%;
         transform: translateX(-50%);
+        max-width: 24em;
         padding: 8px 16px;
         font-size: 14px;
         color: #0b4a1c;
@@ -201,6 +202,13 @@
       }
       #milestone-notice[hidden] {
         display: none;
+      }
+      @media (max-width: 900px) {
+        /* 足りない知らせ（下から 104px）の上に積む */
+        #milestone-notice {
+          bottom: 240px;
+          max-width: calc(100vw - 32px);
+        }
       }
       #demand {
         display: flex;
