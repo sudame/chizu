@@ -58,7 +58,7 @@ impl World {
         stuck
     }
 
-    /// 世帯を街から出す。移動している住民の移動もやめさせる。
+    /// 世帯を街から出す。移動している住民の移動をやめさせ、停めてある車も駐車場から外す。
     pub(super) fn remove_household(&mut self, h: HouseholdId) {
         let members = self.population.members(h).unwrap_or_default().to_vec();
         for id in members {
@@ -66,6 +66,7 @@ impl World {
             if let Some(t) = self.population.citizen(id).and_then(|r| r.trip) {
                 self.trips.cancel(t);
             }
+            self.trips.forget_car(id);
         }
         self.population.remove_household(h);
     }

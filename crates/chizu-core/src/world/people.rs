@@ -152,6 +152,7 @@ impl World {
         }
         if tick.is_multiple_of(JOB_INTERVAL) {
             self.update_jobs();
+            self.drop_stale_errands();
         }
         if tick.is_multiple_of(TICKS_PER_HOUR) {
             self.emigrate();
@@ -516,12 +517,23 @@ pub(crate) mod tests {
             .filter(|id| p.citizen(*id).unwrap().trip.is_some())
             .count();
         assert_eq!(p.departures().len() + moving, workers);
-        // 昼には職場にいて、夜には家にいる。移動にかかる時間を見込んで、出発のばらつきの 2 倍だけ待つ。
+        // 昼には職場にいて、夜には家にいる。出発から 4 時間待つ。移動は 1 tick に移動の 1 秒しか進まず、
+        // 歩道は片側を一方の向きにしか歩けないので、この街の徒歩の通勤は回り道で 1,000 tick 近くかかる。
         let day_start = w.tick().0 - w.tick().0 % TICKS_PER_DAY;
-        let wait = 2 * u64::from(DEPARTURE_SPREAD);
+        let wait = 4 * u64::from(DEPARTURE_SPREAD);
+        // 母数は判定する時点の働く住民である。朝の出発のあとに職場が決まり、次の朝を待っている住民は除く。
+        let workers_now = |w: &World| {
+            let p = w.population();
+            p.citizen_ids()
+                .map(|id| p.citizen(id).unwrap())
+                .filter(|r| r.workplace.is_some())
+                .filter(|r| r.schedule.next != Activity::Work || r.schedule.depart_at.is_none())
+                .count()
+        };
         while w.tick().0 < day_start + TICKS_PER_DAY + WORK_START + wait {
             w.step();
         }
+        let workers = workers_now(&w);
         assert!(
             w.citizens_at_work() * 10 >= workers * 9,
             "朝に職場へ向かわない：{} / {workers}",
@@ -530,7 +542,12 @@ pub(crate) mod tests {
         while w.tick().0 < day_start + TICKS_PER_DAY + WORK_END + wait {
             w.step();
         }
-        assert!(w.citizens_at_work() * 10 <= workers, "夕方に家へ帰らない");
+        let workers = workers_now(&w);
+        assert!(
+            w.citizens_at_work() * 10 <= workers,
+            "夕方に家へ帰らない：{} / {workers}",
+            w.citizens_at_work()
+        );
     }
 
     /// 区画の組み合わせごとに、早すぎる時点で止まらず、需要が 0 のまわりに収まっていくことを確かめる。

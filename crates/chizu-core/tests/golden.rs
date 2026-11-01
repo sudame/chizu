@@ -498,6 +498,172 @@ fn citizens_go_shopping_by_day_and_after_work() {
     assert!(noon_movers > 0, "正午に街を誰も動いていない");
 }
 
+/// 住民の表、移動、出発の待ち行列、買い物の行き先が互いに食い違わないことを確かめる。
+fn assert_errands_consistent(world: &World, when: &str) {
+    let p = world.population();
+    let trips = world.trips();
+    let mut scheduled = 0;
+    for id in p.citizen_ids() {
+        let row = p.citizen(id).unwrap();
+        if let Some(t) = row.trip {
+            assert_eq!(trips.commuter(t).map(|c| c.citizen), Some(id), "{when}");
+        }
+        if row.schedule.depart_at.is_some() {
+            scheduled += 1;
+        }
+        if row.schedule.next == Activity::Shop {
+            assert!(
+                world.errands().any(|(c, _)| c == id),
+                "{when}：店の予定に店がない"
+            );
+        }
+    }
+    for (t, _) in trips.iter() {
+        if let Some(c) = trips.commuter(t) {
+            assert_eq!(p.citizen(c.citizen).and_then(|r| r.trip), Some(t), "{when}");
+        }
+    }
+    for (at, id) in p.departures().iter() {
+        assert_eq!(
+            p.citizen(id).unwrap().schedule.depart_at,
+            Some(at),
+            "{when}"
+        );
+    }
+    assert_eq!(p.departures().len(), scheduled, "{when}");
+    for (id, shop) in world.errands() {
+        assert!(p.citizen(id).is_some(), "{when}：いない住民の買い物");
+        assert!(
+            world.buildings().get(shop).is_some(),
+            "{when}：消えた店への買い物"
+        );
+    }
+}
+
+/// 店へ向かう移動の数。
+fn shop_trips(world: &World) -> usize {
+    let trips = world.trips();
+    trips
+        .iter()
+        .filter(|(id, _)| trips.commuter(*id).is_some_and(|c| c.to == Activity::Shop))
+        .count()
+}
+
+/// 2 日目の昼、店へ向かう住民がいる時刻に商業の区画を消して店を取り壊しても、表どうしが食い違わず、
+/// 消えた店への買い物も残らない。
+#[test]
+fn removing_shops_mid_errand_keeps_tables_consistent() {
+    let noon = TICKS_PER_DAY + TICKS_PER_DAY / 2;
+    let mut probe = World::new(42);
+    let base = errand();
+    replay(&mut probe, &base, noon);
+    let mut at = noon;
+    while shop_trips(&probe) == 0 {
+        replay(&mut probe, &base, 1);
+        at += 1;
+        assert!(at < noon + TICKS_PER_DAY / 6, "昼に店へ向かう住民がいない");
+    }
+    let mut log = errand();
+    let area = TileRect::from_corners(TilePos::new(-20, 1), TilePos::new(20, 6));
+    log.record(Tick(at), Command::PaintZone { area, zone: None })
+        .unwrap();
+    let mut world = World::new(42);
+    replay(&mut world, &log, at);
+    replay(&mut world, &log, 1);
+    assert_eq!(shop_trips(&world), 0, "消えた店へ向かい続ける");
+    assert_eq!(world.errands().count(), 0, "消えた店への買い物が残る");
+    for _ in 0..TICKS_PER_DAY / 3 {
+        replay(&mut world, &log, 1);
+        assert_errands_consistent(&world, "店を壊したあと");
+    }
+}
+
+/// 仕事の帰りに店へ寄っているあいだに職場が消え、職場の割り当てが変わっても、表どうしが食い違わない。
+#[test]
+fn losing_the_job_while_at_the_shop_keeps_tables_consistent() {
+    let far = TileRect::from_corners(TilePos::new(60, -6), TilePos::new(100, -1));
+    // 店で帰りを待っている、遠い工業の帯で働く住民。
+    let at_far_shop = |w: &World| {
+        let p = w.population();
+        w.errands().find(|(id, _)| {
+            let r = p.citizen(*id).unwrap();
+            r.schedule.next == Activity::Home
+                && r.trip.is_none()
+                && r.schedule.depart_at.is_some()
+                && r.workplace
+                    .and_then(|b| w.buildings().get(b))
+                    .is_some_and(|b| b.front.x >= far.min.x)
+        })
+    };
+    let base = errand();
+    let mut probe = World::new(42);
+    let evening = TICKS_PER_DAY + TICKS_PER_DAY * 17 / 24;
+    replay(&mut probe, &base, evening);
+    let mut at = evening;
+    let who = loop {
+        if let Some((id, _)) = at_far_shop(&probe) {
+            break id;
+        }
+        replay(&mut probe, &base, 1);
+        at += 1;
+        assert!(
+            at < evening + TICKS_PER_DAY / 6,
+            "帰りに店にいる住民がいない"
+        );
+    };
+    let mut log = errand();
+    log.record(
+        Tick(at),
+        Command::PaintZone {
+            area: far,
+            zone: None,
+        },
+    )
+    .unwrap();
+    let mut world = World::new(42);
+    replay(&mut world, &log, at + 1);
+    assert!(
+        world.errands().all(|(id, _)| id != who),
+        "職場が消えても店にいる"
+    );
+    for _ in 0..TICKS_PER_DAY {
+        replay(&mut world, &log, 1);
+        assert_errands_consistent(&world, "職場を壊したあと");
+    }
+}
+
+/// 通勤のシナリオを 20 日回しても、駐車場に停めてある車が増え続けない。停めてある車はどれも、
+/// 住民が自分の車として覚えている 1 台で、停めてある台数は住民の数を超えない。
+#[test]
+fn parked_cars_do_not_pile_up_over_days() {
+    let log = commute();
+    let mut world = World::new(42);
+    let mut by_day = Vec::new();
+    for day in 1..=20 {
+        replay(&mut world, &log, TICKS_PER_DAY);
+        let parked: u64 = world.trips().lots().map(|(_, l)| u64::from(l.parked)).sum();
+        let p = world.population();
+        let owned = p
+            .citizen_ids()
+            .filter_map(|id| world.trips().parked_car(id))
+            .filter(|b| world.buildings().get(*b).is_some())
+            .count() as u64;
+        assert_eq!(parked, owned, "{day} 日目：持ち主のいない車が停めてある");
+        assert!(
+            parked <= p.citizen_count() as u64,
+            "{day} 日目：{parked} 台"
+        );
+        by_day.push(parked);
+    }
+    let early = by_day[4..10].iter().max().copied().unwrap();
+    let late = by_day[14..].iter().max().copied().unwrap();
+    assert!(early > 0, "車が停められていない {by_day:?}");
+    assert!(
+        late * 4 <= early * 5,
+        "停めてある台数が増え続ける {by_day:?}"
+    );
+}
+
 /// 始めたときの枠のぶんだけチャンクを買い、次の 1 つは枠で断られ、
 /// 人口がマイルストーンに届いたあとに同じチャンクを買える記録。所持金は多めにして始める。
 fn land_slots() -> CommandLog {

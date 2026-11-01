@@ -4,6 +4,8 @@
 //! 手段は、2 つの建物の正面のマスの直線の距離で決める。[`DRIVE_MIN_MM`] 以上なら
 //! 歩く → 車 → 歩く で向かい、それより近いか、車で行けなければ歩く。
 //! 移動の主体ごとに、誰がどこへ向かっているかを覚えておき、移動が終わったら返す。
+//! 住民ごとに自分の車を停めた駐車場も覚え、次に車で出るときはそこから車を出す。満車で別の建物に
+//! 停めた車も、持ち主が乗って出るので、停めてある台数は住民の数を超えて増えない。
 
 use std::collections::BTreeMap;
 
@@ -33,15 +35,27 @@ impl StateHash for Commuter {
     }
 }
 
-/// 移動の主体ごとの、移動している住民。
+/// 移動の主体ごとの、移動している住民と、住民ごとの車を停めた駐車場。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Commuters {
     by_trip: BTreeMap<TripId, Commuter>,
+    /// 住民が自分の車を停めた駐車場。次に車で出るときは、ここから車を出す。
+    cars: BTreeMap<CitizenId, BuildingId>,
+}
+
+impl Commuters {
+    /// 移動 `trip` の車を駐車場 `lot` に停めた。通勤でなければ何もしない。
+    pub(super) fn parked(&mut self, trip: TripId, lot: BuildingId) {
+        if let Some(c) = self.by_trip.get(&trip) {
+            self.cars.insert(c.citizen, lot);
+        }
+    }
 }
 
 impl StateHash for Commuters {
     fn write_state(&self, h: &mut StateHasher) {
         h.write(&self.by_trip);
+        h.write(&self.cars);
     }
 }
 
@@ -84,9 +98,15 @@ impl Trips {
         let mut out: Vec<Option<TripId>> = requests
             .iter()
             .map(|r| {
-                far_enough(buildings, r.from, r.to)
-                    .then(|| self.spawn_drive(net, router, buildings, (r.from, r.to), now))
-                    .flatten()
+                if !far_enough(buildings, r.from, r.to) {
+                    return None;
+                }
+                // 住民の車が停めてあれば、その駐車場から出す。なければ車は出発の建物から現れる。
+                let take = self.commuters.cars.get(&r.who.citizen).copied();
+                let id =
+                    self.spawn_drive_taking(net, router, buildings, (r.from, r.to), take, now)?;
+                self.commuters.cars.remove(&r.who.citizen);
+                Some(id)
             })
             .collect();
         let spot = |b: BuildingId| building_spot(net, buildings.get(b)?);
@@ -117,6 +137,18 @@ impl Trips {
     /// 移動している住民。
     pub fn commuter(&self, id: TripId) -> Option<Commuter> {
         self.commuters.by_trip.get(&id).copied()
+    }
+
+    /// 住民が車を停めた駐車場。
+    pub fn parked_car(&self, citizen: CitizenId) -> Option<BuildingId> {
+        self.commuters.cars.get(&citizen).copied()
+    }
+
+    /// 街を出る住民の、停めてある車を駐車場から外す。
+    pub fn forget_car(&mut self, citizen: CitizenId) {
+        if let Some(lot) = self.commuters.cars.remove(&citizen) {
+            self.parking.unpark(lot);
+        }
     }
 
     /// 移動を途中でやめさせる。押さえていた駐車場の空きは返す。
