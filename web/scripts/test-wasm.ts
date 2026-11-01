@@ -4,9 +4,12 @@
 // 三重バッファから読んだ時計が実時間に合わせて進み、速度と一時停止のボタンに従うかも確かめる。
 // チャンクが Worker から届いて描かれること、ドラッグとホイールでカメラが動くことも確かめる。
 // 道路の道具で道路を引くと描かれて所持金が減ること、断られると理由が出ること、ブルドーザで消せることも確かめる。
+// フィードバックを送ると、保存した記録を chizu-cli で再生して同じ状態ハッシュになることも確かめる。
 // Chrome は mise の tools で入れた chrome-headless-shell を PATH から探す。
 
-import { accessSync, constants } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
@@ -45,6 +48,9 @@ function check(ok: boolean, label: string): void {
 
 // 引数で URL を渡すと、preview を立てずにその URL を開く。開発サーバーを確かめるときに使う
 const givenUrl = process.argv[2];
+// フィードバックは一時ディレクトリに書かせる。preview はこの値を読んでから立ち上がる
+const feedbackDir = mkdtempSync(join(tmpdir(), "chizu-feedback-"));
+process.env.CHIZU_FEEDBACK_DIR = feedbackDir;
 const server =
   givenUrl === undefined
     ? await preview({
@@ -538,9 +544,67 @@ try {
     { timeout: TIMEOUT_MS },
   );
   check((await mapState()).zoom === MAX_ZOOM, `拡大は上限 ${MAX_ZOOM} で止まる`);
+
+  // フィードバックを送り、保存した記録を chizu-cli で再生する
+  await page.locator("#feedback-open").click();
+  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
+  await page.locator("#feedback-note").fill("道路の色が見分けにくい");
+  await page.locator("#feedback-send").click();
+  const result = page.locator("#feedback-result");
+  await result.and(page.locator("[data-saved]")).waitFor({ timeout: TIMEOUT_MS });
+  const saved = (await result.getAttribute("data-saved")) ?? "";
+  const files = ["note.md", "screenshot.png", "state.json", "commands.rec"];
+  check(
+    saved.startsWith(feedbackDir) && files.every((f) => existsSync(join(saved, f))),
+    `フィードバックが 4 つのファイルとして保存される（${saved}）`,
+  );
+  const fb: {
+    seed: string;
+    tick: number;
+    stateHash: string;
+    camera?: { zoom?: unknown };
+  } = JSON.parse(readFileSync(join(saved, "state.json"), "utf8"));
+  const png = readFileSync(join(saved, "screenshot.png"));
+  check(
+    png.subarray(1, 4).toString() === "PNG" && png.length > 1000,
+    `スクリーンショットが PNG で保存される（${png.length} バイト）`,
+  );
+  check(
+    readFileSync(join(saved, "note.md"), "utf8").includes("道路の色が見分けにくい") &&
+      typeof fb.camera?.zoom === "number",
+    "書いた文とカメラの位置が保存される",
+  );
+  const replayed = execFileSync(
+    "cargo",
+    [
+      "run",
+      "--quiet",
+      "-p",
+      "chizu-cli",
+      "--",
+      join(saved, "commands.rec"),
+      fb.seed,
+      String(fb.tick),
+    ],
+    {
+      cwd: fileURLToPath(new URL("../..", import.meta.url)),
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "inherit"],
+    },
+  ).trim();
+  check(
+    replayed === fb.stateHash,
+    `保存した記録を chizu-cli で再生すると同じ状態ハッシュになる（${replayed} と ${fb.stateHash}、tick ${fb.tick}）`,
+  );
+  // 開く前は動いていたので、閉じると再開する
+  await page.locator('#feedback button[value="close"]').click();
+  await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
+  const afterClose = await ticksIn(500);
+  check(afterClose > 0, `フィードバックの欄を閉じると再開する（${afterClose} tick）`);
 } finally {
   await browser.close();
   await server?.close();
+  rmSync(feedbackDir, { recursive: true, force: true });
 }
 
 if (failures.length > 0) {

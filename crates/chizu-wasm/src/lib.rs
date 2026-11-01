@@ -120,6 +120,24 @@ impl Simulation {
         self.0.set_paused(paused);
     }
 
+    /// フィードバックに添える状態。種、tick、所持金、状態ハッシュ（16 進の 16 桁）を JSON で返す。
+    /// 種と所持金は JS の数で誤差なく表せないことがあるので、文字列にする。
+    pub fn feedback_state(&self) -> String {
+        let w = self.0.world();
+        format!(
+            "{{\"seed\":\"{}\",\"tick\":{},\"money\":\"{}\",\"stateHash\":\"{:016x}\"}}",
+            w.seed(),
+            w.tick().0,
+            w.money().0,
+            w.state_hash()
+        )
+    }
+
+    /// これまでの記録を、chizu-cli で再生できる形式で返す。
+    pub fn encode_log(&self) -> Vec<u8> {
+        self.0.log().encode()
+    }
+
     /// 等速の何倍で回しているか。
     pub fn speed(&self) -> u16 {
         self.0.world().speed().multiplier()
