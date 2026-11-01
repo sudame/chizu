@@ -120,9 +120,10 @@ impl Parking {
         }
     }
 
-    /// 押さえた空きに車を停める。駐車場がなくなっていれば、車は停めずに消える。
-    fn park(&mut self, b: BuildingId) {
-        if self.lots.contains_key(&b) {
+    /// 押さえた空きに車を停め、停めたら `true`。駐車場がなくなっていれば、車は停めずに消える。
+    fn park(&mut self, b: BuildingId) -> bool {
+        let there = self.lots.contains_key(&b);
+        if there {
             self.update(b, |l| {
                 l.reserved = l
                     .reserved
@@ -131,10 +132,11 @@ impl Parking {
                 l.parked = l.parked.checked_add(1).expect("停めた台数があふれた");
             });
         }
+        there
     }
 
     /// 停めてある車を 1 台出す。停めてある車がなければ `false`。
-    fn unpark(&mut self, b: BuildingId) -> bool {
+    pub(super) fn unpark(&mut self, b: BuildingId) -> bool {
         let had = self.get(b).parked > 0;
         if had {
             self.update(b, |l| l.parked -= 1);
@@ -231,13 +233,27 @@ impl Trips {
         (from, to): (BuildingId, BuildingId),
         now: Tick,
     ) -> Option<TripId> {
+        self.spawn_drive_taking(net, router, buildings, (from, to), Some(from), now)
+    }
+
+    /// [`Trips::spawn_drive`] と同じだが、停めてある車を出す駐車場を `take` で決める。`None` なら
+    /// どの駐車場からも出さない。
+    pub(super) fn spawn_drive_taking(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        buildings: &Buildings,
+        (from, to): (BuildingId, BuildingId),
+        take: Option<BuildingId>,
+        now: Tick,
+    ) -> Option<TripId> {
         let origin = building_spot(net, buildings.get(from)?)?;
         let dest_b = buildings.get(to)?;
         let dest = building_spot(net, dest_b)?;
-        let took = self.parking.unpark(from);
+        let took = take.filter(|b| self.parking.unpark(*b));
         let id = self.start_drive(net, router, buildings, (origin, to, dest), now);
-        if id.is_none() && took {
-            self.parking.update(from, |l| {
+        if let (None, Some(b)) = (id, took) {
+            self.parking.update(b, |l| {
                 l.parked = l.parked.checked_add(1).expect("停めた台数があふれた");
             });
         }
@@ -312,8 +328,12 @@ impl Trips {
                 }
                 Then::Walk { lot, to } => {
                     t.then = Then::Arrive;
-                    self.parking.park(lot);
-                    legs[1].push((i, t.dest, to, Then::Arrive));
+                    let dest = t.dest;
+                    if self.parking.park(lot) {
+                        let (index, generation) = self.slots.current(i).expect("着いた主体がない");
+                        self.commuters.parked(TripId { index, generation }, lot);
+                    }
+                    legs[1].push((i, dest, to, Then::Arrive));
                 }
             }
         }

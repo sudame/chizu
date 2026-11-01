@@ -443,6 +443,38 @@ fn commuters_walk_and_drive_to_work_in_the_morning() {
     );
 }
 
+/// 通勤のシナリオを 20 日回しても、駐車場に停めてある車が増え続けない。停めてある車はどれも、
+/// 住民が自分の車として覚えている 1 台で、停めてある台数は住民の数を超えない。
+#[test]
+fn parked_cars_do_not_pile_up_over_days() {
+    let log = commute();
+    let mut world = World::new(42);
+    let mut by_day = Vec::new();
+    for day in 1..=20 {
+        replay(&mut world, &log, TICKS_PER_DAY);
+        let parked: u64 = world.trips().lots().map(|(_, l)| u64::from(l.parked)).sum();
+        let p = world.population();
+        let owned = p
+            .citizen_ids()
+            .filter_map(|id| world.trips().parked_car(id))
+            .filter(|b| world.buildings().get(*b).is_some())
+            .count() as u64;
+        assert_eq!(parked, owned, "{day} 日目：持ち主のいない車が停めてある");
+        assert!(
+            parked <= p.citizen_count() as u64,
+            "{day} 日目：{parked} 台"
+        );
+        by_day.push(parked);
+    }
+    let early = by_day[4..10].iter().max().copied().unwrap();
+    let late = by_day[14..].iter().max().copied().unwrap();
+    assert!(early > 0, "車が停められていない {by_day:?}");
+    assert!(
+        late * 4 <= early * 5,
+        "停めてある台数が増え続ける {by_day:?}"
+    );
+}
+
 /// 始めたときの枠のぶんだけチャンクを買い、次の 1 つは枠で断られ、
 /// 人口がマイルストーンに届いたあとに同じチャンクを買える記録。所持金は多めにして始める。
 fn land_slots() -> CommandLog {
