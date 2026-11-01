@@ -28,6 +28,8 @@ impl Layer {
 pub enum TileUse {
     #[default]
     Empty = 0,
+    /// 道路か歩道が通っている。
+    Road = 1,
 }
 
 /// 1 つの層のマスの表。
