@@ -341,7 +341,7 @@ proptest! {
             let _ = n.build_road(&line, kinds[k as usize]);
         }
         if let Some((x, y)) = bulldoze {
-            n.bulldoze(TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + 1, y)));
+            let _ = n.bulldoze(TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + 1, y)));
         }
         for mode in [LaneMode::Car, LaneMode::Sidewalk] {
             let g = Graph::build(&n, mode);
