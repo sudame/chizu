@@ -2,6 +2,7 @@
 
 pub mod command_input;
 pub mod layers;
+pub mod save;
 pub mod sim;
 pub mod snapshot;
 
