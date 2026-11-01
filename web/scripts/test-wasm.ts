@@ -605,6 +605,23 @@ try {
   await waitUnsupplied("zero");
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
+  // 水道のレイヤーも重ねると、各マスの左半分が電気、右半分が水道になる。発電所は電気のレイヤーだけで黄に塗る
+  await page.locator('#layers button[data-layer="2"]').click();
+  const halfOf = (x: number, y: number, dx: number) => {
+    const p = tilePoint(x, y);
+    return pixel(p.x + (dx - 0.5) * view.zoom, p.y);
+  };
+  let plantLeft = await halfOf(54, 34, 0.25);
+  let plantRight = await halfOf(54, 34, 0.75);
+  for (let i = 0; i < 100 && (!isYellow(plantLeft) || isYellow(plantRight)); i++) {
+    await page.waitForTimeout(100);
+    plantLeft = await halfOf(54, 34, 0.25);
+    plantRight = await halfOf(54, 34, 0.75);
+  }
+  check(
+    isYellow(plantLeft) && !isYellow(plantRight),
+    `電気と水道を重ねると、マスの左右に分けて塗る（左 ${plantLeft.join(", ")}、右 ${plantRight.join(", ")}）`,
+  );
   await page.locator('#layers button[data-layer="none"]').click();
   await page.waitForTimeout(100);
   const markAfter = await markPixel();

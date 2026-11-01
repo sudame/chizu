@@ -50,11 +50,15 @@ precision mediump float;
 uniform mediump usampler2D u_values;
 uniform vec4 u_palette[${PALETTE_SIZE}];
 uniform float u_dim;
+// 重ねたレイヤーの数と、このレイヤーの順番。各マスを縦の帯に等分し、このレイヤーは u_slot 番目の帯だけを塗る
+uniform int u_slots;
+uniform int u_slot;
 in vec2 v_uv;
 out vec4 color;
 void main() {
   uint v = texture(u_values, v_uv).r;
-  if (v == 0u || v >= ${PALETTE_SIZE}u) {
+  int band = int(floor(fract(v_uv.x * ${CHUNK_SIDE}.0) * float(u_slots)));
+  if (v == 0u || v >= ${PALETTE_SIZE}u || min(band, u_slots - 1) != u_slot) {
     if (u_dim == 0.0) {
       discard;
     }
@@ -80,7 +84,7 @@ export class LayerOverlay {
   readonly #program: WebGLProgram;
   readonly #vao: WebGLVertexArrayObject;
   readonly #u: Record<
-    "offset" | "size" | "viewport" | "values" | "palette" | "dim",
+    "offset" | "size" | "viewport" | "values" | "palette" | "dim" | "slots" | "slot",
     WebGLUniformLocation | null
   >;
   /** レイヤーの番号ごとの、チャンクのテクスチャ。 */
@@ -102,6 +106,8 @@ export class LayerOverlay {
       values: u("u_values"),
       palette: u("u_palette"),
       dim: u("u_dim"),
+      slots: u("u_slots"),
+      slot: u("u_slot"),
     };
     this.#vao = gl.createVertexArray();
     gl.bindVertexArray(this.#vao);
@@ -175,7 +181,10 @@ export class LayerOverlay {
     }
   }
 
-  /** 出しているレイヤーを、範囲の中のチャンクについて重ねて描き、描いたテクスチャの数を返す。 */
+  /**
+   * 出しているレイヤーを、範囲の中のチャンクについて重ねて描き、描いたテクスチャの数を返す。
+   * 2 枚以上を出しているときは、どのレイヤーも読めるよう、各マスを縦の帯に分けて 1 枚ずつ塗る。
+   */
   draw(camera: Camera, viewport: Viewport, range: ChunkRange): number {
     const gl = this.#gl;
     const layers = DATA_LAYERS.filter((l) => this.active.includes(l.code));
@@ -189,8 +198,10 @@ export class LayerOverlay {
     gl.uniform1i(this.#u.values, 0);
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     gl.uniform1f(this.#u.size, CHUNK_SIDE * camera.zoom);
+    gl.uniform1i(this.#u.slots, layers.length);
     let drawn = 0;
-    for (const layer of layers) {
+    for (const [slot, layer] of layers.entries()) {
+      gl.uniform1i(this.#u.slot, slot);
       const chunks = this.#textures.get(layer.code);
       if (chunks === undefined) {
         continue;
