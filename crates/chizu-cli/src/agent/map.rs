@@ -139,9 +139,20 @@ impl Grid {
 
 /// 範囲がセルの上限に収まる最小の縮尺。
 fn min_scale(width: u64, height: u64) -> u64 {
-    (1..)
-        .find(|n| width.div_ceil(*n) * height.div_ceil(*n) <= MAX_CELLS)
-        .expect("縮尺が見つからない")
+    let fits = |n: u64| {
+        u128::from(width.div_ceil(n)) * u128::from(height.div_ceil(n)) <= u128::from(MAX_CELLS)
+    };
+    // 縮尺が大きいほどセルは減るので、二分探索で求める。最大の辺の長さなら 1 セルに収まる。
+    let (mut lo, mut hi) = (1, width.max(height));
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if fits(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    lo
 }
 
 /// 見本のマスの位置。セルの幅 `len` マスを `SAMPLES_PER_SIDE` 点までに間引く。
@@ -160,18 +171,27 @@ pub fn render(world: &World, rect: TileRect, scale: u64) -> Result<String, Strin
     }
     let width = rect.max.x.abs_diff(rect.min.x) + 1;
     let height = rect.max.y.abs_diff(rect.min.y) + 1;
+    if scale > width.max(height) {
+        return Err(format!(
+            "--scale {scale} は範囲の長い辺 {} マスより大きい。1 以上、{} 以下にする",
+            width.max(height),
+            width.max(height)
+        ));
+    }
     let (cols, rows) = (width.div_ceil(scale), height.div_ceil(scale));
-    if cols * rows > MAX_CELLS {
+    // 世界のほぼ全体を指しても掛け算があふれないよう、広い型で数える。
+    let cells = u128::from(cols) * u128::from(rows);
+    if cells > u128::from(MAX_CELLS) {
         return Err(format!(
             "範囲 {width}×{height} マスを縮尺 {scale} で描くと {cols}×{rows} = {} 文字になり、上限の {MAX_CELLS} 文字を超える。\
              --scale {} 以上にするか、範囲をせまくする",
-            cols * rows,
+            cells,
             min_scale(width, height)
         ));
     }
     let mut grid = Grid {
         rect,
-        scale: scale as i64,
+        scale: i64::try_from(scale).map_err(|e| format!("--scale {scale}: {e}"))?,
         cols: cols as usize,
         rows: rows as usize,
         cells: vec![Cell::default(); (cols * rows) as usize],
@@ -241,7 +261,7 @@ pub fn render(world: &World, rect: TileRect, scale: u64) -> Result<String, Strin
     Ok(text(&grid))
 }
 
-/// 上の目盛りの基準にする数。縮尺 1 のときは x、そうでなければ列の番号で、下 1 桁が 0 の列に x を書く。
+/// 上の目盛りの基準にする数。縮尺 1 のときは x、そうでなければ列の番号で、絶対値の下 1 桁が 0 の列に x を書く。
 fn key(grid: &Grid, col: usize) -> i64 {
     if grid.scale == 1 {
         grid.rect.min.x + col as i64
@@ -265,7 +285,7 @@ fn text(grid: &Grid) -> String {
     out.push_str(LEGEND);
     out.push('\n');
     if grid.scale == 1 {
-        out.push_str("座標：行頭が y、上の数は x（下 1 桁の行つき）\n");
+        out.push_str("座標：行頭が y、上の数は x（下の行は x の絶対値の下 1 桁で、-74 なら 4）\n");
     } else {
         out.push_str("座標：行頭は各行の先頭のセルの y、上の数は各列の先頭のセルの x（10 列ごと）。下の行はその列の番号の下 1 桁\n");
     }
@@ -285,8 +305,8 @@ fn text(grid: &Grid) -> String {
     let mut digits = String::new();
     for col in 0..grid.cols {
         let k = key(grid, col);
-        digits.push(char::from(b'0' + k.rem_euclid(10) as u8));
-        if k.rem_euclid(10) == 0 {
+        digits.push(char::from(b'0' + (k.unsigned_abs() % 10) as u8));
+        if k.unsigned_abs() % 10 == 0 {
             let label = (rect.min.x + col as i64 * grid.scale).to_string();
             let from = col.max(if ruler.is_empty() { 0 } else { ruler.len() + 1 });
             if from == col {

@@ -404,3 +404,46 @@ fn map_shows_facilities() {
         "{map}"
     );
 }
+
+/// 大きすぎる縮尺は、あふれずに断る。
+#[test]
+fn map_refuses_huge_scale() {
+    let dir = small_town("agent-map-huge-scale");
+    let d = dir.to_str().unwrap();
+    for scale in ["18446744073709551615", "9223372036854775808", "193"] {
+        let err = cli_fails(&[
+            "agent", "map", d, "-64", "-64", "127", "127", "--scale", scale,
+        ]);
+        assert!(err.contains("--scale"), "{err}");
+        assert!(!err.contains("panicked"), "{err}");
+    }
+    cli(&[
+        "agent", "map", d, "-64", "-64", "127", "127", "--scale", "192",
+    ]);
+}
+
+/// 世界のほぼ全体を指しても、文字数の計算があふれない。
+#[test]
+fn map_handles_whole_world() {
+    let dir = small_town("agent-map-world");
+    let d = dir.to_str().unwrap();
+    let (lo, hi) = ("-2147483648", "2147483648");
+    let err = cli_fails(&["agent", "map", d, lo, lo, hi, hi]);
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(err.contains("--scale 44"), "{err}");
+    let err = cli_fails(&["agent", "map", d, lo, lo, hi, hi, "--scale", "2"]);
+    assert!(!err.contains("panicked"), "{err}");
+    assert!(err.contains("--scale 44"), "{err}");
+}
+
+/// 負の x の目盛りは、符号を除いた下 1 桁になる。
+#[test]
+fn map_ruler_uses_absolute_digits() {
+    let dir = small_town("agent-map-ruler");
+    let d = dir.to_str().unwrap();
+    let map = cli(&["agent", "map", d, "-74", "0", "-65", "0"]);
+    let lines: Vec<&str> = map.lines().collect();
+    let digits = lines[lines.len() - 2].trim();
+    assert_eq!(digits, "4321098765", "{map}");
+    assert!(lines[lines.len() - 3].contains("-70"), "{map}");
+}
