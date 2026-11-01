@@ -1,11 +1,12 @@
 //! chizu-core と画面（Web Worker）のあいだの受け渡しの層。
 
 pub mod command_input;
+pub mod movers;
 pub mod sim;
 pub mod snapshot;
 
 use chizu_core::network::{DIAGONAL_TILE_MM, TILE_MM, road_cost_per_tile};
-use chizu_core::{ApplyOutcome, ChunkCoord, Command, RoadKind};
+use chizu_core::{ApplyOutcome, ChunkCoord, Command, RoadKind, TilePos, TileRect};
 use command_input::Field;
 use js_sys::Reflect;
 use rayon::prelude::*;
@@ -160,6 +161,31 @@ impl Simulation {
     /// チャンクのマスを 64×64 バイトで返す。ビットの意味は `sim::TILE_WATER` などにある。
     pub fn chunk_tiles(&self, cx: i32, cy: i32) -> Vec<u8> {
         self.0.chunk_tiles(ChunkCoord::new(cx, cy))
+    }
+
+    /// 移動体を描くマスの範囲（両端を含む）。`clear` なら移動体を書かない。
+    pub fn set_mover_view(&mut self, min_x: f64, min_y: f64, max_x: f64, max_y: f64, clear: bool) {
+        let tile = |x: f64, y: f64| TilePos::new(x as i64, y as i64);
+        let view = (!clear).then(|| TileRect {
+            min: tile(min_x, min_y),
+            max: tile(max_x, max_y),
+        });
+        self.0.set_mover_view(view);
+    }
+
+    /// 開発用に、マス (`from_x`, `from_y`) と (`to_x`, `to_y`) のあいだに歩く人を `count` 人出す。
+    /// 記録に入れないので、フィードバックの記録を再生しても現れない。出せた人数を返す。
+    pub fn spawn_dev_walks(
+        &mut self,
+        from_x: f64,
+        from_y: f64,
+        to_x: f64,
+        to_y: f64,
+        count: u32,
+    ) -> u32 {
+        let tile = |x: f64, y: f64| TilePos::new(x as i64, y as i64);
+        self.0
+            .spawn_dev_walks(tile(from_x, from_y), tile(to_x, to_y), count)
     }
 
     /// 一時停止していなければ `ticks` だけ進め、いまの状態を三重バッファに書く。

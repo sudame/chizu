@@ -326,6 +326,60 @@ try {
   await page.locator("#pause").click();
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
 
+  // 開発用の道具で、いま引いた道路の左寄りのマスと右寄りのマスのあいだに歩く人を出す。
+  // 止めたまま出し、出発のマスの中心に移動体の明るい点が描かれるのを確かめる
+  const setSpeed = async (speed: number) => {
+    await page.locator(`button[data-speed="${speed}"]`).click();
+    await hud.and(page.locator(`[data-speed="${speed}"]`)).waitFor({ timeout: TIMEOUT_MS });
+  };
+  const moverState = async () => {
+    const d = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+    return { drawn: Number(d.drawnMovers ?? 0), first: d.firstMover ?? "" };
+  };
+  await setSpeed(1);
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
+  const walkFrom = tileCenter(14, 32);
+  const walkTo = tileCenter(50, 32);
+  const roadColor = await pixel(walkFrom.x, walkFrom.y);
+  await page.locator('button[data-tool="dev-walks"]').click();
+  await page.mouse.click(walkFrom.x, walkFrom.y);
+  await page.mouse.click(walkTo.x, walkTo.y);
+  await page.waitForFunction(
+    () => Number(document.querySelector<HTMLElement>("#map")?.dataset.devWalks ?? 0) > 0,
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  await page.waitForFunction(
+    () => Number(document.querySelector<HTMLElement>("#map")?.dataset.drawnMovers ?? 0) > 0,
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const spawned = await moverState();
+  const walkerColor = await pixel(walkFrom.x, walkFrom.y);
+  check(
+    spawned.drawn > 0 && brightness(walkerColor) > brightness(roadColor) + 200,
+    `歩く人を出すと移動体の点が描かれる（${spawned.drawn} 人、${roadColor.join(", ")} → ${walkerColor.join(", ")}）`,
+  );
+  await page.locator("#pause").click();
+  await page.waitForFunction(
+    (before) => document.querySelector<HTMLElement>("#map")?.dataset.firstMover !== before,
+    spawned.first,
+    { timeout: TIMEOUT_MS },
+  );
+  check(
+    true,
+    `時間を進めると移動体の位置が変わる（${spawned.first} → ${(await moverState()).first}）`,
+  );
+  await setSpeed(FAST_SPEED);
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#map")?.dataset.drawnMovers === "0",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, "行き先に着いた移動体は描かれなくなる");
+  await page.locator('button[data-tool="none"]').click();
+
   // 土地を買う道具。地図を左へ 400 ピクセル引きずり、右隣のチャンクが見えるようにする
   await page.locator('button[data-tool="buy"]').click();
   await page.mouse.move(cx + 200, cy);

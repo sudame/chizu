@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "slotCount": 3,
   "controlWords": 4,
   "control": {
@@ -24,7 +24,9 @@
     "population": 6,
     "speed": 7,
     "paused": 8,
-    "moverCount": 9
+    "moverCount": 9,
+    "baseCx": 10,
+    "baseCy": 11
   },
   "moverWords": 4,
   "mover": {

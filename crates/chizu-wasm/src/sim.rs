@@ -20,6 +20,8 @@ pub struct Sim {
     reports: Vec<Report>,
     /// 道路網が変わって、区画を塗れるマスが変わりうるチャンクに足していく数。画面向けの版に混ぜる。
     near_road_changes: BTreeMap<ChunkCoord, u32>,
+    /// 移動体を描く範囲。画面だけが決め、中核には渡さない。`None` なら移動体を書かない。
+    mover_view: Option<TileRect>,
 }
 
 /// 記録したコマンドを適用した結果。
@@ -38,6 +40,7 @@ impl Sim {
             snapshot: TripleBuffer::new(),
             reports: Vec::new(),
             near_road_changes: BTreeMap::new(),
+            mover_view: None,
         }
     }
 
@@ -227,8 +230,21 @@ impl Sim {
         out
     }
 
+    pub fn set_mover_view(&mut self, view: Option<TileRect>) {
+        self.mover_view = view.filter(|v| v.is_ordered());
+    }
+
+    /// 開発用に、記録に入れずに歩く人を出す。出せた人数を返す。
+    pub fn spawn_dev_walks(&mut self, from: TilePos, to: TilePos, count: u32) -> u32 {
+        crate::movers::spawn_dev_walks(&mut self.world, from, to, count)
+    }
+
     /// いまの状態を三重バッファに書く。
     pub fn publish(&mut self) {
+        let (base, movers) = self
+            .mover_view
+            .map(|v| crate::movers::visible_movers(&self.world, v))
+            .unwrap_or_default();
         let tick = self.world.tick();
         let time = GameTime::at(tick);
         let header = Header {
@@ -239,8 +255,10 @@ impl Sim {
             population: 0,
             speed: self.world.speed().multiplier(),
             paused: self.paused,
+            base_cx: base.cx,
+            base_cy: base.cy,
         };
-        self.snapshot.publish(&header, &[]);
+        self.snapshot.publish(&header, &movers);
     }
 }
 

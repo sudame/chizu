@@ -49,6 +49,10 @@
         width: 28em;
         height: 6em;
       }
+      #dev-info {
+        font-size: 12px;
+        color: #a33;
+      }
       #tool-info,
       #tool-message {
         min-width: 10em;
@@ -92,6 +96,8 @@
       <button type="button" data-tool="zone-Office" aria-pressed="false">オフィス</button>
       <button type="button" data-tool="zone-Clear" aria-pressed="false">区画を消す</button>
       <button type="button" data-tool="buy" aria-pressed="false">土地を買う</button>
+      <button type="button" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>
+      <span id="dev-info"></span>
       <span id="tool-info"></span>
       <span id="tool-message" aria-live="polite"></span>
     </div>
