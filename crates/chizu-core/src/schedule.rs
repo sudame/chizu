@@ -1,7 +1,9 @@
 //! 住民の組ごとの更新と、出発の待ち行列。
 //!
-//! 住民は ID の添え字を [`BUCKET_COUNT`] で割った余りで組に分け、tick を同じ数で割った余りの組を
-//! その tick に更新する。添え字は使い回しても変わらないので、住民の組は生きているあいだ変わらない。
+//! 住民は ID の添え字の連続した [`BLOCK_SIZE`] 人ずつを塊とし、塊の番号を [`BUCKET_COUNT`] で割った余りで
+//! 組に分ける。tick を同じ数で割った余りの組をその tick に更新する。1 組の住民が塊ごとに列の上で
+//! 連続するので、キャッシュラインを無駄に読まない。添え字は使い回しても変わらないので、住民の組は
+//! 生きているあいだ変わらない。
 
 use std::collections::BTreeSet;
 
@@ -16,6 +18,9 @@ use crate::units::Tick;
 /// 住民を分ける組の数。等速（30 tick/秒）で、1 人あたり約 2 秒に 1 回の更新になる。
 pub const BUCKET_COUNT: u32 = 64;
 
+/// 組に分けるときの塊の人数。
+pub const BLOCK_SIZE: u32 = 64;
+
 /// `tick` に更新する組。
 pub fn bucket_at(tick: Tick) -> u32 {
     (tick.0 % u64::from(BUCKET_COUNT)) as u32
@@ -23,7 +28,7 @@ pub fn bucket_at(tick: Tick) -> u32 {
 
 /// 住民の属する組。
 pub fn bucket_of(id: CitizenId) -> u32 {
-    id.index % BUCKET_COUNT
+    id.index / BLOCK_SIZE % BUCKET_COUNT
 }
 
 /// 組ごとの更新で 1 人の住民に行う処理。いまは何も変えない。
@@ -100,35 +105,34 @@ impl Population {
         F: Fn(CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
     {
         assert!(bucket < BUCKET_COUNT, "組の番号が範囲の外: {bucket}");
-        let start = bucket as usize;
+        let len = self.citizens.slots.len();
+        let block = BLOCK_SIZE as usize;
         let stride = BUCKET_COUNT as usize;
-        let count = self
-            .citizens
-            .slots
-            .len()
-            .saturating_sub(start)
-            .div_ceil(stride);
+        let first = bucket as usize;
+        let blocks = len.div_ceil(block).saturating_sub(first).div_ceil(stride);
         let citizens = &self.citizens;
-        let compute = |k: usize| {
-            let slot = start + k * stride;
+        let block_slots = |k: usize| {
+            let start = (first + k * stride) * block;
+            start..(start + block).min(len)
+        };
+        let compute = |slot: usize| {
             let (index, generation) = citizens.slots.current(slot)?;
             let id = CitizenId { index, generation };
             f(id, citizens.row(slot)).map(|change| (id, change))
         };
+        // 並列の collect は、変更のあった住民だけを元の順番（ID の順）のまま集める。
         #[cfg(feature = "parallel")]
-        let changes: Vec<_> = (0..count).into_par_iter().map(compute).collect();
+        let changes: Vec<_> = (0..blocks)
+            .into_par_iter()
+            .flat_map_iter(|k| block_slots(k).filter_map(compute))
+            .collect();
         #[cfg(not(feature = "parallel"))]
-        let changes: Vec<_> = (0..count).map(compute).collect();
-        for (id, change) in changes.into_iter().flatten() {
+        let changes: Vec<_> = (0..blocks)
+            .flat_map(|k| block_slots(k).filter_map(compute))
+            .collect();
+        for (id, change) in changes {
             self.apply_change(id, change);
         }
-    }
-
-    /// `tick` の組を、標準の処理 [`update_citizen`] で更新する。
-    pub fn step(&mut self, seed: u64, tick: Tick) {
-        self.update_bucket(bucket_at(tick), |id, row| {
-            update_citizen(seed, tick, id, row)
-        });
     }
 }
 
@@ -187,7 +191,8 @@ mod tests {
 
     #[test]
     fn each_citizen_is_updated_once_every_bucket_count_ticks() {
-        let mut p = population(1_000);
+        // 塊が 64 を超えて、組 0 に 2 つ目の塊が入る人数にする。
+        let mut p = population(5_000);
         let bump = |_: CitizenId, row: CitizenRow| {
             let mut happiness = row.happiness;
             happiness.services += 1;
@@ -196,27 +201,30 @@ mod tests {
                 happiness,
             })
         };
-        for t in 0..u64::from(BUCKET_COUNT) {
-            p.update_bucket(bucket_at(Tick(t)), bump);
+        for b in 0..BUCKET_COUNT {
+            p.update_bucket(b, |id, row| {
+                assert_eq!(bucket_of(id), b);
+                bump(id, row)
+            });
         }
         let ids: Vec<_> = p.citizen_ids().collect();
-        assert_eq!(ids.len(), 1_000);
+        assert_eq!(ids.len(), 5_000);
         for id in ids {
             assert_eq!(p.citizen(id).unwrap().happiness.services, 51, "{id:?}");
         }
         assert_eq!(bucket_at(Tick(64 * 5 + 3)), 3);
         assert_eq!(
             bucket_of(CitizenId {
-                index: 64 * 9 + 3,
+                index: 64 * (64 * 2 + 9) + 3,
                 generation: 2
             }),
-            3
+            9
         );
     }
 
     #[test]
     fn small_tables_and_vacant_rows_are_updated_exactly_once() {
-        for n in [0_u32, 1, 63, 64, 65, 130] {
+        for n in [0_u32, 1, 63, 64, 65, 130, 4_095, 4_096, 4_097, 9_000] {
             let mut p = population(n);
             // 消した行は飛ばす。
             let removed: Vec<_> = p.citizen_ids().step_by(5).collect();
@@ -262,7 +270,7 @@ mod tests {
         run(&mut p, 128);
         assert_eq!(
             crate::state_hash::state_hash_of(&p),
-            11_377_169_248_151_745_310
+            14_766_751_425_656_856_464
         );
     }
 
@@ -284,5 +292,51 @@ mod tests {
         assert_eq!(one, hash_with(8));
         assert_eq!(one, hash_with(3));
         assert_ne!(one, crate::state_hash::state_hash_of(&population(20_000)));
+    }
+
+    #[test]
+    fn world_step_updates_the_bucket_of_the_tick() {
+        let mut w = crate::world::World::new(3);
+        *w.population_mut() = population(10_000);
+        for _ in 0..5 {
+            w.step();
+        }
+        let bump = |_: u64, tick: Tick, _: CitizenId, row: CitizenRow| {
+            let mut happiness = row.happiness;
+            happiness.wealth = (tick.0 % 100) as u8;
+            Some(CitizenChange {
+                schedule: row.schedule,
+                happiness,
+            })
+        };
+        w.step_with(bump);
+        assert_eq!(w.tick(), Tick(6));
+        let p = w.population();
+        for id in p.citizen_ids() {
+            let wealth = p.citizen(id).unwrap().happiness.wealth;
+            if bucket_of(id) == bucket_at(Tick(5)) {
+                assert_eq!(wealth, 5, "{id:?}");
+            } else {
+                assert_eq!(wealth, crate::citizens::HappinessParts::NEUTRAL.wealth);
+            }
+        }
+    }
+
+    #[test]
+    fn world_state_hash_includes_the_population() {
+        let mut w = crate::world::World::new(3);
+        let empty = w.state_hash();
+        *w.population_mut() = population(100);
+        let filled = w.state_hash();
+        assert_ne!(filled, empty);
+        let id = w.population().citizen_ids().nth(50).unwrap();
+        w.population_mut().set_schedule(
+            id,
+            ScheduleState {
+                next: Activity::Shop,
+                depart_at: None,
+            },
+        );
+        assert_ne!(w.state_hash(), filled);
     }
 }
