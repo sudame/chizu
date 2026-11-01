@@ -25,6 +25,8 @@ pub enum RngPurpose {
     JobAssignment = 4,
     /// 1 日の予定。
     DailySchedule = 5,
+    /// 外部接続の幹線の生成。
+    TrunkLine = 6,
 }
 
 const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;

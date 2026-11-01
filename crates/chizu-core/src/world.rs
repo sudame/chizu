@@ -2,11 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use crate::chunk::Chunk;
+use crate::chunk::{Chunk, Layer, TileUse};
 use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
 use crate::network::{Line, Network, road_cost};
+use crate::rng::{RngPurpose, mix_words};
 use crate::state_hash::{StateHash, StateHasher};
-use crate::tile::{ChunkCoord, TilePos, TileRect};
+use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
 use crate::units::{Money, Tick};
 
 /// 始めたときの所持金。
@@ -23,6 +24,9 @@ pub const CHUNK_BASE_PRICE: Money = Money(50_000);
 
 /// 1 つ買うごとに、次のチャンクの値段に足す額。
 pub const CHUNK_PRICE_STEP: Money = Money(25_000);
+
+/// 外部接続の高速道路が、始めたときに買ってある土地の端から外へ延びる長さ（マス）。
+pub const HIGHWAY_OUTSIDE_TILES: i64 = 1_024;
 
 /// コマンドを適用した結果。どの結果でも状態ハッシュには影響しない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +61,23 @@ pub struct World {
     network: Network,
 }
 
+/// 外部接続の高速道路の、買ってある土地の端のマスと、外へ向かう 1 歩。
+/// どの辺から出るかと辺のどこから出るかは、種から決める。
+fn highway_start(seed: u64) -> (TilePos, (i64, i64)) {
+    let side = CHUNK_SIDE as i64;
+    let r = i64::from(START_CHUNK_RADIUS);
+    let (min, max) = (-r * side, (r + 1) * side - 1);
+    let h = mix_words(seed, RngPurpose::TrunkLine, &[0]);
+    // 原点のチャンクの幅の中から出す。
+    let along = (h >> 8) as i64 & (side - 1);
+    match h % 4 {
+        0 => (TilePos::new(max, along), (1, 0)),
+        1 => (TilePos::new(min, along), (-1, 0)),
+        2 => (TilePos::new(along, max), (0, 1)),
+        _ => (TilePos::new(along, min), (0, -1)),
+    }
+}
+
 impl World {
     pub fn new(seed: u64) -> World {
         let r = START_CHUNK_RADIUS;
@@ -68,7 +89,14 @@ impl World {
                 (coord, chunk)
             })
             .collect();
-        World {
+        let mut network = Network::new();
+        let (inner, (sx, sy)) = highway_start(seed);
+        let outer = TilePos::new(
+            inner.x + sx * HIGHWAY_OUTSIDE_TILES,
+            inner.y + sy * HIGHWAY_OUTSIDE_TILES,
+        );
+        network.add_highway(inner, outer);
+        let mut world = World {
             seed,
             tick: Tick::ZERO,
             speed: SimSpeed::NORMAL,
@@ -76,8 +104,54 @@ impl World {
             tax_permille: [INITIAL_TAX_PERMILLE; 4],
             chunks,
             chunks_bought: 0,
-            network: Network::new(),
+            network,
+        };
+        let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+        for coord in coords {
+            world.sync_chunk_roads(coord);
         }
+        world
+    }
+
+    /// マスの使い道を網に合わせて書き直し、変えたチャンクの版を上げる。メモリにないチャンクのマスは飛ばす。
+    fn sync_road_tiles(&mut self, tiles: impl IntoIterator<Item = TilePos>) {
+        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, TileUse)>>::new();
+        for t in tiles {
+            let Some(coord) = t.chunk().filter(|c| self.chunks.contains_key(c)) else {
+                continue;
+            };
+            let (lx, ly) = t.local();
+            let u = if self.network.is_road_tile(t) {
+                TileUse::Road
+            } else {
+                TileUse::Empty
+            };
+            edits
+                .entry(coord)
+                .or_default()
+                .push((local_index(lx, ly), u));
+        }
+        for (coord, list) in edits {
+            let chunk = self.chunks.get_mut(&coord).expect("チャンクがない");
+            chunk.edit_layer(Layer::Ground, |tiles| {
+                for (i, u) in list {
+                    tiles.occupancy[i] = u;
+                }
+            });
+        }
+    }
+
+    /// メモリに置いたばかりのチャンクに、そこを通る道路を書く。
+    fn sync_chunk_roads(&mut self, coord: ChunkCoord) {
+        let tiles: Vec<TilePos> = self
+            .network
+            .segments_in_chunk(coord)
+            .iter()
+            .filter_map(|s| self.network.segment_line(*s))
+            .flat_map(|l| l.tiles().collect::<Vec<_>>())
+            .filter(|t| t.chunk() == Some(coord))
+            .collect();
+        self.sync_road_tiles(tiles);
     }
 
     pub fn network(&self) -> &Network {
@@ -106,16 +180,23 @@ impl World {
             return ApplyOutcome::Denied;
         }
         self.money = self.money - cost;
+        self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
         ApplyOutcome::Applied
     }
 
     // 消した道路の建設費は払い戻さない。
     fn bulldoze(&mut self, area: TileRect) -> ApplyOutcome {
-        if self.network.bulldoze(area) == 0 {
-            ApplyOutcome::Denied
-        } else {
-            ApplyOutcome::Applied
+        let removed = self.network.bulldoze(area);
+        if removed.is_empty() {
+            return ApplyOutcome::Denied;
         }
+        self.sync_road_tiles(
+            removed
+                .iter()
+                .flat_map(|l| l.tiles().collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+        );
+        ApplyOutcome::Applied
     }
 
     pub fn seed(&self) -> u64 {
@@ -170,11 +251,15 @@ impl World {
         }
         self.money = self.money - price;
         self.chunks_bought += 1;
+        let fresh = !self.chunks.contains_key(&coord);
         let seed = self.seed;
         self.chunks
             .entry(coord)
             .or_insert_with(|| Chunk::generate(seed, coord))
             .set_owned();
+        if fresh {
+            self.sync_chunk_roads(coord);
+        }
         ApplyOutcome::Applied
     }
 
@@ -314,6 +399,27 @@ mod tests {
     }
 
     #[test]
+    fn starts_with_a_highway_from_the_edge_of_the_owned_land() {
+        let mut sides = std::collections::BTreeSet::new();
+        for seed in 0..32 {
+            let w = World::new(seed);
+            let (_, seg) = w.network().segments().next().unwrap();
+            let inner = w.network().node(seg.a).unwrap();
+            let outer = w.network().node(seg.b).unwrap();
+            assert!(!inner.outside && outer.outside);
+            assert!(w.is_buildable(inner.tile()));
+            let line = w
+                .network()
+                .segment_line(w.network().segments().next().unwrap().0);
+            let line = line.unwrap();
+            assert!(!w.is_buildable(line.tile(1)));
+            assert_eq!(line.len, HIGHWAY_OUTSIDE_TILES as u64);
+            sides.insert(line.step);
+        }
+        assert_eq!(sides.len(), 4, "種によって出る辺が変わる");
+    }
+
+    #[test]
     fn building_a_road_charges_its_cost() {
         let mut w = World::new(0);
         let before = w.state_hash();
@@ -323,11 +429,57 @@ mod tests {
         );
         assert_eq!(w.money(), INITIAL_MONEY - Money(2_500));
         assert_ne!(w.state_hash(), before);
-        assert_eq!(w.network().segments().count(), 1);
+        assert_eq!(w.network().segments().count(), 2);
         let area = TileRect::from_corners(TilePos::new(3, 0), TilePos::new(3, 0));
         assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Applied);
         assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Denied);
         assert_eq!(w.money(), INITIAL_MONEY - Money(2_500));
+    }
+
+    fn tile_use(w: &World, x: i64, y: i64) -> TileUse {
+        let t = TilePos::new(x, y);
+        let (lx, ly) = t.local();
+        let tiles = w.chunk(t.chunk().unwrap()).unwrap().layer(Layer::Ground);
+        tiles.unwrap().occupancy[local_index(lx, ly)]
+    }
+
+    #[test]
+    fn road_tiles_follow_the_network_and_bump_the_chunk_version() {
+        let mut w = World::new(0);
+        let origin = ChunkCoord::new(0, 0);
+        let v0 = w.chunk(origin).unwrap().version();
+        road(&mut w, (0, 5), (10, 5), RoadKind::Small);
+        road(&mut w, (5, 5), (5, 10), RoadKind::Small);
+        assert_eq!(w.chunk(origin).unwrap().version(), v0 + 2);
+        for (x, y) in [(0, 5), (7, 5), (5, 5), (5, 10)] {
+            assert_eq!(tile_use(&w, x, y), TileUse::Road, "({x}, {y})");
+        }
+        assert_eq!(tile_use(&w, 6, 6), TileUse::Empty);
+        let area = TileRect::from_corners(TilePos::new(5, 8), TilePos::new(5, 8));
+        assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Applied);
+        assert_eq!(w.chunk(origin).unwrap().version(), v0 + 3);
+        assert_eq!(tile_use(&w, 5, 8), TileUse::Empty);
+        // 残った区間の端のマスは道路のままである。
+        assert_eq!(tile_use(&w, 5, 5), TileUse::Road);
+    }
+
+    #[test]
+    fn highway_tiles_are_written_when_their_chunk_is_bought() {
+        let w = World::new(0);
+        let (id, _) = w.network().segments().next().unwrap();
+        let line = w.network().segment_line(id).unwrap();
+        let inner = line.start;
+        assert_eq!(tile_use(&w, inner.x, inner.y), TileUse::Road);
+        // 高速道路が延びる先の隣のチャンクを買う。
+        let next = line.tile(1);
+        let coord = next.chunk().unwrap();
+        let mut w = w;
+        assert_eq!(buy(&mut w, coord.cx, coord.cy), ApplyOutcome::Applied);
+        assert_eq!(tile_use(&w, next.x, next.y), TileUse::Road);
+        assert_eq!(
+            tile_use(&w, line.tile(64).x, line.tile(64).y),
+            TileUse::Road
+        );
     }
 
     #[test]
@@ -363,8 +515,8 @@ mod tests {
             })
             .expect("水辺のある土地が見つからない");
         let o = coord.origin();
-        let water = (0..crate::tile::CHUNK_AREA)
-            .map(|i| (i % crate::tile::CHUNK_SIDE, i / crate::tile::CHUNK_SIDE))
+        let water = (0..CHUNK_SIDE * CHUNK_SIDE)
+            .map(|i| (i % CHUNK_SIDE, i / CHUNK_SIDE))
             .find(|(lx, ly)| w.chunk(coord).unwrap().terrain().is_water(*lx, *ly))
             .unwrap();
         let t = (o.x + water.0 as i64, o.y + water.1 as i64);
