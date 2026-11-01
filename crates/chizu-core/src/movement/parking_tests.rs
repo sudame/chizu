@@ -1,0 +1,265 @@
+use super::*;
+use crate::building::{Building, Buildings};
+use crate::command::{RoadKind, ZoneKind};
+use crate::id::BuildingId;
+use crate::network::{Dir, Line};
+use crate::rng::{RngPurpose, rng};
+use crate::state_hash::state_hash_of;
+use crate::tile::TileRect;
+
+/// 東西の道路と、その北側に並べた 1 マスの建物。
+struct Street {
+    net: Network,
+    router: AstarRouter,
+    buildings: Buildings,
+    trips: Trips,
+}
+
+impl Street {
+    /// 建物を `xs` のマスに建てる。どれも段階 1 で、駐車場は 1 台ぶんである。
+    fn new(xs: &[i64]) -> (Street, Vec<BuildingId>) {
+        let mut net = Network::new();
+        let line = Line::between(TilePos::new(0, 0), TilePos::new(60, 0)).unwrap();
+        net.build_road(&line, RoadKind::Small).unwrap();
+        let segment = net.segments().next().unwrap().0;
+        let mut buildings = Buildings::default();
+        let ids = xs
+            .iter()
+            .map(|x| {
+                let front = TilePos::new(*x, -1);
+                buildings.insert(Building {
+                    zone: ZoneKind::Commercial,
+                    area: TileRect::from_corners(front, front),
+                    front,
+                    toward_road: (0, 1),
+                    entrance: LinkId {
+                        segment,
+                        dir: Dir::Backward,
+                        mode: LaneMode::Sidewalk,
+                    },
+                    level: 1,
+                    leveled_at: Tick::ZERO,
+                })
+            })
+            .collect();
+        let router = AstarRouter::new(&net);
+        let s = Street {
+            net,
+            router,
+            buildings,
+            trips: Trips::default(),
+        };
+        (s, ids)
+    }
+
+    fn drive(&mut self, from: BuildingId, to: BuildingId) -> Option<TripId> {
+        let (net, router) = (&self.net, &mut self.router);
+        self.trips
+            .spawn_drive(net, router, &self.buildings, (from, to), Tick::ZERO)
+    }
+
+    fn step(&mut self) -> Vec<TripId> {
+        let ended = self.trips.step(&self.net, &mut self.router);
+        self.check();
+        ended
+    }
+
+    /// 駐車場の整合。停めてある台数と押さえた台数の和は台数を超えず、押さえた台数は向かっている
+    /// 主体の数と同じで、駐車場は建っている建物にだけある。
+    fn check(&self) {
+        let mut holding = std::collections::BTreeMap::<BuildingId, u32>::new();
+        for (_, t) in self.trips.iter() {
+            if let Some(lot) = t.then.lot().filter(|b| self.buildings.get(*b).is_some()) {
+                *holding.entry(lot).or_default() += 1;
+            }
+        }
+        for (id, lot) in self.trips.lots() {
+            let b = self.buildings.get(id).expect("消えた建物に駐車場が残った");
+            assert!(u64::from(lot.parked + lot.reserved) <= b.parking_spaces());
+            assert_eq!(lot.reserved, holding.remove(&id).unwrap_or(0), "{id:?}");
+        }
+        assert!(
+            holding.is_empty(),
+            "押さえた空きが数えられていない {holding:?}"
+        );
+    }
+
+    /// 終わるまで進め、その tick ごとの手段の列（同じ手段が続く所は 1 つにまとめる）を返す。
+    fn run(&mut self, id: TripId) -> Vec<LaneMode> {
+        let mut modes = Vec::new();
+        for _ in 0..1_000 {
+            if let Some(t) = self.trips.get(id)
+                && modes.last() != Some(&t.mode())
+            {
+                modes.push(t.mode());
+            }
+            if self.step().contains(&id) {
+                return modes;
+            }
+        }
+        panic!("着かない");
+    }
+}
+
+fn lot(s: &Street, b: BuildingId) -> (u32, u32) {
+    let l = s.trips.lot(b);
+    (l.parked, l.reserved)
+}
+
+#[test]
+fn a_drive_walks_to_the_car_drives_parks_and_walks_on() {
+    let (mut s, ids) = Street::new(&[50, 5]);
+    let (home, shop) = (ids[0], ids[1]);
+    let id = s.drive(home, shop).unwrap();
+    assert_eq!(s.trips.get(id).unwrap().mode(), LaneMode::Sidewalk);
+    assert_eq!(lot(&s, shop), (0, 1));
+    let modes = s.run(id);
+    assert_eq!(
+        modes,
+        [LaneMode::Sidewalk, LaneMode::Car, LaneMode::Sidewalk]
+    );
+    assert_eq!(lot(&s, shop), (1, 0));
+    // 停めた車で帰ると、店の駐車場が空き、家の駐車場に停まる。
+    let back = s.drive(shop, home).unwrap();
+    assert_eq!((lot(&s, shop), lot(&s, home)), ((0, 0), (0, 1)));
+    s.run(back);
+    assert_eq!(lot(&s, home), (1, 0));
+}
+
+#[test]
+fn a_full_destination_sends_the_car_to_the_nearest_free_lot() {
+    let (mut s, ids) = Street::new(&[30, 5, 9, 1, 40]);
+    let (home, shop, near, other, far) = (ids[0], ids[1], ids[2], ids[3], ids[4]);
+    s.drive(home, shop).unwrap();
+    // 店は押さえてあるので、4 マス先の 2 つのうち、番号の小さい建物にする。
+    let second = s.drive(home, shop).unwrap();
+    assert_eq!(lot(&s, near), (0, 1));
+    s.drive(home, shop).unwrap();
+    assert_eq!(lot(&s, other), (0, 1));
+    // 遠い建物は範囲の外なので、どこも満車で車では行けない。駐車場は変わらない。
+    let before = s.trips.clone();
+    assert_eq!(s.drive(far, shop), None);
+    assert_eq!(s.trips, before);
+    let modes = s.run(second);
+    assert_eq!(
+        modes,
+        [LaneMode::Sidewalk, LaneMode::Car, LaneMode::Sidewalk]
+    );
+    assert_eq!(lot(&s, near), (1, 0));
+    let walked = s.trips.get(second);
+    assert!(walked.is_none());
+}
+
+#[test]
+fn leaving_cars_do_not_free_spaces_held_for_arriving_cars() {
+    let (mut s, ids) = Street::new(&[50, 5, 9]);
+    let (home, shop, near) = (ids[0], ids[1], ids[2]);
+    // 店の 1 台ぶんを、向かっている車のために押さえる。
+    let coming = s.drive(home, shop).unwrap();
+    // 店から出る車は、店に停めてある車がないので、押さえた空きを減らさない。
+    s.drive(shop, home).unwrap();
+    assert_eq!(lot(&s, shop), (0, 1));
+    // 次に店へ向かう車は、近くの建物へ回る。
+    s.drive(home, shop).unwrap();
+    assert_eq!(lot(&s, near), (0, 1));
+    s.run(coming);
+    assert_eq!(lot(&s, shop), (1, 0));
+}
+
+#[test]
+fn a_drive_keeps_its_legs_when_the_road_is_split() {
+    let (mut s, ids) = Street::new(&[50, 5]);
+    let (home, shop) = (ids[0], ids[1]);
+    let id = s.drive(home, shop).unwrap();
+    for _ in 0..3 {
+        s.step();
+    }
+    assert_eq!(s.trips.get(id).unwrap().mode(), LaneMode::Car);
+    // 走っている道路の先を、交わる道路で分ける。
+    let line = Line::between(TilePos::new(30, -5), TilePos::new(30, 5)).unwrap();
+    s.net.build_road(&line, RoadKind::Small).unwrap();
+    s.router.sync(&s.net);
+    assert_eq!(s.trips.reroute(&s.net, &mut s.router), []);
+    assert_eq!(s.run(id), [LaneMode::Car, LaneMode::Sidewalk]);
+    assert_eq!(lot(&s, shop), (1, 0));
+}
+
+#[test]
+fn removed_buildings_drop_their_parked_cars_and_reservations() {
+    let (mut s, ids) = Street::new(&[50, 5, 20]);
+    let (home, shop, mall) = (ids[0], ids[1], ids[2]);
+    let first = s.drive(home, shop).unwrap();
+    s.run(first);
+    assert_eq!(lot(&s, shop), (1, 0));
+    let to_mall = s.drive(home, mall).unwrap();
+    for _ in 0..3 {
+        s.step();
+    }
+    assert_eq!(lot(&s, mall), (0, 1));
+    s.buildings.remove(mall);
+    s.buildings.remove(shop);
+    s.trips.forget_lots(&s.buildings);
+    assert_eq!(s.trips.lots().count(), 0);
+    // 消えた駐車場へ向かっていた車は、着いても停めずに、歩いて行き先へ向かう。
+    let modes = s.run(to_mall);
+    assert_eq!(modes, [LaneMode::Car, LaneMode::Sidewalk]);
+    assert_eq!(s.trips.lots().count(), 0);
+    assert_eq!(s.drive(home, mall), None);
+}
+
+/// 建物の並んだ道路で、種から決めた建物どうしを行き来させ、途中で建物を消す。作った移動の数、終わった順、
+/// 状態ハッシュを返す。
+fn busy_street() -> (u32, Vec<TripId>, u64) {
+    let xs: Vec<i64> = (0..20).map(|k| 3 * k).collect();
+    let (mut s, ids) = Street::new(&xs);
+    let (mut ended, mut spawned) = (Vec::new(), 0);
+    for t in 0..2_000_u64 {
+        if t < 200 {
+            let mut r = rng(7, RngPurpose::DailySchedule, 0, Tick(t));
+            let pick = |r: &mut crate::rng::Pcg32| ids[r.below(20) as usize];
+            let (a, b) = (pick(&mut r), pick(&mut r));
+            if s.buildings.get(a).is_some() {
+                spawned += u32::from(s.drive(a, b).is_some());
+            }
+        }
+        if t == 100 {
+            for id in ids.iter().step_by(3) {
+                s.buildings.remove(*id);
+            }
+            s.trips.forget_lots(&s.buildings);
+            s.check();
+        }
+        ended.extend(s.step());
+    }
+    assert!(s.trips.is_empty(), "着かずに残った移動がある");
+    (spawned, ended, state_hash_of(&s.trips))
+}
+
+#[test]
+fn parking_stays_consistent_and_does_not_depend_on_the_thread_count() {
+    let one = busy_street();
+    assert!(one.0 > 30, "作れた移動が少ない {}", one.0);
+    assert_eq!(one.1.len(), one.0 as usize);
+    assert_eq!(busy_street(), one);
+    #[cfg(feature = "parallel")]
+    for threads in [1, 3, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        assert_eq!(pool.install(busy_street), one);
+    }
+}
+
+#[test]
+fn building_spots_sit_on_the_road_in_front() {
+    let (s, ids) = Street::new(&[0, 7, 60]);
+    for id in ids {
+        let b = s.buildings.get(id).unwrap();
+        let (link, off) = building_spot(&s.net, b).unwrap().resolve(&s.net).unwrap();
+        assert_eq!(link, b.entrance);
+        // 西向きの歩道なので、始まり（東の端）からの距離は (60 - x) マスである。
+        let want = u32::try_from(60 - b.front.x).unwrap() * 8_000;
+        assert_eq!(off, LaneOffset(want));
+    }
+}

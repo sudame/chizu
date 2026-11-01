@@ -1,0 +1,323 @@
+//! 建物の駐車場と、建物から建物への「歩く → 車 → 歩く」の移動。
+//!
+//! 移動は 3 つの区切りに分ける。出発の建物の出入口から、その建物の駐車場まで歩く。車で行き先の
+//! 駐車場まで走る。車を停めて、行き先の出入口まで歩く。駐車場と出入口は、どちらも建物の前の道路の
+//! 位置に置く。そのため、自分の建物の駐車場までの歩きは長さ 0 で、1 tick で終わる。
+//!
+//! 行き先の駐車場は出発のときに決めて、空きを 1 台ぶん押さえる。満車なら、行き先から
+//! [`PARK_RADIUS`] マスの中で空きのある、いちばん近い建物の駐車場にする。どこも満車なら車では行けない。
+//! 停めてある台数と押さえた台数は別に数える。建物から車が出るときは停めてある台数だけを減らすので、
+//! まだ着いていない車のために押さえた空きを、出る車が使ってしまうことはない。
+//! 建物が消えると、その駐車場に停めてあった車も消える。そこへ向かっていた車は、着いたら停めずに消える。
+
+use std::collections::BTreeMap;
+
+use super::{Ends, SidewalkPos, Trip, Trips, make_trip, plan, pos};
+use crate::building::{Building, Buildings};
+use crate::id::{BuildingId, TripId};
+use crate::network::{LaneMode, Network};
+use crate::routing::AstarRouter;
+use crate::state_hash::{StateHash, StateHasher};
+use crate::tile::TilePos;
+use crate::units::{LaneOffset, Tick};
+
+/// 満車のときに、ほかの駐車場を探す範囲（マス）。
+pub const PARK_RADIUS: u64 = 16;
+
+/// いまの区切りが終わったあとにすること。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Then {
+    /// 移動を終える。
+    Arrive,
+    /// 車に乗って `park_at` まで走り、駐車場 `lot` に停めて `to` まで歩く。
+    Drive {
+        park_at: SidewalkPos,
+        lot: BuildingId,
+        to: SidewalkPos,
+    },
+    /// 車を駐車場 `lot` に停めて、`to` まで歩く。
+    Walk { lot: BuildingId, to: SidewalkPos },
+}
+
+impl Then {
+    /// 押さえている駐車場。
+    pub(super) fn lot(&self) -> Option<BuildingId> {
+        match self {
+            Then::Arrive => None,
+            Then::Drive { lot, .. } | Then::Walk { lot, .. } => Some(*lot),
+        }
+    }
+}
+
+impl StateHash for Then {
+    fn write_state(&self, h: &mut StateHasher) {
+        match self {
+            Then::Arrive => h.write(&0_u8),
+            Then::Drive { park_at, lot, to } => {
+                h.write(&1_u8);
+                h.write(park_at);
+                h.write(lot);
+                h.write(to);
+            }
+            Then::Walk { lot, to } => {
+                h.write(&2_u8);
+                h.write(lot);
+                h.write(to);
+            }
+        }
+    }
+}
+
+/// 1 つの駐車場の、停めてある台数と、向かっている車のために押さえた台数。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lot {
+    pub parked: u32,
+    pub reserved: u32,
+}
+
+impl StateHash for Lot {
+    fn write_state(&self, h: &mut StateHasher) {
+        h.write(&self.parked);
+        h.write(&self.reserved);
+    }
+}
+
+/// 建物ごとの駐車場。どちらの台数も 0 の建物は持たない。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Parking {
+    lots: BTreeMap<BuildingId, Lot>,
+}
+
+impl Parking {
+    fn get(&self, b: BuildingId) -> Lot {
+        self.lots.get(&b).copied().unwrap_or_default()
+    }
+
+    /// 建物 `b` の駐車場を `f` で書き換える。どちらの台数も 0 になったら表から外す。
+    fn update(&mut self, b: BuildingId, f: impl FnOnce(&mut Lot)) {
+        let lot = self.lots.entry(b).or_default();
+        f(lot);
+        if *lot == Lot::default() {
+            self.lots.remove(&b);
+        }
+    }
+
+    fn reserve(&mut self, b: BuildingId) {
+        self.update(b, |l| {
+            l.reserved = l.reserved.checked_add(1).expect("押さえた台数があふれた");
+        });
+    }
+
+    /// 押さえた空きを返す。建物が消えて駐車場がなくなっていれば何もしない。
+    fn release(&mut self, b: BuildingId) {
+        if self.lots.contains_key(&b) {
+            self.update(b, |l| {
+                l.reserved = l
+                    .reserved
+                    .checked_sub(1)
+                    .expect("押さえていない空きを返した");
+            });
+        }
+    }
+
+    /// 押さえた空きに車を停める。駐車場がなくなっていれば、車は停めずに消える。
+    fn park(&mut self, b: BuildingId) {
+        if self.lots.contains_key(&b) {
+            self.update(b, |l| {
+                l.reserved = l
+                    .reserved
+                    .checked_sub(1)
+                    .expect("押さえていない空きに停めた");
+                l.parked = l.parked.checked_add(1).expect("停めた台数があふれた");
+            });
+        }
+    }
+
+    /// 停めてある車を 1 台出す。停めてある車がなければ `false`。
+    fn unpark(&mut self, b: BuildingId) -> bool {
+        let had = self.get(b).parked > 0;
+        if had {
+            self.update(b, |l| l.parked -= 1);
+        }
+        had
+    }
+
+    fn is_free(&self, id: BuildingId, b: &Building) -> bool {
+        let l = self.get(id);
+        u64::from(l.parked) + u64::from(l.reserved) < b.parking_spaces()
+    }
+
+    /// 行き先 `to` の近くで空きのある駐車場。行き先そのものを先に見る。同じ距離なら番号の小さい建物にする。
+    fn find(&self, buildings: &Buildings, to: BuildingId, dest: &Building) -> Option<BuildingId> {
+        if self.is_free(to, dest) {
+            return Some(to);
+        }
+        let dist = |a: TilePos, b: TilePos| a.x.abs_diff(b.x).max(a.y.abs_diff(b.y));
+        buildings
+            .iter()
+            .filter(|(id, b)| self.is_free(*id, b))
+            .map(|(id, b)| (dist(b.front, dest.front), id))
+            .filter(|(d, _)| *d <= PARK_RADIUS)
+            .min()
+            .map(|(_, id)| id)
+    }
+}
+
+impl StateHash for Parking {
+    fn write_state(&self, h: &mut StateHasher) {
+        h.write(&self.lots);
+    }
+}
+
+/// 建物の前の、面した道路の上の位置。出入口の歩道の上でもあり、同じ側の車のリンクの上でもある。
+/// 出入口のリンクがなければ `None`。
+pub fn building_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
+    let (start, step, _) = pos::link_geometry(net, b.entrance)?;
+    let road = TilePos::new(
+        b.front.x.checked_add(b.toward_road.0)?,
+        b.front.y.checked_add(b.toward_road.1)?,
+    );
+    let k = road.x.abs_diff(start.x).max(road.y.abs_diff(start.y));
+    let offset = u32::try_from(k).ok()?.checked_mul(pos::step_mm(step))?;
+    SidewalkPos::on_any_link(net, b.entrance, LaneOffset(offset))
+}
+
+/// 手段 `mode` で `from` から `to` へ行けるか。
+fn reachable(
+    net: &Network,
+    router: &mut AstarRouter,
+    mode: LaneMode,
+    from: SidewalkPos,
+    to: SidewalkPos,
+) -> bool {
+    let ends = from.resolve_on(net, mode).zip(to.resolve_on(net, mode));
+    ends.is_some_and(|e| plan(router, mode, &[e])[0].is_some())
+}
+
+impl Trips {
+    /// 建物 `b` の駐車場の台数。
+    pub fn lot(&self, b: BuildingId) -> Lot {
+        self.parking.get(b)
+    }
+
+    /// 駐車場を建物の番号の順に返す。
+    pub fn lots(&self) -> impl Iterator<Item = (BuildingId, Lot)> + '_ {
+        self.parking.lots.iter().map(|(id, l)| (*id, *l))
+    }
+
+    /// 建物 `from` から建物 `to` へ、歩く → 車 → 歩く で向かう移動を作る。行き先の駐車場の空きは
+    /// このときに押さえ、`from` に停めてある車があれば 1 台出す。建物がないか、行き先の近くがどこも満車か、
+    /// 3 つの区切りのどれかの経路がなければ `None` で、駐車場も変えない。
+    pub fn spawn_drive(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        buildings: &Buildings,
+        (from, to): (BuildingId, BuildingId),
+        now: Tick,
+    ) -> Option<TripId> {
+        let origin = building_spot(net, buildings.get(from)?)?;
+        let dest_b = buildings.get(to)?;
+        let dest = building_spot(net, dest_b)?;
+        let took = self.parking.unpark(from);
+        let id = self.start_drive(net, router, buildings, (origin, to, dest), now);
+        if id.is_none() && took {
+            self.parking.update(from, |l| {
+                l.parked = l.parked.checked_add(1).expect("停めた台数があふれた");
+            });
+        }
+        id
+    }
+
+    fn start_drive(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        buildings: &Buildings,
+        (origin, to, dest): (SidewalkPos, BuildingId, SidewalkPos),
+        now: Tick,
+    ) -> Option<TripId> {
+        let lot = self.parking.find(buildings, to, buildings.get(to)?)?;
+        let park_at = building_spot(net, buildings.get(lot)?)?;
+        router.sync(net);
+        if !reachable(net, router, LaneMode::Car, origin, park_at)
+            || !reachable(net, router, LaneMode::Sidewalk, park_at, dest)
+        {
+            return None;
+        }
+        let id = self.spawn_many(net, router, &[(origin, origin)], now)[0]?;
+        self.rows[id.slot()]
+            .as_mut()
+            .expect("作った主体がない")
+            .then = Then::Drive {
+            park_at,
+            lot,
+            to: dest,
+        };
+        self.parking.reserve(lot);
+        Some(id)
+    }
+
+    /// 建物が消えたあとに呼ぶ。表にない建物の駐車場を、停めてあった車ごと捨てる。
+    pub fn forget_lots(&mut self, buildings: &Buildings) {
+        self.parking
+            .lots
+            .retain(|id, _| buildings.get(*id).is_some());
+    }
+
+    /// 主体を消す。押さえていた駐車場の空きは返す。
+    pub(super) fn remove(&mut self, id: TripId) {
+        if self.slots.release(id.index, id.generation) {
+            let t = self.rows[id.slot()].take().expect("消す主体がない");
+            if let Some(lot) = t.then.lot() {
+                self.parking.release(lot);
+            }
+        }
+    }
+
+    /// 区切りの終わりに着いた行 `done` を、次の区切りへ進める。移動を終える行と、次の区切りの経路が
+    /// なくなっていた行を返す。
+    pub(super) fn next_legs(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        done: Vec<usize>,
+    ) -> Vec<usize> {
+        let mut ended = Vec::new();
+        let mut legs: [Vec<(usize, SidewalkPos, SidewalkPos, Then)>; 2] = Default::default();
+        for i in done {
+            let t = self.rows[i].as_mut().expect("着いた主体がない");
+            match t.then {
+                Then::Arrive => ended.push(i),
+                Then::Drive { park_at, lot, to } => {
+                    legs[0].push((i, t.dest, park_at, Then::Walk { lot, to }));
+                }
+                Then::Walk { lot, to } => {
+                    t.then = Then::Arrive;
+                    self.parking.park(lot);
+                    legs[1].push((i, t.dest, to, Then::Arrive));
+                }
+            }
+        }
+        for (mode, legs) in [LaneMode::Car, LaneMode::Sidewalk].into_iter().zip(legs) {
+            let resolved: Vec<Option<Ends>> = legs
+                .iter()
+                .map(|(_, a, b, _)| a.resolve_on(net, mode).zip(b.resolve_on(net, mode)))
+                .collect();
+            let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
+            let mut routes = plan(router, mode, &ends).into_iter();
+            for ((i, _, to, then), e) in legs.into_iter().zip(resolved) {
+                let route = e.and_then(|_| routes.next().expect("探した経路の数が合わない"));
+                let (Some(e), Some(route)) = (e, route) else {
+                    ended.push(i);
+                    continue;
+                };
+                let departed = self.rows[i].as_ref().expect("着いた主体がない").departed;
+                let mut t: Trip = make_trip(net, route, e, to, departed);
+                t.then = then;
+                self.rows[i] = Some(t);
+            }
+        }
+        ended
+    }
+}

@@ -19,7 +19,7 @@ pub struct SidewalkPos {
     pub along: LaneOffset,
 }
 
-fn step_mm(step: (i8, i8)) -> u32 {
+pub(super) fn step_mm(step: (i8, i8)) -> u32 {
     let mm = if step.0 != 0 && step.1 != 0 {
         DIAGONAL_TILE_MM
     } else {
