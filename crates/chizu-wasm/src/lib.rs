@@ -4,7 +4,7 @@ pub mod command_input;
 pub mod sim;
 pub mod snapshot;
 
-use chizu_core::Command;
+use chizu_core::{ChunkCoord, Command};
 use command_input::Field;
 use js_sys::Reflect;
 use rayon::prelude::*;
@@ -69,6 +69,20 @@ impl Simulation {
     /// 等速の何倍で回しているか。
     pub fn speed(&self) -> u16 {
         self.0.world().speed().multiplier()
+    }
+
+    /// チャンクの版。画面の手元の版と違うときだけマスを送り直す。
+    pub fn chunk_version(&self, cx: i32, cy: i32) -> u32 {
+        self.0.chunk_version(ChunkCoord::new(cx, cy))
+    }
+
+    pub fn chunk_owned(&self, cx: i32, cy: i32) -> bool {
+        self.0.chunk_owned(ChunkCoord::new(cx, cy))
+    }
+
+    /// チャンクのマスを 64×64 バイトで返す。ビットの意味は `sim::TILE_WATER` にある。
+    pub fn chunk_tiles(&self, cx: i32, cy: i32) -> Vec<u8> {
+        self.0.chunk_tiles(ChunkCoord::new(cx, cy))
     }
 
     /// 一時停止していなければ `ticks` だけ進め、いまの状態を三重バッファに書く。

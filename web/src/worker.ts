@@ -6,16 +6,40 @@ import init, {
   thread_count,
   ticks_per_second,
 } from "../wasm/chizu_wasm.js";
-import type { MainToWorker, WorkerToMain } from "./protocol/messages.ts";
+import { ChunkSync } from "./map/chunk-sync.ts";
+import type { ChunkData, MainToWorker, WorkerToMain } from "./protocol/messages.ts";
 import { layout } from "./protocol/snapshot.ts";
 
 const SUM_N = 10_000_000;
 const FRAME_MS = 1000 / 60;
 // 処理が追いつかないときに取り戻す遅れの上限（実時間の秒）。超えた分は捨てる
 const MAX_BACKLOG_SECONDS = 0.25;
+// 1 回に送るチャンクの数の上限。見えていないチャンクの地形は種から作るので、まとめて作ると tick が遅れる
+const CHUNKS_PER_FRAME = 32;
 
-function reply(message: WorkerToMain): void {
-  self.postMessage(message);
+function reply(message: WorkerToMain, transfer: Transferable[] = []): void {
+  self.postMessage(message, transfer);
+}
+
+const chunkSync = new ChunkSync();
+
+// 画面の手元と版の違うチャンクを送る。マスの配列は移譲するので、送ったあとの Worker の側には残らない
+function sendChunks(sim: Simulation): void {
+  const picked = chunkSync.collect((cx, cy) => sim.chunk_version(cx, cy), CHUNKS_PER_FRAME);
+  if (picked.length === 0) {
+    return;
+  }
+  const chunks: ChunkData[] = picked.map(({ cx, cy, version }) => ({
+    cx,
+    cy,
+    version,
+    owned: sim.chunk_owned(cx, cy),
+    tiles: sim.chunk_tiles(cx, cy).buffer as ArrayBuffer,
+  }));
+  reply(
+    { kind: "chunks", chunks },
+    chunks.map((c) => c.tiles),
+  );
 }
 
 // 実時間に合わせて tick を進める。何 tick 進めるかはここで決め、中核には整数の tick 数だけを渡す
@@ -34,6 +58,7 @@ function run(sim: Simulation): (paused: boolean) => void {
     const ticks = Math.floor(budget);
     budget -= ticks;
     sim.advance(ticks);
+    sendChunks(sim);
   }, FRAME_MS);
   return (p) => {
     paused = p;
@@ -80,6 +105,10 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         break;
       case "pause":
         setPaused(message.paused);
+        break;
+      case "view":
+        // 送るのはタイマーの側だけにして、1 周期に送る数を CHUNKS_PER_FRAME に抑える
+        chunkSync.setView(message.visible, message.forgotten);
         break;
     }
   } catch (error) {
