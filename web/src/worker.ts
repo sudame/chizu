@@ -107,8 +107,8 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         setPaused(message.paused);
         break;
       case "view":
-        chunkSync.setView(message.chunks);
-        sendChunks(sim);
+        // 送るのはタイマーの側だけにして、1 周期に送る数を CHUNKS_PER_FRAME に抑える
+        chunkSync.setView(message.visible, message.forgotten);
         break;
     }
   } catch (error) {

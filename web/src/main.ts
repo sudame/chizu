@@ -95,18 +95,24 @@ const inRange = (r: ChunkRange, cx: number, cy: number) =>
   cx >= r.minCx && cx <= r.maxCx && cy >= r.minCy && cy <= r.maxCy;
 
 let sentRange = "";
-// 見えているチャンクの範囲が変わったときだけ、手元の版を添えて Worker に伝える
+// 見えているチャンクの範囲が変わったときだけ、その範囲と捨てたチャンクを Worker に伝える
 function sendView(range: ChunkRange): void {
   const key = `${range.minCx},${range.maxCx},${range.minCy},${range.maxCy}`;
   if (key === sentRange) {
     return;
   }
   sentRange = key;
-  for (const removed of store.evict((cx, cy) => inRange(range, cx, cy), MAX_STORED_CHUNKS)) {
-    renderer?.remove(removed.cx, removed.cy);
+  const visible = chunksByDistance(range, { x: camera.x, y: camera.y });
+  store.touch(visible);
+  const removed = store.evict((cx, cy) => inRange(range, cx, cy), MAX_STORED_CHUNKS);
+  for (const chunk of removed) {
+    renderer?.remove(chunk.cx, chunk.cy);
   }
-  const center = { x: camera.x, y: camera.y };
-  send({ kind: "view", chunks: store.known(chunksByDistance(range, center)) });
+  send({
+    kind: "view",
+    visible: visible.map(([cx, cy]) => ({ cx, cy })),
+    forgotten: removed.map(({ cx, cy }) => ({ cx, cy })),
+  });
 }
 
 function drawMap(): void {

@@ -6,6 +6,8 @@ function data(cx: number, cy: number, version: number, owned = false): ChunkData
   return { cx, cy, version, owned, tiles: new ArrayBuffer(CHUNK_AREA) };
 }
 
+const at = (...xs: number[]) => xs.map((cx) => ({ cx, cy: 0 }));
+
 describe("ChunkSync", () => {
   const versions = new Map([
     ["0,0", 3],
@@ -14,14 +16,11 @@ describe("ChunkSync", () => {
   ]);
   const versionOf = (cx: number, cy: number) => versions.get(`${cx},${cy}`) ?? 0;
 
-  test("手元と版の違うチャンクだけを選び、一度送ったものは選ばない", () => {
+  test("まだ送っていないチャンクだけを選び、一度送ったものは選ばない", () => {
     const sync = new ChunkSync();
-    sync.setView([
-      { cx: 0, cy: 0, version: 3 },
-      { cx: 1, cy: 0, version: null },
-      { cx: 2, cy: 0, version: 4 },
-    ]);
+    sync.setView(at(0, 1, 2), []);
     expect(sync.collect(versionOf, 10)).toEqual([
+      { cx: 0, cy: 0, version: 3 },
       { cx: 1, cy: 0, version: 0 },
       { cx: 2, cy: 0, version: 5 },
     ]);
@@ -31,22 +30,44 @@ describe("ChunkSync", () => {
   test("中核の側で版が上がったら送り直す", () => {
     const local = new Map(versions);
     const sync = new ChunkSync();
-    sync.setView([{ cx: 0, cy: 0, version: null }]);
+    sync.setView(at(0), []);
     const of = (cx: number, cy: number) => local.get(`${cx},${cy}`) ?? 0;
     expect(sync.collect(of, 10)).toHaveLength(1);
     local.set("0,0", 4);
     expect(sync.collect(of, 10)).toEqual([{ cx: 0, cy: 0, version: 4 }]);
   });
 
-  test("一度に選ぶ数を limit で抑え、残りは次に回す", () => {
+  test("送ったチャンクが届く前に新しい view が来ても、送り直さない", () => {
     const sync = new ChunkSync();
-    sync.setView([
-      { cx: 0, cy: 0, version: null },
-      { cx: 1, cy: 0, version: null },
-      { cx: 2, cy: 0, version: null },
-    ]);
-    expect(sync.collect(versionOf, 2).map((c) => c.cx)).toEqual([0, 1]);
-    expect(sync.collect(versionOf, 2).map((c) => c.cx)).toEqual([2]);
+    sync.setView(at(0, 1), []);
+    expect(sync.collect(versionOf, 10)).toHaveLength(2);
+    // 画面はまだ何も受け取っていないまま、範囲を広げた
+    sync.setView(at(0, 1, 2), []);
+    expect(sync.collect(versionOf, 10)).toEqual([{ cx: 2, cy: 0, version: 5 }]);
+  });
+
+  test("画面が捨てたチャンクは、また見えたら送り直す", () => {
+    const sync = new ChunkSync();
+    sync.setView(at(0, 1), []);
+    sync.collect(versionOf, 10);
+    sync.setView(at(2), at(0));
+    sync.collect(versionOf, 10);
+    sync.setView(at(0, 1), []);
+    expect(sync.collect(versionOf, 10)).toEqual([{ cx: 0, cy: 0, version: 3 }]);
+  });
+
+  test("view が何度来ても、1 周期に選ぶ数は limit を超えず、残りは次の周期に回る", () => {
+    const sync = new ChunkSync();
+    const view = at(0, 1, 2, 3, 4);
+    const picked: number[] = [];
+    for (let cycle = 0; cycle < 3; cycle++) {
+      sync.setView(view, []);
+      sync.setView(view, []);
+      const sent = sync.collect(versionOf, 2);
+      expect(sent.length).toBeLessThanOrEqual(2);
+      picked.push(...sent.map((c) => c.cx));
+    }
+    expect(picked).toEqual([0, 1, 2, 3, 4]);
   });
 });
 
@@ -61,20 +82,6 @@ describe("ChunkStore", () => {
     expect(store.size).toBe(2);
   });
 
-  test("手元の版を渡した順で伝え、ないものは null にする", () => {
-    const store = new ChunkStore();
-    store.receive([data(3, 4, 7)]);
-    expect(
-      store.known([
-        [5, 5],
-        [3, 4],
-      ]),
-    ).toEqual([
-      { cx: 5, cy: 5, version: null },
-      { cx: 3, cy: 4, version: 7 },
-    ]);
-  });
-
   test("数が上限を超えたら、残すもの以外を捨てる", () => {
     const store = new ChunkStore();
     store.receive([data(0, 0, 1), data(1, 0, 1), data(2, 0, 1), data(3, 0, 1)]);
@@ -84,7 +91,20 @@ describe("ChunkStore", () => {
     expect(store.evict(() => false, 5)).toEqual([]);
   });
 
-  test("送り直したチャンクを受け取ると、Worker の側も手元の版に追いつく", () => {
+  test("最後に使ったのが古いものから捨てる", () => {
+    const store = new ChunkStore();
+    // 開始地点のチャンク 0 が最初に届き、そのあと遠くを見た
+    store.receive([data(0, 0, 1), data(1, 0, 1), data(2, 0, 1), data(3, 0, 1)]);
+    // 開始地点に戻ってきた
+    store.touch([[0, 0]]);
+    // 同じ版を受け取り直したチャンクも、使ったものとして扱う
+    store.receive([data(1, 0, 1)]);
+    expect(store.evict(() => false, 2).map((c) => c.cx)).toEqual([2, 3]);
+    expect(store.get(0, 0)).toBeDefined();
+    expect(store.get(1, 0)).toBeDefined();
+  });
+
+  test("捨てたチャンクを Worker に伝えると、また見えたときに届き直す", () => {
     const store = new ChunkStore();
     const sync = new ChunkSync();
     const core = new Map([["0,0", 1]]);
@@ -94,13 +114,17 @@ describe("ChunkStore", () => {
       store.receive(picked.map(({ cx, cy, version }) => data(cx, cy, version)));
       return picked.length;
     };
-    sync.setView(store.known([[0, 0]]));
-    expect(round()).toBe(1);
+    sync.setView(at(0, 1), []);
+    expect(round()).toBe(2);
     expect(round()).toBe(0);
     core.set("0,0", 2);
     expect(round()).toBe(1);
-    sync.setView(store.known([[0, 0]]));
+    expect(store.get(0, 0)?.version).toBe(2);
+    const removed = store.evict((cx) => cx === 1, 1);
+    sync.setView(at(1), removed);
     expect(round()).toBe(0);
+    sync.setView(at(0, 1), []);
+    expect(round()).toBe(1);
     expect(store.get(0, 0)?.version).toBe(2);
   });
 });

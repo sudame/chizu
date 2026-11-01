@@ -9,8 +9,7 @@ export const CHUNK_AREA = CHUNK_SIDE * CHUNK_SIDE;
 /** マスのバイトのうち、水辺を表すビット。chizu-wasm の sim::TILE_WATER と同じ。 */
 export const TILE_WATER = 1;
 
-/** 画面の手元にあるチャンクの版。手元になければ null。 */
-export type ChunkKnown = { cx: number; cy: number; version: number | null };
+export type ChunkCoordMessage = { cx: number; cy: number };
 
 /** Worker から送るチャンクの中身。tiles は 1 マス 1 バイトを行ごとに並べたもので、移譲して送る。 */
 export type ChunkData = {
@@ -24,8 +23,11 @@ export type ChunkData = {
 export type MainToWorker =
   | { kind: "command"; command: CommandMessage }
   | { kind: "pause"; paused: boolean }
-  /** いま見えているチャンクを、先に送ってほしい順に並べたもの。 */
-  | { kind: "view"; chunks: ChunkKnown[] };
+  /**
+   * visible はいま見えているチャンクを先に送ってほしい順に並べたもの。
+   * forgotten は前の view のあとに画面が捨てたチャンクで、Worker は次に見えたときに送り直す。
+   */
+  | { kind: "view"; visible: ChunkCoordMessage[]; forgotten: ChunkCoordMessage[] };
 
 export type WorkerToMain =
   | {
