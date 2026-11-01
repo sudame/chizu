@@ -41,8 +41,50 @@ pub enum ApplyOutcome {
     /// 値が受け付ける範囲の外なので、何もしなかった。記録を通したコマンドは検証済みなので、
     /// 記録を通さずに直接渡された不正なコマンドだけがここに来る。
     Rejected,
-    /// 値は正しいが、いまの状態では受け付けられない（買えない土地、所持金の不足など）ので、何もしなかった。
-    Denied,
+    /// 値は正しいが、いまの状態では受け付けられないので、何もしなかった。
+    Denied(DenyReason),
+}
+
+/// コマンドを受け付けなかった理由。値は数えるときの表の添え字である。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum DenyReason {
+    /// 買っていない土地のマスを通る。
+    NotOwned = 0,
+    /// 水辺のマスを通る。
+    Water = 1,
+    /// 所持金が足りない。
+    NotEnoughMoney = 2,
+    /// 既存の区間と同じ 1 歩を通る。
+    Overlap = 3,
+    /// 斜めの区間とマスの角で交わる。
+    CornerCrossing = 4,
+    /// 高速道路の、内側の端のノード以外のマスを通る。
+    HighwayMidway = 5,
+    /// 消す区間がない。
+    NothingToBulldoze = 6,
+    /// 買う土地が、買った土地と辺を接していない。
+    NotAdjacent = 7,
+    /// 買う土地をもう買ってある。
+    AlreadyOwned = 8,
+}
+
+impl DenyReason {
+    pub const ALL: [DenyReason; 9] = [
+        DenyReason::NotOwned,
+        DenyReason::Water,
+        DenyReason::NotEnoughMoney,
+        DenyReason::Overlap,
+        DenyReason::CornerCrossing,
+        DenyReason::HighwayMidway,
+        DenyReason::NothingToBulldoze,
+        DenyReason::NotAdjacent,
+        DenyReason::AlreadyOwned,
+    ];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
 }
 
 /// 街全体の状態の入れ物。
@@ -166,24 +208,36 @@ impl World {
 
     /// 道路を引けるマスか。買った土地で、水辺でないマスである。
     pub fn is_buildable(&self, t: TilePos) -> bool {
-        t.chunk()
+        self.check_buildable(t).is_ok()
+    }
+
+    /// 道路を引けるマスか確かめ、引けないなら理由を返す。
+    pub fn check_buildable(&self, t: TilePos) -> Result<(), DenyReason> {
+        let chunk = t
+            .chunk()
             .and_then(|c| self.chunks.get(&c))
-            .is_some_and(|c| {
-                let (lx, ly) = t.local();
-                c.owned() && !c.terrain().is_water(lx, ly)
-            })
+            .filter(|c| c.owned())
+            .ok_or(DenyReason::NotOwned)?;
+        let (lx, ly) = t.local();
+        if chunk.terrain().is_water(lx, ly) {
+            return Err(DenyReason::Water);
+        }
+        Ok(())
     }
 
     fn build_road(&mut self, from: TilePos, to: TilePos, kind: RoadKind) -> ApplyOutcome {
         let Ok(line) = Line::between(from, to) else {
             return ApplyOutcome::Rejected;
         };
-        if !line.tiles().all(|t| self.is_buildable(t)) {
-            return ApplyOutcome::Denied;
+        if let Err(reason) = line.tiles().try_for_each(|t| self.check_buildable(t)) {
+            return ApplyOutcome::Denied(reason);
         }
         let cost = road_cost(kind, &line);
-        if self.money < cost || self.network.build_road(&line, kind).is_err() {
-            return ApplyOutcome::Denied;
+        if self.money < cost {
+            return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
+        }
+        if let Err(reason) = self.network.build_road(&line, kind) {
+            return ApplyOutcome::Denied(reason);
         }
         self.money = self.money - cost;
         self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
@@ -192,10 +246,10 @@ impl World {
 
     // 消した道路の建設費は払い戻さない。
     fn bulldoze(&mut self, area: TileRect) -> ApplyOutcome {
-        let removed = self.network.bulldoze(area);
-        if removed.is_empty() {
-            return ApplyOutcome::Denied;
-        }
+        let removed = match self.network.bulldoze(area) {
+            Ok(removed) => removed,
+            Err(reason) => return ApplyOutcome::Denied(reason),
+        };
         self.sync_road_tiles(
             removed
                 .iter()
@@ -255,14 +309,28 @@ impl World {
 
     /// まだ買っておらず、買った土地と辺を接するチャンクか。
     pub fn can_buy_chunk(&self, coord: ChunkCoord) -> bool {
-        !self.is_owned(coord) && coord.edge_neighbors().any(|n| self.is_owned(n))
+        self.check_buy_chunk(coord).is_ok()
+    }
+
+    /// チャンクを買えるか確かめ、買えないなら理由を返す。所持金は見ない。
+    pub fn check_buy_chunk(&self, coord: ChunkCoord) -> Result<(), DenyReason> {
+        if self.is_owned(coord) {
+            Err(DenyReason::AlreadyOwned)
+        } else if !coord.edge_neighbors().any(|n| self.is_owned(n)) {
+            Err(DenyReason::NotAdjacent)
+        } else {
+            Ok(())
+        }
     }
 
     // 人口のマイルストーンで買える枠が増える仕組みは、マイルストーンを入れるときに足す。
     fn buy_chunk(&mut self, coord: ChunkCoord) -> ApplyOutcome {
         let price = self.next_chunk_price();
-        if !self.can_buy_chunk(coord) || self.money < price {
-            return ApplyOutcome::Denied;
+        if let Err(reason) = self.check_buy_chunk(coord) {
+            return ApplyOutcome::Denied(reason);
+        }
+        if self.money < price {
+            return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
         }
         self.money = self.money - price;
         self.chunks_bought += 1;
@@ -342,6 +410,27 @@ impl StateHash for World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deny_reason_all_matches_the_index_and_every_variant() {
+        for (i, reason) in DenyReason::ALL.iter().enumerate() {
+            assert_eq!(reason.index(), i);
+        }
+        // 種類を足したら、ここの match がコンパイルできなくなり、ALL にも足すことを思い出させる。
+        let listed = |r: DenyReason| match r {
+            DenyReason::NotOwned
+            | DenyReason::Water
+            | DenyReason::NotEnoughMoney
+            | DenyReason::Overlap
+            | DenyReason::CornerCrossing
+            | DenyReason::HighwayMidway
+            | DenyReason::NothingToBulldoze
+            | DenyReason::NotAdjacent
+            | DenyReason::AlreadyOwned => DenyReason::ALL.contains(&r),
+        };
+        assert!(DenyReason::ALL.into_iter().all(listed));
+        assert_eq!(DenyReason::ALL.len(), 9);
+    }
     use crate::command::{MAX_TAX_PERMILLE, NodeId};
 
     #[test]
@@ -458,8 +547,14 @@ mod tests {
         assert_ne!(w.state_hash(), before);
         assert_eq!(w.network().segments().count(), 2);
         let area = TileRect::from_corners(TilePos::new(3, 0), TilePos::new(3, 0));
+        let version = w.network().version();
         assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Applied);
-        assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Denied);
+        assert_eq!(w.network().version(), version + 1);
+        assert_eq!(
+            w.apply(&Command::Bulldoze { area }),
+            ApplyOutcome::Denied(DenyReason::NothingToBulldoze)
+        );
+        assert_eq!(w.network().version(), version + 1);
         assert_eq!(w.money(), INITIAL_MONEY - Money(2_500));
     }
 
@@ -602,13 +697,13 @@ mod tests {
         // 買った土地の端から 1 マスはみ出す。
         assert_eq!(
             road(&mut w, (100, 0), (128, 0), RoadKind::Small),
-            ApplyOutcome::Denied
+            ApplyOutcome::Denied(DenyReason::NotOwned)
         );
         // 1 本で所持金を超える。
         w.money = Money(2_999);
         assert_eq!(
             road(&mut w, (-60, 0), (-56, 0), RoadKind::Large),
-            ApplyOutcome::Denied
+            ApplyOutcome::Denied(DenyReason::NotEnoughMoney)
         );
         w.money = Money(3_000);
         assert_eq!(
@@ -636,7 +731,7 @@ mod tests {
         let before = w.clone();
         assert_eq!(
             road(&mut w, (t.0 - 1, t.1), (t.0, t.1), RoadKind::Small),
-            ApplyOutcome::Denied
+            ApplyOutcome::Denied(DenyReason::Water)
         );
         assert_eq!(w, before);
     }
@@ -682,8 +777,18 @@ mod tests {
     fn buying_is_denied_for_owned_detached_or_diagonal_chunks() {
         let mut w = World::new(5);
         let before = w.clone();
-        for (cx, cy) in [(0, 0), (1, 1), (3, 0), (2, 2), (-2, -2), (i32::MIN, 0)] {
-            assert_eq!(buy(&mut w, cx, cy), ApplyOutcome::Denied, "({cx}, {cy})");
+        let owned = DenyReason::AlreadyOwned;
+        let detached = DenyReason::NotAdjacent;
+        for (cx, cy, reason) in [
+            (0, 0, owned),
+            (1, 1, owned),
+            (3, 0, detached),
+            (2, 2, detached),
+            (-2, -2, detached),
+            (i32::MIN, 0, detached),
+        ] {
+            let outcome = buy(&mut w, cx, cy);
+            assert_eq!(outcome, ApplyOutcome::Denied(reason), "({cx}, {cy})");
         }
         assert_eq!(w, before);
     }
@@ -698,7 +803,10 @@ mod tests {
             let price = w.next_chunk_price();
             if w.money() < price {
                 let before = w.clone();
-                assert_eq!(buy(&mut w, cx, 0), ApplyOutcome::Denied);
+                assert_eq!(
+                    buy(&mut w, cx, 0),
+                    ApplyOutcome::Denied(DenyReason::NotEnoughMoney)
+                );
                 assert_eq!(w, before);
                 break;
             }

@@ -1,9 +1,8 @@
 //! Worker が持つシミュレーションの本体。実時間は持たず、進める tick 数は呼び出し側が決める。
 
-use chizu_core::network::road_cost;
 use chizu_core::record::RecordError;
 use chizu_core::{
-    ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, GameTime, Line,
+    ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
     SegmentKind, TerrainTiles, World, terrain,
 };
 
@@ -16,8 +15,6 @@ pub struct Sim {
     snapshot: TripleBuffer,
     /// 適用したが、まだ画面に渡していない結果。
     reports: Vec<Report>,
-    /// 道路網を変えたコマンドを適用した回数。画面は、この値が変わったときだけ道路の形を受け取り直す。
-    network_revision: u32,
 }
 
 /// 記録したコマンドを適用した結果。
@@ -25,8 +22,6 @@ pub struct Sim {
 pub struct Report {
     pub seq: u64,
     pub outcome: ApplyOutcome,
-    /// `Denied` のときの理由。
-    pub reason: Option<&'static str>,
 }
 
 impl Sim {
@@ -37,7 +32,6 @@ impl Sim {
             paused: false,
             snapshot: TripleBuffer::new(),
             reports: Vec::new(),
-            network_revision: 0,
         }
     }
 
@@ -71,21 +65,7 @@ impl Sim {
         command.validate().map_err(RecordError::Invalid)?;
         let seq = self.log.record(self.world.tick(), command)?;
         let outcome = self.world.apply(&command);
-        let reason =
-            (outcome == ApplyOutcome::Denied).then(|| denial_reason(&self.world, &command));
-        if outcome == ApplyOutcome::Applied
-            && matches!(
-                command,
-                Command::BuildRoad { .. } | Command::Bulldoze { .. }
-            )
-        {
-            self.network_revision = self.network_revision.wrapping_add(1);
-        }
-        self.reports.push(Report {
-            seq,
-            outcome,
-            reason,
-        });
+        self.reports.push(Report { seq, outcome });
         Ok(seq)
     }
 
@@ -122,8 +102,9 @@ impl Sim {
         std::mem::take(&mut self.reports)
     }
 
-    pub fn network_revision(&self) -> u32 {
-        self.network_revision
+    /// 道路網の版。画面は、この値が変わったときだけ道路の形を受け取り直す。
+    pub fn network_version(&self) -> u64 {
+        self.world.network().version()
     }
 
     /// 道路の区間を、1 本につき `[a の x, a の y, b の x, b の y, 種類]` の 5 つの数で返す。
@@ -180,23 +161,18 @@ pub fn segment_kind_code(kind: SegmentKind) -> u8 {
     }
 }
 
-/// `Denied` になったコマンドの理由。`Denied` のコマンドは状態を変えないので、適用したあとの状態で調べてよい。
-/// 網に引けない理由は中核が外に出さないので、ほかの理由に当たらなければ網の決まりに反したとみなす。
-fn denial_reason(world: &World, command: &Command) -> &'static str {
-    match *command {
-        Command::BuildRoad { from, to, kind } => match Line::between(from, to) {
-            Ok(line) if !line.tiles().all(|t| world.is_buildable(t)) => {
-                "買っていない土地か水辺を通る"
-            }
-            Ok(line) if world.money() < road_cost(kind, &line) => "所持金が足りない",
-            _ => "ほかの道路と重なるか、途中で交わる",
-        },
-        Command::Bulldoze { .. } => "範囲に消せる道路がない",
-        Command::BuyChunk { coord } if !world.can_buy_chunk(coord) => {
-            "買った土地に接していないか、もう買ってある"
-        }
-        Command::BuyChunk { .. } => "所持金が足りない",
-        _ => "いまの状態では受け付けられない",
+/// 画面に出す、コマンドを受け付けなかった理由。
+pub fn deny_text(reason: DenyReason) -> &'static str {
+    match reason {
+        DenyReason::NotOwned => "買っていない土地を通る",
+        DenyReason::Water => "水辺を通る",
+        DenyReason::NotEnoughMoney => "所持金が足りない",
+        DenyReason::Overlap => "ほかの道路と重なる",
+        DenyReason::CornerCrossing => "斜めの道路と角で交わる",
+        DenyReason::HighwayMidway => "高速道路にはその端でしかつなげない",
+        DenyReason::NothingToBulldoze => "範囲に消せる道路がない",
+        DenyReason::NotAdjacent => "買った土地に接していない",
+        DenyReason::AlreadyOwned => "もう買ってある",
     }
 }
 
@@ -282,7 +258,8 @@ mod tests {
         sim.set_paused(true);
         sim.submit(road((0, 0), (5, 0))).unwrap();
         sim.submit(road((2, -3), (2, 3))).unwrap();
-        assert_eq!(sim.network_revision(), 2, "止めたままでも建つ");
+        let version = World::new(5).network().version();
+        assert_eq!(sim.network_version(), version + 2, "止めたままでも建つ");
         assert_eq!(sim.world().tick(), Tick(3));
         sim.set_paused(false);
         sim.advance(2);
@@ -314,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_outcomes_and_counts_network_changes() {
+    fn reports_outcomes_and_network_version() {
         let mut sim = Sim::new(0);
         let money = sim.world().money();
         sim.submit(road((0, 0), (4, 0))).unwrap();
@@ -326,14 +303,13 @@ mod tests {
                 .iter()
                 .map(|r| (r.seq, r.outcome))
                 .collect::<Vec<_>>(),
-            [(0, ApplyOutcome::Applied), (1, ApplyOutcome::Denied)]
-        );
-        assert_eq!(
-            reports[1].reason,
-            Some("ほかの道路と重なるか、途中で交わる")
+            [
+                (0, ApplyOutcome::Applied),
+                (1, ApplyOutcome::Denied(DenyReason::Overlap))
+            ]
         );
         assert!(sim.take_reports().is_empty());
-        assert_eq!(sim.network_revision(), 1);
+        let version = sim.network_version();
         assert!(sim.world().money() < money);
         // 外部接続の高速道路は最初からあるので、引いた道路はそのあとに並ぶ
         let segments = sim.road_segments();
@@ -349,15 +325,19 @@ mod tests {
         })
         .unwrap();
         sim.advance(1);
-        let reasons: Vec<_> = sim.take_reports().iter().map(|r| r.reason).collect();
+        let outcomes: Vec<_> = sim.take_reports().iter().map(|r| r.outcome).collect();
         assert_eq!(
-            reasons,
+            outcomes,
             [
-                Some("買っていない土地か水辺を通る"),
-                Some("範囲に消せる道路がない")
+                ApplyOutcome::Denied(DenyReason::NotOwned),
+                ApplyOutcome::Denied(DenyReason::NothingToBulldoze)
             ]
         );
-        assert_eq!(sim.network_revision(), 1);
+        assert_eq!(
+            sim.network_version(),
+            version,
+            "断られたコマンドでは版が変わらない"
+        );
     }
 
     #[test]
@@ -367,9 +347,31 @@ mod tests {
         sim.advance(2);
         sim.submit(road((0, 6), (6, 0))).unwrap();
         sim.submit(road((3, 0), (3, 5))).unwrap();
+        sim.submit(Command::Bulldoze {
+            area: TileRect::from_corners(TilePos::new(3, 4), TilePos::new(3, 5)),
+        })
+        .unwrap();
+        sim.advance(1);
+        // 値段は 50,000 から 25,000 ずつ上がるので、4 つ買うと 350,000 使う。
+        // 道路の費用を引いた残りは 150,000 に届かず、5 つめは所持金が足りない
+        for (cx, cy) in [(2, 0), (3, 0), (-2, 0), (0, 2), (0, -2)] {
+            sim.submit(Command::BuyChunk {
+                coord: ChunkCoord::new(cx, cy),
+            })
+            .unwrap();
+        }
         sim.advance(3);
+        let outcomes: Vec<_> = sim.take_reports().iter().map(|r| r.outcome).collect();
+        assert_eq!(
+            outcomes,
+            [
+                [ApplyOutcome::Applied; 8].as_slice(),
+                &[ApplyOutcome::Denied(DenyReason::NotEnoughMoney)]
+            ]
+            .concat()
+        );
         let mut world = World::new(3);
-        chizu_core::replay(&mut world, sim.log(), 5);
+        chizu_core::replay(&mut world, sim.log(), 6);
         assert_eq!(world.state_hash(), sim.world().state_hash());
     }
 

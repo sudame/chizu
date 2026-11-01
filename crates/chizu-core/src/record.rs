@@ -38,7 +38,7 @@ use core::fmt;
 use crate::command::{Command, InvalidCommand, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
 use crate::tile::{ChunkCoord, TilePos, TileRect};
 use crate::units::Tick;
-use crate::world::{ApplyOutcome, World};
+use crate::world::{ApplyOutcome, DenyReason, World};
 
 const MAGIC: &[u8; 8] = b"CHIZUREC";
 
@@ -435,6 +435,8 @@ pub struct ReplayStats {
     pub not_implemented: u64,
     pub rejected: u64,
     pub denied: u64,
+    /// 却下した件数の、理由ごとの内訳。添え字は [`DenyReason::index`] である。
+    pub denied_by: [u64; DenyReason::ALL.len()],
 }
 
 /// `world` を `ticks` だけ進め、そのあいだの tick に記録されたコマンドを各 tick の頭で適用する。
@@ -452,7 +454,10 @@ pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
                 ApplyOutcome::Applied => stats.applied += 1,
                 ApplyOutcome::NotImplemented => stats.not_implemented += 1,
                 ApplyOutcome::Rejected => stats.rejected += 1,
-                ApplyOutcome::Denied => stats.denied += 1,
+                ApplyOutcome::Denied(reason) => {
+                    stats.denied += 1;
+                    stats.denied_by[reason.index()] += 1;
+                }
             }
             next += 1;
         }
@@ -754,6 +759,12 @@ mod tests {
                 not_implemented: 3,
                 rejected: 0,
                 denied: 2,
+                denied_by: {
+                    let mut by = [0; DenyReason::ALL.len()];
+                    by[DenyReason::NothingToBulldoze.index()] = 1;
+                    by[DenyReason::NotAdjacent.index()] = 1;
+                    by
+                },
             }
         );
         let mut pieces = World::new(9);

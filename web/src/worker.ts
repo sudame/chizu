@@ -75,7 +75,7 @@ function sendOutcomes(sim: Simulation): void {
 // 見えているチャンクにかかる区間だけを、チャンクの版と一緒に送る形に変える
 let sentNetworkRevision = -1;
 function sendRoads(sim: Simulation): void {
-  const revision = sim.network_revision();
+  const revision = sim.network_version();
   if (revision === sentNetworkRevision) {
     return;
   }

@@ -196,7 +196,7 @@ try {
 
   const initialSegments = Number(await map.getAttribute("data-road-segments"));
   check(
-    (await map.getAttribute("data-road-revision")) === "0" && initialSegments > 0,
+    initialSegments > 0,
     `起動すると、外部接続の高速道路のある道路網が届く（${initialSegments} 本）`,
   );
 
