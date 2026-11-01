@@ -4,6 +4,9 @@
 //! `(tick, 番号, Command)` を記録する。同じ tick のコマンドは番号順に適用する。
 //! 再現に必要なのは、種とこの記録だけである。
 //!
+//! 記録の並びは、tick が減らず、番号が 1 件ごとに増えていく。
+//! 記録するときも読み戻すときも [`Command::validate`] を通すので、記録に入ったものは必ず読み戻せる。
+//!
 //! # バイト列の形式
 //!
 //! 整数はすべてリトルエンディアンで、型の幅のまま書く。
@@ -32,9 +35,7 @@
 
 use core::fmt;
 
-use crate::command::{
-    Command, MAX_TAX_PERMILLE, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind,
-};
+use crate::command::{Command, InvalidCommand, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
 use crate::tile::{ChunkCoord, TilePos, TileRect};
 use crate::units::Tick;
 use crate::world::{ApplyOutcome, World};
@@ -54,7 +55,7 @@ pub struct RecordedCommand {
     pub command: Command,
 }
 
-/// 記録の並びが `(tick, 番号)` の昇順になっていない。
+/// tick が減っているか、番号が増えていない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OutOfOrder {
     pub previous: (Tick, u64),
@@ -73,7 +74,28 @@ impl fmt::Display for OutOfOrder {
 
 impl std::error::Error for OutOfOrder {}
 
-/// コマンドの記録。`(tick, 番号)` の昇順で、同じ組は 2 度現れない。
+/// 記録できなかった理由。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordError {
+    OutOfOrder(OutOfOrder),
+    Invalid(InvalidCommand),
+    /// 直前の番号が `u64::MAX` で、次の番号を振れない。
+    SeqExhausted,
+}
+
+impl fmt::Display for RecordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecordError::OutOfOrder(e) => e.fmt(f),
+            RecordError::Invalid(e) => e.fmt(f),
+            RecordError::SeqExhausted => write!(f, "番号を使い切った"),
+        }
+    }
+}
+
+impl std::error::Error for RecordError {}
+
+/// コマンドの記録。tick は減らず、番号は増えていく。中のコマンドはすべて検証を通っている。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CommandLog {
     entries: Vec<RecordedCommand>,
@@ -96,25 +118,26 @@ impl CommandLog {
         self.entries.is_empty()
     }
 
-    /// 1 件足す。並びが崩れるときは足さない。
-    pub fn push(&mut self, entry: RecordedCommand) -> Result<(), OutOfOrder> {
+    /// 1 件足す。並びが崩れるときと、コマンドが検証を通らないときは足さない。
+    pub fn push(&mut self, entry: RecordedCommand) -> Result<(), RecordError> {
         if let Some(last) = self.entries.last()
-            && (entry.tick, entry.seq) <= (last.tick, last.seq)
+            && (entry.tick < last.tick || entry.seq <= last.seq)
         {
-            return Err(OutOfOrder {
+            return Err(RecordError::OutOfOrder(OutOfOrder {
                 previous: (last.tick, last.seq),
                 next: (entry.tick, entry.seq),
-            });
+            }));
         }
+        entry.command.validate().map_err(RecordError::Invalid)?;
         self.entries.push(entry);
         Ok(())
     }
 
     /// 受け取ったコマンドを、直前の番号の次の番号で記録する。振った番号を返す。
-    pub fn record(&mut self, tick: Tick, command: Command) -> Result<u64, OutOfOrder> {
+    pub fn record(&mut self, tick: Tick, command: Command) -> Result<u64, RecordError> {
         let seq = match self.entries.last() {
             None => 0,
-            Some(last) => last.seq.checked_add(1).expect("番号が u64 に収まらない"),
+            Some(last) => last.seq.checked_add(1).ok_or(RecordError::SeqExhausted)?,
         };
         self.push(RecordedCommand { tick, seq, command })?;
         Ok(seq)
@@ -151,7 +174,15 @@ impl CommandLog {
             let seq = r.u64()?;
             let command = decode_command(&mut r)?;
             log.push(RecordedCommand { tick, seq, command })
-                .map_err(DecodeError::OutOfOrder)?;
+                .map_err(|e| match e {
+                    RecordError::OutOfOrder(e) => DecodeError::OutOfOrder(e),
+                    RecordError::Invalid(e) => DecodeError::InvalidCommand {
+                        error: e,
+                        at: r.pos,
+                    },
+                    // 番号を振るのは record だけなので、push からは返らない。
+                    RecordError::SeqExhausted => unreachable!(),
+                })?;
         }
         if r.pos != bytes.len() {
             return Err(DecodeError::TrailingBytes(bytes.len() - r.pos));
@@ -173,6 +204,11 @@ pub enum DecodeError {
         what: &'static str,
         at: usize,
     },
+    /// コマンドが検証を通らない。`at` はそのコマンドを読み終えた位置である。
+    InvalidCommand {
+        error: InvalidCommand,
+        at: usize,
+    },
     OutOfOrder(OutOfOrder),
     TrailingBytes(usize),
 }
@@ -188,6 +224,9 @@ impl fmt::Display for DecodeError {
             DecodeError::UnknownCommand(c) => write!(f, "知らないコマンドの種類 {c}"),
             DecodeError::InvalidValue { what, at } => {
                 write!(f, "{at} バイト目までの {what} が範囲の外にある")
+            }
+            DecodeError::InvalidCommand { error, at } => {
+                write!(f, "{at} バイト目までのコマンドが不正：{error}")
             }
             DecodeError::OutOfOrder(e) => e.fmt(f),
             DecodeError::TrailingBytes(n) => write!(f, "記録のあとに {n} バイト余っている"),
@@ -280,11 +319,10 @@ impl<'a> Reader<'a> {
         Ok(TilePos::new(self.i64()?, self.i64()?))
     }
     fn rect(&mut self) -> Result<TileRect, DecodeError> {
-        let r = TileRect {
+        Ok(TileRect {
             min: self.tile()?,
             max: self.tile()?,
-        };
-        self.check(r.is_ordered(), "TileRect の角", r)
+        })
     }
     fn check<T>(&self, ok: bool, what: &'static str, value: T) -> Result<T, DecodeError> {
         if ok {
@@ -374,12 +412,10 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
         6 => Command::BuyChunk {
             coord: ChunkCoord::new(r.i32()?, r.i32()?),
         },
-        7 => {
-            let zone = r.code("ZoneKind", ZoneKind::from_code)?;
-            let permille = r.u16()?;
-            let permille = r.check(permille <= MAX_TAX_PERMILLE, "税率", permille)?;
-            Command::SetTaxRate { zone, permille }
-        }
+        7 => Command::SetTaxRate {
+            zone: r.code("ZoneKind", ZoneKind::from_code)?,
+            permille: r.u16()?,
+        },
         8 => {
             let speed = SimSpeed::new(r.u16()?).ok_or(DecodeError::InvalidValue {
                 what: "速度",
@@ -426,6 +462,7 @@ pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::MAX_TAX_PERMILLE;
     use proptest::prelude::*;
 
     fn sample_commands() -> Vec<Command> {
@@ -550,7 +587,13 @@ mod tests {
                 Err(DecodeError::InvalidValue { .. })
             )
         };
-        assert!(invalid(&[7, 1, 0x2d, 0x01])); // 税率 301‰
+        let invalid_command = |tail: &[u8]| {
+            matches!(
+                CommandLog::decode(&single(0, 0, tail)),
+                Err(DecodeError::InvalidCommand { .. })
+            )
+        };
+        assert!(invalid_command(&[7, 1, 0x2d, 0x01])); // 税率 301‰
         assert!(invalid(&[7, 0, 0, 0])); // 区画の種類 0
         assert!(invalid(&[8, 0, 0])); // 速度 0 倍
         assert!(invalid(&[8, 49, 0])); // 速度 49 倍
@@ -563,7 +606,7 @@ mod tests {
         rect.extend_from_slice(&0_i64.to_le_bytes());
         rect.extend_from_slice(&0_i64.to_le_bytes());
         rect.extend_from_slice(&0_i64.to_le_bytes());
-        assert!(invalid(&rect));
+        assert!(invalid_command(&rect));
         assert_eq!(
             CommandLog::decode(&single(0, 0, &[9])),
             Err(DecodeError::UnknownCommand(9))
@@ -588,7 +631,7 @@ mod tests {
                 },
             )
             .unwrap_err();
-        assert_eq!(err.next, (Tick(4), 1));
+        assert!(matches!(err, RecordError::OutOfOrder(e) if e.next == (Tick(4), 1)));
         let dup = RecordedCommand {
             tick: Tick(5),
             seq: 0,
@@ -597,6 +640,71 @@ mod tests {
             },
         };
         assert!(log.push(dup).is_err());
+        // tick が進んでも、番号が戻るのは並びの崩れである。
+        let seq_back = RecordedCommand {
+            tick: Tick(6),
+            ..dup
+        };
+        assert!(matches!(
+            log.push(seq_back),
+            Err(RecordError::OutOfOrder(_))
+        ));
+        assert_eq!(log.len(), 1);
+    }
+
+    #[test]
+    fn decode_rejects_seq_going_back_across_ticks() {
+        let mut b = b"CHIZUREC".to_vec();
+        b.extend_from_slice(&1_u32.to_le_bytes());
+        b.extend_from_slice(&2_u64.to_le_bytes());
+        for (tick, seq) in [(1_u64, 5_u64), (2, 0)] {
+            b.extend_from_slice(&tick.to_le_bytes());
+            b.extend_from_slice(&seq.to_le_bytes());
+            b.extend_from_slice(&[8, 1, 0]);
+        }
+        assert!(matches!(
+            CommandLog::decode(&b),
+            Err(DecodeError::OutOfOrder(_))
+        ));
+    }
+
+    #[test]
+    fn record_rejects_invalid_commands() {
+        let mut log = CommandLog::new();
+        let bad = Command::SetTaxRate {
+            zone: ZoneKind::Office,
+            permille: MAX_TAX_PERMILLE + 1,
+        };
+        assert_eq!(
+            log.record(Tick(0), bad),
+            Err(RecordError::Invalid(InvalidCommand::TaxRateTooHigh(
+                MAX_TAX_PERMILLE + 1
+            )))
+        );
+        let rect = TileRect {
+            min: TilePos::new(0, 1),
+            max: TilePos::new(0, 0),
+        };
+        assert!(matches!(
+            log.record(Tick(0), Command::Bulldoze { area: rect }),
+            Err(RecordError::Invalid(_))
+        ));
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn record_after_last_seq_returns_error() {
+        let mut log = CommandLog::new();
+        let c = Command::SetSimSpeed {
+            speed: SimSpeed::NORMAL,
+        };
+        log.push(RecordedCommand {
+            tick: Tick(0),
+            seq: u64::MAX,
+            command: c,
+        })
+        .unwrap();
+        assert_eq!(log.record(Tick(0), c), Err(RecordError::SeqExhausted));
         assert_eq!(log.len(), 1);
     }
 

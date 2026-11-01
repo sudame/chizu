@@ -1,11 +1,13 @@
 //! プレイヤーの操作を表すコマンド。
 //!
-//! 画面からの操作はすべて [`Command`] に直して中核へ渡す。値の検証は受け渡しの層で済ませ、
-//! 中核に届くのは正しい値だけという前提にする。ただし記録ファイルから読むときは、
-//! [`crate::record`] がここと同じ範囲を確かめる。
+//! 画面からの操作はすべて [`Command`] に直して中核へ渡す。値が受け付ける範囲にあるかは
+//! [`Command::validate`] で確かめる。受け渡しの層も記録もこの関数を呼ぶので、
+//! 範囲の決まりはここにしか書かない。
 //!
 //! 種類を表す enum の値は記録ファイルに書く番号である。既存の値を変えると古い記録が
 //! 読めなくなるので、足すときは新しい値を使う。
+
+use core::fmt;
 
 use crate::tile::{ChunkCoord, TilePos, TileRect};
 
@@ -158,4 +160,88 @@ pub enum Command {
     SetSimSpeed {
         speed: SimSpeed,
     },
+}
+
+/// コマンドの値が受け付ける範囲の外にある。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvalidCommand {
+    /// 長方形の `min` が `max` を超えている。
+    UnorderedRect(TileRect),
+    /// 税率が `MAX_TAX_PERMILLE` を超えている。
+    TaxRateTooHigh(u16),
+}
+
+impl fmt::Display for InvalidCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InvalidCommand::UnorderedRect(r) => write!(
+                f,
+                "長方形の角の順番が逆になっている：min ({}, {})、max ({}, {})",
+                r.min.x, r.min.y, r.max.x, r.max.y
+            ),
+            InvalidCommand::TaxRateTooHigh(p) => {
+                write!(f, "税率 {p}‰ は上限の {MAX_TAX_PERMILLE}‰ を超えている")
+            }
+        }
+    }
+}
+
+impl std::error::Error for InvalidCommand {}
+
+impl Command {
+    /// 値が受け付ける範囲にあるか。範囲の外のコマンドは記録せず、適用もしない。
+    pub fn validate(&self) -> Result<(), InvalidCommand> {
+        match *self {
+            Command::Bulldoze { area } | Command::PaintZone { area, .. } => {
+                if area.is_ordered() {
+                    Ok(())
+                } else {
+                    Err(InvalidCommand::UnorderedRect(area))
+                }
+            }
+            Command::SetTaxRate { permille, .. } => {
+                if permille <= MAX_TAX_PERMILLE {
+                    Ok(())
+                } else {
+                    Err(InvalidCommand::TaxRateTooHigh(permille))
+                }
+            }
+            // 種類の enum と `SimSpeed` は、型そのものが範囲の外の値を持てない。
+            Command::BuildRoad { .. }
+            | Command::PlaceBuilding { .. }
+            | Command::SetSignal { .. }
+            | Command::BuyChunk { .. }
+            | Command::SetSimSpeed { .. } => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_checks_ranges() {
+        let rect = TileRect {
+            min: TilePos::new(1, 0),
+            max: TilePos::new(0, 0),
+        };
+        assert_eq!(
+            Command::Bulldoze { area: rect }.validate(),
+            Err(InvalidCommand::UnorderedRect(rect))
+        );
+        let zone = ZoneKind::Office;
+        assert_eq!(
+            Command::PaintZone { area: rect, zone }.validate(),
+            Err(InvalidCommand::UnorderedRect(rect))
+        );
+        let ok = TileRect::from_corners(rect.min, rect.max);
+        assert_eq!(Command::PaintZone { area: ok, zone }.validate(), Ok(()));
+        let tax = |permille| Command::SetTaxRate { zone, permille }.validate();
+        assert_eq!(tax(MAX_TAX_PERMILLE), Ok(()));
+        assert_eq!(
+            tax(MAX_TAX_PERMILLE + 1),
+            Err(InvalidCommand::TaxRateTooHigh(MAX_TAX_PERMILLE + 1))
+        );
+    }
 }

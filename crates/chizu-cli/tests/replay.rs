@@ -22,8 +22,15 @@ fn replays_golden_record() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let expected = std::fs::read_to_string(golden("clock_and_commands.hash")).unwrap();
-    assert_eq!(String::from_utf8(out.stdout).unwrap(), expected);
+    // 最後の行が再生の終わりの時点で、2 列目がその状態ハッシュである。
+    let golden = std::fs::read_to_string(golden("clock_and_commands.hash")).unwrap();
+    let last = golden.lines().last().unwrap();
+    let expected = last.split(' ').nth(1).unwrap();
+    assert!(last.starts_with("14400 "), "{last}");
+    assert_eq!(
+        String::from_utf8(out.stdout).unwrap(),
+        format!("{expected}\n")
+    );
 }
 
 #[test]

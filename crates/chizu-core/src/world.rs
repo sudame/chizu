@@ -1,6 +1,6 @@
 //! 街全体の状態。
 
-use crate::command::{Command, MAX_TAX_PERMILLE, SimSpeed, ZoneKind};
+use crate::command::{Command, SimSpeed, ZoneKind};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::units::{Money, Tick};
 
@@ -17,7 +17,8 @@ pub enum ApplyOutcome {
     Applied,
     /// 中核にまだ中身がない種類なので、何もしなかった。
     NotImplemented,
-    /// 値が受け付ける範囲の外なので、何もしなかった。
+    /// 値が受け付ける範囲の外なので、何もしなかった。記録を通したコマンドは検証済みなので、
+    /// 記録を通さずに直接渡された不正なコマンドだけがここに来る。
     Rejected,
 }
 
@@ -69,15 +70,15 @@ impl World {
 
     /// コマンドを 1 つ適用する。いまの tick の頭で呼ぶ。
     pub fn apply(&mut self, command: &Command) -> ApplyOutcome {
+        if command.validate().is_err() {
+            return ApplyOutcome::Rejected;
+        }
         match *command {
             Command::SetSimSpeed { speed } => {
                 self.speed = speed;
                 ApplyOutcome::Applied
             }
             Command::SetTaxRate { zone, permille } => {
-                if permille > MAX_TAX_PERMILLE {
-                    return ApplyOutcome::Rejected;
-                }
                 self.tax_permille[zone.index()] = permille;
                 ApplyOutcome::Applied
             }
@@ -116,6 +117,7 @@ impl StateHash for World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::MAX_TAX_PERMILLE;
     use crate::tile::ChunkCoord;
 
     #[test]
