@@ -61,6 +61,17 @@ mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファ�
 ツールを足すときは、`mise.toml` の `[tools]` に版を固定して書く。`npx` などで実行時に取ってこない。
 タスクを足したり変えたりしたら、`.github/workflows/ci.yml` のジョブもそろえる。
 
+## 依存の更新
+
+依存は Renovate で上げる。設定は `renovate.json` にある。
+
+- 毎朝 9 時前（Asia/Tokyo）に動く。脆弱性は OSV で見つけ、待たずに PR を作る。
+- メジャー以外は 1 つの PR にまとめ、出てから 3 日たった版だけを使い、CI が通ったら自動でマージする。メジャーは依存ごとの PR になり、人が見てマージする。
+- wasm-bindgen のクレートと mise の CLI は、別の 1 つの PR でそろえて上げる。
+- `rust-toolchain.toml` の nightly は Renovate では上げない。日付を変えるときは手で書き換える。
+
+メジャー以外は人が見ずにマージされるので、壊れたら test か lint が落ちるようにテストを保つ。
+
 ## 書き方
 
 - コメント、ドキュメント、コミットメッセージ、PR の本文、画面の文言は日本語で書く。
