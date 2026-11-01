@@ -870,11 +870,12 @@ mod tests {
             stats,
             ReplayStats {
                 applied: 5,
-                not_implemented: 2,
+                not_implemented: 1,
                 rejected: 0,
-                denied: 2,
+                denied: 3,
                 denied_by: {
                     let mut by = [0; DenyReason::ALL.len()];
+                    by[DenyReason::NoRoadAccess.index()] = 1;
                     by[DenyReason::NothingToBulldoze.index()] = 1;
                     by[DenyReason::NotAdjacent.index()] = 1;
                     by

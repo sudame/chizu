@@ -6,6 +6,7 @@
 use crate::command::ZoneKind;
 use crate::id::{BuildingId, Slots};
 use crate::network::LinkId;
+use crate::service::Supply;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{TilePos, TileRect};
 use crate::units::Tick;
@@ -31,6 +32,8 @@ pub struct Building {
     pub level: u8,
     /// いまの段階になった tick。
     pub leveled_at: Tick,
+    /// 電気と水道が届いているか。供給の判定のたびに書き換える。
+    pub supply: Supply,
 }
 
 impl Building {
@@ -76,6 +79,7 @@ impl StateHash for Building {
         h.write(&(self.entrance.mode as u8));
         h.write(&self.level);
         h.write(&self.leveled_at);
+        h.write(&self.supply);
     }
 }
 
