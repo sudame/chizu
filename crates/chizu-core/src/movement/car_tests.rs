@@ -524,6 +524,38 @@ fn a_car_slows_down_before_a_slower_road() {
     }
 }
 
+#[test]
+fn cars_pull_out_and_park_on_either_side_of_the_road() {
+    // 行き止まりの道で、東向きの側の建物から、西の東向きの側の建物へ向かう。
+    // 同じ側に限ると、東の端で折り返し、西の端でもう一度折り返して戻る。どちらの側からも
+    // 出て着けるなら、西向きの車線を 1 本走るだけで着く。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let id = c.drive(at(10, 0, (1, 0), 0), at(3, 0, (1, 0), 0));
+    let t = c.trips.get(id).unwrap();
+    assert_eq!(t.route().links.len(), 1);
+    assert_eq!(t.link().dir, Dir::Backward);
+    let mut ticks = 0;
+    while c.trips.get(id).is_some() {
+        c.step();
+        ticks += 1;
+        assert!(ticks < 100, "着かない");
+    }
+}
+
+#[test]
+fn a_car_keeps_its_side_when_it_drives_toward_the_destination() {
+    // 同じ側のまま前へ進めば着くときは、向きを変えない。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let id = c.drive(at(3, 0, (1, 0), 0), at(10, 0, (1, 0), 0));
+    let t = c.trips.get(id).unwrap();
+    assert_eq!(t.route().links.len(), 1);
+    assert_eq!(t.link().dir, Dir::Forward);
+}
+
 /// 範囲の中の移動体の、中心線の上の位置とずれ。
 type Drawn = std::collections::BTreeMap<crate::id::TripId, ((i64, i64), (i64, i64))>;
 
@@ -573,4 +605,94 @@ fn lane_shifts_follow_the_travelled_distance_across_road_kinds_and_turns() {
         before = after;
     }
     assert!(samples > 100 && turned, "走った車が少ない {samples}");
+}
+
+#[test]
+fn a_running_car_keeps_its_direction_when_it_reroutes() {
+    // 四角い輪の下の辺を東へ走る車の前で、右下の区間を消して下の辺を行き止まりにする。
+    // 反対の車線へ移れるなら西へ戻るのがいちばん早いが、走っている車はその場で向きを変えられない。
+    // 行き止まりまで進んで折り返す。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (14, 0), RoadKind::Small);
+    road(&mut n, (14, 0), (20, 0), RoadKind::Small);
+    road(&mut n, (0, 0), (0, 10), RoadKind::Small);
+    road(&mut n, (0, 10), (20, 10), RoadKind::Small);
+    road(&mut n, (20, 10), (20, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let id = c.drive(at(4, 0, (1, 0), 0), at(20, 5, (0, -1), 0));
+    for _ in 0..3 {
+        c.step();
+    }
+    c.net
+        .bulldoze(TileRect::from_corners(
+            TilePos::new(15, 0),
+            TilePos::new(15, 0),
+        ))
+        .unwrap();
+    c.router.rebuild(&c.net);
+    assert!(c.trips.reroute(&c.net, &mut c.router).is_empty());
+    let t = c.trips.get(id).unwrap();
+    assert_eq!(t.link().dir, Dir::Forward);
+    assert_eq!(t.position().step, (1, 0));
+    let mut arrived = false;
+    for _ in 0..600 {
+        arrived |= c.step().contains(&id);
+    }
+    assert!(arrived);
+}
+
+/// 先頭の車を動かさないことで、後ろの車を詰まらせて止める。先頭の車は、1 tick ごとに元の状態へ戻す。
+fn step_with_lead_pinned(c: &mut Cars, lead: TripId) {
+    let pinned = c.trips.get(lead).expect("先頭の車がない").clone();
+    c.step();
+    c.trips.rows[lead.slot()] = Some(pinned);
+}
+
+/// 詰まって止まった車は、そこに交差する道路が引かれて車線の ID が変わっても、止まったままと数える。
+#[test]
+fn stalled_cars_stay_stalled_when_the_road_is_split() {
+    use crate::world::CarSample;
+
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (60, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let lead = c.drive(at(40, 0, (1, 0), 0), at(59, 0, (1, 0), 0));
+    let followers: Vec<TripId> = (0..3)
+        .map(|i| c.drive(at(5 * i, 0, (1, 0), 0), at(59, 0, (1, 0), 0)))
+        .collect();
+    for _ in 0..150 {
+        step_with_lead_pinned(&mut c, lead);
+    }
+    let before = CarSample::of(&c.trips);
+    assert_eq!(before.len(), 4);
+    // 先頭の車に追いついて止まっている。動いている車は 1 台もない。
+    for _ in 0..20 {
+        step_with_lead_pinned(&mut c, lead);
+    }
+    let still = CarSample::of(&c.trips);
+    assert_eq!(still.unmoved_since(&before), 4, "詰まった車が動いている");
+
+    // 止まっている後ろの車の真ん中に、道路を交差させて区間を分ける。
+    let lanes: Vec<_> = followers
+        .iter()
+        .map(|id| c.trips.get(*id).unwrap().lane())
+        .collect();
+    let x = c.trips.get(followers[1]).unwrap().position().tile.x;
+    road(&mut c.net, (x, -5), (x, 5), RoadKind::Small);
+    c.router.rebuild(&c.net);
+    assert!(c.trips.reroute(&c.net, &mut c.router).is_empty());
+    for _ in 0..40 {
+        step_with_lead_pinned(&mut c, lead);
+    }
+    let after: Vec<_> = followers
+        .iter()
+        .map(|id| c.trips.get(*id).unwrap().lane())
+        .collect();
+    assert_ne!(lanes, after, "区間が分けられても車線が変わらない");
+    let later = CarSample::of(&c.trips);
+    assert_eq!(
+        later.unmoved_since(&before),
+        4,
+        "分けられた区間で止まった車が動いた扱いになった"
+    );
 }
