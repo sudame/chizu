@@ -39,10 +39,10 @@ pub fn zoned_grid_city(seed: u64) -> World {
     grid_city(seed, 3, false)
 }
 
-/// [`zoned_grid_city`] を 9×9 チャンクに広げ、5 列に 1 列の街区を区画にせず発電所と浄水場で埋めた街。
+/// [`zoned_grid_city`] を 11×11 チャンクに広げ、5 列に 1 列の街区を区画にせず発電所と浄水場で埋めた街。
 /// 住民が 10 万人を超えるだけの土地と、そのぶんの電気と水道がある。
 pub fn serviced_grid_city(seed: u64) -> World {
-    grid_city(seed, 4, true)
+    grid_city(seed, 5, true)
 }
 
 /// 開始地点を中心とする (2 × `radius` + 1) 四方のチャンクの格子の街。
