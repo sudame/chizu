@@ -5,6 +5,7 @@ use chizu_core::{
     ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network, Population, RngPurpose, RoadKind,
     Tick, TilePos, TileRect, World, ZoneKind, rng,
 };
+use chizu_core::{LaneOffset, SidewalkPos};
 
 /// 1 世帯の住民の数の上限。
 pub const MAX_HOUSEHOLD_SIZE: u32 = 4;
@@ -159,6 +160,32 @@ pub fn commute_requests(
                 to: offices[r.below(office_len) as usize],
                 mode: LaneMode::Car,
             }
+        })
+        .collect()
+}
+
+/// `count` 人ぶんの、歩道の上の 2 点を結ぶ歩きの出発と行き先。どちらも歩道のリンクから一様に選び、
+/// リンクの上の位置も一様に選ぶ。
+pub fn walk_ends(seed: u64, net: &Network, count: u32) -> Vec<(SidewalkPos, SidewalkPos)> {
+    let links: Vec<LinkId> = net
+        .links()
+        .filter(|l| l.mode == LaneMode::Sidewalk)
+        .collect();
+    let len = u32::try_from(links.len()).expect("リンクが多すぎる");
+    (0..count)
+        .map(|i| {
+            let mut r = rng(seed, RngPurpose::DailySchedule, u64::from(i), Tick::ZERO);
+            let mut pick = || {
+                let link = links[r.below(len) as usize];
+                let length = net
+                    .segment_line(link.segment)
+                    .expect("リンクがない")
+                    .length();
+                let length = u32::try_from(length.0).expect("長さが u32 に収まらない");
+                let offset = LaneOffset(r.below(length));
+                SidewalkPos::on_link(net, link, offset).expect("歩道の位置がない")
+            };
+            (pick(), pick())
         })
         .collect()
 }
