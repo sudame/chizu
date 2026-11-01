@@ -278,7 +278,13 @@ impl Population {
         true
     }
 
+    #[track_caller]
     pub(crate) fn apply_change(&mut self, id: CitizenId, change: CitizenChange) {
+        let h = change.happiness;
+        assert!(
+            h.commute <= HAPPINESS_MAX && h.services <= HAPPINESS_MAX && h.wealth <= HAPPINESS_MAX,
+            "幸福度の点数が上限を超えた: {h:?}"
+        );
         self.set_schedule(id, change.schedule);
         self.citizens.happiness[id.slot()] = change.happiness;
     }
@@ -404,7 +410,7 @@ mod tests {
         let mut p = Population::default();
         let h = p.add_household(Money::ZERO);
         let ids: Vec<_> = (0..3).map(|_| p.add_citizen(h, 20).unwrap()).collect();
-        for (id, t) in ids.iter().zip([7, 5, 5]) {
+        for (id, t) in ids.iter().zip([7, 5, 5]).rev() {
             p.set_schedule(
                 *id,
                 ScheduleState {
@@ -417,5 +423,33 @@ mod tests {
         assert_eq!(p.citizen(ids[1]).unwrap().schedule.depart_at, None);
         assert_eq!(p.pop_departures(Tick(7)), [ids[0]]);
         assert!(p.departures().is_empty());
+    }
+
+    #[test]
+    fn reused_household_starts_empty_and_its_removal_clears_departures() {
+        let mut p = Population::default();
+        let h = p.add_household(Money(9));
+        let a = p.add_citizen(h, 30).unwrap();
+        p.set_schedule(
+            a,
+            ScheduleState {
+                next: Activity::Work,
+                depart_at: Some(Tick(3)),
+            },
+        );
+        p.households.home[h.slot()] = Some(BuildingId {
+            index: 1,
+            generation: 0,
+        });
+        assert!(p.remove_household(h));
+        assert!(p.departures().is_empty());
+        assert_eq!(p.citizen(a), None);
+
+        let g = p.add_household(Money(4));
+        assert_eq!((g.index, g.generation), (h.index, h.generation + 1));
+        assert_eq!(p.members(g), Some(&[][..]));
+        assert_eq!(p.home(g), Some(None));
+        assert_eq!(p.household_money(g), Some(Money(4)));
+        assert_eq!(p.members(h), None);
     }
 }

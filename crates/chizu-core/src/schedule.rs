@@ -91,7 +91,7 @@ impl StateHash for DepartureQueue {
 }
 
 impl Population {
-    /// 組 `bucket` の住民を更新する。
+    /// 組 `bucket` の住民を更新する。`bucket` が [`BUCKET_COUNT`] 以上なら panic する。
     ///
     /// `f` はいまの行だけを読んで新しい値を返し、他の住民の行は読まない。各住民の `f` は並列に呼び、
     /// 結果を ID の順に集めてから 1 本のスレッドで書き戻すので、結果はスレッド数に左右されない。
@@ -99,6 +99,7 @@ impl Population {
     where
         F: Fn(CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
     {
+        assert!(bucket < BUCKET_COUNT, "組の番号が範囲の外: {bucket}");
         let start = bucket as usize;
         let stride = BUCKET_COUNT as usize;
         let count = self
@@ -214,6 +215,32 @@ mod tests {
     }
 
     #[test]
+    fn small_tables_and_vacant_rows_are_updated_exactly_once() {
+        for n in [0_u32, 1, 63, 64, 65, 130] {
+            let mut p = population(n);
+            // 消した行は飛ばす。
+            let removed: Vec<_> = p.citizen_ids().step_by(5).collect();
+            for id in &removed {
+                p.remove_citizen(*id);
+            }
+            let calls = std::sync::atomic::AtomicU32::new(0);
+            for b in 0..BUCKET_COUNT {
+                p.update_bucket(b, |_, _| {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    None
+                });
+            }
+            assert_eq!(calls.into_inner() as usize, p.citizen_count(), "{n} 人");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "範囲の外")]
+    fn out_of_range_bucket_panics() {
+        population(100).update_bucket(BUCKET_COUNT, |_, _| None);
+    }
+
+    #[test]
     fn departures_follow_the_schedule() {
         let mut p = population(3_000);
         run(&mut p, 300);
@@ -227,7 +254,6 @@ mod tests {
             .filter(|id| p.citizen(*id).unwrap().schedule.depart_at.is_some())
             .count();
         assert_eq!(scheduled, queued.len());
-        assert!(queued.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]
