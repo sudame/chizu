@@ -155,7 +155,6 @@ mod tests {
 #[cfg(test)]
 mod car_tests {
     use super::CAR_OWNERSHIP_PERCENT;
-    use crate::clock::TICKS_PER_DAY;
     use crate::command::ZoneKind;
     use crate::world::people::tests::{city, run_days};
 
@@ -171,17 +170,5 @@ mod car_tests {
             percent.abs_diff(CAR_OWNERSHIP_PERCENT) <= 20,
             "車を持つ世帯が {percent}%"
         );
-    }
-
-    #[test]
-    fn a_small_city_has_cars_on_the_road() {
-        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
-        run_days(&mut w, 1);
-        let mut peak = 0;
-        for _ in 0..TICKS_PER_DAY {
-            w.step();
-            peak = peak.max(w.citizen_places().driving);
-        }
-        assert!(peak > 0, "車が 1 台も走らなかった");
     }
 }

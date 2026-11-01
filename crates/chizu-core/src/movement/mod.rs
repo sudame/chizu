@@ -476,6 +476,10 @@ impl Trips {
         self.finished.clear();
         let done = self.advance(net, router.connectors());
         let mut ended = self.next_legs(net, router, done);
+        let give_up: Vec<usize> = (0..self.rows.len())
+            .filter(|i| self.rows[*i].as_ref().is_some_and(car::given_up))
+            .collect();
+        self.walk_instead(net, router, give_up, &mut ended);
         ended.sort_unstable();
         ended
             .into_iter()

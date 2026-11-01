@@ -129,6 +129,11 @@ impl LaneIndex {
 /// 行 `i` の車を、いまのリンクの車線に置く。車の少ない車線から順に、いまの位置から後ろへ下げて
 /// 空いた位置を探す。どの車線にも空きがなければ、出発を待たせて `false` を返す。
 /// `ix` は行 `i` を除いた車線の上の車で、置いたら行 `i` を足す。
+/// 車線に一度も出られないまま `RESCUE` tick を越えて待っている車か。
+pub(super) fn given_up(t: &Trip) -> bool {
+    t.mode == LaneMode::Car && t.waiting && t.stalled > junction::RESCUE
+}
+
 pub(super) fn place(
     rows: &mut [Option<Trip>],
     net: &Network,
@@ -584,14 +589,10 @@ pub(super) fn step(
         #[cfg(test)]
         check_lane(rows, lane);
     }
-    // 満車の車線に出られないまま待ち続けた車も、止まったままの車と同じに扱う。
+    // 満車の車線に出られないまま待つ車の tick 数を数える。`RESCUE` を越えた車は、呼び出し側が歩きに切り替える。
     for i in still_waiting {
         let t = rows[i].as_mut().expect("車の主体がない");
         t.stalled = t.stalled.saturating_add(1);
-        if t.stalled > junction::RESCUE {
-            rescues.teleported = rescues.teleported.saturating_add(1);
-            arrived.push(i);
-        }
     }
     rescue_stalled(rows, &was, &mut arrived, rescues);
     arrived
