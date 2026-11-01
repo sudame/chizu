@@ -1,4 +1,7 @@
-import { isWorkerToMain, type MainToWorker } from "./protocol/messages.ts";
+import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
+import { ChunkStore } from "./map/chunk-sync.ts";
+import { MapRenderer } from "./map/renderer.ts";
+import { CHUNK_SIDE, isWorkerToMain, type MainToWorker } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 
 function element<T extends Element>(selector: string): T {
@@ -11,6 +14,7 @@ function element<T extends Element>(selector: string): T {
 
 const status = element<HTMLElement>("#status");
 const canvas = element<HTMLCanvasElement>("#hud");
+const mapCanvas = element<HTMLCanvasElement>("#map");
 const pauseButton = element<HTMLButtonElement>("#pause");
 const context = canvas.getContext("2d");
 if (context === null) {
@@ -47,16 +51,105 @@ function draw(ctx: CanvasRenderingContext2D, header: SnapshotHeader): void {
   canvas.dataset.money = String(header.money);
 }
 
+// 手元に置くチャンクの数の上限。超えたら見えていないものから捨てる
+const MAX_STORED_CHUNKS = 4096;
+// ホイールの 1 ピクセル分の拡大率の変わり方
+const WHEEL_ZOOM_RATE = 0.0015;
+const WHEEL_LINE_PIXELS = 16;
+
+// 開始地点の買ってあるチャンク（-1〜1）の真ん中から見始める
+const camera = new Camera(CHUNK_SIDE / 2, CHUNK_SIDE / 2, 4);
+const store = new ChunkStore();
+const renderer = new MapRenderer(mapCanvas);
+
+const viewport = (): Viewport => ({
+  width: mapCanvas.clientWidth,
+  height: mapCanvas.clientHeight,
+});
+const inRange = (r: ChunkRange, cx: number, cy: number) =>
+  cx >= r.minCx && cx <= r.maxCx && cy >= r.minCy && cy <= r.maxCy;
+
+let sentRange = "";
+// 見えているチャンクの範囲が変わったときだけ、手元の版を添えて Worker に伝える
+function sendView(range: ChunkRange): void {
+  const key = `${range.minCx},${range.maxCx},${range.minCy},${range.maxCy}`;
+  if (key === sentRange) {
+    return;
+  }
+  sentRange = key;
+  for (const removed of store.evict((cx, cy) => inRange(range, cx, cy), MAX_STORED_CHUNKS)) {
+    renderer.remove(removed.cx, removed.cy);
+  }
+  const center = { x: camera.x, y: camera.y };
+  send({ kind: "view", chunks: store.known(chunksByDistance(range, center)) });
+}
+
+function drawMap(): void {
+  const vp = viewport();
+  const range = camera.visibleChunks(vp);
+  sendView(range);
+  const drawn = renderer.draw(camera, vp, range);
+  // test:wasm が読む
+  mapCanvas.dataset.drawnChunks = String(drawn);
+  mapCanvas.dataset.visibleChunks = String(
+    (range.maxCx - range.minCx + 1) * (range.maxCy - range.minCy + 1),
+  );
+  mapCanvas.dataset.storedChunks = String(store.size);
+  mapCanvas.dataset.cameraX = String(camera.x);
+  mapCanvas.dataset.cameraY = String(camera.y);
+  mapCanvas.dataset.zoom = String(camera.zoom);
+}
+
 function startDrawing(reader: SnapshotReader, ctx: CanvasRenderingContext2D): void {
   const frame = () => {
     const header = reader.acquire();
     if (header !== null) {
       draw(ctx, header);
     }
+    drawMap();
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
 }
+
+let dragging: { id: number; x: number; y: number } | null = null;
+mapCanvas.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) {
+    return;
+  }
+  dragging = { id: event.pointerId, x: event.clientX, y: event.clientY };
+  mapCanvas.setPointerCapture(event.pointerId);
+});
+mapCanvas.addEventListener("pointermove", (event) => {
+  if (dragging?.id !== event.pointerId) {
+    return;
+  }
+  camera.pan(event.clientX - dragging.x, event.clientY - dragging.y);
+  dragging.x = event.clientX;
+  dragging.y = event.clientY;
+});
+const endDrag = (event: PointerEvent) => {
+  if (dragging?.id === event.pointerId) {
+    dragging = null;
+  }
+};
+mapCanvas.addEventListener("pointerup", endDrag);
+mapCanvas.addEventListener("pointercancel", endDrag);
+mapCanvas.addEventListener(
+  "wheel",
+  (event) => {
+    event.preventDefault();
+    const pixels = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? WHEEL_LINE_PIXELS : 1;
+    const rect = mapCanvas.getBoundingClientRect();
+    camera.zoomAt(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      Math.exp(-event.deltaY * pixels * WHEEL_ZOOM_RATE),
+      viewport(),
+    );
+  },
+  { passive: false },
+);
 
 let paused = false;
 pauseButton.addEventListener("click", () => {
@@ -77,6 +170,12 @@ for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-s
 worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   const message = event.data;
   if (!isWorkerToMain(message)) {
+    return;
+  }
+  if (message.kind === "chunks") {
+    for (const chunk of store.receive(message.chunks)) {
+      renderer.upload(chunk);
+    }
     return;
   }
   if (message.kind === "error") {
