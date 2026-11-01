@@ -301,10 +301,48 @@ impl LaneOffset {
     }
 }
 
+/// お金。1 が通貨の最小の単位である。借金を表せるように符号つきで持つ。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Money(pub i64);
+
+impl Money {
+    pub const ZERO: Money = Money(0);
+
+    pub fn checked_add(self, rhs: Money) -> Option<Money> {
+        self.0.checked_add(rhs.0).map(Money)
+    }
+
+    pub fn checked_sub(self, rhs: Money) -> Option<Money> {
+        self.0.checked_sub(rhs.0).map(Money)
+    }
+}
+
+impl Add for Money {
+    type Output = Money;
+    #[track_caller]
+    fn add(self, rhs: Money) -> Money {
+        self.checked_add(rhs).unwrap_or_else(|| overflow("Money"))
+    }
+}
+
+impl Sub for Money {
+    type Output = Money;
+    #[track_caller]
+    fn sub(self, rhs: Money) -> Money {
+        self.checked_sub(rhs).unwrap_or_else(|| overflow("Money"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    #[should_panic(expected = "Money があふれた")]
+    fn money_add_overflow_panics() {
+        let _ = Money(i64::MAX) + Money(1);
+    }
 
     #[test]
     fn mm_from_m() {

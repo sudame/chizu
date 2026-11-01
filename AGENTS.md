@@ -41,6 +41,9 @@ mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core の浮動
 
 `test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。
 
+決まった記録を再生した状態ハッシュは `crates/chizu-core/tests/golden/` に置いてある。
+シミュレーションや記録の形式を意図して変えたときは、`CHIZU_UPDATE_GOLDEN=1 cargo test -p chizu-core --test golden` で書き直し、同じ PR に含める。
+
 Rust のツールチェーンは `rust-toolchain.toml` で日付つきの nightly に固定している。
 mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファイルから版を読むので、`mise.toml` の `[tools]` には `rust` を書かない。
 
