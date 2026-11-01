@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use chizu_core::{
-    BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneMode, LaneOffset, Money,
+    Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneMode, LaneOffset, Money,
     RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed,
     StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind, replay, rng,
 };
@@ -428,9 +428,12 @@ fn commuters_walk_and_drive_to_work_in_the_morning() {
     }
     assert!(walking > 0 && driving > 0, "歩き {walking}、車 {driving}");
     let p = world.population();
+    // 朝のあとに職場が決まり、翌朝に出発する住民は数えない。
     let workers = p
         .citizen_ids()
-        .filter(|id| p.citizen(*id).unwrap().workplace.is_some())
+        .map(|id| p.citizen(id).unwrap())
+        .filter(|r| r.workplace.is_some())
+        .filter(|r| r.schedule.next != Activity::Work || r.schedule.depart_at.is_none())
         .count();
     assert!(workers > 0, "誰も働いていない");
     assert!(
@@ -793,10 +796,11 @@ fn economy_settles_every_hour() {
     assert!(f.taxes[ZoneKind::Industrial.index()].0 > 0, "{f:?}");
     assert!(f.road_upkeep.0 > 0 && f.facility_upkeep.iter().all(|m| m.0 > 0));
     assert_eq!(stats.denied, 0);
-    // 1 時間ぶん進めると、1 日の見込みのおよそ 1/24 だけ所持金が動く。
-    let (money, net) = (world.money().0, world.finances().net().0);
-    replay(&mut world, &s.log, 300);
-    let moved = world.money().0 - money;
+    // 精算の tick を進めると、その tick の終わりの 1 日の見込みのおよそ 1/24 だけ所持金が動く。
+    replay(&mut world, &s.log, 200);
+    let money = world.money().0;
+    replay(&mut world, &s.log, 1);
+    let (moved, net) = (world.money().0 - money, world.finances().net().0);
     assert!((moved * 24 - net).abs() <= 24, "{moved} × 24 と {net}");
 }
 

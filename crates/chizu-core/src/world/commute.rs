@@ -7,7 +7,7 @@
 
 use super::World;
 use crate::citizens::Activity;
-use crate::id::{CitizenId, TripId};
+use crate::id::{CitizenId, HouseholdId, TripId};
 use crate::movement::{CommuteRequest, Commuter};
 
 impl World {
@@ -53,6 +53,17 @@ impl World {
         }
         stuck.sort_unstable();
         stuck
+    }
+
+    /// 世帯を街から出す。移動している住民の移動もやめさせる。
+    pub(super) fn remove_household(&mut self, h: HouseholdId) {
+        let members = self.population.members(h).unwrap_or_default().to_vec();
+        for id in members {
+            if let Some(t) = self.population.citizen(id).and_then(|r| r.trip) {
+                self.trips.cancel(t);
+            }
+        }
+        self.population.remove_household(h);
     }
 
     /// 終わった移動 `ended` の住民の居場所を切り替える。

@@ -31,16 +31,6 @@ pub fn bucket_of(id: CitizenId) -> u32 {
     id.index / BLOCK_SIZE % BUCKET_COUNT
 }
 
-/// 組ごとの更新で 1 人の住民に行う処理。いまは何も変えない。
-pub fn update_citizen(
-    _seed: u64,
-    _tick: Tick,
-    _id: CitizenId,
-    _row: CitizenRow,
-) -> Option<CitizenChange> {
-    None
-}
-
 /// 出発の待ち行列。`(出発 tick, CitizenId)` の順に並ぶので、同じ tick の出発は ID の順に出る。
 ///
 /// 住民 1 人が入るのは高々 1 か所で、その tick は住民の予定の `depart_at` と一致する。
@@ -98,11 +88,12 @@ impl StateHash for DepartureQueue {
 impl Population {
     /// 組 `bucket` の住民を更新する。`bucket` が [`BUCKET_COUNT`] 以上なら panic する。
     ///
-    /// `f` はいまの行だけを読んで新しい値を返し、他の住民の行は読まない。各住民の `f` は並列に呼び、
+    /// `f` は表といまの行を読んで新しい値を返す。書き戻すのは全員の `f` が済んでからなので、`f` が読む表は
+    /// 組の中の誰の更新にも左右されない。各住民の `f` は並列に呼び、
     /// 結果を ID の順に集めてから 1 本のスレッドで書き戻すので、結果はスレッド数に左右されない。
     pub fn update_bucket<F>(&mut self, bucket: u32, f: F)
     where
-        F: Fn(CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
+        F: Fn(&Population, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync,
     {
         assert!(bucket < BUCKET_COUNT, "組の番号が範囲の外: {bucket}");
         let len = self.citizens.slots.len();
@@ -110,6 +101,7 @@ impl Population {
         let stride = BUCKET_COUNT as usize;
         let first = bucket as usize;
         let blocks = len.div_ceil(block).saturating_sub(first).div_ceil(stride);
+        let this = &*self;
         let citizens = &self.citizens;
         let block_slots = |k: usize| {
             let start = (first + k * stride) * block;
@@ -118,7 +110,7 @@ impl Population {
         let compute = |slot: usize| {
             let (index, generation) = citizens.slots.current(slot)?;
             let id = CitizenId { index, generation };
-            f(id, citizens.row(slot)).map(|change| (id, change))
+            f(this, id, citizens.row(slot)).map(|change| (id, change))
         };
         // 並列の collect は、変更のあった住民だけを元の順番（ID の順）のまま集める。
         #[cfg(feature = "parallel")]
@@ -159,8 +151,8 @@ mod tests {
     fn noisy(
         seed: u64,
         tick: Tick,
-    ) -> impl Fn(CitizenId, CitizenRow) -> Option<CitizenChange> + Sync {
-        move |id, row| {
+    ) -> impl Fn(&Population, CitizenId, CitizenRow) -> Option<CitizenChange> + Sync {
+        move |_, id, row| {
             let key = (u64::from(id.index) << 16) | u64::from(id.generation);
             let mut r = rng(seed, RngPurpose::DailySchedule, key, tick);
             if r.chance(1, 4) {
@@ -193,7 +185,7 @@ mod tests {
     fn each_citizen_is_updated_once_every_bucket_count_ticks() {
         // 塊が 64 を超えて、組 0 に 2 つ目の塊が入る人数にする。
         let mut p = population(5_000);
-        let bump = |_: CitizenId, row: CitizenRow| {
+        let bump = |_: &Population, _: CitizenId, row: CitizenRow| {
             let mut happiness = row.happiness;
             happiness.services += 1;
             Some(CitizenChange {
@@ -202,9 +194,9 @@ mod tests {
             })
         };
         for b in 0..BUCKET_COUNT {
-            p.update_bucket(b, |id, row| {
+            p.update_bucket(b, |p, id, row| {
                 assert_eq!(bucket_of(id), b);
-                bump(id, row)
+                bump(p, id, row)
             });
         }
         let ids: Vec<_> = p.citizen_ids().collect();
@@ -233,7 +225,7 @@ mod tests {
             }
             let calls = std::sync::atomic::AtomicU32::new(0);
             for b in 0..BUCKET_COUNT {
-                p.update_bucket(b, |_, _| {
+                p.update_bucket(b, |_, _, _| {
                     calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     None
                 });
@@ -245,7 +237,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "範囲の外")]
     fn out_of_range_bucket_panics() {
-        population(100).update_bucket(BUCKET_COUNT, |_, _| None);
+        population(100).update_bucket(BUCKET_COUNT, |_, _, _| None);
     }
 
     #[test]
@@ -299,11 +291,11 @@ mod tests {
         let mut w = crate::world::World::new(3);
         *w.population_mut() = population(10_000);
         for _ in 0..5 {
-            w.step();
+            w.step_with(|_, _, _| None);
         }
-        let bump = |_: u64, tick: Tick, _: CitizenId, row: CitizenRow| {
+        let bump = |ctx: &crate::happiness::CitizenContext, _: CitizenId, row: CitizenRow| {
             let mut happiness = row.happiness;
-            happiness.wealth = (tick.0 % 100) as u8;
+            happiness.wealth = (ctx.tick.0 % 100) as u8;
             Some(CitizenChange {
                 schedule: row.schedule,
                 happiness,
