@@ -1,0 +1,220 @@
+// 道路網と、道具の仮の表示を WebGL2 で描く。
+// 頂点の位置は、まとめて送った基準のマスからの相対で持つ。遠くの座標でも f32 の桁が足りるようにするためである。
+
+import { NODE_STRIDE, SEGMENT_STRIDE } from "../protocol/messages.ts";
+import type { Camera, Viewport } from "./camera.ts";
+
+/** マスの座標。 */
+export type Tile = { x: number; y: number };
+
+// 縮小しても線が消えないよう、半分の太さは画面で 1.5 ピクセルを下回らせない
+const MIN_HALF_PX = "1.5";
+
+const VERTEX = `#version 300 es
+in vec2 a_pos;
+in vec2 a_normal;
+in float a_half;
+in vec4 a_color;
+uniform vec2 u_offset;
+uniform float u_zoom;
+uniform vec2 u_viewport;
+out vec4 v_color;
+void main() {
+  float half_px = a_half > 0.0 ? max(a_half * u_zoom, ${MIN_HALF_PX}) : 0.0;
+  vec2 p = (a_pos * u_zoom + u_offset + a_normal * half_px) / (u_viewport * 0.5);
+  gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
+  v_color = a_color;
+}`;
+
+const FRAGMENT = `#version 300 es
+precision mediump float;
+in vec4 v_color;
+out vec4 color;
+void main() {
+  color = v_color;
+}`;
+
+/** 頂点 1 つの数の個数。位置 2、法線 2、半分の太さ 1、色 4。 */
+export const VERTEX_FLOATS = 9;
+
+export type Color = readonly [number, number, number, number];
+
+const ROAD_COLOR: Color = [0.32, 0.32, 0.35, 1];
+const HIGHWAY_COLOR: Color = [0.78, 0.55, 0.25, 1];
+const NODE_COLOR: Color = [0.5, 0.5, 0.54, 1];
+// 半分の太さ（マス）。区間の種類の番号は chizu-wasm の segment_kind_code と同じ
+const HALF_WIDTH: Record<number, number> = { 1: 0.3, 2: 0.4, 3: 0.5, 4: 0.5 };
+const HIGHWAY_CODE = 4;
+const NODE_HALF = 0.5;
+
+/** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
+export class Geometry {
+  readonly #data: number[] = [];
+  readonly origin: Tile;
+
+  constructor(origin: Tile) {
+    this.origin = origin;
+  }
+
+  get vertexCount(): number {
+    return this.#data.length / VERTEX_FLOATS;
+  }
+
+  #vertex(x: number, y: number, nx: number, ny: number, half: number, color: Color): void {
+    this.#data.push(x - this.origin.x, y - this.origin.y, nx, ny, half, ...color);
+  }
+
+  /** マス a の中心からマス b の中心への線。 */
+  segment(a: Tile, b: Tile, half: number, color: Color): void {
+    const ax = a.x + 0.5;
+    const ay = a.y + 0.5;
+    const bx = b.x + 0.5;
+    const by = b.y + 0.5;
+    const len = Math.hypot(bx - ax, by - ay);
+    if (len === 0) {
+      return;
+    }
+    const nx = -(by - ay) / len;
+    const ny = (bx - ax) / len;
+    const v = (x: number, y: number, s: number) => this.#vertex(x, y, nx * s, ny * s, half, color);
+    v(ax, ay, 1);
+    v(ax, ay, -1);
+    v(bx, by, 1);
+    v(bx, by, 1);
+    v(ax, ay, -1);
+    v(bx, by, -1);
+  }
+
+  /** マスの中心に置く正方形。 */
+  square(t: Tile, half: number, color: Color): void {
+    const x = t.x + 0.5;
+    const y = t.y + 0.5;
+    const v = (sx: number, sy: number) => this.#vertex(x, y, sx, sy, half, color);
+    v(-1, -1);
+    v(1, -1);
+    v(-1, 1);
+    v(-1, 1);
+    v(1, -1);
+    v(1, 1);
+  }
+
+  /** 角のマスを両端に含む長方形。 */
+  rect(min: Tile, max: Tile, color: Color): void {
+    const v = (x: number, y: number) => this.#vertex(x, y, 0, 0, 0, color);
+    const [x0, y0, x1, y1] = [min.x, min.y, max.x + 1, max.y + 1];
+    v(x0, y0);
+    v(x1, y0);
+    v(x0, y1);
+    v(x0, y1);
+    v(x1, y0);
+    v(x1, y1);
+  }
+
+  build(): Float32Array {
+    return new Float32Array(this.#data);
+  }
+}
+
+export function halfWidthOf(kindCode: number): number {
+  return HALF_WIDTH[kindCode] ?? 0.4;
+}
+
+/** Worker から届いた道路網の形を頂点に直す。基準のマスは最初のノードにする。 */
+export function roadGeometry(segments: Float64Array, nodes: Float64Array): Geometry {
+  const geometry = new Geometry({ x: nodes[0] ?? 0, y: nodes[1] ?? 0 });
+  for (let i = 0; i + SEGMENT_STRIDE <= segments.length; i += SEGMENT_STRIDE) {
+    const [ax = 0, ay = 0, bx = 0, by = 0, kind = 0] = segments.subarray(i, i + SEGMENT_STRIDE);
+    const color = kind === HIGHWAY_CODE ? HIGHWAY_COLOR : ROAD_COLOR;
+    geometry.segment({ x: ax, y: ay }, { x: bx, y: by }, halfWidthOf(kind), color);
+  }
+  for (let i = 0; i + NODE_STRIDE <= nodes.length; i += NODE_STRIDE) {
+    geometry.square({ x: nodes[i] ?? 0, y: nodes[i + 1] ?? 0 }, NODE_HALF, NODE_COLOR);
+  }
+  return geometry;
+}
+
+type Mesh = { buffer: WebGLBuffer; vao: WebGLVertexArrayObject; count: number; origin: Tile };
+
+export class RoadLayer {
+  readonly #gl: WebGL2RenderingContext;
+  readonly #program: WebGLProgram;
+  readonly #u: Record<"offset" | "zoom" | "viewport", WebGLUniformLocation | null>;
+  readonly #roads: Mesh;
+  readonly #preview: Mesh;
+
+  constructor(
+    gl: WebGL2RenderingContext,
+    link: (vertex: string, fragment: string) => WebGLProgram,
+  ) {
+    this.#gl = gl;
+    this.#program = link(VERTEX, FRAGMENT);
+    this.#u = {
+      offset: gl.getUniformLocation(this.#program, "u_offset"),
+      zoom: gl.getUniformLocation(this.#program, "u_zoom"),
+      viewport: gl.getUniformLocation(this.#program, "u_viewport"),
+    };
+    this.#roads = this.#mesh();
+    this.#preview = this.#mesh();
+  }
+
+  #mesh(): Mesh {
+    const gl = this.#gl;
+    const vao = gl.createVertexArray();
+    const buffer = gl.createBuffer();
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    const stride = VERTEX_FLOATS * 4;
+    const attributes: [string, number, number][] = [
+      ["a_pos", 2, 0],
+      ["a_normal", 2, 2],
+      ["a_half", 1, 4],
+      ["a_color", 4, 5],
+    ];
+    for (const [name, size, offset] of attributes) {
+      const location = gl.getAttribLocation(this.#program, name);
+      gl.enableVertexAttribArray(location);
+      gl.vertexAttribPointer(location, size, gl.FLOAT, false, stride, offset * 4);
+    }
+    gl.bindVertexArray(null);
+    return { buffer, vao, count: 0, origin: { x: 0, y: 0 } };
+  }
+
+  #upload(mesh: Mesh, geometry: Geometry): void {
+    const gl = this.#gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, geometry.build(), gl.DYNAMIC_DRAW);
+    mesh.count = geometry.vertexCount;
+    mesh.origin = geometry.origin;
+  }
+
+  setRoads(geometry: Geometry): void {
+    this.#upload(this.#roads, geometry);
+  }
+
+  setPreview(geometry: Geometry | null): void {
+    this.#upload(this.#preview, geometry ?? new Geometry({ x: 0, y: 0 }));
+  }
+
+  draw(camera: Camera, viewport: Viewport): void {
+    const gl = this.#gl;
+    gl.useProgram(this.#program);
+    gl.uniform1f(this.#u.zoom, camera.zoom);
+    gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    for (const mesh of [this.#roads, this.#preview]) {
+      if (mesh.count === 0) {
+        continue;
+      }
+      gl.uniform2f(
+        this.#u.offset,
+        (mesh.origin.x - camera.x) * camera.zoom,
+        (mesh.origin.y - camera.y) * camera.zoom,
+      );
+      gl.bindVertexArray(mesh.vao);
+      gl.drawArrays(gl.TRIANGLES, 0, mesh.count);
+    }
+    gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
+  }
+}

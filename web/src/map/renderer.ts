@@ -4,6 +4,7 @@
 import { CHUNK_SIDE, TILE_WATER } from "../protocol/messages.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { chunkKey, type StoredChunk } from "./chunk-sync.ts";
+import { RoadLayer } from "./roads.ts";
 
 const VERTEX = `#version 300 es
 in vec2 a_corner;
@@ -44,6 +45,17 @@ function compile(gl: WebGL2RenderingContext, type: GLenum, source: string): WebG
   return shader;
 }
 
+function link(gl: WebGL2RenderingContext, vertex: string, fragment: string): WebGLProgram {
+  const program = gl.createProgram();
+  gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, vertex));
+  gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, fragment));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    throw new Error(`シェーダーをつなげない：${gl.getProgramInfoLog(program)}`);
+  }
+  return program;
+}
+
 function uniform(gl: WebGL2RenderingContext, program: WebGLProgram, name: string) {
   const location = gl.getUniformLocation(program, name);
   if (location === null) {
@@ -57,6 +69,10 @@ type Texture = { texture: WebGLTexture; owned: boolean };
 export class MapRenderer {
   readonly canvas: HTMLCanvasElement;
   readonly #gl: WebGL2RenderingContext;
+  readonly #program: WebGLProgram;
+  readonly #vao: WebGLVertexArrayObject;
+  /** 道路網と道具の仮の表示。チャンクの上に重ねて描く。 */
+  readonly roads: RoadLayer;
   readonly #textures = new Map<string, Texture>();
   readonly #u: Record<"offset" | "size" | "viewport" | "tiles" | "owned", WebGLUniformLocation>;
 
@@ -68,13 +84,8 @@ export class MapRenderer {
       throw new Error("WebGL2 を使えない");
     }
     this.#gl = gl;
-    const program = gl.createProgram();
-    gl.attachShader(program, compile(gl, gl.VERTEX_SHADER, VERTEX));
-    gl.attachShader(program, compile(gl, gl.FRAGMENT_SHADER, FRAGMENT));
-    gl.linkProgram(program);
-    if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-      throw new Error(`シェーダーをつなげない：${gl.getProgramInfoLog(program)}`);
-    }
+    const program = link(gl, VERTEX, FRAGMENT);
+    this.#program = program;
     gl.useProgram(program);
     this.#u = {
       offset: uniform(gl, program, "u_offset"),
@@ -85,7 +96,8 @@ export class MapRenderer {
     };
     gl.uniform1i(this.#u.tiles, 0);
 
-    gl.bindVertexArray(gl.createVertexArray());
+    this.#vao = gl.createVertexArray();
+    gl.bindVertexArray(this.#vao);
     gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
     gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
     const corner = gl.getAttribLocation(program, "a_corner");
@@ -93,6 +105,8 @@ export class MapRenderer {
     gl.vertexAttribPointer(corner, 2, gl.FLOAT, false, 0, 0);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.activeTexture(gl.TEXTURE0);
+    gl.bindVertexArray(null);
+    this.roads = new RoadLayer(gl, (v, f) => link(gl, v, f));
   }
 
   /** チャンクのテクスチャを作るか、中身を書き換える。 */
@@ -148,6 +162,8 @@ export class MapRenderer {
     gl.viewport(0, 0, width, height);
     gl.clearColor(...BACKGROUND, 1);
     gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.useProgram(this.#program);
+    gl.bindVertexArray(this.#vao);
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     const size = CHUNK_SIDE * camera.zoom;
     gl.uniform1f(this.#u.size, size);
@@ -169,6 +185,8 @@ export class MapRenderer {
         drawn++;
       }
     }
+    gl.bindVertexArray(null);
+    this.roads.draw(camera, viewport);
     return drawn;
   }
 }

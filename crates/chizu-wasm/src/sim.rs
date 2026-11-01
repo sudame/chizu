@@ -1,9 +1,10 @@
 //! Worker が持つシミュレーションの本体。実時間は持たず、進める tick 数は呼び出し側が決める。
 
+use chizu_core::network::road_cost;
 use chizu_core::record::RecordError;
 use chizu_core::{
-    CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, GameTime, TerrainTiles, World, replay,
-    terrain,
+    ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, GameTime, Line,
+    SegmentKind, TerrainTiles, World, terrain,
 };
 
 use crate::snapshot::{Header, TripleBuffer};
@@ -13,6 +14,19 @@ pub struct Sim {
     log: CommandLog,
     paused: bool,
     snapshot: TripleBuffer,
+    /// 適用したが、まだ画面に渡していない結果。
+    reports: Vec<Report>,
+    /// 道路網を変えたコマンドを適用した回数。画面は、この値が変わったときだけ道路の形を受け取り直す。
+    network_revision: u32,
+}
+
+/// 記録したコマンドを適用した結果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    pub seq: u64,
+    pub outcome: ApplyOutcome,
+    /// `Denied` のときの理由。
+    pub reason: Option<&'static str>,
 }
 
 impl Sim {
@@ -22,6 +36,8 @@ impl Sim {
             log: CommandLog::new(),
             paused: false,
             snapshot: TripleBuffer::new(),
+            reports: Vec::new(),
+            network_revision: 0,
         }
     }
 
@@ -71,10 +87,77 @@ impl Sim {
     }
 
     /// 一時停止していなければ `ticks` だけ進める。
+    ///
+    /// 進め方は `chizu_core::replay` と同じで、各 tick の頭にその tick のコマンドを番号順に
+    /// 適用してから `step` を呼ぶ。コマンドごとの結果を受け取るため、ここで同じ手順を回す。
     pub fn advance(&mut self, ticks: u32) {
-        if !self.paused {
-            replay(&mut self.world, &self.log, u64::from(ticks));
+        if self.paused {
+            return;
         }
+        let entries = self.log.entries();
+        let mut next = entries.partition_point(|e| e.tick < self.world.tick());
+        for _ in 0..ticks {
+            while let Some(e) = entries.get(next)
+                && e.tick == self.world.tick()
+            {
+                let outcome = self.world.apply(&e.command);
+                let reason = (outcome == ApplyOutcome::Denied)
+                    .then(|| denial_reason(&self.world, &e.command));
+                if outcome == ApplyOutcome::Applied
+                    && matches!(
+                        e.command,
+                        Command::BuildRoad { .. } | Command::Bulldoze { .. }
+                    )
+                {
+                    self.network_revision = self.network_revision.wrapping_add(1);
+                }
+                self.reports.push(Report {
+                    seq: e.seq,
+                    outcome,
+                    reason,
+                });
+                next += 1;
+            }
+            self.world.step();
+        }
+    }
+
+    /// まだ渡していない結果を、適用した順に取り出す。
+    pub fn take_reports(&mut self) -> Vec<Report> {
+        std::mem::take(&mut self.reports)
+    }
+
+    pub fn network_revision(&self) -> u32 {
+        self.network_revision
+    }
+
+    /// 道路の区間を、1 本につき `[a の x, a の y, b の x, b の y, 種類]` の 5 つの数で返す。
+    /// 種類は [`segment_kind_code`] の番号である。
+    /// 座標はマスの座標で、JS の数で誤差なく表せる範囲にある。
+    pub fn road_segments(&self) -> Vec<f64> {
+        let network = self.world.network();
+        let mut out = Vec::new();
+        for (id, segment) in network.segments() {
+            let line = network.segment_line(id).expect("区間の直線がない");
+            let end = line.end();
+            out.extend(
+                [line.start.x, line.start.y, end.x, end.y]
+                    .map(|v| v as f64)
+                    .into_iter()
+                    .chain([f64::from(segment_kind_code(segment.kind))]),
+            );
+        }
+        out
+    }
+
+    /// ノードを、1 つにつき `[x, y, つながる区間の数]` の 3 つの数で返す。
+    pub fn road_nodes(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for (_, node) in self.world.network().nodes() {
+            let t = node.tile();
+            out.extend([t.x as f64, t.y as f64, node.segments.len() as f64]);
+        }
+        out
     }
 
     /// いまの状態を三重バッファに書く。
@@ -91,6 +174,33 @@ impl Sim {
             paused: self.paused,
         };
         self.snapshot.publish(&header, &[]);
+    }
+}
+
+/// 画面に渡す区間の種類の番号。道路は `RoadKind` の値（1〜3）をそのまま使う。
+pub fn segment_kind_code(kind: SegmentKind) -> u8 {
+    match kind {
+        SegmentKind::Road(k) => k as u8,
+    }
+}
+
+/// `Denied` になったコマンドの理由。`Denied` のコマンドは状態を変えないので、適用したあとの状態で調べてよい。
+/// 網に引けない理由は中核が外に出さないので、ほかの理由に当たらなければ網の決まりに反したとみなす。
+fn denial_reason(world: &World, command: &Command) -> &'static str {
+    match *command {
+        Command::BuildRoad { from, to, kind } => match Line::between(from, to) {
+            Ok(line) if !line.tiles().all(|t| world.is_buildable(t)) => {
+                "買っていない土地か水辺を通る"
+            }
+            Ok(line) if world.money() < road_cost(kind, &line) => "所持金が足りない",
+            _ => "ほかの道路と重なるか、途中で交わる",
+        },
+        Command::Bulldoze { .. } => "範囲に道路がない",
+        Command::BuyChunk { coord } if !world.can_buy_chunk(coord) => {
+            "買った土地に接していないか、もう買ってある"
+        }
+        Command::BuyChunk { .. } => "所持金が足りない",
+        _ => "いまの状態では受け付けられない",
     }
 }
 
@@ -111,7 +221,7 @@ fn encode_tiles(terrain: &TerrainTiles) -> Vec<u8> {
 mod tests {
     use super::*;
     use chizu_core::command::MAX_TAX_PERMILLE;
-    use chizu_core::{Chunk, SimSpeed, Tick, ZoneKind};
+    use chizu_core::{Chunk, RoadKind, SimSpeed, Tick, TilePos, TileRect, ZoneKind};
 
     fn has_water(sim: &Sim, coord: ChunkCoord) -> bool {
         sim.chunk_tiles(coord).iter().any(|t| t & TILE_WATER != 0)
@@ -180,6 +290,70 @@ mod tests {
         };
         assert!(matches!(sim.submit(bad), Err(RecordError::Invalid(_))));
         assert!(sim.log().is_empty());
+    }
+
+    fn road(from: (i64, i64), to: (i64, i64)) -> Command {
+        Command::BuildRoad {
+            from: TilePos::new(from.0, from.1),
+            to: TilePos::new(to.0, to.1),
+            kind: RoadKind::Small,
+        }
+    }
+
+    #[test]
+    fn reports_outcomes_and_counts_network_changes() {
+        let mut sim = Sim::new(0);
+        let money = sim.world().money();
+        sim.submit(road((0, 0), (4, 0))).unwrap();
+        sim.submit(road((0, 0), (4, 0))).unwrap();
+        sim.advance(1);
+        let reports = sim.take_reports();
+        assert_eq!(
+            reports
+                .iter()
+                .map(|r| (r.seq, r.outcome))
+                .collect::<Vec<_>>(),
+            [(0, ApplyOutcome::Applied), (1, ApplyOutcome::Denied)]
+        );
+        assert_eq!(
+            reports[1].reason,
+            Some("ほかの道路と重なるか、途中で交わる")
+        );
+        assert!(sim.take_reports().is_empty());
+        assert_eq!(sim.network_revision(), 1);
+        assert!(sim.world().money() < money);
+        assert_eq!(sim.road_segments(), [0.0, 0.0, 4.0, 0.0, 1.0]);
+        assert_eq!(sim.road_nodes(), [0.0, 0.0, 1.0, 4.0, 0.0, 1.0]);
+
+        let far = (CHUNK_SIDE as i64) * 3;
+        sim.submit(road((far, 0), (far + 2, 0))).unwrap();
+        sim.submit(Command::Bulldoze {
+            area: TileRect::from_corners(TilePos::new(-5, -5), TilePos::new(-4, -4)),
+        })
+        .unwrap();
+        sim.advance(1);
+        let reasons: Vec<_> = sim.take_reports().iter().map(|r| r.reason).collect();
+        assert_eq!(
+            reasons,
+            [
+                Some("買っていない土地か水辺を通る"),
+                Some("範囲に道路がない")
+            ]
+        );
+        assert_eq!(sim.network_revision(), 1);
+    }
+
+    #[test]
+    fn advance_matches_replay() {
+        let mut sim = Sim::new(3);
+        sim.submit(road((0, 0), (6, 6))).unwrap();
+        sim.advance(2);
+        sim.submit(road((0, 6), (6, 0))).unwrap();
+        sim.submit(road((3, 0), (3, 5))).unwrap();
+        sim.advance(3);
+        let mut world = World::new(3);
+        chizu_core::replay(&mut world, sim.log(), 5);
+        assert_eq!(world.state_hash(), sim.world().state_hash());
     }
 
     #[test]

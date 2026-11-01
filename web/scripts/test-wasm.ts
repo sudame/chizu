@@ -193,6 +193,12 @@ try {
     `画面の中心に買ってある陸が描かれる（${owned.join(", ")}）`,
   );
 
+  check(
+    (await map.getAttribute("data-road-revision")) === "0" &&
+      (await map.getAttribute("data-road-segments")) === "0",
+    "起動すると、まだ道路のない道路網が届く",
+  );
+
   await page.mouse.move(cx, cy);
   for (let i = 0; i < 20; i++) {
     await page.mouse.wheel(0, 400);
