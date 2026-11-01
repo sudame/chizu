@@ -1011,7 +1011,12 @@ pub(crate) mod tests {
         assert!(early.happiness < LEAVE_BELOW, "{early:?}");
         run_days(&mut w, 2);
         let late = w.city_stats();
-        assert!(late.citizens <= early.citizens, "{early:?} → {late:?}");
+        // 移り住む世帯は増えない。住んでいる世帯の子が生まれる分は、人口が少し増えてよい。
+        assert!(late.households <= early.households, "{early:?} → {late:?}");
+        assert!(
+            late.citizens <= early.citizens + early.citizens / 4,
+            "{early:?} → {late:?}"
+        );
         // 施設のある同じ街は、ずっと大きく育つ。
         let mut served = city(&zones);
         run_days(&mut served, 4);
