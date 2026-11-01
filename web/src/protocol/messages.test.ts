@@ -33,11 +33,19 @@ describe("isWorkerToMain", () => {
     );
     expect(isWorkerToMain({ ...probe, results: [null, null, null] })).toBe(false);
     expect(isWorkerToMain({ ...probe, results: [null, 1, null, null] })).toBe(false);
+    const inspect = { kind: "inspect", query: { kind: "tile", x: 3, y: -4 }, info: [] };
+    expect(isWorkerToMain(inspect)).toBe(true);
+    expect(isWorkerToMain({ ...inspect, info: [2, 1, 1200, 1200] })).toBe(true);
+    expect(isWorkerToMain({ ...inspect, info: ["a"] })).toBe(false);
+    expect(isWorkerToMain({ ...inspect, query: { kind: "tile", x: 1.5, y: 0 } })).toBe(false);
+    const byTarget = { kind: "target", target: [1, 5, 2] };
+    expect(isWorkerToMain({ ...inspect, query: byTarget })).toBe(true);
+    expect(isWorkerToMain({ ...inspect, query: { kind: "target", target: [1, 5] } })).toBe(false);
     const buildings = {
       kind: "buildings",
       buildings: new Float64Array(7),
       facilities: new Float64Array(5),
-      stats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+      stats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
     };
     expect(isWorkerToMain({ ...buildings, facilities: new Float64Array(4) })).toBe(false);
     expect(isWorkerToMain(buildings)).toBe(true);

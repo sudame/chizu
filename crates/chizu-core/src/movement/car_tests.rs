@@ -243,6 +243,7 @@ fn cars_reroute_around_a_removed_road_and_show_as_movers() {
     assert_eq!(t.speed(), speed);
     assert!(t.route().links.len() >= 5);
     let m = c.trips.movers_in(
+        &c.net,
         WorldPos::new(Mm(0), Mm(0)),
         WorldPos::new(Mm(80_000), Mm(8_000)),
     );
@@ -399,6 +400,42 @@ fn cars_use_more_than_the_first_lane_on_large_roads() {
 }
 
 #[test]
+fn mover_shifts_follow_the_lane_each_car_runs_in() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (12, 0), RoadKind::Large);
+    let mut c = Cars::new(n);
+    // 上り（+x）の車線ごとに 1 台ずつ、下り（-x）に 1 台走らせる。
+    for _ in 0..3 {
+        c.drive(at(2, 0, (1, 0), 0), at(10, 0, (1, 0), 0));
+    }
+    c.drive(at(10, 0, (-1, 0), 0), at(2, 0, (-1, 0), 0));
+    let min = WorldPos::new(Mm(-8_000), Mm(-8_000));
+    let max = WorldPos::new(Mm(160_000), Mm(16_000));
+    for _ in 0..40 {
+        c.step();
+        for m in c.trips.movers_in(&c.net, min, max) {
+            assert_eq!(m.mode, LaneMode::Car);
+            let t = c.trips.get(m.id).unwrap();
+            let k = c
+                .net
+                .link_lanes(t.link())
+                .position(|l| l == t.lane())
+                .unwrap();
+            // 横のずれは中心線に直交し、左側通行で、車線の番号が小さいほど端（中心線から遠い）にある。
+            assert_eq!(m.shift.0, Mm(0));
+            let side = if m.heading.0 > 0 { -1 } else { 1 };
+            let settled = t.blend.is_none_or(|b| {
+                i64::from(t.offset().0) >= i64::from(b.start) + lane_shift::BLEND_MM
+            });
+            if settled {
+                // 大きい道路の車線は 1,120mm 幅で、端の車線の中心は中心線から 2,800mm にある。
+                assert_eq!(m.shift.1, Mm(side * (2_800 - 1_120 * k as i64)));
+            }
+        }
+    }
+}
+
+#[test]
 fn cars_from_the_same_tile_queue_behind_or_wait() {
     let mut n = Network::new();
     road(&mut n, (0, 0), (10, 0), RoadKind::Small);
@@ -411,6 +448,7 @@ fn cars_from_the_same_tile_queue_behind_or_wait() {
     assert_eq!(c.trips.get(b).unwrap().offset(), LaneOffset(1_000));
     let w = c.drive(at(1, 0, (1, 0), 0), at(9, 0, (1, 0), 0));
     let m = c.trips.movers_in(
+        &c.net,
         WorldPos::new(Mm(0), Mm(0)),
         WorldPos::new(Mm(80_000), Mm(8_000)),
     );
@@ -516,4 +554,89 @@ fn a_car_keeps_its_side_when_it_drives_toward_the_destination() {
     let t = c.trips.get(id).unwrap();
     assert_eq!(t.route().links.len(), 1);
     assert_eq!(t.link().dir, Dir::Forward);
+}
+
+/// 範囲の中の移動体の、中心線の上の位置とずれ。
+type Drawn = std::collections::BTreeMap<crate::id::TripId, ((i64, i64), (i64, i64))>;
+
+fn drawn(c: &Cars) -> Drawn {
+    let min = WorldPos::new(Mm(-800_000), Mm(-800_000));
+    let max = WorldPos::new(Mm(800_000), Mm(800_000));
+    c.trips
+        .movers_in(&c.net, min, max)
+        .into_iter()
+        .map(|m| (m.id, ((m.pos.x.0, m.pos.y.0), (m.shift.0.0, m.shift.1.0))))
+        .collect()
+}
+
+#[test]
+fn lane_shifts_follow_the_travelled_distance_across_road_kinds_and_turns() {
+    // 大きい道路から小さい道路へ移り、2 回曲がる。道路の種類が変わると車線の幅も数も変わる。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (12, 0), RoadKind::Large);
+    road(&mut n, (12, 0), (12, 10), RoadKind::Medium);
+    road(&mut n, (12, 10), (2, 10), RoadKind::Small);
+    road(&mut n, (2, 10), (2, 14), RoadKind::Large);
+    let mut c = Cars::new(n);
+    for k in 0..6_i64 {
+        c.drive(at(1 + k % 2, 0, (1, 0), 0), at(2, 13, (0, 1), 0));
+    }
+    let mut before = drawn(&c);
+    let mut samples = 0_usize;
+    let mut turned = false;
+    for _ in 0..600 {
+        c.step();
+        let after = drawn(&c);
+        for (id, (pos, shift)) in &after {
+            let Some((pos0, shift0)) = before.get(id) else {
+                continue;
+            };
+            let dist = (pos.0 - pos0.0).abs().max((pos.1 - pos0.1).abs());
+            let dshift = (shift.0 - shift0.0).abs().max((shift.1 - shift0.1).abs());
+            // 横のずれの変わり方は、進んだ距離に比べて高々 3 倍である（3m で移りきる）。
+            // 車線が飛べば、進んだ距離が短いときにこれを超える。
+            assert!(
+                dshift <= 3 * dist + 50,
+                "{id:?} が 1 tick に {dist}mm 進むあいだに、ずれが {dshift}mm 変わった"
+            );
+            samples += 1;
+            turned |= c.trips.get(*id).is_some_and(|t| t.leg >= 2);
+        }
+        before = after;
+    }
+    assert!(samples > 100 && turned, "走った車が少ない {samples}");
+}
+
+#[test]
+fn a_running_car_keeps_its_direction_when_it_reroutes() {
+    // 四角い輪の下の辺を東へ走る車の前で、右下の区間を消して下の辺を行き止まりにする。
+    // 反対の車線へ移れるなら西へ戻るのがいちばん早いが、走っている車はその場で向きを変えられない。
+    // 行き止まりまで進んで折り返す。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (14, 0), RoadKind::Small);
+    road(&mut n, (14, 0), (20, 0), RoadKind::Small);
+    road(&mut n, (0, 0), (0, 10), RoadKind::Small);
+    road(&mut n, (0, 10), (20, 10), RoadKind::Small);
+    road(&mut n, (20, 10), (20, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let id = c.drive(at(4, 0, (1, 0), 0), at(20, 5, (0, -1), 0));
+    for _ in 0..3 {
+        c.step();
+    }
+    c.net
+        .bulldoze(TileRect::from_corners(
+            TilePos::new(15, 0),
+            TilePos::new(15, 0),
+        ))
+        .unwrap();
+    c.router.rebuild(&c.net);
+    assert!(c.trips.reroute(&c.net, &mut c.router).is_empty());
+    let t = c.trips.get(id).unwrap();
+    assert_eq!(t.link().dir, Dir::Forward);
+    assert_eq!(t.position().step, (1, 0));
+    let mut arrived = false;
+    for _ in 0..600 {
+        arrived |= c.step().contains(&id);
+    }
+    assert!(arrived);
 }

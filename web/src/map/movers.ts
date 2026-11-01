@@ -31,10 +31,11 @@ void main() {
   float angle = float(a_heading_kind & 0xffffu) * (6.2831853 / 65536.0);
   vec2 along = vec2(cos(angle), sin(angle));
   vec2 across = vec2(-along.y, along.x);
-  // 半分の大きさ（マス）。1 マスは 8m で、人は 1.6m、車は 4.8m×1.9m ほどにする。縮小しても消えないよう下限を置く
+  // 半分の大きさ（マス）。1 マスは 8m で、車は 4.8m 長さで、いちばん狭い車線（大きい道路の 1.1m）に収まる幅にする。
+  // 人は歩道（0.64m）に収まる大きさにする。縮小しても消えないよう下限を置く
   vec2 half_px = kind == ${KIND_CAR}u
-    ? max(vec2(0.3, 0.12) * u_zoom, vec2(2.0, 1.0))
-    : vec2(max(0.1 * u_zoom, 1.5));
+    ? max(vec2(0.3, 0.06) * u_zoom, vec2(2.0, 1.0))
+    : vec2(max(0.035 * u_zoom, 1.5));
   vec2 p = a_pos * u_zoom + u_offset + along * a_corner.x * half_px.x + across * a_corner.y * half_px.y;
   p /= u_viewport * 0.5;
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);

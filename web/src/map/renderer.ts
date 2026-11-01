@@ -6,7 +6,13 @@ import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { chunkKey, type StoredChunk } from "./chunk-sync.ts";
 import { LayerOverlay } from "./layers.ts";
 import { MoverLayer } from "./movers.ts";
-import { RoadLayer } from "./roads.ts";
+import { GRASS_COLOR, RoadLayer, ZONE_BASE, ZONE_MIX } from "./roads.ts";
+
+// 区画の色は roads.ts の ZONE_BASE と共有する（1〜4 の順）
+const ZONE_GLSL = [1, 2, 3, 4].map((zone) => {
+  const [r, g, b] = ZONE_BASE[zone] ?? [0.6, 0.6, 0.6];
+  return `vec3(${r}, ${g}, ${b})`;
+});
 
 const VERTEX = `#version 300 es
 in vec2 a_corner;
@@ -29,17 +35,14 @@ in vec2 v_uv;
 out vec4 color;
 // 区画の色は CS2 にならう。住宅は緑、商業は青、工業は黄、オフィスは水色
 const vec3 ZONE[4] = vec3[4](
-  vec3(0.15, 0.95, 0.15),
-  vec3(0.25, 0.45, 0.95),
-  vec3(0.95, 0.8, 0.2),
-  vec3(0.3, 0.85, 0.95)
+  ${ZONE_GLSL.join(",\n  ")}
 );
 void main() {
   uint tile = texture(u_tiles, v_uv).r;
-  vec3 c = (tile & ${TILE_WATER}u) != 0u ? vec3(0.24, 0.48, 0.72) : vec3(0.56, 0.72, 0.42);
+  vec3 c = (tile & ${TILE_WATER}u) != 0u ? vec3(0.24, 0.48, 0.72) : vec3(${GRASS_COLOR.join(", ")});
   uint zone = (tile >> ${TILE_ZONE_SHIFT}u) & 7u;
   if (zone >= 1u && zone <= 4u) {
-    c = mix(c, ZONE[zone - 1u], 0.55);
+    c = mix(c, ZONE[zone - 1u], ${ZONE_MIX});
   } else if (u_zonable && (tile & ${TILE_ZONABLE}u) != 0u) {
     c = mix(c, vec3(1.0), 0.3);
   }

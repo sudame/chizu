@@ -114,11 +114,18 @@ cargo run -p chizu-cli -- agent new <dir> --from <fb>     # フィードバッ�
 cargo run -p chizu-cli -- agent act <dir> <commands.json> # いまの tick でコマンドを適用する
 cargo run -p chizu-cli -- agent advance <dir> <ticks>     # 時間を進める
 cargo run -p chizu-cli -- agent observe <dir>             # 街の様子を JSON で出す
+cargo run -p chizu-cli -- agent map <dir> <x0> <y0> <x1> <y1> [--scale N]  # 範囲の地図を文字のマス目で出す
 ```
+
+map は observe と同じく何も書かず、フィードバックのディレクトリにも打てる。1 マスを 1 文字にして、先頭に凡例、上に x、行頭に y の目盛りを付ける。
+座標は act と同じである。出力の上限は 9216 文字で、超える範囲は断り、必要な `--scale` を案内する。`--scale N` は N×N マスを 1 文字にまとめる。
+買った土地の範囲は observe の `land.ownedBounds` にあるので、まずそこを `--scale` を上げて眺め、置きたい所を拡大するとよい。
+重なったときの優先順位と、文字の意味は `--help` に書いてある。
 
 コマンドの JSON の形と座標の意味は `cargo run -p chizu-cli -- agent --help` で出る。
 
 コマンドや、遊ぶ人が見て判断する状態（お金、需要、サービスなど）を足したり変えたりしたら、同じ PR で `chizu-cli agent` の act と observe を追従させる。
+地図に出すもの（マスの種類、建物、施設、道路の種類）を足したら、`agent/map.rs` の凡例と文字も足す。
 コマンドと JSON を行き来する match はワイルドカードなしで書いてあるので、`Command` の種類や欄を足すと chizu-cli がコンパイルで止まる。
 
 ## 保存

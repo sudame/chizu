@@ -109,6 +109,72 @@
         align-items: center;
         margin: 4px 0;
       }
+      #city-utilities.short {
+        color: #a31515;
+        font-weight: bold;
+      }
+      #city-shortage {
+        position: fixed;
+        top: 8px;
+        left: 520px;
+        padding: 4px 8px;
+        max-width: 24em;
+        font-size: 13px;
+        color: #7a1010;
+        background: #ffe3a3;
+        border: 1px solid #d49a00;
+        border-radius: 4px;
+      }
+      @media (max-width: 900px) {
+        #city-shortage {
+          top: auto;
+          right: 8px;
+          bottom: 104px;
+          left: 8px;
+          max-width: none;
+        }
+      }
+      #legend {
+        position: fixed;
+        right: 8px;
+        bottom: 56px;
+        max-width: 16em;
+        padding: 4px 8px;
+        font-size: 12px;
+        background: rgb(255 255 255 / 90%);
+        border-radius: 4px;
+      }
+      #legend summary {
+        cursor: pointer;
+        font-weight: bold;
+      }
+      #legend h3 {
+        margin: 6px 0 2px;
+        font-size: 12px;
+      }
+      #legend ul {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2px 10px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      #legend li {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+      #legend .swatch {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border: 1px solid rgb(0 0 0 / 40%);
+      }
+      #legend .swatch-icon {
+        background: #555;
+        border-radius: 2px;
+      }
       #demand {
         display: flex;
         gap: 4px;
@@ -160,6 +226,7 @@
       </div>
       <div id="layers" title="データレイヤー"></div>
     </div>
+    <div id="city-shortage" role="status" hidden></div>
     <div id="toolbar">
       <button type="button" data-tool="none" aria-pressed="true">見る</button>
       <button type="button" data-tool="road-Small" aria-pressed="false">道路 小</button>
@@ -177,6 +244,10 @@
       <span id="tool-info"></span>
       <span id="tool-message" aria-live="polite"></span>
     </div>
+    <details id="legend">
+      <summary>凡例</summary>
+      <div id="legend-body"></div>
+    </details>
     <button type="button" id="feedback-open" hidden>フィードバック</button>
     <div id="dev-tools">
       <button type="button" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>
@@ -191,6 +262,49 @@
         <button type="submit" value="close" formnovalidate>閉じる</button>
       </form>
     </dialog>
+    <style>
+      /* 右下の凡例と重ならないよう、右上のフィードバックのボタンの下に置く */
+      #inspector {
+        position: fixed;
+        right: 8px;
+        top: 48px;
+        min-width: 16em;
+        padding: 4px 8px 8px;
+        font-size: 14px;
+        background: rgb(255 255 255 / 90%);
+        border-radius: 4px;
+      }
+      #inspector[hidden] {
+        display: none;
+      }
+      #inspector header {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+        font-weight: bold;
+      }
+      #inspector dl {
+        display: grid;
+        grid-template-columns: auto auto;
+        gap: 2px 12px;
+        margin: 4px 0 0;
+      }
+      #inspector dt {
+        color: #555;
+      }
+      #inspector dd {
+        margin: 0;
+        text-align: right;
+      }
+    </style>
+    <aside id="inspector" hidden>
+      <header>
+        <span data-inspector-title aria-live="polite"></span>
+        <button type="button" data-inspector-close aria-label="閉じる">×</button>
+      </header>
+      <dl data-inspector-rows></dl>
+    </aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

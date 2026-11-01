@@ -4,7 +4,7 @@ export type RoadKindName = "Small" | "Medium" | "Large";
 /** 施設の種類。 */
 export type ServiceName = "PowerPlant" | "WaterPump";
 /** chizu-wasm の city_stats の数の個数。 */
-export const CITY_STATS_LENGTH = 12;
+export const CITY_STATS_LENGTH = 16;
 /** 区画の種類。Clear は区画を消す。 */
 export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
 
@@ -78,12 +78,38 @@ export type LayerCode = number;
 /** データレイヤーの、チャンク 1 つの値。values は 1 マス 1 バイトを行ごとに並べたもので、移譲して送る。 */
 export type LayerChunkData = { cx: number; cy: number; version: number; values: ArrayBuffer };
 
+/** 押したものの識別子 `[種類, a, b]`。chizu-wasm の inspect_target に渡す。建物は添え字と世代、施設は min のマス。 */
+export type InspectTarget = [number, number, number];
+
+/** 建物や施設の問い合わせ。最初はマスで、押したものが決まってからは識別子で引く。 */
+export type InspectQuery =
+  | { kind: "tile"; x: number; y: number }
+  | { kind: "target"; target: InspectTarget };
+
+function isInspectQuery(value: unknown): value is InspectQuery {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const v = value as Record<string, unknown>;
+  if (v.kind === "tile") {
+    return Number.isInteger(v.x) && Number.isInteger(v.y);
+  }
+  return (
+    v.kind === "target" &&
+    Array.isArray(v.target) &&
+    v.target.length === 3 &&
+    v.target.every((n) => Number.isInteger(n))
+  );
+}
+
 export type MainToWorker =
   /** id は画面が振る番号で、結果の通知で返ってくる。 */
   | { kind: "command"; id: number; command: CommandMessage }
   | { kind: "pause"; paused: boolean }
   /** 施設を間口のマス (x, y) に置けるかを、向きごとに中核に問い合わせる。 */
   | { kind: "probe-service"; service: ServiceName; x: number; y: number }
+  /** マス (x, y) にある建物か施設の様子を中核に問い合わせる。 */
+  | { kind: "inspect"; query: InspectQuery }
   /** フィードバックに添える状態と記録を求める。 */
   | { kind: "feedback" }
   /**
@@ -130,6 +156,8 @@ export type WorkerToMain =
       y: number;
       results: (string | null)[];
     }
+  /** inspect の答え。query は問い合わせの写しで、info は chizu-wasm の inspect の数。何もなければ空。 */
+  | { kind: "inspect"; query: InspectQuery; info: number[] }
   /** フィードバックの状態を返せなかった。 */
   | { kind: "feedback-error"; message: string }
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
@@ -231,6 +259,12 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         Array.isArray(v.results) &&
         v.results.length === 4 &&
         v.results.every((r) => r === null || typeof r === "string")
+      );
+    case "inspect":
+      return (
+        isInspectQuery(v.query) &&
+        Array.isArray(v.info) &&
+        v.info.every((n) => typeof n === "number")
       );
     case "feedback-error":
     case "error":
