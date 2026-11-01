@@ -26,24 +26,42 @@ export function demandBar(value: number): number {
   return Math.max(-1, Math.min(1, value / DEMAND_FULL_SCALE));
 }
 
-const BAR_HALF_PX = 20;
+/** 棒の入れ物の高さの半分（ピクセル）。真ん中の線が需要 0 である。 */
+export const BAR_HALF_PX = 20;
+
+/** 建物の数と、住める世帯と職場の上限の 1 行。 */
+export function formatCityNumbers(stats: CityStats): string {
+  const n = (v: number) => v.toLocaleString("ja-JP");
+  return `建物 ${n(stats.buildings)} 棟・住める世帯 ${n(stats.households)}・職場の枠 ${n(stats.workplaces)}`;
+}
+
+export type BarLayout = { value: number; top: number; height: number };
+
+/** 住宅・商業・工業・オフィスの順の棒の位置。正の需要は真ん中の線から上へ、負の需要は下へ伸ばす。 */
+export function demandBars(stats: CityStats): BarLayout[] {
+  return stats.demand.map((value) => {
+    const v = demandBar(value);
+    const height = Math.abs(v) * BAR_HALF_PX;
+    return { value, top: v >= 0 ? BAR_HALF_PX - height : BAR_HALF_PX, height };
+  });
+}
 
 export function renderCityStats(stats: CityStats): void {
   const numbers = document.querySelector<HTMLElement>("#city-numbers");
   if (numbers !== null) {
-    const n = (v: number) => v.toLocaleString("ja-JP");
-    numbers.textContent = `建物 ${n(stats.buildings)} 棟・世帯 ${n(stats.households)}・職場 ${n(stats.workplaces)}`;
+    numbers.textContent = formatCityNumbers(stats);
     // test:wasm が読む
     numbers.dataset.buildings = String(stats.buildings);
   }
-  const bars = document.querySelectorAll<HTMLElement>("#demand .bar");
-  bars.forEach((bar, i) => {
-    const v = demandBar(stats.demand[i] ?? 0);
-    const height = Math.abs(v) * BAR_HALF_PX;
-    // 正の需要は真ん中の線から上へ、負の需要は下へ伸ばす
-    bar.style.height = `${height}px`;
-    bar.style.top = `${v >= 0 ? BAR_HALF_PX - height : BAR_HALF_PX}px`;
-    bar.title = String(stats.demand[i] ?? 0);
-    bar.dataset.demand = String(stats.demand[i] ?? 0);
+  const layouts = demandBars(stats);
+  document.querySelectorAll<HTMLElement>("#demand .bar").forEach((bar, i) => {
+    const layout = layouts[i];
+    if (layout === undefined) {
+      return;
+    }
+    bar.style.height = `${layout.height}px`;
+    bar.style.top = `${layout.top}px`;
+    bar.title = String(layout.value);
+    bar.dataset.demand = String(layout.value);
   });
 }

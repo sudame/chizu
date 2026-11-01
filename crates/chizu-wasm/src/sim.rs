@@ -1,8 +1,10 @@
 //! Worker が持つシミュレーションの本体。実時間は持たず、進める tick 数は呼び出し側が決める。
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chizu_core::building::demand;
+use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::record::RecordError;
 use chizu_core::zone::{ZONE_DEPTH, near_road};
 use chizu_core::{
@@ -22,6 +24,8 @@ pub struct Sim {
     reports: Vec<Report>,
     /// 道路網が変わって、区画を塗れるマスが変わりうるチャンクに足していく数。画面向けの版に混ぜる。
     near_road_changes: BTreeMap<ChunkCoord, u32>,
+    /// 建物の表の版の控え。`(記録の件数, 建つ・育つが走った回数, 版)` で、前の 2 つが変わったときだけ計算し直す。
+    buildings_version: Cell<Option<(usize, u64, f64)>>,
 }
 
 /// 記録したコマンドを適用した結果。
@@ -40,6 +44,7 @@ impl Sim {
             snapshot: TripleBuffer::new(),
             reports: Vec::new(),
             near_road_changes: BTreeMap::new(),
+            buildings_version: Cell::new(None),
         }
     }
 
@@ -230,8 +235,24 @@ impl Sim {
     }
 
     /// 建物の表の版。建物が建つ、消える、段階が上がるたびに変わる。表の状態ハッシュの下位 52 ビットを使う。
+    ///
+    /// 建物の表が変わるのは、コマンドを適用したときと、建つ・育つが走る tick（`GROWTH_INTERVAL` の倍数）
+    /// だけである。表全体のハッシュは重いので、そのどちらかが起きたときだけ計算し直す。
     pub fn buildings_version(&self) -> f64 {
-        (state_hash_of(self.world.buildings()) & ((1 << 52) - 1)) as f64
+        let key = (self.log.len(), self.growth_runs());
+        if let Some((commands, growth, version)) = self.buildings_version.get()
+            && (commands, growth) == key
+        {
+            return version;
+        }
+        let version = (state_hash_of(self.world.buildings()) & ((1 << 52) - 1)) as f64;
+        self.buildings_version.set(Some((key.0, key.1, version)));
+        version
+    }
+
+    /// これまでに建つ・育つの処理が走った回数。tick 0 から `GROWTH_INTERVAL` ごとに 1 回走る。
+    fn growth_runs(&self) -> u64 {
+        self.world.tick().0.div_ceil(GROWTH_INTERVAL)
     }
 
     /// 建物を、1 つにつき `[min の x, min の y, max の x, max の y, 区画の種類, 段階]` の 6 つの数で返す。
@@ -464,6 +485,39 @@ mod tests {
         assert_eq!(stats[0], count as f64);
         assert!(stats[1] > 0.0);
         assert_ne!(sim.buildings_version(), version);
+    }
+
+    #[test]
+    fn cached_buildings_version_never_misses_a_change() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        let fresh = |sim: &Sim| (state_hash_of(sim.world().buildings()) & ((1 << 52) - 1)) as f64;
+        let mut changes = 0;
+        let mut last = sim.buildings_version();
+        for _ in 0..(GROWTH_INTERVAL * 5) {
+            sim.advance(1);
+            let v = sim.buildings_version();
+            assert_eq!(v, fresh(&sim), "tick {}", sim.world().tick().0);
+            if v != last {
+                changes += 1;
+            }
+            last = v;
+        }
+        assert!(changes > 0, "建物が建たない");
+        // 道路を消すと建物も消え、版が変わり、数字は 0 に戻る
+        sim.submit(Command::Bulldoze {
+            area: TileRect::from_corners(TilePos::new(10, 10), TilePos::new(30, 10)),
+        })
+        .unwrap();
+        assert!(sim.world().buildings().is_empty());
+        assert_ne!(sim.buildings_version(), last);
+        assert_eq!(sim.buildings_version(), fresh(&sim));
+        assert_eq!(sim.city_stats()[..3], [0.0, 0.0, 0.0]);
     }
 
     #[test]

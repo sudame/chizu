@@ -165,6 +165,7 @@ export function roadGeometry(segments: Float64Array, nodes: Float64Array): Geome
 
 type Mesh = { buffer: WebGLBuffer; vao: WebGLVertexArrayObject; count: number; origin: Tile };
 
+// 道路と建物は、1 つ変わるたびに全体を受け取り直して頂点を作り直す。重くなったらチャンクごとのメッシュに分ける。
 export class RoadLayer {
   readonly #gl: WebGL2RenderingContext;
   readonly #program: WebGLProgram;
