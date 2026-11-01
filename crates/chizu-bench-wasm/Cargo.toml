@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 chizu-scenario = { path = "../chizu-scenario" }
+rayon = "1.11"
 # wasm-bindgen-cli は mise.toml で同じ版を入れる。版を変えるときは chizu-wasm とそろえる
 wasm-bindgen = "=0.2.130"
 
