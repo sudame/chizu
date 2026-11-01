@@ -88,10 +88,10 @@ function sendRoads(sim: Simulation): void {
   reply({ kind: "roads", revision, segments, nodes }, [segments.buffer, nodes.buffer]);
 }
 
-// 建物は、表の版が変わったときだけ全体を送り直す
+// 建物と街の数字は、建物の表か道路網が変わったときだけ全体を送り直す。足りない網の数は網のつながりで変わる
 let sentBuildingsVersion = -1;
 function sendBuildings(sim: Simulation): void {
-  const version = sim.buildings_version();
+  const version = sim.supply_version();
   if (version === sentBuildingsVersion) {
     return;
   }

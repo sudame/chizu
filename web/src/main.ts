@@ -565,7 +565,8 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "layer-chunks") {
     if (activeLayers.includes(message.layer)) {
-      for (const c of message.chunks) {
+      // 画面が捨てた直後に届いたチャンクは、手元の地形と一緒に捨てる
+      for (const c of message.chunks.filter((c) => store.get(c.cx, c.cy) !== undefined)) {
         renderer?.layers.upload(message.layer, c.cx, c.cy, c.version, new Uint8Array(c.values));
       }
     }

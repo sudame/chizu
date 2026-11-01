@@ -79,8 +79,8 @@ impl LayerGrid {
     }
 }
 
-/// 建物の表（供給の有無を含む）か道路網が変わると変わる。
-fn supply_version(sim: &Sim) -> u64 {
+/// 建物の表（供給の有無を含む）か道路網が変わると変わる。HUD の街の数字も、この版が変わったときに送り直す。
+pub fn supply_version(sim: &Sim) -> u64 {
     let mut h = StateHasher::new();
     h.write(&sim.buildings_version().to_bits());
     h.write(&sim.network_version());
@@ -88,6 +88,7 @@ fn supply_version(sim: &Sim) -> u64 {
 }
 
 /// 建物は中核が判定して持っている供給の有無で、道路は網ごとの供給量と需要の釣り合いで塗る。
+// 建物が建った tick は、中核が次の tick の頭まで供給を判定し直さないので、道路は足りていても新しい建物は赤になる
 fn supply_values(world: &World, kind: ServiceKind) -> LayerGrid {
     let slot = match kind {
         ServiceKind::PowerPlant => 0,
@@ -189,6 +190,11 @@ impl LayerCache {
 
 #[wasm_bindgen]
 impl Simulation {
+    /// 建物と施設の表と、道路網の版。街の数字（`city_stats`）はこの版が変わったときだけ送り直す。
+    pub fn supply_version(&self) -> f64 {
+        (supply_version(&self.0) & ((1 << 52) - 1)) as f64
+    }
+
     /// データレイヤーの版。レイヤーの番号も混ぜ、JS の数で誤差なく表せる下位 52 ビットにする。
     pub fn layer_version(&self, code: u8) -> Result<f64, JsError> {
         let layer = layer(code)?;
@@ -273,6 +279,54 @@ mod tests {
         );
         assert_eq!(value_at(&mut cache, &sim, water, TilePos::new(16, 9)), 0);
         assert_eq!(utility_totals(sim.world()), [400, 0, 0, 1]);
+    }
+
+    #[test]
+    fn joining_and_splitting_networks_changes_the_stats_version() {
+        let mut sim = Sim::new(0);
+        let road = |from: (i64, i64), to: (i64, i64)| Command::BuildRoad {
+            from: TilePos::new(from.0, from.1),
+            to: TilePos::new(to.0, to.1),
+            kind: RoadKind::Small,
+        };
+        for (y, zone) in [(10, ZoneKind::Residential), (20, ZoneKind::Industrial)] {
+            sim.submit(road((10, y), (30, y))).unwrap();
+            sim.submit(Command::PaintZone {
+                area: TileRect::from_corners(TilePos::new(10, y + 1), TilePos::new(25, y + 4)),
+                zone: Some(zone),
+            })
+            .unwrap();
+        }
+        // 2 本の道路の両方に建物が建つまで進める
+        for _ in 0..20 {
+            sim.advance(GROWTH_INTERVAL as u32);
+            let ys: Vec<i64> = sim
+                .world()
+                .buildings()
+                .iter()
+                .map(|(_, b)| b.area.min.y)
+                .collect();
+            if ys.iter().any(|y| *y < 20) && ys.iter().any(|y| *y > 20) {
+                break;
+            }
+        }
+        sim.advance(1);
+        let short = |sim: &Sim| sim.city_stats()[10..12].to_vec();
+        assert_eq!(short(&sim), [2.0, 2.0], "施設のない網が 2 つある");
+        let (buildings, version) = (sim.buildings_version(), supply_version(&sim));
+        // 2 本の端をつなぐと網は 1 つになる。建物の表は変わらないが、版は変わる
+        sim.submit(road((30, 10), (30, 20))).unwrap();
+        assert_eq!(short(&sim), [1.0, 1.0]);
+        assert_eq!(sim.buildings_version(), buildings);
+        assert_ne!(supply_version(&sim), version);
+        // つなぎの区間を消すと、また 2 つに分かれ、版も変わる
+        let joined = supply_version(&sim);
+        sim.submit(Command::Bulldoze {
+            area: TileRect::from_corners(TilePos::new(30, 12), TilePos::new(30, 18)),
+        })
+        .unwrap();
+        assert_eq!(short(&sim), [2.0, 2.0]);
+        assert_ne!(supply_version(&sim), joined);
     }
 
     #[test]
