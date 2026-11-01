@@ -122,14 +122,16 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   await page.waitForTimeout(100);
   const walkFrom = tileCenter(14, 32);
   const walkTo = tileCenter(50, 32);
-  const roadColor = await pixel(walkFrom);
+  // 歩く人は歩道の上にいる。小さい道路の歩道は中心線から 0.26 マス、東へ歩く人の右（画面の下）にある
+  const sidewalk = { x: walkFrom.x, y: walkFrom.y + 0.26 * zoom };
+  const roadColor = await pixel(sidewalk);
   await page.locator('button[data-tool="dev-walks"]').click();
   await page.mouse.click(walkFrom.x, walkFrom.y);
   await page.mouse.click(walkTo.x, walkTo.y);
   await waitMap("devWalks", "0", "gt");
   await waitMap("drawnMovers", "0", "gt");
   const spawned = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
-  const walkerColor = await pixel(walkFrom);
+  const walkerColor = await pixel(sidewalk);
   check(
     brightness(walkerColor) > brightness(roadColor) + 200,
     `歩く人を出すと移動体の点が描かれる（${spawned.drawnMovers} 人、${roadColor.join(", ")} → ${walkerColor.join(", ")}）`,
