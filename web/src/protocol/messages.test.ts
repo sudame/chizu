@@ -37,7 +37,7 @@ describe("isWorkerToMain", () => {
       kind: "buildings",
       buildings: new Float64Array(7),
       facilities: new Float64Array(5),
-      stats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      stats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     };
     expect(isWorkerToMain({ ...buildings, facilities: new Float64Array(4) })).toBe(false);
     expect(isWorkerToMain(buildings)).toBe(true);
@@ -47,6 +47,15 @@ describe("isWorkerToMain", () => {
       true,
     );
     expect(isWorkerToMain({ kind: "outcome", id: 4, outcome: "Rejected" })).toBe(true);
+    const layer = { cx: 0, cy: -1, version: 5, values: new ArrayBuffer(CHUNK_AREA) };
+    expect(isWorkerToMain({ kind: "layer-chunks", layer: 1, chunks: [layer] })).toBe(true);
+    expect(
+      isWorkerToMain({
+        kind: "layer-chunks",
+        layer: 1,
+        chunks: [{ ...layer, values: new ArrayBuffer(8) }],
+      }),
+    ).toBe(false);
   });
 
   test("形の違うメッセージを捨てる", () => {

@@ -7,10 +7,12 @@
 //!
 //! 届く範囲の決め方は要件で未定なので、ここを差し替えれば判定が変わるようにしている。
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::building::{Building, Buildings};
 use crate::command::ServiceKind;
 use crate::id::BuildingId;
-use crate::network::{LinkId, Network};
+use crate::network::{LinkId, Network, SegmentId};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{TilePos, TileRect};
 use crate::units::Money;
@@ -141,44 +143,79 @@ impl Components {
     }
 }
 
-/// 建物ごとに、電気と水道が届いているかを決める。結果は建物の ID の順に並ぶ。
-pub fn evaluate_supply(
-    network: &Network,
-    facilities: &[Facility],
-    buildings: &Buildings,
-) -> Vec<(BuildingId, Supply)> {
+/// 連結成分 1 つの、電気か水道の供給量と需要。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Balance {
+    pub capacity: u64,
+    pub demand: u64,
+}
+
+impl Balance {
+    /// この成分の建物に届くか。
+    pub fn enough(self) -> bool {
+        self.capacity > 0 && self.capacity >= self.demand
+    }
+}
+
+/// 道路網の連結成分ごとの、電気と水道の釣り合い。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SupplyBalance {
+    /// 成分ごとの `[電気, 水道]`。成分の代表のノードの添え字の順に並ぶ。
+    pub components: Vec<[Balance; 2]>,
+    /// 区間ごとの、`components` の添え字。区間の ID の順に並ぶ。
+    pub segments: Vec<(SegmentId, usize)>,
+}
+
+/// 成分ごとに施設の供給量と建物の需要を足したもの。
+struct Tally {
+    comps: Components,
+    /// ノードの添え字ごとの `[電気, 水道]`。成分の代表の添え字のところにだけ値が入る。
+    balance: Vec<[Balance; 2]>,
+    placed: Vec<(BuildingId, Option<usize>)>,
+}
+
+fn tally(network: &Network, facilities: &[Facility], buildings: &Buildings) -> Tally {
     let mut comps = Components::of(network);
-    let n = comps.parent.len();
-    // 成分ごとの、電気と水道の供給量と需要。
-    let mut capacity = vec![[0_u64; 2]; n];
-    let mut demand = vec![[0_u64; 2]; n];
+    let mut balance = vec![[Balance::default(); 2]; comps.parent.len()];
     for f in facilities {
         if let Some(c) = f.entrance.and_then(|e| comps.of_link(network, e)) {
             let slot = match f.kind {
                 ServiceKind::PowerPlant => 0,
                 ServiceKind::WaterPump => 1,
             };
-            capacity[c][slot] += f.kind.capacity();
+            balance[c][slot].capacity += f.kind.capacity();
         }
     }
-    let placed: Vec<(BuildingId, Option<usize>)> = buildings
+    let placed = buildings
         .iter()
         .map(|(id, b)| {
             let c = comps.of_link(network, b.entrance);
             if let Some(c) = c {
                 let d = building_demand(b);
-                demand[c][0] += d;
-                demand[c][1] += d;
+                balance[c][0].demand += d;
+                balance[c][1].demand += d;
             }
             (id, c)
         })
         .collect();
-    placed
+    Tally {
+        comps,
+        balance,
+        placed,
+    }
+}
+
+/// 建物ごとに、電気と水道が届いているかを決める。結果は建物の ID の順に並ぶ。
+pub fn evaluate_supply(
+    network: &Network,
+    facilities: &[Facility],
+    buildings: &Buildings,
+) -> Vec<(BuildingId, Supply)> {
+    let t = tally(network, facilities, buildings);
+    t.placed
         .into_iter()
         .map(|(id, c)| {
-            let ok = |slot: usize| {
-                c.is_some_and(|c| capacity[c][slot] > 0 && capacity[c][slot] >= demand[c][slot])
-            };
+            let ok = |slot: usize| c.is_some_and(|c| t.balance[c][slot].enough());
             (
                 id,
                 Supply {
@@ -188,4 +225,29 @@ pub fn evaluate_supply(
             )
         })
         .collect()
+}
+
+/// 道路網の連結成分ごとの供給量と需要。[`evaluate_supply`] と同じ足し方で、状態は変えない。
+pub fn supply_balance(
+    network: &Network,
+    facilities: &[Facility],
+    buildings: &Buildings,
+) -> SupplyBalance {
+    let mut t = tally(network, facilities, buildings);
+    let roots: Vec<(SegmentId, usize)> = network
+        .segments()
+        .map(|(id, s)| (id, t.comps.find(s.a.index as usize)))
+        .collect();
+    let order: BTreeMap<usize, usize> = roots
+        .iter()
+        .map(|(_, r)| *r)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| (r, i))
+        .collect();
+    SupplyBalance {
+        components: order.keys().map(|r| t.balance[*r]).collect(),
+        segments: roots.into_iter().map(|(id, r)| (id, order[&r])).collect(),
+    }
 }

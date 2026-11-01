@@ -3,6 +3,7 @@ import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
+import { setupLayerPanel } from "./map/layers.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
 import { MapRenderer } from "./map/renderer.ts";
 import {
@@ -137,6 +138,12 @@ let renderer = createRenderer();
 // 最後に届いた道路網と建物。コンテキストを失ったあとに貼り直す
 let roads: Geometry | null = null;
 let buildings: Geometry | null = null;
+let activeLayers: number[] = [];
+setupLayerPanel(element<HTMLElement>("#layers"), (active) => {
+  activeLayers = active;
+  renderer?.layers.setActive(active);
+  send({ kind: "layers", active });
+});
 
 // コンテキストが戻ったら作り直し、手元のチャンクを貼り直す
 mapCanvas.addEventListener("webglcontextlost", (event) => {
@@ -157,6 +164,8 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
   if (buildings !== null) {
     renderer?.roads.setBuildings(buildings);
   }
+  renderer?.layers.setActive(activeLayers);
+  send({ kind: "layers", active: activeLayers });
   updatePreview();
 });
 
@@ -581,6 +590,15 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "chunks") {
     for (const chunk of store.receive(message.chunks)) {
       renderer?.upload(chunk);
+    }
+    return;
+  }
+  if (message.kind === "layer-chunks") {
+    if (activeLayers.includes(message.layer)) {
+      // 画面が捨てた直後に届いたチャンクは、手元の地形と一緒に捨てる
+      for (const c of message.chunks.filter((c) => store.get(c.cx, c.cy) !== undefined)) {
+        renderer?.layers.upload(message.layer, c.cx, c.cy, c.version, new Uint8Array(c.values));
+      }
     }
     return;
   }

@@ -11,7 +11,7 @@ import {
 
 describe("街の数字", () => {
   test("city_stats の並びを読む", () => {
-    expect(parseCityStats([3, 40, 12, 20, -5, 0, 7, 400, 300, 25])).toEqual({
+    expect(parseCityStats([3, 40, 12, 20, -5, 0, 7, 400, 300, 25, 1, 0])).toEqual({
       buildings: 3,
       households: 40,
       workplaces: 12,
@@ -19,9 +19,14 @@ describe("街の数字", () => {
       power: 400,
       water: 300,
       utilityDemand: 25,
+      powerShort: 1,
+      waterShort: 0,
     });
-    expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 0, 1200]))).toBe(
-      "電気 400 / 需要 1,200・水道 0 / 需要 1,200",
+    expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 0, 1200, 1, 2]))).toBe(
+      "電気 400 / 需要 1,200（足りない網 1）・水道 0 / 需要 1,200（足りない網 2）",
+    );
+    expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 300, 10, 0, 0]))).toBe(
+      "電気 400 / 需要 10・水道 300 / 需要 10",
     );
   });
 

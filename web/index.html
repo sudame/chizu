@@ -40,6 +40,16 @@
         background: #2d6cdf;
         color: #fff;
       }
+      #layers {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        margin-top: 4px;
+      }
+      #layers button[aria-pressed="true"] {
+        background: #2d6cdf;
+        color: #fff;
+      }
       #feedback-open {
         position: fixed;
         top: 8px;
@@ -148,6 +158,7 @@
         <button type="button" data-speed="16">16 倍</button>
         <button type="button" data-speed="48">48 倍</button>
       </div>
+      <div id="layers" title="データレイヤー"></div>
     </div>
     <div id="toolbar">
       <button type="button" data-tool="none" aria-pressed="true">見る</button>
