@@ -609,7 +609,14 @@ mod tests {
         );
         assert_eq!(sim.facilities().len(), 10);
         let stats = sim.city_stats();
-        assert_eq!(stats[7..9], [400.0, 300.0]);
+        let capacity = |k: ServiceKind| k.capacity() as f64;
+        assert_eq!(
+            stats[7..9],
+            [
+                capacity(ServiceKind::PowerPlant),
+                capacity(ServiceKind::WaterPump)
+            ]
+        );
         assert!(stats[9] > 0.0);
         let stats = sim.city_stats();
         assert_eq!(stats[0], count as f64);

@@ -260,15 +260,18 @@ fn growth() -> CommandLog {
     for c in connect_to_outside(42, 0, -40, 40) {
         rec(3, c);
     }
-    for (kind, x) in [
-        (ServiceKind::PowerPlant, -37),
-        (ServiceKind::WaterPump, -33),
+    // 新しい建物は電気と水道の余りのある網にしか建たないので、どちらの通りにも施設を置く。
+    for (kind, x, y) in [
+        (ServiceKind::PowerPlant, -37, -1),
+        (ServiceKind::WaterPump, -33, -1),
+        (ServiceKind::PowerPlant, -37, 19),
+        (ServiceKind::WaterPump, -33, 19),
     ] {
         rec(
             3,
             Command::PlaceBuilding {
                 kind,
-                at: TilePos::new(x, -1),
+                at: TilePos::new(x, y),
                 rotation: 2,
             },
         );
