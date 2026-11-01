@@ -1,0 +1,4 @@
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "反復順が決まらない。BTreeMap か ID で引く Vec を使う" },
+  { path = "std::collections::HashSet", reason = "反復順が決まらない。BTreeSet か ID で引く Vec を使う" },
+]

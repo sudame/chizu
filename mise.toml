@@ -1,10 +1,26 @@
+[settings]
+# rust の版は rust-toolchain.toml から読む。mise が RUSTUP_TOOLCHAIN を立てるので、ここで別の版を書くとファイルより優先されてしまう
+idiomatic_version_file_enable_tools = ["rust"]
+
 [tools]
 jactionlint = "2.4.0"
 rumdl = "0.3.2"
 shellcheck = "0.11.0"
 
-[tasks.test]
-run = "echo 'テストはまだない'"
+[tasks."lint:md"]
+run = "rumdl check ."
+
+[tasks."lint:actions"]
+run = "jactionlint"
+
+[tasks."lint:rust"]
+run = ["cargo fmt --all --check", "cargo clippy --workspace --all-targets -- -D warnings"]
 
 [tasks.lint]
-run = ["rumdl check .", "jactionlint"]
+depends = ["lint:md", "lint:actions", "lint:rust"]
+
+[tasks."test:rust"]
+run = "cargo test --workspace"
+
+[tasks.test]
+depends = ["test:rust"]

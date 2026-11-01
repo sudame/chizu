@@ -31,9 +31,18 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 ## コマンド
 
 ```sh
-mise run test   # テストをすべて回す
-mise run lint   # markdown、ワークフロー、コードの静的検査
+mise run test          # テストをすべて回す
+mise run lint          # 静的検査をすべて回す
+mise run test:rust     # cargo test --workspace
+mise run lint:md       # markdown の検査（rumdl）
+mise run lint:actions  # ワークフローの検査（jactionlint）
+mise run lint:rust     # cargo fmt --check と cargo clippy
 ```
+
+`test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。
+
+Rust のツールチェーンは `rust-toolchain.toml` で日付つきの nightly に固定している。
+mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファイルから版を読むので、`mise.toml` の `[tools]` には `rust` を書かない。
 
 ツールを足すときは、`mise.toml` の `[tools]` に版を固定して書く。`npx` などで実行時に取ってこない。
 タスクを足したり変えたりしたら、`.github/workflows/ci.yml` のジョブもそろえる。
