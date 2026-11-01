@@ -1,6 +1,7 @@
 //! chizu-core と画面（Web Worker）のあいだの受け渡しの層。
 
 pub mod command_input;
+pub mod layers;
 pub mod sim;
 pub mod snapshot;
 
@@ -64,13 +65,13 @@ pub fn service_table() -> Vec<f64> {
 
 /// Worker から使うシミュレーション。
 #[wasm_bindgen]
-pub struct Simulation(sim::Sim);
+pub struct Simulation(sim::Sim, layers::LayerCache);
 
 #[wasm_bindgen]
 impl Simulation {
     #[wasm_bindgen(constructor)]
     pub fn new(seed: u64) -> Simulation {
-        Simulation(sim::Sim::new(seed))
+        Simulation(sim::Sim::new(seed), layers::LayerCache::default())
     }
 
     /// 三重バッファの先頭の、WASM のメモリの中でのバイト位置。
@@ -165,7 +166,7 @@ impl Simulation {
     }
 
     /// `[建物の数, 世帯の上限, 職場の上限, 住宅・商業・工業・オフィスの需要, 電気の供給量,
-    /// 水道の供給量, 電気と水道の需要]`。
+    /// 水道の供給量, 電気と水道の需要, 電気の足りない網の数, 水道の足りない網の数]`。
     pub fn city_stats(&self) -> Vec<f64> {
         self.0.city_stats()
     }

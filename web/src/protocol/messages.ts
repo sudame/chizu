@@ -4,7 +4,7 @@ export type RoadKindName = "Small" | "Medium" | "Large";
 /** 施設の種類。 */
 export type ServiceName = "PowerPlant" | "WaterPump";
 /** chizu-wasm の city_stats の数の個数。 */
-export const CITY_STATS_LENGTH = 10;
+export const CITY_STATS_LENGTH = 12;
 /** 区画の種類。Clear は区画を消す。 */
 export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
 
@@ -70,6 +70,12 @@ export type ChunkData = {
   tiles: ArrayBuffer;
 };
 
+/** データレイヤーの番号。chizu-wasm の layers::LAYERS の code と同じ。 */
+export type LayerCode = number;
+
+/** データレイヤーの、チャンク 1 つの値。values は 1 マス 1 バイトを行ごとに並べたもので、移譲して送る。 */
+export type LayerChunkData = { cx: number; cy: number; version: number; values: ArrayBuffer };
+
 export type MainToWorker =
   /** id は画面が振る番号で、結果の通知で返ってくる。 */
   | { kind: "command"; id: number; command: CommandMessage }
@@ -82,7 +88,9 @@ export type MainToWorker =
    * visible はいま見えているチャンクを先に送ってほしい順に並べたもの。
    * forgotten は前の view のあとに画面が捨てたチャンクで、Worker は次に見えたときに送り直す。
    */
-  | { kind: "view"; visible: ChunkCoordMessage[]; forgotten: ChunkCoordMessage[] };
+  | { kind: "view"; visible: ChunkCoordMessage[]; forgotten: ChunkCoordMessage[] }
+  /** 画面に出すデータレイヤー。送るたびに、見えているチャンクの値を送り直してもらう。 */
+  | { kind: "layers"; active: LayerCode[] };
 
 export type WorkerToMain =
   | {
@@ -100,6 +108,8 @@ export type WorkerToMain =
       serviceTable: number[];
     }
   | { kind: "chunks"; chunks: ChunkData[] }
+  /** データレイヤーの値。版が変わったチャンクだけを送る。 */
+  | { kind: "layer-chunks"; layer: LayerCode; chunks: LayerChunkData[] }
   /** state は chizu-wasm の feedback_state の JSON、commands は記録を encode したもの。 */
   | { kind: "feedback"; state: string; commands: ArrayBuffer }
   /** probe-service の答え。results は向き 0〜3 の順に、置けるなら null、置けないなら理由の文。 */
@@ -160,6 +170,19 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "chunks":
       return Array.isArray(v.chunks) && v.chunks.every(isChunkData);
+    case "layer-chunks":
+      return (
+        Number.isInteger(v.layer) &&
+        Array.isArray(v.chunks) &&
+        v.chunks.every(
+          (c: Record<string, unknown>) =>
+            Number.isInteger(c.cx) &&
+            Number.isInteger(c.cy) &&
+            typeof c.version === "number" &&
+            c.values instanceof ArrayBuffer &&
+            c.values.byteLength === CHUNK_AREA,
+        )
+      );
     case "roads":
       return (
         typeof v.revision === "number" &&

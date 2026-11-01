@@ -4,6 +4,7 @@
 // 三重バッファから読んだ時計が実時間に合わせて進み、速度と一時停止のボタンに従うかも確かめる。
 // チャンクが Worker から届いて描かれること、ドラッグとホイールでカメラが動くことも確かめる。
 // 道路の道具で道路を引くと描かれて所持金が減ること、断られると理由が出ること、ブルドーザで消せることも確かめる。
+// 電気のデータレイヤーで、届いていない建物と届いている建物が色分けされることも確かめる。
 // フィードバックを送ると、保存した記録を chizu-cli で再生して同じ状態ハッシュになることも確かめる。
 // Chrome は mise の tools で入れた chrome-headless-shell を PATH から探す。
 
@@ -531,6 +532,26 @@ try {
     (await unsupplied()) > 0 && isYellow(markBefore),
     `電気の届かない建物に黄色の印が出る（${await unsupplied()} 棟、${markBefore.join(", ")}）`,
   );
+  // 電気のデータレイヤーに切り替えると、建物が届いているかどうかの色で塗られる
+  const layerPixel = () =>
+    pixel(cx + (bx + 0.5 - view.x) * view.zoom, cy + (by + 0.8 - view.y) * view.zoom);
+  const isRed = (c: number[]) => (c[0] ?? 0) > 180 && (c[1] ?? 0) < 100 && (c[2] ?? 0) < 100;
+  const isGreen = (c: number[]) => (c[1] ?? 0) > (c[0] ?? 0) + 80 && (c[1] ?? 0) > 150;
+  const waitColor = async (test: (c: number[]) => boolean) => {
+    const until = Date.now() + TIMEOUT_MS;
+    let c = await layerPixel();
+    while (!test(c) && Date.now() < until) {
+      await page.waitForTimeout(100);
+      c = await layerPixel();
+    }
+    return c;
+  };
+  await page.locator('#layers button[data-layer="1"]').click();
+  const layerOff = await waitColor(isRed);
+  check(
+    isRed(layerOff) && (await page.locator("#layers").getAttribute("data-active")) === "1",
+    `電気のレイヤーでは、届いていない建物が赤で塗られる（${layerOff.join(", ")}）`,
+  );
   // 道路を (52, 32) から (60, 32) へ延ばし、その下に発電所と浄水場を置く
   await page.locator('button[data-tool="road-Small"]').click();
   for (const [x, y] of [
@@ -582,6 +603,9 @@ try {
     `発電所と浄水場を置ける（${plant.text}、${pump.text}）`,
   );
   await waitUnsupplied("zero");
+  const layerOn = await waitColor(isGreen);
+  check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
+  await page.locator('#layers button[data-layer="none"]').click();
   await page.waitForTimeout(100);
   const markAfter = await markPixel();
   const plantColor = await colorOfTile(54, 34);

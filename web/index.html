@@ -40,6 +40,20 @@
         background: #2d6cdf;
         color: #fff;
       }
+      #layers {
+        position: fixed;
+        top: 40px;
+        right: 8px;
+        display: flex;
+        gap: 4px;
+        padding: 4px;
+        background: rgb(255 255 255 / 85%);
+        border-radius: 4px;
+      }
+      #layers button[aria-pressed="true"] {
+        background: #2d6cdf;
+        color: #fff;
+      }
       #feedback-open {
         position: fixed;
         top: 8px;
@@ -139,6 +153,7 @@
       <span id="tool-info"></span>
       <span id="tool-message" aria-live="polite"></span>
     </div>
+    <div id="layers" title="データレイヤー"></div>
     <button type="button" id="feedback-open" hidden>フィードバック</button>
     <dialog id="feedback">
       <form method="dialog">

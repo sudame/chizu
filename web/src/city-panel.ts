@@ -7,11 +7,14 @@ export type CityStats = {
   workplaces: number;
   /** 住宅・商業・工業・オフィスの順。正なら建物が建つ。 */
   demand: [number, number, number, number];
-  /** 置いた発電所と浄水場の供給量の合計。 */
+  /** 道路網につながった発電所と浄水場の供給量の合計。 */
   power: number;
   water: number;
   /** 建物の電気と水道の需要の合計。電気と水道で同じ値である。 */
   utilityDemand: number;
+  /** 供給量が需要に足りない道路網の数。施設のない網も数える。 */
+  powerShort: number;
+  waterShort: number;
 };
 
 export function parseCityStats(stats: number[]): CityStats {
@@ -24,6 +27,8 @@ export function parseCityStats(stats: number[]): CityStats {
     power: at(7),
     water: at(8),
     utilityDemand: at(9),
+    powerShort: at(10),
+    waterShort: at(11),
   };
 }
 
@@ -47,7 +52,8 @@ export function formatCityNumbers(stats: CityStats): string {
 export function formatUtilities(stats: CityStats): string {
   const n = (v: number) => v.toLocaleString("ja-JP");
   const d = n(stats.utilityDemand);
-  return `電気 ${n(stats.power)} / 需要 ${d}・水道 ${n(stats.water)} / 需要 ${d}`;
+  const short = (k: number) => (k > 0 ? `（足りない網 ${n(k)}）` : "");
+  return `電気 ${n(stats.power)} / 需要 ${d}${short(stats.powerShort)}・水道 ${n(stats.water)} / 需要 ${d}${short(stats.waterShort)}`;
 }
 
 export type BarLayout = { value: number; top: number; height: number };

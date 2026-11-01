@@ -4,6 +4,7 @@
 import { CHUNK_SIDE, TILE_WATER, TILE_ZONABLE, TILE_ZONE_SHIFT } from "../protocol/messages.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { chunkKey, type StoredChunk } from "./chunk-sync.ts";
+import { LayerOverlay } from "./layers.ts";
 import { RoadLayer } from "./roads.ts";
 
 const VERTEX = `#version 300 es
@@ -87,6 +88,8 @@ export class MapRenderer {
   readonly #vao: WebGLVertexArrayObject;
   /** 道路網と道具の仮の表示。チャンクの上に重ねて描く。 */
   readonly roads: RoadLayer;
+  /** データレイヤー。道路と建物の上に重ねて描く。 */
+  readonly layers: LayerOverlay;
   readonly #textures = new Map<string, Texture>();
   readonly #u: Record<
     "offset" | "size" | "viewport" | "tiles" | "owned" | "zonable",
@@ -127,6 +130,7 @@ export class MapRenderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(null);
     this.roads = new RoadLayer(gl, (v, f) => link(gl, v, f));
+    this.layers = new LayerOverlay(gl, (v, f) => link(gl, v, f));
   }
 
   /** チャンクのテクスチャを作るか、中身を書き換える。 */
@@ -167,6 +171,7 @@ export class MapRenderer {
       this.#gl.deleteTexture(entry.texture);
       this.#textures.delete(key);
     }
+    this.layers.remove(cx, cy);
   }
 
   /** 範囲の中の、テクスチャのあるチャンクを描き、描いた数を返す。 */
@@ -208,6 +213,7 @@ export class MapRenderer {
     }
     gl.bindVertexArray(null);
     this.roads.draw(camera, viewport);
+    this.layers.draw(camera, viewport, range);
     return drawn;
   }
 }
