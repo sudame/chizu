@@ -15,6 +15,12 @@ export type CityStats = {
   /** 供給量が需要に足りない道路網の数。施設のない網も数える。 */
   powerShort: number;
   waterShort: number;
+  /** 建物があるのに施設のない道路網の数（需要のある網で供給量が 0）。 */
+  powerIsolated: number;
+  waterIsolated: number;
+  /** 施設のある網で、需要が供給量を上回った分の合計。 */
+  powerGap: number;
+  waterGap: number;
 };
 
 export function parseCityStats(stats: number[]): CityStats {
@@ -29,6 +35,10 @@ export function parseCityStats(stats: number[]): CityStats {
     utilityDemand: at(9),
     powerShort: at(10),
     waterShort: at(11),
+    powerIsolated: at(12),
+    waterIsolated: at(13),
+    powerGap: at(14),
+    waterGap: at(15),
   };
 }
 
@@ -52,8 +62,34 @@ export function formatCityNumbers(stats: CityStats): string {
 export function formatUtilities(stats: CityStats): string {
   const n = (v: number) => v.toLocaleString("ja-JP");
   const d = n(stats.utilityDemand);
-  const short = (k: number) => (k > 0 ? `（足りない網 ${n(k)}）` : "");
-  return `電気 ${n(stats.power)} / 需要 ${d}${short(stats.powerShort)}・水道 ${n(stats.water)} / 需要 ${d}${short(stats.waterShort)}`;
+  return `電気 ${n(stats.power)} / 需要 ${d}・水道 ${n(stats.water)} / 需要 ${d}`;
+}
+
+/** 電気か水道が届いていない建物の数と、その理由。足りているときは null。 */
+export type UtilityShortage = { headline: string; reasons: string[] };
+
+export function utilityShortage(stats: CityStats, unsupplied: number): UtilityShortage | null {
+  if (unsupplied <= 0) {
+    return null;
+  }
+  const n = (v: number) => v.toLocaleString("ja-JP");
+  const reasons: string[] = [];
+  const add = (name: string, facility: string, gap: number, isolated: number) => {
+    if (gap > 0) {
+      reasons.push(`${name}が ${n(gap)} 足りない。${facility}を足す`);
+    }
+    if (isolated > 0) {
+      reasons.push(
+        `${facility}につながっていない道路網が ${n(isolated)} つある。${facility}を置くか、道路でつなぐ`,
+      );
+    }
+  };
+  add("電気", "発電所", stats.powerGap, stats.powerIsolated);
+  add("水道", "浄水場", stats.waterGap, stats.waterIsolated);
+  return {
+    headline: `電気か水道が届いていない建物が ${n(unsupplied)} 棟ある`,
+    reasons,
+  };
 }
 
 export type BarLayout = { value: number; top: number; height: number };
@@ -67,7 +103,7 @@ export function demandBars(stats: CityStats): BarLayout[] {
   });
 }
 
-export function renderCityStats(stats: CityStats): void {
+export function renderCityStats(stats: CityStats, unsupplied = 0): void {
   const numbers = document.querySelector<HTMLElement>("#city-numbers");
   if (numbers !== null) {
     numbers.textContent = formatCityNumbers(stats);
@@ -78,6 +114,24 @@ export function renderCityStats(stats: CityStats): void {
   if (utilities !== null) {
     utilities.textContent = formatUtilities(stats);
   }
+  const shortage = utilityShortage(stats, unsupplied);
+  const notice = document.querySelector<HTMLElement>("#city-shortage");
+  if (notice !== null) {
+    notice.hidden = shortage === null;
+    notice.dataset.unsupplied = String(unsupplied);
+    notice.replaceChildren();
+    if (shortage !== null) {
+      const head = document.createElement("strong");
+      head.textContent = shortage.headline;
+      notice.append(head);
+      for (const reason of shortage.reasons) {
+        const line = document.createElement("div");
+        line.textContent = reason;
+        notice.append(line);
+      }
+    }
+  }
+  utilities?.classList.toggle("short", shortage !== null);
   const layouts = demandBars(stats);
   document.querySelectorAll<HTMLElement>("#demand .bar").forEach((bar, i) => {
     const layout = layouts[i];

@@ -159,6 +159,25 @@ pub fn utility_totals(world: &World) -> [u64; 4] {
     out
 }
 
+/// 電気と水道の不足の中身。`[電気の施設のない網, 水道の施設のない網, 電気の不足量, 水道の不足量]`。
+/// 施設のない網は、建物があるのに供給量が 0 の網の数である。
+/// 不足量は、施設のある網で需要が供給量を上回った分の合計である。
+pub fn utility_gaps(world: &World) -> [u64; 4] {
+    let balance = supply_balance(world.network(), world.facilities(), world.buildings());
+    let mut out = [0; 4];
+    for c in &balance.components {
+        for slot in 0..2 {
+            let b = c[slot];
+            if b.demand > 0 && b.capacity == 0 {
+                out[slot] += 1;
+            } else {
+                out[2 + slot] += b.demand.saturating_sub(b.capacity);
+            }
+        }
+    }
+    out
+}
+
 /// レイヤーごとに、最後に作った値の面を版と一緒に持つ。
 #[derive(Default)]
 pub struct LayerCache {
@@ -256,6 +275,7 @@ mod tests {
         assert_eq!(value_at(&mut cache, &sim, power, road), SUPPLY_ROAD_NONE);
         assert_eq!(value_at(&mut cache, &sim, power, TilePos::new(20, 5)), 0);
         assert_eq!(utility_totals(sim.world()), [0, 0, 1, 1]);
+        assert_eq!(utility_gaps(sim.world()), [1, 1, 0, 0]);
         let before = sim.buildings_version();
         sim.submit(Command::PlaceBuilding {
             kind: ServiceKind::PowerPlant,
@@ -282,6 +302,9 @@ mod tests {
             utility_totals(sim.world()),
             [ServiceKind::PowerPlant.capacity(), 0, 0, 1]
         );
+        // 発電所は足り、浄水場のない網だけが残る
+        assert_eq!(utility_gaps(sim.world()), [0, 1, 0, 0]);
+        assert_eq!(sim.city_stats()[12..16], [0.0, 1.0, 0.0, 0.0]);
     }
 
     #[test]

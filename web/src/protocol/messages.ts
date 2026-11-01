@@ -4,7 +4,7 @@ export type RoadKindName = "Small" | "Medium" | "Large";
 /** 施設の種類。 */
 export type ServiceName = "PowerPlant" | "WaterPump";
 /** chizu-wasm の city_stats の数の個数。 */
-export const CITY_STATS_LENGTH = 12;
+export const CITY_STATS_LENGTH = 16;
 /** 区画の種類。Clear は区画を消す。 */
 export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
 
