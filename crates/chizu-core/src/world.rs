@@ -145,6 +145,7 @@ pub struct World {
     router: RouterSlot,
 }
 
+mod commute;
 pub mod economy;
 pub mod growth;
 pub mod people;
@@ -480,7 +481,8 @@ impl World {
     /// 網が変わっていたら経路探索を作り直し、通れなくなった移動を探し直す。
     fn sync_router(&mut self) {
         if self.router.router.sync(&self.network) {
-            self.trips.reroute(&self.network, &mut self.router.router);
+            let lost = self.trips.reroute(&self.network, &mut self.router.router);
+            self.end_commutes(lost);
         }
     }
 
@@ -642,7 +644,8 @@ impl World {
         self.population
             .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
         self.update_people();
-        self.trips.step(&self.network, &mut self.router.router);
+        let ended = self.trips.step(&self.network, &mut self.router.router);
+        self.end_commutes(ended);
         self.grow_buildings();
         self.update_economy();
         self.tick = tick.next();

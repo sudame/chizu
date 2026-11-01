@@ -6,7 +6,7 @@
 //! - 建物が消えたら、その tick のうちに住む世帯を家なしにし、働く住民の職場を外す。
 //! - 職場：[`assign_jobs`] で割り当て、職場ができた住民に通勤の予定を立てる。
 //! - 予定：家にいる住民は朝に職場へ、職場にいる住民は夕方に家へ出発する。出発の tick は
-//!   出発の待ち行列に積み、時刻が来たら居場所を切り替える。移動そのものはまだ作らない。
+//!   出発の待ち行列に積み、時刻が来たら移動を始め（`world::commute`）、着いたら居場所を切り替える。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -100,13 +100,14 @@ impl World {
         s
     }
 
-    /// いま職場にいる住民の数。
+    /// いま職場にいる住民の数。家へ向かって移動している住民は数えない。
     pub fn citizens_at_work(&self) -> usize {
         let p = &self.population;
         p.citizen_ids()
             .filter(|id| {
-                p.citizen(*id)
-                    .is_some_and(|r| r.workplace.is_some() && r.schedule.next == Activity::Home)
+                p.citizen(*id).is_some_and(|r| {
+                    r.workplace.is_some() && r.schedule.next == Activity::Home && r.trip.is_none()
+                })
             })
             .count()
     }
@@ -133,9 +134,16 @@ impl World {
         u64::from(r.below(DEPARTURE_SPREAD))
     }
 
-    /// 出発の時刻が来た住民の居場所を切り替え、次の出発を積む。
+    /// 出発の時刻が来た住民の移動を始める。移動を作れなかった住民は、その場で居場所を切り替える。
     fn run_departures(&mut self) {
-        for id in self.population.pop_departures(self.tick) {
+        let due = self.population.pop_departures(self.tick);
+        let stuck = self.start_commutes(due);
+        self.switch_places(stuck);
+    }
+
+    /// 行き先に着いた住民の居場所を切り替え、次の出発を積む。
+    pub(super) fn switch_places(&mut self, ids: Vec<CitizenId>) {
+        for id in ids {
             let row = self.population.citizen(id).expect("出発する住民がいない");
             let jitter = self.departure_jitter(id);
             let schedule = match (row.schedule.next, row.workplace) {
@@ -407,22 +415,28 @@ pub(crate) mod tests {
         }
         let stats = w.city_stats();
         assert!(stats.employed > 0, "誰も働いていない");
-        // 職場のある住民は、出発の待ち行列にちょうど 1 回入っている。
+        // 職場のある住民は、移動しているか、出発の待ち行列にちょうど 1 回入っている。
         let workers = p
             .citizen_ids()
             .filter(|id| p.citizen(*id).unwrap().workplace.is_some())
             .count();
-        assert_eq!(p.departures().len(), workers);
-        // 昼には職場にいて、夜には家にいる。
+        let moving = p
+            .citizen_ids()
+            .filter(|id| p.citizen(*id).unwrap().trip.is_some())
+            .count();
+        assert_eq!(p.departures().len() + moving, workers);
+        // 昼には職場にいて、夜には家にいる。移動にかかる時間を見込んで、出発のばらつきの 2 倍だけ待つ。
         let day_start = w.tick().0 - w.tick().0 % TICKS_PER_DAY;
-        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_START + u64::from(DEPARTURE_SPREAD) {
+        let wait = 2 * u64::from(DEPARTURE_SPREAD);
+        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_START + wait {
             w.step();
         }
         assert!(
             w.citizens_at_work() * 10 >= workers * 9,
-            "朝に職場へ向かわない"
+            "朝に職場へ向かわない：{} / {workers}",
+            w.citizens_at_work()
         );
-        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_END + u64::from(DEPARTURE_SPREAD) {
+        while w.tick().0 < day_start + TICKS_PER_DAY + WORK_END + wait {
             w.step();
         }
         assert!(w.citizens_at_work() * 10 <= workers, "夕方に家へ帰らない");

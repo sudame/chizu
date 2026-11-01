@@ -70,6 +70,8 @@ export class MoverLayer {
   readonly #floats = new Float32Array(this.#copy.buffer);
   /** 最後に描いた枠の、最初の移動体のワールド座標（マス）。test:wasm が位置の変化を見るのに使う。 */
   first: { x: number; y: number } | null = null;
+  /** 最後に描いた枠の、種類ごとの最初の移動体のワールド座標（マス）。test:wasm が画素を見るのに使う。 */
+  firstOf: Map<number, { x: number; y: number }> = new Map();
 
   constructor(
     gl: WebGL2RenderingContext,
@@ -109,6 +111,7 @@ export class MoverLayer {
   /** 枠の移動体を描き、描いた数を返す。縮小しすぎているときは描かない。 */
   draw(camera: Camera, viewport: Viewport, header: SnapshotHeader, words: Uint32Array): number {
     const count = Math.min(header.moverCount, Math.floor(words.length / layout.moverWords));
+    this.firstOf.clear();
     if (!showsMovers(camera.zoom) || count === 0) {
       this.first = null;
       return 0;
@@ -116,10 +119,17 @@ export class MoverLayer {
     const gl = this.#gl;
     const used = count * layout.moverWords;
     this.#copy.set(words.subarray(0, used));
-    this.first = {
-      x: header.baseCx * CHUNK_SIDE + (this.#floats[layout.mover.x] ?? 0),
-      y: header.baseCy * CHUNK_SIDE + (this.#floats[layout.mover.y] ?? 0),
-    };
+    const at = (i: number) => ({
+      x: header.baseCx * CHUNK_SIDE + (this.#floats[i * layout.moverWords + layout.mover.x] ?? 0),
+      y: header.baseCy * CHUNK_SIDE + (this.#floats[i * layout.moverWords + layout.mover.y] ?? 0),
+    });
+    this.first = at(0);
+    for (let i = 0; i < count && this.firstOf.size < 2; i++) {
+      const kind = (this.#copy[i * layout.moverWords + layout.mover.headingKind] ?? 0) >>> 16;
+      if (!this.firstOf.has(kind)) {
+        this.firstOf.set(kind, at(i));
+      }
+    }
     gl.bindBuffer(gl.ARRAY_BUFFER, this.#instances);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.#copy, 0, used);
     gl.useProgram(this.#program);
