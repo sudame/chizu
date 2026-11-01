@@ -344,6 +344,19 @@ impl Sim {
         [0, 1, 2, 3].map(|r| self.world.check_service(kind, at, r).map(|_| ()))
     }
 
+    /// マス `at` にある建物か施設の様子を、[`crate::inspect::encode`] の形の数で返す。何もなければ空。
+    /// 押された 1 つについてだけ集計し、状態は変えない。
+    pub fn inspect(&self, at: TilePos) -> Vec<f64> {
+        crate::inspect::encode(crate::inspect::inspect(&self.world, at))
+    }
+
+    /// 押したものの識別子（[`crate::inspect::decode_target`]）で様子を返す。消えていたり読めなければ空。
+    pub fn inspect_target(&self, kind: f64, a: f64, b: f64) -> Vec<f64> {
+        let found = crate::inspect::decode_target(kind, a, b)
+            .and_then(|t| crate::inspect::inspect_target(&self.world, t));
+        crate::inspect::encode(found)
+    }
+
     /// 施設を、1 つにつき `[min の x, min の y, max の x, max の y, 種類]` の 5 つの数で返す。
     /// 種類は `ServiceKind` の値である。
     pub fn facilities(&self) -> Vec<f64> {
@@ -356,9 +369,11 @@ impl Sim {
         out
     }
 
-    /// 街の数字を次の 12 個の数で返す。建物の数、世帯の上限、職場の上限、
+    /// 街の数字を次の 16 個の数で返す。建物の数、世帯の上限、職場の上限、
     /// 住宅・商業・工業・オフィスの需要、電気の供給量、水道の供給量、電気と水道の需要、
-    /// 電気と水道のそれぞれで供給量が需要に足りない網の数。供給量は道路網につながった施設の合計である。
+    /// 電気と水道のそれぞれで供給量が需要に足りない網の数、
+    /// 電気と水道のそれぞれで施設のない網の数、電気と水道のそれぞれの不足量。
+    /// 供給量は道路網につながった施設の合計である。
     pub fn city_stats(&self) -> Vec<f64> {
         let buildings = self.world.buildings();
         let capacity = buildings.capacity();
@@ -371,6 +386,7 @@ impl Sim {
         let [power, water, power_short, water_short] = crate::layers::utility_totals(&self.world);
         let need: u64 = buildings.iter().map(|(_, b)| building_demand(b)).sum();
         out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
+        out.extend(crate::layers::utility_gaps(&self.world).map(|v| v as f64));
         out
     }
 

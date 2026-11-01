@@ -626,15 +626,53 @@ try {
       test,
       { timeout: TIMEOUT_MS },
     );
-  // 電気の印は建物の左上のマスの (0.25, 0.3) を中心に置く（roads.ts の markCenter）。
-  // 縮小すると水道の印と重なるので、左の端寄りを読む
-  const markPixel = () =>
-    pixel(cx + (bx + 0.1 - view.x) * view.zoom, cy + (by + 0.3 - view.y) * view.zoom);
+  // 電気の印（稲妻）は建物の左上のマスの (0.25, 0.3) を中心に置く（roads.ts の markCenter）。
+  // 縮小すると印は数ピクセルになるので、中心のまわりの 5×5 ピクセルを一度に読む
+  const markPixels = () =>
+    map.evaluate(
+      (el, at) => {
+        const canvas = el as HTMLCanvasElement;
+        const gl = canvas.getContext("webgl2");
+        const dpr = window.devicePixelRatio;
+        const out: number[][] = [];
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            const px = new Uint8Array(4);
+            gl?.readPixels(
+              Math.floor(at.x * dpr) + dx,
+              canvas.height - 1 - Math.floor(at.y * dpr) - dy,
+              1,
+              1,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              px,
+            );
+            out.push([...px]);
+          }
+        }
+        return out;
+      },
+      {
+        x: cx + (bx + 0.25 - view.x) * view.zoom,
+        y: cy + (by + 0.3 - view.y) * view.zoom,
+      },
+    );
   const isYellow = (c: number[]) => (c[0] ?? 0) > 200 && (c[1] ?? 0) > 180 && (c[2] ?? 0) < 100;
-  const markBefore = await markPixel();
+  const anyYellow = (cs: number[][]) => cs.some(isYellow);
+  const markBefore = await markPixels();
   check(
-    (await unsupplied()) > 0 && isYellow(markBefore),
-    `電気の届かない建物に黄色の印が出る（${await unsupplied()} 棟、${markBefore.join(", ")}）`,
+    (await unsupplied()) > 0 && anyYellow(markBefore),
+    `電気の届かない建物に黄色の印が出る（${await unsupplied()} 棟、${markBefore.map((c) => c.join(",")).join(" ")}）`,
+  );
+  const shortage = page.locator("#city-shortage");
+  check(
+    (await shortage.isVisible()) &&
+      /足りない|つながっていない/.test((await shortage.textContent()) ?? ""),
+    `届いていない建物の数と理由が欄に出る（${await shortage.textContent()}）`,
+  );
+  check(
+    (await page.locator("#legend-body li").count()) >= 10,
+    "凡例に区画・建物の段階・印・施設が並ぶ",
   );
   // 電気のデータレイヤーに切り替えると、建物が届いているかどうかの色で塗られる
   const layerPixel = () =>
@@ -728,12 +766,42 @@ try {
   );
   await page.locator('#layers button[data-layer="none"]').click();
   await page.waitForTimeout(100);
-  const markAfter = await markPixel();
+  const markAfter = await markPixels();
   const plantColor = await colorOfTile(54, 34);
   check(
-    !isYellow(markAfter) && (plantColor[0] ?? 0) > 200 && (plantColor[2] ?? 0) < 100,
-    `施設が橙で描かれ、建物に供給が届いて印が消える（施設 ${plantColor.join(", ")}、印の場所 ${markAfter.join(", ")}）`,
+    !anyYellow(markAfter) && (plantColor[0] ?? 0) > 200 && (plantColor[2] ?? 0) < 100,
+    `施設が橙で描かれ、建物に供給が届いて印が消える（施設 ${plantColor.join(", ")}、印の場所 ${markAfter.map((c) => c.join(",")).join(" ")}）`,
   );
+  // 「見る」で建物を押すと様子のパネルが出て、何もないところを押すと閉じる
+  await page.locator('button[data-tool="none"]').click();
+  const inspector = page.locator("#inspector");
+  const building = tilePoint(bx, by);
+  await page.mouse.click(building.x, building.y);
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#inspector")?.dataset.title?.startsWith("住宅"),
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const homeRows = (await inspector.locator("dt").allTextContents()).join(",");
+  check(
+    homeRows.includes("世帯") && homeRows.includes("電気") && homeRows.includes("水道"),
+    `住宅を押すと、世帯と電気と水道が出る（${homeRows}）`,
+  );
+  const plantTile = tilePoint(54, 34);
+  await page.mouse.click(plantTile.x, plantTile.y);
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#inspector")?.dataset.title === "発電所",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  await page.locator("[data-inspector-close]").click();
+  check(await inspector.isHidden(), "閉じるボタンでパネルが閉じる");
+  await page.mouse.click(building.x, building.y);
+  await inspector.waitFor({ state: "visible", timeout: TIMEOUT_MS });
+  const empty = tilePoint(45, 45);
+  await page.mouse.click(empty.x, empty.y);
+  await inspector.waitFor({ state: "hidden", timeout: TIMEOUT_MS });
+  check(true, "何もないところを押すとパネルが閉じる");
   // 施設の前の道路を消すと、つながりが切れて印がまた出る
   await page.locator('button[data-tool="bulldoze"]').click();
   const cut = tilePoint(59, 32);
