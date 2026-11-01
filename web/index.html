@@ -262,6 +262,49 @@
         <button type="submit" value="close" formnovalidate>閉じる</button>
       </form>
     </dialog>
+    <style>
+      /* 右下の凡例と重ならないよう、右上のフィードバックのボタンの下に置く */
+      #inspector {
+        position: fixed;
+        right: 8px;
+        top: 48px;
+        min-width: 16em;
+        padding: 4px 8px 8px;
+        font-size: 14px;
+        background: rgb(255 255 255 / 90%);
+        border-radius: 4px;
+      }
+      #inspector[hidden] {
+        display: none;
+      }
+      #inspector header {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+        font-weight: bold;
+      }
+      #inspector dl {
+        display: grid;
+        grid-template-columns: auto auto;
+        gap: 2px 12px;
+        margin: 4px 0 0;
+      }
+      #inspector dt {
+        color: #555;
+      }
+      #inspector dd {
+        margin: 0;
+        text-align: right;
+      }
+    </style>
+    <aside id="inspector" hidden>
+      <header>
+        <span data-inspector-title aria-live="polite"></span>
+        <button type="button" data-inspector-close aria-label="閉じる">×</button>
+      </header>
+      <dl data-inspector-rows></dl>
+    </aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

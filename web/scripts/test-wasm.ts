@@ -770,6 +770,36 @@ try {
     !anyYellow(markAfter) && (plantColor[0] ?? 0) > 200 && (plantColor[2] ?? 0) < 100,
     `施設が橙で描かれ、建物に供給が届いて印が消える（施設 ${plantColor.join(", ")}、印の場所 ${markAfter.map((c) => c.join(",")).join(" ")}）`,
   );
+  // 「見る」で建物を押すと様子のパネルが出て、何もないところを押すと閉じる
+  await page.locator('button[data-tool="none"]').click();
+  const inspector = page.locator("#inspector");
+  const building = tilePoint(bx, by);
+  await page.mouse.click(building.x, building.y);
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#inspector")?.dataset.title?.startsWith("住宅"),
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const homeRows = (await inspector.locator("dt").allTextContents()).join(",");
+  check(
+    homeRows.includes("世帯") && homeRows.includes("電気") && homeRows.includes("水道"),
+    `住宅を押すと、世帯と電気と水道が出る（${homeRows}）`,
+  );
+  const plantTile = tilePoint(54, 34);
+  await page.mouse.click(plantTile.x, plantTile.y);
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#inspector")?.dataset.title === "発電所",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  await page.locator("[data-inspector-close]").click();
+  check(await inspector.isHidden(), "閉じるボタンでパネルが閉じる");
+  await page.mouse.click(building.x, building.y);
+  await inspector.waitFor({ state: "visible", timeout: TIMEOUT_MS });
+  const empty = tilePoint(45, 45);
+  await page.mouse.click(empty.x, empty.y);
+  await inspector.waitFor({ state: "hidden", timeout: TIMEOUT_MS });
+  check(true, "何もないところを押すとパネルが閉じる");
   // 施設の前の道路を消すと、つながりが切れて印がまた出る
   await page.locator('button[data-tool="bulldoze"]').click();
   const cut = tilePoint(59, 32);

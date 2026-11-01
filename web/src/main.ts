@@ -1,6 +1,7 @@
 import { parseCityStats, renderCityStats } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
+import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
@@ -41,6 +42,7 @@ import {
   CHUNK_SIDE,
   type CommandMessage,
   FACILITY_STRIDE,
+  type InspectQuery,
   isWorkerToMain,
   type MainToWorker,
   type Outcome,
@@ -352,6 +354,24 @@ function serviceChoice(service: ServiceName, at: Tile) {
   return chooseRotation(fresh && probe !== null ? probe.results : [], manualRotation);
 }
 
+// 「見る」で押したマス。パネルを出しているあいだ、数百 ms ごとに中核へ問い合わせ直す
+const INSPECT_INTERVAL_MS = 400;
+// 最初はマスで引き、答えが届いたら押したものの識別子で引く。消えたら閉じる
+let inspected: InspectQuery | null = null;
+const inspector = setupInspector(element<HTMLElement>("#inspector"), () => {
+  inspected = null;
+});
+function closeInspector(): void {
+  inspected = null;
+  inspector.close();
+}
+function requestInspect(): void {
+  if (inspected !== null) {
+    send({ kind: "inspect", query: inspected });
+  }
+}
+setInterval(requestInspect, INSPECT_INTERVAL_MS);
+
 function cancelTool(): void {
   roadStart = null;
   if (pointer?.mode === "area") {
@@ -371,6 +391,7 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
   if (renderer !== null) {
     renderer.showZonable = next.kind === "zone";
   }
+  closeInspector();
   cancelTool();
 }
 
@@ -393,6 +414,10 @@ function clickTile(at: Tile): void {
   } else if (tool.kind === "service") {
     // 答えの届いていないマスでも送り、置けるかは中核に決めさせる
     sendCommand(placeServiceCommand(tool.service, at, serviceChoice(tool.service, at).rotation));
+  } else if (tool.kind === "none") {
+    // 何もないところを押すと、答えが空で返ってきてパネルが閉じる
+    inspected = { kind: "tile", x: at.x, y: at.y };
+    requestInspect();
   }
 }
 
@@ -408,6 +433,7 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape") {
+    closeInspector();
     cancelTool();
   } else if ((event.key === "r" || event.key === "R") && tool.kind === "service") {
     const current = cursor !== null ? serviceChoice(tool.service, cursor).rotation : 0;
@@ -643,6 +669,15 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "service-probe") {
     probe = message;
     updatePreview();
+    return;
+  }
+  if (message.kind === "inspect") {
+    // 押し直したあとに、前の問い合わせの答えが遅れて届くことがある
+    const result = applyInspectReply(inspected, message.query, message.info);
+    if (!result.stale) {
+      inspected = result.query;
+      inspector.show(result.view);
+    }
     return;
   }
   if (message.kind === "feedback-error") {
