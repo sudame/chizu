@@ -36,7 +36,7 @@ mise run lint          # 静的検査をすべて回す
 mise run test:rust     # cargo test --workspace
 mise run lint:md       # markdown の検査（rumdl）
 mise run lint:actions  # ワークフローの検査（jactionlint）
-mise run lint:rust     # cargo fmt --check と cargo clippy
+mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core の浮動小数点の検査
 ```
 
 `test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。

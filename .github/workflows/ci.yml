@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+# mise run が足りないツールを勝手に入れないようにし、各ジョブは install_args で入れたツールだけで動かす
+env:
+  MISE_AUTO_INSTALL: "false"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -56,7 +60,7 @@ jobs:
       # rust の版は mise.toml の設定で rust-toolchain.toml から読む
       - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
-          install_args: rust
+          install_args: rust ripgrep
       - run: mise run lint:rust
 
   test-rust:
