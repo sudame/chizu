@@ -4,8 +4,8 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chizu_core::building::demand;
-use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::record::RecordError;
+use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::zone::{ZONE_DEPTH, near_road};
 use chizu_core::{
     ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
