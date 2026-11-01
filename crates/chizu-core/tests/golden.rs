@@ -44,14 +44,14 @@ fn scenarios() -> Vec<Scenario> {
             name: "road_network",
             seed: 42,
             ticks: 400,
-            log: road_network(),
+            log: road_network(42),
         },
     ]
 }
 
-/// 道路を引き、ノードでつなぎ、消して、また引く記録。重なり、既存の区間の途中、
+/// 道路を引き、交差させ、高速道路につなぎ、消して、また引く記録。重なり、角での交わり、
 /// 買っていない土地、何もない場所を消す操作で却下される場合も混ぜる。
-fn road_network() -> CommandLog {
+fn road_network(seed: u64) -> CommandLog {
     let mut log = CommandLog::new();
     let mut rec = |tick: u64, c: Command| {
         log.record(Tick(tick), c).unwrap();
@@ -66,6 +66,7 @@ fn road_network() -> CommandLog {
     };
     rec(10, road((0, 0), (40, 0), RoadKind::Small));
     rec(10, road((40, 0), (40, 20), RoadKind::Medium));
+    // 既存の区間の途中を横切り、両方を分ける。
     rec(20, road((20, -20), (20, 20), RoadKind::Small));
     rec(20, road((40, -20), (40, 0), RoadKind::Large));
     rec(20, road((0, 0), (30, 30), RoadKind::Large));
@@ -75,6 +76,13 @@ fn road_network() -> CommandLog {
     // 既存のノードを途中で通り、そこで分ける。
     rec(30, road((35, 5), (45, -5), RoadKind::Small));
     rec(30, road((100, 0), (140, 0), RoadKind::Small));
+    // 外部接続の高速道路の、買ってある土地の端のノードから内へ引く。
+    let world = World::new(seed);
+    let (highway, _) = world.network().segments().next().unwrap();
+    let line = world.network().segment_line(highway).unwrap();
+    let (inner, (sx, sy)) = (line.start, line.step);
+    let inward = (inner.x - 10 * sx, inner.y - 10 * sy);
+    rec(40, road((inner.x, inner.y), inward, RoadKind::Medium));
     rec(100, bulldoze((39, 10), (41, 12)));
     rec(100, bulldoze((-50, -50), (-40, -40)));
     rec(200, road((40, 0), (40, 30), RoadKind::Small));
@@ -198,7 +206,7 @@ fn land_purchase_covers_water_and_the_rules() {
     assert_eq!(checkpoints_and_world(s.seed, &s.log, s.ticks).1, world);
 }
 
-/// 道路の記録が、ノードでのつなぎ、却下、消したあとの引き直しを通っていることを確かめる。
+/// 道路の記録が、交差での分割、高速道路へのつなぎ、却下、消したあとの引き直しを通っていることを確かめる。
 #[test]
 fn road_network_covers_the_rules() {
     let s = scenarios()
@@ -207,14 +215,17 @@ fn road_network_covers_the_rules() {
         .unwrap();
     let mut world = World::new(s.seed);
     let stats = replay(&mut world, &s.log, s.ticks);
-    assert_eq!((stats.applied, stats.denied), (7, 5));
+    assert_eq!((stats.applied, stats.denied), (9, 4));
     let net = world.network();
     let degree = |x, y| {
         let node = net.node_at(TilePos::new(x, y)).unwrap();
         net.node(node).unwrap().segments.len()
     };
-    assert_eq!((degree(40, 0), degree(0, 0)), (5, 2));
-    assert_eq!(net.segments().count(), 6);
+    assert_eq!((degree(20, 0), degree(20, 20), degree(40, 0)), (4, 3, 5));
+    // 高速道路と、つないだ道路の 2 本が端のノードに集まる。
+    let (highway, _) = net.segments().next().unwrap();
+    let inner = net.segment_line(highway).unwrap().start;
+    assert_eq!(degree(inner.x, inner.y), 2);
     assert!(world.money() < chizu_core::world::INITIAL_MONEY);
 }
 
