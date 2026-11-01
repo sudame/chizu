@@ -132,7 +132,7 @@ impl Trip {
         (Mm(x), Mm(y))
     }
 
-        fn last_leg(&self) -> bool {
+    fn last_leg(&self) -> bool {
         self.leg as usize + 1 == self.route.links.len()
     }
 

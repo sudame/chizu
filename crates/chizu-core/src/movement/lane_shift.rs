@@ -99,7 +99,10 @@ mod tests {
             (SegmentKind::Highway, 4_000),
         ] {
             let lanes = i64::from(kind.car_lanes_per_side());
-            assert_eq!(lanes * kind.lane_width_mm() + kind.sidewalk_width_mm(), half);
+            assert_eq!(
+                lanes * kind.lane_width_mm() + kind.sidewalk_width_mm(),
+                half
+            );
         }
     }
 

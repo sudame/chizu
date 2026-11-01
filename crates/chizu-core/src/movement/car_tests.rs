@@ -424,9 +424,9 @@ fn mover_shifts_follow_the_lane_each_car_runs_in() {
             // 横のずれは中心線に直交し、左側通行で、車線の番号が小さいほど端（中心線から遠い）にある。
             assert_eq!(m.shift.0, Mm(0));
             let side = if m.heading.0 > 0 { -1 } else { 1 };
-            let settled = t
-                .blend
-                .is_none_or(|b| i64::from(t.offset().0) >= i64::from(b.start) + lane_shift::BLEND_MM);
+            let settled = t.blend.is_none_or(|b| {
+                i64::from(t.offset().0) >= i64::from(b.start) + lane_shift::BLEND_MM
+            });
             if settled {
                 // 大きい道路の車線は 1,120mm 幅で、端の車線の中心は中心線から 2,800mm にある。
                 assert_eq!(m.shift.1, Mm(side * (2_800 - 1_120 * k as i64)));
@@ -525,7 +525,9 @@ fn a_car_slows_down_before_a_slower_road() {
 }
 
 /// 範囲の中の移動体の、中心線の上の位置とずれ。
-fn drawn(c: &Cars) -> std::collections::BTreeMap<crate::id::TripId, ((i64, i64), (i64, i64))> {
+type Drawn = std::collections::BTreeMap<crate::id::TripId, ((i64, i64), (i64, i64))>;
+
+fn drawn(c: &Cars) -> Drawn {
     let min = WorldPos::new(Mm(-800_000), Mm(-800_000));
     let max = WorldPos::new(Mm(800_000), Mm(800_000));
     c.trips
