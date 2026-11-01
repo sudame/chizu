@@ -521,7 +521,7 @@ impl World {
             edge(rect.max.x.saturating_add(1)),
             edge(rect.max.y.saturating_add(1)),
         );
-        self.trips.movers_in(min, max)
+        self.trips.movers_in(&self.network, min, max)
     }
 
     /// プレイヤーが置いた公共の施設。置いた順に並ぶ。
