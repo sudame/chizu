@@ -24,8 +24,7 @@ import {
   EMPTY_ROAD_INDEX,
   isDisconnected,
   type RoadIndex,
-  snapRoadEnd,
-  snapRoadStart,
+  roadEndpoints,
 } from "./map/snap.ts";
 import {
   buildRoadCommand,
@@ -44,7 +43,6 @@ import {
   type ServiceProbe,
   screenToTile,
   serviceFootprint,
-  snapToEightDirections,
   type Tile,
   type Tool,
 } from "./map/tools.ts";
@@ -283,6 +281,14 @@ let roadStart: Tile | null = null;
 let roadIndex: RoadIndex = EMPTY_ROAD_INDEX;
 // Alt を押しているあいだは、道路を近くの道路に吸い付けない
 let noSnap = false;
+// プレビューで最後に見せた道路。押したときは、これと同じ道路を送る
+let shownRoad: {
+  start: Tile | null;
+  cursor: Tile;
+  noSnap: boolean;
+  from: Tile;
+  to: Tile;
+} | null = null;
 let cursor: Tile | null = null;
 let pointer: {
   id: number;
@@ -303,8 +309,8 @@ function updatePreview(): void {
   let info = "";
   let infoText = "";
   if (tool.kind === "road" && cursor !== null) {
-    const from = roadStart ?? roadStartAt(cursor);
-    const to = roadStart === null ? cursor : roadEndAt(roadStart, cursor);
+    const { from, to } = roadEndpoints(roadIndex, roadStart, cursor, noSnap);
+    shownRoad = { start: roadStart, cursor, noSnap, from, to };
     geometry = new Geometry(from);
     const half = halfWidthOf(ROAD_CODES[tool.road]);
     if (roadStart !== null && roadCosts !== null) {
@@ -356,14 +362,23 @@ function updatePreview(): void {
   toolInfo.textContent = infoText === "" ? info : infoText;
 }
 
-/** 道路の始点。近くの道路に吸い付ける。Alt を押しているあいだは吸い付けない。 */
-function roadStartAt(at: Tile): Tile {
-  return noSnap ? at : snapRoadStart(roadIndex, at);
-}
-
-/** 道路の終点。8 方向に寄せ、近くの道路に吸い付ける。 */
-function roadEndAt(start: Tile, at: Tile): Tile {
-  return noSnap ? snapToEightDirections(start, at) : snapRoadEnd(roadIndex, start, at);
+/**
+ * 押した位置の道路の始点と終点。プレビューで最後に見せた道路と同じ条件ならそれをそのまま使い、
+ * 道路網が届いて索引が変わっていても、プレビューと違う道路を送らない。
+ */
+function roadAt(at: Tile): { from: Tile; to: Tile } {
+  const shown = shownRoad;
+  if (
+    shown !== null &&
+    shown.noSnap === noSnap &&
+    shown.cursor.x === at.x &&
+    shown.cursor.y === at.y &&
+    shown.start?.x === roadStart?.x &&
+    shown.start?.y === roadStart?.y
+  ) {
+    return shown;
+  }
+  return roadEndpoints(roadIndex, roadStart, at, noSnap);
 }
 
 function requestProbe(service: ServiceName, at: Tile): void {
@@ -424,9 +439,9 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
 function clickTile(at: Tile): void {
   if (tool.kind === "road") {
     if (roadStart === null) {
-      roadStart = roadStartAt(at);
+      roadStart = roadAt(at).from;
     } else {
-      const end = roadEndAt(roadStart, at);
+      const end = roadAt(at).to;
       if (end.x !== roadStart.x || end.y !== roadStart.y) {
         sendCommand(buildRoadCommand(tool.road, roadStart, end));
         // CS2 と同じく、引いた終点から続けて引ける
@@ -661,6 +676,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "roads") {
     roads = roadMeshes(message.segments, message.nodes);
     roadIndex = buildRoadIndex(message.segments, message.nodes);
+    updatePreview();
     renderer?.roads.setRoads(roads);
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);

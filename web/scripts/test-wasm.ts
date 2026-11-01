@@ -376,6 +376,9 @@ try {
     x: cx + (x + 0.5 - first.x) * zoom,
     y: cy + (y + 0.5 - first.y) * zoom,
   });
+  // カーソルのある道路には始点の印が重なるので、道路から離れたところへ動かしてから色を読む
+  await page.mouse.move(cx, cy - 120, { steps: 2 });
+  await page.waitForTimeout(100);
   // 道路とノードは灰色、地面は緑が強い
   const isRoad = (c: number[]) =>
     Math.abs((c[1] ?? 0) - (c[0] ?? 0)) < 20 && Math.abs((c[2] ?? 0) - (c[1] ?? 0)) < 20;

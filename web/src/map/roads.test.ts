@@ -79,7 +79,10 @@ describe("Geometry", () => {
   });
 
   test("届いた道路網は、区間ごとに 6 頂点、ノードごとに 6 頂点にする", () => {
-    const g = roadGeometry(new Float64Array([0, 0, 4, 0, 1]), new Float64Array([0, 0, 1, 4, 0, 1]));
+    const g = roadGeometry(
+      new Float64Array([0, 0, 4, 0, 1]),
+      new Float64Array([0, 0, 1, 0, 4, 0, 1, 0]),
+    );
     expect(g.vertexCount).toBe(18);
     expect(roadGeometry(new Float64Array(), new Float64Array()).vertexCount).toBe(0);
   });
@@ -87,7 +90,7 @@ describe("Geometry", () => {
 
 describe("車線ごとの道路", () => {
   const nodesOf = (...tiles: [number, number][]) =>
-    new Float64Array(tiles.flatMap(([x, y]) => [x, y, 1]));
+    new Float64Array(tiles.flatMap(([x, y]) => [x, y, 1, 0]));
   // 6 頂点ごとの塊の、i 番めの頂点の x と y
   const at = (g: Geometry, block: number, vertex: number) => {
     const data = g.build();

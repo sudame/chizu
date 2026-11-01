@@ -44,7 +44,7 @@ export const SUPPLY_WATER = 2;
 /** 施設 1 つの数の個数。chizu-wasm の facilities と同じ。 */
 export const FACILITY_STRIDE = 5;
 /** ノード 1 つの数の個数。chizu-wasm の road_nodes と同じ。 */
-export const NODE_STRIDE = 3;
+export const NODE_STRIDE = 4;
 
 /** チャンクの 1 辺のマス数。chizu-core の CHUNK_SIDE と同じ。 */
 export const CHUNK_SIDE = 64;

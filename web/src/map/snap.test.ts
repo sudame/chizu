@@ -5,7 +5,9 @@ import {
   DISCONNECTED_NOTICE,
   EMPTY_ROAD_INDEX,
   isDisconnected,
+  isRefused,
   isRoadTile,
+  roadEndpoints,
   snapRoadEnd,
   snapRoadStart,
 } from "./snap.ts";
@@ -55,10 +57,12 @@ describe("snapRoadStart", () => {
   test("高速道路の途中には吸い付けない", () => {
     const highway = buildRoadIndex(
       new Float64Array([0, 0, 10, 0, HIGHWAY_CODE]),
-      new Float64Array(),
+      new Float64Array([0, 0, 1, 0, 10, 0, 1, 1]),
     );
     expect(snapRoadStart(highway, t(5, 1))).toEqual(t(5, 1));
-    expect(snapRoadStart(highway, t(11, 0))).toEqual(t(10, 0));
+    // 内側の端には吸い付けるが、外の世界につながる外側の端には吸い付けない
+    expect(snapRoadStart(highway, t(-1, 1))).toEqual(t(0, 0));
+    expect(snapRoadStart(highway, t(11, 0))).toEqual(t(11, 0));
   });
 
   test("道路がなければそのまま", () => {
@@ -127,7 +131,7 @@ describe("isDisconnected", () => {
   test("高速道路の途中を横切る道路は、つながるとは数えない", () => {
     const highway = buildRoadIndex(
       new Float64Array([0, 0, 10, 0, HIGHWAY_CODE]),
-      new Float64Array(),
+      new Float64Array([0, 0, 1, 0, 10, 0, 1, 1]),
     );
     expect(isDisconnected(highway, t(5, -3), t(5, 3))).toBe(true);
   });
@@ -138,5 +142,61 @@ describe("知らせの文言", () => {
     expect(DISCONNECTED_NOTICE).toContain("つながらない");
     expect(DISCONNECTED_NOTICE).toContain("電気と水道");
     expect(DISCONNECTED_NOTICE).toContain("Alt");
+  });
+});
+
+describe("既存の道路と重なる吸い付けはしない", () => {
+  test("道路の上の始点から 1 マス脇へ出す枝は、元の道路に沿って吸い付かない", () => {
+    expect(snapRoadEnd(roads, t(15, 10), t(15, 11))).toEqual(t(15, 11));
+    expect(snapRoadEnd(roads, t(14, 10), t(14, 11))).toEqual(t(14, 11));
+    expect(snapRoadEnd(roads, t(16, 10), t(16, 9))).toEqual(t(16, 9));
+  });
+
+  test("同じ道路の端の手前でも、沿ってしまうなら吸い付かない", () => {
+    // (11, 10) から (10, 10) へは、(10, 10)–(20, 10) に沿った1歩になる
+    expect(snapRoadEnd(roads, t(11, 10), t(10, 11))).toEqual(t(10, 11));
+  });
+
+  test("沿わない吸い付けは今までどおりする", () => {
+    expect(snapRoadEnd(roads, t(15, 5), t(15, 9))).toEqual(t(15, 10));
+  });
+
+  test("斜めの道路の角で交わる吸い付けもしない", () => {
+    const diagonal = buildRoadIndex(
+      new Float64Array([0, 0, 4, 4, 0, 4, 0, 0, 4, 0]),
+      new Float64Array([0, 0, 1, 0, 4, 4, 1, 0, 4, 0, 1, 0, 0, 4, 1, 0]),
+    );
+    expect(isRefused(diagonal, t(1, 0), t(0, 1))).toBe(true);
+    expect(isRefused(diagonal, t(10, 10), t(12, 10))).toBe(false);
+  });
+
+  test("高速道路の途中を通る道路は断られると数える", () => {
+    const highway = buildRoadIndex(
+      new Float64Array([0, 0, 10, 0, HIGHWAY_CODE]),
+      new Float64Array([0, 0, 1, 0, 10, 0, 1, 1]),
+    );
+    expect(isRefused(highway, t(5, -2), t(5, 2))).toBe(true);
+    expect(isRefused(highway, t(0, -2), t(0, 2))).toBe(false);
+  });
+});
+
+describe("roadEndpoints", () => {
+  test("始点がなければ、カーソルを吸い付けた始点を返す", () => {
+    expect(roadEndpoints(roads, null, t(9, 10), false)).toEqual({ from: t(10, 10), to: t(10, 10) });
+  });
+
+  test("始点があれば、終点を吸い付ける", () => {
+    expect(roadEndpoints(roads, t(0, 10), t(9, 10), false)).toEqual({
+      from: t(0, 10),
+      to: t(10, 10),
+    });
+  });
+
+  test("Alt を押しているあいだは吸い付けず、8 方向に寄せるだけにする", () => {
+    expect(roadEndpoints(roads, null, t(9, 10), true)).toEqual({ from: t(9, 10), to: t(9, 10) });
+    expect(roadEndpoints(roads, t(0, 10), t(9, 10), true)).toEqual({
+      from: t(0, 10),
+      to: t(9, 10),
+    });
   });
 });
