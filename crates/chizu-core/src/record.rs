@@ -6,6 +6,8 @@
 //!
 //! 記録の並びは、tick が減らず、番号が 1 件ごとに増えていく。
 //! 記録するときも読み戻すときも [`Command::validate`] を通すので、記録に入ったものは必ず読み戻せる。
+//! ただし、それは同じ版の中核で書いて読む場合に限る。保存を入れるまでは、検証の範囲や中身が
+//! 変わったときの古い記録との互換を保証せず、`FORMAT_VERSION` も上げない。版の運用は、保存を入れる PR で決める。
 //!
 //! # バイト列の形式
 //!
@@ -24,7 +26,7 @@
 //! |---|---|---|
 //! | 1 | `BuildRoad` | from `TilePos`、to `TilePos`、kind `u8` |
 //! | 2 | `Bulldoze` | area `TileRect` |
-//! | 3 | `PaintZone` | area `TileRect`、zone `u8` |
+//! | 3 | `PaintZone` | area `TileRect`、zone `u8`（0 は区画を消す） |
 //! | 4 | `PlaceBuilding` | kind `u8`、at `TilePos`、rotation `u8` |
 //! | 5 | `SetSignal` | index `u32`、generation `u16`、on `u8`（0 か 1） |
 //! | 6 | `BuyChunk` | cx `i32`、cy `i32` |
@@ -331,6 +333,10 @@ impl<'a> Reader<'a> {
             Err(DecodeError::InvalidValue { what, at: self.pos })
         }
     }
+    fn check_code<T>(&self, what: &'static str, value: Option<T>) -> Result<T, DecodeError> {
+        value.ok_or(DecodeError::InvalidValue { what, at: self.pos })
+    }
+
     fn code<T>(&mut self, what: &'static str, from: fn(u8) -> Option<T>) -> Result<T, DecodeError> {
         let code = self.u8()?;
         from(code).ok_or(DecodeError::InvalidValue { what, at: self.pos })
@@ -352,7 +358,7 @@ fn encode_command(w: &mut Writer, c: &Command) {
         Command::PaintZone { area, zone } => {
             w.u8(3);
             w.rect(area);
-            w.u8(zone as u8);
+            w.u8(zone.map_or(0, |z| z as u8));
         }
         Command::PlaceBuilding { kind, at, rotation } => {
             w.u8(4);
@@ -393,7 +399,10 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
         2 => Command::Bulldoze { area: r.rect()? },
         3 => Command::PaintZone {
             area: r.rect()?,
-            zone: r.code("ZoneKind", ZoneKind::from_code)?,
+            zone: match r.u8()? {
+                0 => None,
+                code => Some(r.check_code("ZoneKind", ZoneKind::from_code(code))?),
+            },
         },
         4 => Command::PlaceBuilding {
             kind: r.code("ServiceKind", ServiceKind::from_code)?,
@@ -470,6 +479,7 @@ pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
 mod tests {
     use super::*;
     use crate::command::MAX_TAX_PERMILLE;
+    use crate::tile::WORLD_LIMIT;
     use proptest::prelude::*;
 
     fn sample_commands() -> Vec<Command> {
@@ -484,7 +494,11 @@ mod tests {
             },
             Command::PaintZone {
                 area: TileRect::from_corners(TilePos::new(0, 0), TilePos::new(3, 3)),
-                zone: ZoneKind::Industrial,
+                zone: Some(ZoneKind::Industrial),
+            },
+            Command::PaintZone {
+                area: TileRect::from_corners(TilePos::new(1, 1), TilePos::new(2, 2)),
+                zone: None,
             },
             Command::PlaceBuilding {
                 kind: ServiceKind::WaterPump,
@@ -499,7 +513,7 @@ mod tests {
                 on: true,
             },
             Command::BuyChunk {
-                coord: ChunkCoord::new(i32::MIN, 1),
+                coord: ChunkCoord::new(-(1 << 25), 1),
             },
             Command::SetTaxRate {
                 zone: ZoneKind::Commercial,
@@ -755,8 +769,8 @@ mod tests {
         assert_eq!(
             stats,
             ReplayStats {
-                applied: 3,
-                not_implemented: 3,
+                applied: 5,
+                not_implemented: 2,
                 rejected: 0,
                 denied: 2,
                 denied_by: {
@@ -775,13 +789,32 @@ mod tests {
     }
 
     fn arb_command() -> impl Strategy<Value = Command> {
-        let tile = (any::<i64>(), any::<i64>()).prop_map(|(x, y)| TilePos::new(x, y));
+        // 座標は、原点のまわり、範囲の端の前後、i64 の全体から引く。
+        let lim = WORLD_LIMIT;
+        let coord = prop_oneof![
+            -1_000_i64..1_000,
+            (lim - 8)..=(lim + 8),
+            (-lim - 8)..=(-lim + 8),
+            any::<i64>(),
+        ];
+        let tile = (coord.clone(), coord.clone()).prop_map(|(x, y)| TilePos::new(x, y));
         let rect = (tile.clone(), tile.clone()).prop_map(|(a, b)| TileRect::from_corners(a, b));
+        let small_rect = (tile.clone(), 0_i64..256, 0_i64..256).prop_map(|(min, w, h)| {
+            let max = TilePos::new(min.x.saturating_add(w), min.y.saturating_add(h));
+            TileRect::from_corners(min, max)
+        });
+        let chunk_lim = (lim / 64) as i32;
+        let chunk = prop_oneof![
+            -4_i32..4,
+            (chunk_lim - 2)..=chunk_lim,
+            -chunk_lim - 2..=-chunk_lim + 2,
+            any::<i32>(),
+        ];
         let zone = proptest::sample::select(ZoneKind::ALL.to_vec());
         prop_oneof![
             (
-                -1_000_i64..1_000,
-                -1_000_i64..1_000,
+                coord.clone(),
+                coord.clone(),
                 -1_i64..=1,
                 -1_i64..=1,
                 1_i64..=1_024,
@@ -791,11 +824,12 @@ mod tests {
                     != (0, 0))
                 .prop_map(|(x, y, sx, sy, n, k)| Command::BuildRoad {
                     from: TilePos::new(x, y),
-                    to: TilePos::new(x + sx * n, y + sy * n),
+                    to: TilePos::new(x.saturating_add(sx * n), y.saturating_add(sy * n)),
                     kind: RoadKind::from_code(k).unwrap(),
                 }),
             rect.clone().prop_map(|area| Command::Bulldoze { area }),
-            (rect, zone.clone()).prop_map(|(area, zone)| Command::PaintZone { area, zone }),
+            (small_rect, proptest::option::of(zone.clone()))
+                .prop_map(|(area, zone)| Command::PaintZone { area, zone }),
             (1_u8..=2, tile, any::<u8>()).prop_map(|(k, at, rotation)| Command::PlaceBuilding {
                 kind: ServiceKind::from_code(k).unwrap(),
                 at,
@@ -807,7 +841,7 @@ mod tests {
                     on,
                 }
             }),
-            (any::<i32>(), any::<i32>()).prop_map(|(cx, cy)| Command::BuyChunk {
+            (chunk.clone(), chunk).prop_map(|(cx, cy)| Command::BuyChunk {
                 coord: ChunkCoord::new(cx, cy),
             }),
             (zone, 0..=MAX_TAX_PERMILLE)
@@ -825,9 +859,15 @@ mod tests {
             let mut tick = 0;
             for (dt, c) in steps {
                 tick += dt;
-                log.record(Tick(tick), c).unwrap();
+                match c.validate() {
+                    Ok(()) => { log.record(Tick(tick), c).unwrap(); }
+                    Err(e) => prop_assert_eq!(log.record(Tick(tick), c), Err(RecordError::Invalid(e))),
+                }
             }
-            prop_assert_eq!(CommandLog::decode(&log.encode()), Ok(log));
+            prop_assert_eq!(CommandLog::decode(&log.encode()), Ok(log.clone()));
+            // 検証を通ったコマンドは、範囲の端でも panic せずに適用できる。
+            let mut w = World::new(0);
+            replay(&mut w, &log, tick + 1);
         }
 
         #[test]

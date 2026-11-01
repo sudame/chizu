@@ -12,6 +12,7 @@ use crate::schedule::{bucket_at, update_citizen};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
 use crate::units::{Money, Tick};
+use crate::zone::{around, near_road, tiles_of};
 
 /// 始めたときの所持金。
 pub const INITIAL_MONEY: Money = Money(500_000);
@@ -67,10 +68,14 @@ pub enum DenyReason {
     NotAdjacent = 7,
     /// 買う土地をもう買ってある。
     AlreadyOwned = 8,
+    /// 区画を塗る長方形に、塗れるマス（道路から奥行きの範囲にある、買った陸の空きマス）がない。
+    NoZonableTile = 9,
+    /// 区画を塗っても消しても、変わるマスがない。
+    ZoneUnchanged = 10,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 9] = [
+    pub const ALL: [DenyReason; 11] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -80,6 +85,8 @@ impl DenyReason {
         DenyReason::NothingToBulldoze,
         DenyReason::NotAdjacent,
         DenyReason::AlreadyOwned,
+        DenyReason::NoZonableTile,
+        DenyReason::ZoneUnchanged,
     ];
 
     pub fn index(self) -> usize {
@@ -184,9 +191,87 @@ impl World {
             chunk.edit_layer(Layer::Ground, |tiles| {
                 for (i, u) in list {
                     tiles.occupancy[i] = u;
+                    // 道路を引いたマスの区画は消える。
+                    if u == TileUse::Road {
+                        tiles.zone[i] = None;
+                    }
                 }
             });
         }
+    }
+
+    /// マスの区画。メモリにないチャンクのマスは `None` である。
+    pub fn zone_at(&self, t: TilePos) -> Option<ZoneKind> {
+        let chunk = self.chunks.get(&t.chunk()?)?;
+        let (lx, ly) = t.local();
+        chunk.layer(Layer::Ground)?.zone[local_index(lx, ly)]
+    }
+
+    /// 区画の表をまとめて書き換え、変えたチャンクの版を上げる。
+    fn write_zones(&mut self, edits: BTreeMap<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>) {
+        for (coord, list) in edits {
+            let chunk = self.chunks.get_mut(&coord).expect("チャンクがない");
+            chunk.edit_layer(Layer::Ground, |tiles| {
+                for (i, z) in list {
+                    tiles.zone[i] = z;
+                }
+            });
+        }
+    }
+
+    /// 長方形の中の、区画を塗れるマスに `zone` を塗る。`None` なら区画を消す。
+    fn paint_zone(&mut self, area: TileRect, zone: Option<ZoneKind>) -> ApplyOutcome {
+        let near = zone.map(|_| near_road(&self.network, area));
+        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
+        let mut zonable = false;
+        for (i, t) in tiles_of(area).enumerate() {
+            let Some((coord, chunk)) = t.chunk().and_then(|c| self.chunks.get_key_value(&c)) else {
+                continue;
+            };
+            let tiles = chunk.layer(Layer::Ground).expect("地上の層がない");
+            let (lx, ly) = t.local();
+            let idx = local_index(lx, ly);
+            if let Some(near) = &near {
+                let can = near[i]
+                    && tiles.occupancy[idx] == TileUse::Empty
+                    && self.check_buildable(t).is_ok();
+                if !can {
+                    continue;
+                }
+                zonable = true;
+            }
+            if tiles.zone[idx] != zone {
+                edits.entry(*coord).or_default().push((idx, zone));
+            }
+        }
+        if edits.is_empty() {
+            let reason = if zone.is_some() && !zonable {
+                DenyReason::NoZonableTile
+            } else {
+                DenyReason::ZoneUnchanged
+            };
+            return ApplyOutcome::Denied(reason);
+        }
+        self.write_zones(edits);
+        ApplyOutcome::Applied
+    }
+
+    /// 長方形の中で、道路から奥行きの範囲を外れた区画を消す。
+    fn prune_zones(&mut self, area: TileRect) {
+        let near = near_road(&self.network, area);
+        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
+        for (i, t) in tiles_of(area).enumerate() {
+            if near[i] || self.zone_at(t).is_none() {
+                continue;
+            }
+            let (lx, ly) = t.local();
+            let coord = t.chunk().expect("区画のあるマスのチャンクがない");
+            edits
+                .entry(coord)
+                .or_default()
+                .push((local_index(lx, ly), None));
+        }
+        self.write_zones(edits);
     }
 
     /// メモリに置いたばかりのチャンクに、そこを通る道路を書く。
@@ -256,6 +341,10 @@ impl World {
                 .flat_map(|l| l.tiles().collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
         );
+        // 消した道路にだけ面していた区画も消える。
+        for line in &removed {
+            self.prune_zones(around(line.start, line.end()));
+        }
         ApplyOutcome::Applied
     }
 
@@ -363,9 +452,10 @@ impl World {
             Command::BuyChunk { coord } => self.buy_chunk(coord),
             Command::BuildRoad { from, to, kind } => self.build_road(from, to, kind),
             Command::Bulldoze { area } => self.bulldoze(area),
-            Command::PaintZone { .. }
-            | Command::PlaceBuilding { .. }
-            | Command::SetSignal { .. } => ApplyOutcome::NotImplemented,
+            Command::PaintZone { area, zone } => self.paint_zone(area, zone),
+            Command::PlaceBuilding { .. } | Command::SetSignal { .. } => {
+                ApplyOutcome::NotImplemented
+            }
         }
     }
 
@@ -426,10 +516,12 @@ mod tests {
             | DenyReason::HighwayMidway
             | DenyReason::NothingToBulldoze
             | DenyReason::NotAdjacent
-            | DenyReason::AlreadyOwned => DenyReason::ALL.contains(&r),
+            | DenyReason::AlreadyOwned
+            | DenyReason::NoZonableTile
+            | DenyReason::ZoneUnchanged => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 9);
+        assert_eq!(DenyReason::ALL.len(), 11);
     }
     use crate::command::{MAX_TAX_PERMILLE, NodeId};
 
@@ -565,6 +657,82 @@ mod tests {
         tiles.unwrap().occupancy[local_index(lx, ly)]
     }
 
+    fn paint(w: &mut World, a: (i64, i64), b: (i64, i64), zone: Option<ZoneKind>) -> ApplyOutcome {
+        let area = TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1));
+        w.apply(&Command::PaintZone { area, zone })
+    }
+
+    #[test]
+    fn zones_reach_six_tiles_from_roads() {
+        let mut w = World::new(0);
+        let res = Some(ZoneKind::Residential);
+        assert_eq!(
+            paint(&mut w, (0, 0), (10, 10), res),
+            ApplyOutcome::Denied(DenyReason::NoZonableTile)
+        );
+        road(&mut w, (0, 0), (10, 0), RoadKind::Small);
+        let origin = ChunkCoord::new(0, 0);
+        let v = w.chunk(origin).unwrap().version();
+        assert_eq!(
+            paint(&mut w, (0, -10), (10, 10), res),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(w.chunk(origin).unwrap().version(), v + 1);
+        assert_eq!(w.zone_at(TilePos::new(5, 6)), res);
+        assert_eq!(w.zone_at(TilePos::new(10, 6)), res);
+        assert_eq!(w.zone_at(TilePos::new(5, 7)), None);
+        assert_eq!(
+            w.zone_at(TilePos::new(5, 0)),
+            None,
+            "道路のマスには塗れない"
+        );
+        assert_eq!(
+            paint(&mut w, (0, -10), (10, 10), res),
+            ApplyOutcome::Denied(DenyReason::ZoneUnchanged)
+        );
+        // 区画のあるマスに道路を引くと、そのマスの区画は消える。
+        road(&mut w, (3, 0), (3, 4), RoadKind::Small);
+        assert_eq!(w.zone_at(TilePos::new(3, 2)), None);
+        // 消す。
+        assert_eq!(paint(&mut w, (0, 1), (1, 6), None), ApplyOutcome::Applied);
+        assert_eq!(w.zone_at(TilePos::new(0, 1)), None);
+        assert_eq!(w.zone_at(TilePos::new(2, 1)), res);
+        assert_eq!(
+            paint(&mut w, (0, 1), (1, 6), None),
+            ApplyOutcome::Denied(DenyReason::ZoneUnchanged)
+        );
+    }
+
+    #[test]
+    fn zones_are_not_painted_off_the_owned_land_or_on_water() {
+        let mut w = World::new(42);
+        road(&mut w, (120, 0), (127, 0), RoadKind::Small);
+        assert_eq!(
+            paint(&mut w, (120, 1), (133, 1), Some(ZoneKind::Office)),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(w.zone_at(TilePos::new(127, 1)), Some(ZoneKind::Office));
+        assert_eq!(w.zone_at(TilePos::new(128, 1)), None);
+        // 水辺は is_buildable と同じ判定で弾く。
+        assert!(w.check_buildable(TilePos::new(128, 1)).is_err());
+    }
+
+    #[test]
+    fn bulldozing_a_road_removes_zones_that_only_faced_it() {
+        let mut w = World::new(0);
+        let res = Some(ZoneKind::Residential);
+        road(&mut w, (0, 0), (20, 0), RoadKind::Small);
+        road(&mut w, (0, 10), (20, 10), RoadKind::Small);
+        assert_eq!(paint(&mut w, (0, -6), (20, 16), res), ApplyOutcome::Applied);
+        let area = TileRect::from_corners(TilePos::new(5, 0), TilePos::new(5, 0));
+        assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Applied);
+        // 消した道路にだけ面していたマスは消え、残った道路にも面するマスは残る。
+        assert_eq!(w.zone_at(TilePos::new(5, -3)), None);
+        assert_eq!(w.zone_at(TilePos::new(5, 3)), None);
+        assert_eq!(w.zone_at(TilePos::new(5, 4)), res);
+        assert_eq!(w.zone_at(TilePos::new(5, 14)), res);
+    }
+
     #[test]
     fn road_tiles_follow_the_network_and_bump_the_chunk_version() {
         let mut w = World::new(0);
@@ -609,7 +777,7 @@ mod tests {
         #[test]
         fn road_tiles_match_the_network(
             edits in proptest::collection::vec(
-                (0_u8..4, -8_i64..8, -8_i64..8, -1_i64..=1, -1_i64..=1, 1_i64..10),
+                (0_u8..6, -8_i64..8, -8_i64..8, -1_i64..=1, -1_i64..=1, 1_i64..10),
                 1..30,
             )
         ) {
@@ -618,6 +786,10 @@ mod tests {
                 if op == 0 {
                     let area = TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + len / 2, y));
                     w.apply(&Command::Bulldoze { area });
+                } else if op == 1 {
+                    // 区画を塗るか消す。sx で種類を選ぶ。
+                    let zone = [None, Some(ZoneKind::Residential), Some(ZoneKind::Office)][(sx + 1) as usize];
+                    paint(&mut w, (x, y), (x + len, y + len), zone);
                 } else if (sx, sy) != (0, 0) {
                     road(&mut w, (x, y), (x + sx * len, y + sy * len), RoadKind::Small);
                 }
@@ -630,6 +802,14 @@ mod tests {
                         TileUse::Empty
                     };
                     proptest::prop_assert_eq!(tile_use(&w, x, y), expected, "({}, {})", x, y);
+                }
+            }
+            // 区画は、道路から奥行きの範囲にある道路でないマスにだけある。
+            let area = TileRect::from_corners(TilePos::new(-20, -20), TilePos::new(19, 19));
+            let near = near_road(w.network(), area);
+            for (i, t) in tiles_of(area).enumerate() {
+                if w.zone_at(t).is_some() {
+                    proptest::prop_assert!(near[i] && !w.network().is_road_tile(t), "{:?}", t);
                 }
             }
         }
@@ -785,11 +965,12 @@ mod tests {
             (3, 0, detached),
             (2, 2, detached),
             (-2, -2, detached),
-            (i32::MIN, 0, detached),
         ] {
             let outcome = buy(&mut w, cx, cy);
             assert_eq!(outcome, ApplyOutcome::Denied(reason), "({cx}, {cy})");
         }
+        // 世界の座標の範囲の外は、検証で弾く。
+        assert_eq!(buy(&mut w, i32::MIN, 0), ApplyOutcome::Rejected);
         assert_eq!(w, before);
     }
 
