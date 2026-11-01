@@ -60,13 +60,13 @@ function payloadOf(sim: Simulation): { meta: SaveMeta; commands: ArrayBuffer } {
   const payload = sim.save();
   try {
     const meta = JSON.parse(payload.meta()) as SaveMeta;
-    return { meta, commands: payload.commands().buffer as ArrayBuffer };
+    return { meta, commands: payload.take_commands().buffer as ArrayBuffer };
   } finally {
     payload.free();
   }
 }
 
-const metaOf = (sim: Simulation) => payloadOf(sim).meta;
+const metaOf = (sim: Simulation) => JSON.parse(sim.save_meta()) as SaveMeta;
 
 function sendSave(sim: Simulation, slot: SlotId): void {
   const { meta, commands } = payloadOf(sim);
@@ -95,7 +95,7 @@ function startAutoSave(sim: Simulation): void {
 
 /**
  * 画面が始め方を決めるのを待って、街を作る。読み込めなかったときは画面に伝え、次の指示を待つ。
- * 作ったあとは、保存データを求められたら返し、自動保存も回す。
+ * 作ったあとは、保存データを求められたら返し、画面が許したときは自動保存も回す。
  */
 export function startSimulation(): Promise<Simulation> {
   let sim: Simulation | null = null;
@@ -112,7 +112,9 @@ export function startSimulation(): Promise<Simulation> {
           loaded:
             loaded === null ? null : { meta: metaOf(created), rulesChanged: loaded.rulesChanged },
         });
-        startAutoSave(created);
+        if (message.autoSave) {
+          startAutoSave(created);
+        }
         resolve(created);
       } catch (error) {
         post({ kind: "save:load-error", message: String(error) });

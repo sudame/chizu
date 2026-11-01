@@ -43,7 +43,9 @@ if (url === undefined) {
 const browser = await chromium.launch({ executablePath: findOnPath("chrome-headless-shell") });
 
 try {
-  const page = await browser.newPage();
+  // 2 つ目のタブを同じ保存先で開くので、文脈を作ってから開く
+  const context = await browser.newContext();
+  const page = await context.newPage();
   page.on("console", (message) => console.log(`[console.${message.type()}] ${message.text()}`));
   page.on("pageerror", (error) => console.log(`[pageerror] ${error.message}`));
   const waitFor = (fn: () => boolean) =>
@@ -118,27 +120,30 @@ try {
   );
   await page.locator("#save-dialog button", { hasText: "閉じる" }).click();
 
-  // 記録の形式の版が違う保存データを、保存 2 に書いておく
+  // 記録の形式の版が違う保存データを保存 2 に、所持金の壊れた保存データを保存 3 に書いておく
   await page.evaluate(
     () =>
       new Promise<void>((resolve, reject) => {
         const open = indexedDB.open("chizu");
         open.onsuccess = () => {
           const tx = open.result.transaction("saves", "readwrite");
+          const meta = {
+            formatVersion: 999,
+            seed: "0",
+            tick: 0,
+            commandCount: 0,
+            day: 0,
+            secondOfDay: 0,
+            money: "0",
+            stateHash: "0000000000000000",
+          };
+          const commands = new ArrayBuffer(0);
+          tx.objectStore("saves").put({ slot: "manual-2", savedAt: Date.now(), meta, commands });
           tx.objectStore("saves").put({
-            slot: "manual-2",
+            slot: "manual-3",
             savedAt: Date.now(),
-            meta: {
-              formatVersion: 999,
-              seed: "0",
-              tick: 0,
-              commandCount: 0,
-              day: 0,
-              secondOfDay: 0,
-              money: "0",
-              stateHash: "0",
-            },
-            commands: new ArrayBuffer(0),
+            meta: { ...meta, formatVersion: 1, money: "abc" },
+            commands,
           });
           tx.oncomplete = () => resolve();
           tx.onerror = () => reject(tx.error);
@@ -159,6 +164,10 @@ try {
   check(
     !(await enabled("manual-2")) && ((await start.textContent()) ?? "").includes("読めない"),
     "記録の形式の版が違う保存データは、読めないと示される",
+  );
+  check(
+    !(await enabled("manual-3")) && ((await start.textContent()) ?? "").includes("壊れている"),
+    "値の壊れた保存データがあっても起動でき、その枠は壊れていると示される",
   );
   check(((await start.textContent()) ?? "").includes("日目"), "枠ごとにゲーム内の日付が並ぶ");
 
@@ -183,6 +192,19 @@ try {
       ((await page.locator("#save-notice").textContent()) ?? "").includes("読み込んだ"),
     "読み込んだと示され、規則が変わったとは示されない",
   );
+
+  // 2 つ目のタブは自動保存の枠に書かない
+  const second = await context.newPage();
+  await second.goto(url);
+  await second
+    .locator("#save-notice", { hasText: "別のタブ" })
+    .waitFor({ timeout: TIMEOUT_MS })
+    .then(
+      () => true,
+      () => false,
+    )
+    .then((ok) => check(ok, "2 つ目のタブでは、自動保存しないと示される"));
+  await second.close();
 
   // 状態ハッシュだけを変えた保存 1 の写しを保存 3 に書き、規則が変わったときの表示を確かめる
   await page.evaluate(
@@ -216,6 +238,19 @@ try {
       (await saveButton.getAttribute("data-loaded-hash")) === savedHash &&
       ((await page.locator("#save-notice").textContent()) ?? "").includes("規則が変わった"),
     "状態ハッシュが食い違っても読み込み、規則が変わったと示す",
+  );
+
+  // 自動保存があるときに新しく始めると、前の自動保存を退避する
+  await page.reload();
+  await start.and(page.locator("[open]")).waitFor({ timeout: TIMEOUT_MS });
+  await page.locator("#save-new").click();
+  await running();
+  await page.reload();
+  await start.and(page.locator("[open]")).waitFor({ timeout: TIMEOUT_MS });
+  check(
+    (await enabled("auto-previous")) &&
+      ((await start.textContent()) ?? "").includes("自動保存（前の街）"),
+    "新しく始めると、前の自動保存が「自動保存（前の街）」に残る",
   );
 } finally {
   await browser.close();

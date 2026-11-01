@@ -14,7 +14,23 @@ import {
 } from "./protocol.ts";
 import { SaveStore } from "./store.ts";
 
-const MANUAL_SLOTS = SLOTS.filter((s) => s !== "auto");
+const MANUAL_SLOTS = SLOTS.filter((s) => s.startsWith("manual-"));
+const AUTO_SAVE_LOCK = "chizu-auto-save";
+
+// 自動保存の枠に書けるタブを 1 つに限る。取れたら、ページを閉じるまで持ち続ける
+function holdAutoSaveLock(): Promise<boolean> {
+  if (!("locks" in navigator)) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    navigator.locks
+      .request(AUTO_SAVE_LOCK, { ifAvailable: true }, (lock) => {
+        resolve(lock !== null);
+        return lock === null ? undefined : new Promise<never>(() => {});
+      })
+      .catch(() => resolve(true));
+  });
+}
 
 function make<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -33,8 +49,13 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
   const send = (message: SaveToWorker, transfer: Transferable[] = []) =>
     worker.postMessage(message, transfer);
   const storePromise = SaveStore.open();
+  const lockPromise = holdAutoSaveLock();
   let records = new Map<SlotId, SaveRecord>();
+  let broken = new Set<SlotId>();
   let formatVersion = 0;
+  // 保存データを読めないときは false にして、保存を使わずに遊ぶ
+  let storage = true;
+  let autoSave = true;
   // 読み込みを頼んだ枠。読み込んだあと、作り直した状態ハッシュと比べる
   let loading: SaveRecord | null = null;
 
@@ -67,29 +88,45 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
   controls.after(notice);
   document.body.append(startDialog, saveDialog);
 
+  const BROKEN = "壊れている";
   const describe = (slot: SlotId) => {
     const r = records.get(slot);
+    if (broken.has(slot)) {
+      return `${SLOT_NAMES[slot]}：${BROKEN}`;
+    }
     return `${SLOT_NAMES[slot]}：${r === undefined ? "空き" : describeSave(r)}`;
   };
 
+  function startRow(slot: SlotId): HTMLElement {
+    const record = records.get(slot);
+    const button = make("button", "続きから", { type: "button", "data-load": slot });
+    let text: string;
+    let reason: string | null;
+    try {
+      text = describe(slot);
+      reason = record === undefined ? BROKEN : unreadableReason(record, formatVersion);
+    } catch {
+      text = `${SLOT_NAMES[slot]}：${BROKEN}`;
+      reason = BROKEN;
+    }
+    button.disabled = reason !== null;
+    if (reason !== null) {
+      button.dataset.unreadable = "true";
+    }
+    if (record !== undefined) {
+      button.addEventListener("click", () => load(record));
+    }
+    const row = make("p", `${text} `);
+    row.append(button);
+    if (reason !== null && reason !== BROKEN) {
+      row.append(` ${reason}`);
+    }
+    return row;
+  }
+
   function renderStartList(): void {
     startList.replaceChildren(
-      ...SLOTS.filter((s) => records.has(s)).map((slot) => {
-        const record = records.get(slot) as SaveRecord;
-        const reason = unreadableReason(record, formatVersion);
-        const button = make("button", "続きから", { type: "button", "data-load": slot });
-        button.disabled = reason !== null;
-        if (reason !== null) {
-          button.dataset.unreadable = "true";
-        }
-        button.addEventListener("click", () => load(record));
-        const row = make("p", `${describe(slot)} `);
-        row.append(button);
-        if (reason !== null) {
-          row.append(` ${reason}`);
-        }
-        return row;
-      }),
+      ...SLOTS.filter((s) => records.has(s) || broken.has(s)).map(startRow),
     );
   }
 
@@ -121,30 +158,68 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
     progress.hidden = false;
     progress.value = 0;
     // 枠の記録は IndexedDB に残すので、複製を送る
-    send({ kind: "save:start", save: { meta: record.meta, commands: record.commands.slice(0) } });
+    send({
+      kind: "save:start",
+      save: { meta: record.meta, commands: record.commands.slice(0) },
+      autoSave: storage && autoSave,
+    });
   }
 
-  newButton.addEventListener("click", () => {
+  // 自動保存があれば、新しい街の自動保存で消えないように「自動保存（前の街）」へ退避してから始める
+  async function startNew(): Promise<void> {
     loading = null;
     setStartBusy(true);
-    send({ kind: "save:start", save: null });
-  });
+    const previous = records.get("auto");
+    if (storage && autoSave && previous !== undefined) {
+      const moved: SaveRecord = { ...previous, slot: "auto-previous" };
+      try {
+        await (await storePromise).put(moved);
+        records.set(moved.slot, moved);
+      } catch (error) {
+        startMessage.textContent = `前の自動保存を退避できなかったので、始めなかった：${String(error)}`;
+        setStartBusy(false);
+        return;
+      }
+    }
+    send({ kind: "save:start", save: null, autoSave: storage && autoSave });
+  }
+  newButton.addEventListener("click", () => void startNew());
 
+  // どこで失敗しても、選ぶ画面と始めるボタンは出す
   async function hello(): Promise<void> {
     try {
-      records = await (await storePromise).all();
+      autoSave = await lockPromise;
+      if (!autoSave) {
+        notice.textContent = "別のタブで遊んでいるので、このタブでは自動保存しない";
+      }
+      try {
+        ({ records, broken } = await (await storePromise).list());
+      } catch (error) {
+        // 読めないまま新しく始めると、自動保存で前の街を上書きしかねない
+        storage = false;
+        startMessage.textContent = `保存データを読めなかった：${String(error)}`;
+        newButton.textContent = "保存を使わずに始める（自動保存は切る）";
+        startDialog.showModal();
+        return;
+      }
+      if (records.size === 0 && broken.size === 0) {
+        await startNew();
+        return;
+      }
+      renderStartList();
     } catch (error) {
-      notice.textContent = `保存データを開けなかった：${String(error)}`;
+      startMessage.textContent = `保存データを並べられなかった：${String(error)}`;
+      setStartBusy(false);
     }
-    if (records.size === 0) {
-      send({ kind: "save:start", save: null });
-      return;
+    if (!startDialog.open) {
+      startDialog.showModal();
     }
-    renderStartList();
-    startDialog.showModal();
   }
 
   async function store(message: Extract<SaveFromWorker, { kind: "save:data" }>): Promise<void> {
+    if (!storage || (message.slot === "auto" && !autoSave)) {
+      return;
+    }
     const record: SaveRecord = {
       slot: message.slot,
       savedAt: Date.now(),
@@ -160,6 +235,7 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
       return;
     }
     records.set(record.slot, record);
+    broken.delete(record.slot);
     // test:wasm が読む
     saveButton.dataset.lastSlot = record.slot;
     saveButton.dataset.lastHash = record.meta.stateHash;
@@ -196,7 +272,7 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
         break;
       case "save:started": {
         startDialog.close();
-        saveButton.disabled = false;
+        saveButton.disabled = !storage;
         const loaded = message.loaded;
         if (loaded !== null && loading !== null) {
           // test:wasm が読む

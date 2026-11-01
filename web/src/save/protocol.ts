@@ -1,7 +1,8 @@
 // 保存と読み込みのために、メインスレッドと Worker のあいだでやりとりするメッセージ。
 // protocol/messages.ts とは別の kind（"save:" で始まる）にして、それぞれの側で別に受ける。
 
-export const SLOTS = ["auto", "manual-1", "manual-2", "manual-3"] as const;
+/** auto-previous は、自動保存があるときに新しく始めたら、前の街の自動保存を退避しておく枠。 */
+export const SLOTS = ["auto", "auto-previous", "manual-1", "manual-2", "manual-3"] as const;
 export type SlotId = (typeof SLOTS)[number];
 
 /** chizu-wasm の SavePayload の meta。 */
@@ -27,8 +28,12 @@ export type SaveRecord = {
 };
 
 export type SaveToWorker =
-  /** save が null なら新しく始める。 */
-  | { kind: "save:start"; save: { meta: SaveMeta; commands: ArrayBuffer } | null }
+  /** save が null なら新しく始める。autoSave が false なら自動保存しない。 */
+  | {
+      kind: "save:start";
+      save: { meta: SaveMeta; commands: ArrayBuffer } | null;
+      autoSave: boolean;
+    }
   | { kind: "save:request"; slot: SlotId };
 
 export type SaveFromWorker =
@@ -52,17 +57,22 @@ export function isSlotId(value: unknown): value is SlotId {
   return SLOTS.some((s) => s === value);
 }
 
+const count = (v: unknown) => Number.isSafeInteger(v) && (v as number) >= 0;
+const matches = (v: unknown, pattern: RegExp) => typeof v === "string" && pattern.test(v);
+
+/** 値まで確かめる。種は 10 進の u64、所持金は整数、状態ハッシュは 16 進の 16 桁の文字列である。 */
 export function isSaveMeta(value: unknown): value is SaveMeta {
   return (
     isObject(value) &&
-    Number.isInteger(value.formatVersion) &&
-    typeof value.seed === "string" &&
-    Number.isInteger(value.tick) &&
-    Number.isInteger(value.commandCount) &&
-    Number.isInteger(value.day) &&
-    Number.isInteger(value.secondOfDay) &&
-    typeof value.money === "string" &&
-    typeof value.stateHash === "string"
+    count(value.formatVersion) &&
+    matches(value.seed, /^\d{1,20}$/) &&
+    count(value.tick) &&
+    count(value.commandCount) &&
+    count(value.day) &&
+    count(value.secondOfDay) &&
+    (value.secondOfDay as number) < 86_400 &&
+    matches(value.money, /^-?\d{1,20}$/) &&
+    matches(value.stateHash, /^[0-9a-f]{16}$/)
   );
 }
 
@@ -70,7 +80,7 @@ export function isSaveRecord(value: unknown): value is SaveRecord {
   return (
     isObject(value) &&
     isSlotId(value.slot) &&
-    typeof value.savedAt === "number" &&
+    Number.isFinite(value.savedAt) &&
     isSaveMeta(value.meta) &&
     value.commands instanceof ArrayBuffer
   );
@@ -83,7 +93,10 @@ export function isSaveToWorker(value: unknown): value is SaveToWorker {
   switch (value.kind) {
     case "save:start": {
       const s = value.save;
-      return s === null || (isObject(s) && isSaveMeta(s.meta) && s.commands instanceof ArrayBuffer);
+      return (
+        typeof value.autoSave === "boolean" &&
+        (s === null || (isObject(s) && isSaveMeta(s.meta) && s.commands instanceof ArrayBuffer))
+      );
     }
     case "save:request":
       return isSlotId(value.slot);
@@ -140,6 +153,7 @@ export function unreadableReason(record: SaveRecord, formatVersion: number): str
 
 export const SLOT_NAMES: Record<SlotId, string> = {
   auto: "自動保存",
+  "auto-previous": "自動保存（前の街）",
   "manual-1": "保存 1",
   "manual-2": "保存 2",
   "manual-3": "保存 3",
