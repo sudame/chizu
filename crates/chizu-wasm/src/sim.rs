@@ -415,7 +415,7 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::Overlap => "ほかの道路と重なる",
         DenyReason::CornerCrossing => "斜めの道路と角で交わる",
         DenyReason::HighwayMidway => "高速道路にはその端でしかつなげない",
-        DenyReason::NothingToBulldoze => "範囲に消せる道路がない",
+        DenyReason::NothingToBulldoze => "範囲に取り壊せるものがない",
         DenyReason::NotAdjacent => "買った土地に接していない",
         DenyReason::AlreadyOwned => "もう買ってある",
         DenyReason::NoZonableTile => "道路沿いに区画を塗れるマスがない",

@@ -500,14 +500,8 @@ impl World {
 
     /// 長方形にかかる施設を取り除き、取り除いた数を返す。払い戻しはしない。
     pub(super) fn bulldoze_facilities(&mut self, area: TileRect) -> usize {
-        let overlaps = |r: TileRect| {
-            r.min.x <= area.max.x
-                && area.min.x <= r.max.x
-                && r.min.y <= area.max.y
-                && area.min.y <= r.max.y
-        };
         let (gone, kept): (Vec<Facility>, Vec<Facility>) =
-            self.facilities.iter().partition(|f| overlaps(f.area));
+            self.facilities.iter().partition(|f| overlaps(f.area, area));
         self.facilities = kept;
         let freed: Vec<_> = gone
             .iter()
@@ -517,6 +511,29 @@ impl World {
         self.write_occupancy(freed);
         gone.len()
     }
+
+    /// 長方形にかかる建物のマスを空け、空けた建物の数を返す。区画は残す。払い戻しはしない。
+    /// 建物は、続く [`World::refresh_buildings`] で、ほかの理由で消える建物と同じく後始末して消える。
+    pub(super) fn bulldoze_buildings(&mut self, area: TileRect) -> usize {
+        let gone: Vec<TileRect> = self
+            .buildings
+            .iter()
+            .map(|(_, b)| b.area)
+            .filter(|r| overlaps(*r, area))
+            .collect();
+        let freed: Vec<_> = gone
+            .iter()
+            .flat_map(|r| crate::zone::tiles_of(*r))
+            .map(|t| (t, TileUse::Empty))
+            .collect();
+        self.write_occupancy(freed);
+        gone.len()
+    }
+}
+
+/// 2 つの長方形が 1 マスでも重なるか。
+fn overlaps(a: TileRect, b: TileRect) -> bool {
+    a.min.x <= b.max.x && b.min.x <= a.max.x && a.min.y <= b.max.y && b.min.y <= a.max.y
 }
 
 #[cfg(test)]
@@ -917,6 +934,53 @@ mod tests {
             w.apply(&empty),
             ApplyOutcome::Denied(DenyReason::NothingToBulldoze)
         );
+    }
+
+    /// 建物の 1 マスにかかる長方形でも、建物ごと取り壊す。区画と道路は残り、住む世帯は家なしに、
+    /// 働く住民は職場を失う。空いた区画には、需要があればまた建つ。
+    #[test]
+    fn bulldoze_demolishes_buildings_and_keeps_their_zone() {
+        let mut w = served_street();
+        run(&mut w, 30 * 60);
+        let p = w.population();
+        let home = p
+            .household_ids()
+            .find_map(|h| p.home(h).flatten())
+            .expect("住む世帯がない");
+        let work = p
+            .citizen_ids()
+            .find_map(|id| p.citizen(id).unwrap().workplace)
+            .expect("働く住民がない");
+        let segments = w.network().segments().count();
+        let mut freed = Vec::new();
+        for id in [home, work] {
+            let b = *w.buildings().get(id).unwrap();
+            let coord = b.area.max.chunk().unwrap();
+            let version = w.chunk(coord).unwrap().version();
+            let area = rect((b.area.max.x, b.area.max.y), (b.area.max.x, b.area.max.y));
+            assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Applied);
+            assert!(w.buildings().get(id).is_none());
+            assert!(w.chunk(coord).unwrap().version() > version);
+            for t in crate::zone::tiles_of(b.area) {
+                assert_eq!(w.tile_state(t), Some((Some(b.zone), TileUse::Empty)));
+            }
+            check_buildings(&w);
+            freed.push(b.area);
+        }
+        assert_eq!(w.network().segments().count(), segments);
+        // 住む世帯と働く住民の表は、残った建物だけを指す。
+        let p = w.population();
+        let exists = |b: Option<BuildingId>| b.is_none_or(|b| w.buildings().get(b).is_some());
+        assert!(p.household_ids().all(|h| exists(p.home(h).flatten())));
+        assert!(p.household_ids().any(|h| p.home(h) == Some(None)));
+        assert!(
+            p.citizen_ids()
+                .all(|id| exists(p.citizen(id).unwrap().workplace))
+        );
+        run(&mut w, 30 * 60);
+        check_buildings(&w);
+        let regrown = |r: TileRect| w.buildings().iter().any(|(_, b)| overlaps(b.area, r));
+        assert!(freed.into_iter().any(regrown), "空いた区画にまた建たない");
     }
 
     #[test]
