@@ -37,9 +37,14 @@ pub struct Report {
 
 impl Sim {
     pub fn new(seed: u64) -> Sim {
+        Sim::from_parts(World::new(seed), CommandLog::new())
+    }
+
+    /// 記録をすべて適用し終えた `world` から作る。保存データを読み込んだときに使う。
+    pub(crate) fn from_parts(world: World, log: CommandLog) -> Sim {
         Sim {
-            world: World::new(seed),
-            log: CommandLog::new(),
+            world,
+            log,
             paused: false,
             snapshot: TripleBuffer::new(),
             reports: Vec::new(),
