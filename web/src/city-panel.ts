@@ -65,7 +65,10 @@ export function formatUtilities(stats: CityStats): string {
   return `電気 ${n(stats.power)} / 需要 ${d}・水道 ${n(stats.water)} / 需要 ${d}`;
 }
 
-/** 電気か水道が届いていない建物の数と、その理由。足りているときは null。 */
+/**
+ * 電気か水道が届いていない建物の数と、その理由。足りているときは null。
+ * 建物が建った直後は、届き方が決まる前の建物が数に入る。理由がないうちは知らせない。
+ */
 export type UtilityShortage = { headline: string; reasons: string[] };
 
 export function utilityShortage(stats: CityStats, unsupplied: number): UtilityShortage | null {
@@ -86,6 +89,9 @@ export function utilityShortage(stats: CityStats, unsupplied: number): UtilitySh
   };
   add("電気", "発電所", stats.powerGap, stats.powerIsolated);
   add("水道", "浄水場", stats.waterGap, stats.waterIsolated);
+  if (reasons.length === 0) {
+    return null;
+  }
   return {
     headline: `電気か水道が届いていない建物が ${n(unsupplied)} 棟ある`,
     reasons,

@@ -664,7 +664,8 @@ try {
   );
   const shortage = page.locator("#city-shortage");
   check(
-    (await shortage.isVisible()) && ((await shortage.textContent()) ?? "").includes("届いていない"),
+    (await shortage.isVisible()) &&
+      /足りない|つながっていない/.test((await shortage.textContent()) ?? ""),
     `届いていない建物の数と理由が欄に出る（${await shortage.textContent()}）`,
   );
   check(

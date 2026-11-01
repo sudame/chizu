@@ -164,8 +164,12 @@ pub fn utility_totals(world: &World) -> [u64; 4] {
 /// 不足量は、施設のある網で需要が供給量を上回った分の合計である。
 pub fn utility_gaps(world: &World) -> [u64; 4] {
     let balance = supply_balance(world.network(), world.facilities(), world.buildings());
+    gaps_of(&balance.components)
+}
+
+fn gaps_of(components: &[[Balance; 2]]) -> [u64; 4] {
     let mut out = [0; 4];
-    for c in &balance.components {
+    for c in components {
         for slot in 0..2 {
             let b = c[slot];
             if b.demand > 0 && b.capacity == 0 {
@@ -353,6 +357,23 @@ mod tests {
         .unwrap();
         assert_eq!(short(&sim), [2.0, 2.0]);
         assert_ne!(supply_version(&sim), joined);
+    }
+
+    #[test]
+    fn gaps_count_isolated_networks_and_short_amounts() {
+        let b = |capacity, demand| Balance { capacity, demand };
+        let nets = [
+            // 施設のない網（電気）と、水道は需要なし
+            [b(0, 5), b(0, 0)],
+            // 施設はあるが足りない網：電気は 30 - 10、水道は 7 - 4
+            [b(10, 30), b(4, 7)],
+            // 足りている網
+            [b(10, 4), b(9, 9)],
+            // 別の足りない網：電気は 8 - 5
+            [b(5, 8), b(1, 0)],
+        ];
+        assert_eq!(gaps_of(&nets), [1, 0, 23, 3]);
+        assert_eq!(gaps_of(&[]), [0; 4]);
     }
 
     #[test]

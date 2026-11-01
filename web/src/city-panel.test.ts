@@ -50,11 +50,8 @@ describe("街の数字", () => {
     });
   });
 
-  test("数だけ分かって理由がまだないときは、理由を空にして数だけ出す", () => {
-    expect(utilityShortage(parseCityStats([]), 3)).toEqual({
-      headline: "電気か水道が届いていない建物が 3 棟ある",
-      reasons: [],
-    });
+  test("理由がないうちは、数が正でも知らせない", () => {
+    expect(utilityShortage(parseCityStats([]), 3)).toBeNull();
   });
 
   test("棒は住宅・商業・工業・オフィスの順に並び、正は上、負は下へ伸びる", () => {
