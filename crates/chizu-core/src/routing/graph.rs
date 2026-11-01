@@ -56,6 +56,9 @@ pub struct Graph {
     /// 頂点 `v` から出る辺は `edges[edge_start[v]..edge_start[v + 1]]` で、行き先の番号の順に並ぶ。
     edge_start: Vec<u32>,
     edges: Vec<Edge>,
+    /// 頂点 `v` に入る辺。`to` は元の頂点で、元の頂点の番号の順に並ぶ。
+    rev_start: Vec<u32>,
+    rev_edges: Vec<Edge>,
     /// グラフの中でいちばん速いリンクの速さ。
     max_speed: MmPerTick,
 }
@@ -138,6 +141,7 @@ impl Graph {
             }
             edge_start.push(u32::try_from(edges.len()).expect("辺が u32 に収まらない"));
         }
+        let (rev_start, rev_edges) = reverse(&edge_start, &edges);
         Graph {
             mode,
             links,
@@ -145,6 +149,8 @@ impl Graph {
             end_tile,
             edge_start,
             edges,
+            rev_start,
+            rev_edges,
             max_speed,
         }
     }
@@ -180,6 +186,12 @@ impl Graph {
         &self.edges[self.edge_start[v] as usize..self.edge_start[v + 1] as usize]
     }
 
+    /// 頂点 `v` に入る辺。`to` は元の頂点である。
+    pub(crate) fn rev_edges(&self, v: u32) -> &[Edge] {
+        let v = v as usize;
+        &self.rev_edges[self.rev_start[v] as usize..self.rev_start[v + 1] as usize]
+    }
+
     /// 頂点 `v` を出てから頂点 `target` を通り終えるまでの費用の下限。
     ///
     /// 区間は 8 方向の直線なので、2 つのノードのあいだの道のりは 8 方向の距離（オクタイル）より
@@ -200,6 +212,31 @@ impl Graph {
         let speed = u64::try_from(self.max_speed.0).expect("速さが負");
         mm.checked_mul(1_000).expect("所要時間があふれた") / speed
     }
+}
+
+/// 辺の向きを逆にした CSR。元の頂点を番号の順になめるので、入る辺は元の頂点の順に並ぶ。
+fn reverse(start: &[u32], edges: &[Edge]) -> (Vec<u32>, Vec<Edge>) {
+    let n = start.len() - 1;
+    let mut rev_start = vec![0_u32; n + 1];
+    for e in edges {
+        rev_start[e.to as usize + 1] += 1;
+    }
+    for v in 0..n {
+        rev_start[v + 1] += rev_start[v];
+    }
+    let mut fill: Vec<u32> = rev_start[..n].to_vec();
+    let mut rev = vec![Edge { to: 0, cost: 0 }; edges.len()];
+    for u in 0..n {
+        for e in &edges[start[u] as usize..start[u + 1] as usize] {
+            let at = &mut fill[e.to as usize];
+            rev[*at as usize] = Edge {
+                to: u32::try_from(u).expect("頂点が u32 に収まらない"),
+                cost: e.cost,
+            };
+            *at += 1;
+        }
+    }
+    (rev_start, rev)
 }
 
 /// ノードでの車線のつながりを作る。ノード、元の車線、先の車線の順に並ぶ。

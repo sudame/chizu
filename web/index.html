@@ -40,6 +40,15 @@
         background: #2d6cdf;
         color: #fff;
       }
+      #feedback-open {
+        position: fixed;
+        top: 8px;
+        right: 8px;
+      }
+      #feedback textarea {
+        width: 28em;
+        height: 6em;
+      }
       #tool-info,
       #tool-message {
         min-width: 10em;
@@ -86,6 +95,16 @@
       <span id="tool-info"></span>
       <span id="tool-message" aria-live="polite"></span>
     </div>
+    <button type="button" id="feedback-open" hidden>フィードバック</button>
+    <dialog id="feedback">
+      <form method="dialog">
+        <p>気づいたことを書く。画面、状態、これまでの操作の記録と一緒に保存する。</p>
+        <textarea id="feedback-note"></textarea>
+        <p id="feedback-result" aria-live="polite"></p>
+        <button type="submit" id="feedback-send">送る</button>
+        <button type="submit" value="close" formnovalidate>閉じる</button>
+      </form>
+    </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

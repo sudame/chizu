@@ -62,6 +62,8 @@ export type MainToWorker =
   /** id は画面が振る番号で、結果の通知で返ってくる。 */
   | { kind: "command"; id: number; command: CommandMessage }
   | { kind: "pause"; paused: boolean }
+  /** フィードバックに添える状態と記録を求める。 */
+  | { kind: "feedback" }
   /**
    * visible はいま見えているチャンクを先に送ってほしい順に並べたもの。
    * forgotten は前の view のあとに画面が捨てたチャンクで、Worker は次に見えたときに送り直す。
@@ -82,6 +84,10 @@ export type WorkerToMain =
       roadCosts: number[];
     }
   | { kind: "chunks"; chunks: ChunkData[] }
+  /** state は chizu-wasm の feedback_state の JSON、commands は記録を encode したもの。 */
+  | { kind: "feedback"; state: string; commands: ArrayBuffer }
+  /** フィードバックの状態を返せなかった。 */
+  | { kind: "feedback-error"; message: string }
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
   | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
   /**
@@ -139,6 +145,9 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         typeof v.outcome === "string" &&
         (v.reason === undefined || typeof v.reason === "string")
       );
+    case "feedback":
+      return typeof v.state === "string" && v.commands instanceof ArrayBuffer;
+    case "feedback-error":
     case "error":
       return typeof v.message === "string";
     default:

@@ -1,7 +1,7 @@
 //! 経路探索。
 //!
-//! 網から車と歩行者のグラフを作り、A* で解く。網が変わったら [`Router::rebuild`] でグラフを
-//! 作り直し、覚えた結果も捨てる。探索の結果は状態に入れない。同じ網と同じ依頼からは、
+//! 網から車と歩行者のグラフを作り、A* か、根を共有する依頼を束ねた 1 対多の探索で解く。
+//! 網が変わったら [`Router::rebuild`] でグラフを作り直し、覚えた結果も捨てる。探索の結果は状態に入れない。同じ網と同じ依頼からは、
 //! 覚えた結果の有無やスレッドの数に関わらず同じ経路を返す。
 
 mod astar;
@@ -15,13 +15,24 @@ use std::sync::Arc;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
-pub use astar::{Route, Scratch, astar};
+use astar::{Marks, extract, search_many};
+pub use astar::{Route, Scratch, Toward, astar, one_to_many};
 pub use graph::{Connector, Graph, WALK_SPEED, connectors, speed_limit};
 
 use crate::network::{LaneMode, LinkId, Network};
 
 /// 1 日を分ける時間帯の数。重みは時間帯ごとに写す。
 pub const TIME_BANDS: u8 = 96;
+
+/// 1 対多の探索に束ねる依頼の数の既定の下限。これより少ない組は A* で解く。
+pub const DEFAULT_BUNDLE_MIN: usize = 4;
+
+/// 1 つの組の経路を、スレッドに分けて取り出し始める依頼の数。
+#[cfg(feature = "parallel")]
+const PARALLEL_EXTRACT_MIN: usize = 256;
+
+/// 覚えておく結果の数の既定の上限。超えそうになったら、新しい結果を入れる前に全部捨てる。
+pub const DEFAULT_CACHE_LIMIT: usize = 1 << 18;
 
 /// 探索の依頼。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -60,15 +71,31 @@ impl Scratches {
     }
 }
 
-/// A* で解き、`(出発のリンク, 着くリンク, 手段)` ごとに結果を覚える方式。時間帯は覚える範囲を区切る。
+/// A* か 1 対多の探索で解き、`(出発のリンク, 着くリンク, 手段)` ごとに結果を覚える方式。
+/// 時間帯は覚える範囲を区切る。
 #[derive(Clone, Debug)]
 pub struct AstarRouter {
     car: Graph,
     walk: Graph,
     connectors: Vec<Connector>,
     band: u8,
+    bundle_min: usize,
+    cache_limit: usize,
     cache: BTreeMap<RouteRequest, Option<Arc<Route>>>,
 }
+
+/// 一括の探索で、1 本のスレッドが解く単位。
+enum Job {
+    Single(RouteRequest),
+    Bundle {
+        mode: LaneMode,
+        root: LinkId,
+        toward: Toward,
+        others: Vec<LinkId>,
+    },
+}
+
+type Solved = Vec<(RouteRequest, Option<Arc<Route>>)>;
 
 impl AstarRouter {
     pub fn new(net: &Network) -> AstarRouter {
@@ -77,8 +104,22 @@ impl AstarRouter {
             walk: Graph::build(net, LaneMode::Sidewalk),
             connectors: connectors(net),
             band: 0,
+            bundle_min: DEFAULT_BUNDLE_MIN,
+            cache_limit: DEFAULT_CACHE_LIMIT,
             cache: BTreeMap::new(),
         }
+    }
+
+    /// 1 対多の探索に束ねる依頼の数の下限を変える。`usize::MAX` なら束ねずにすべて A* で解く。
+    pub fn with_bundle_min(mut self, n: usize) -> AstarRouter {
+        self.bundle_min = n.max(1);
+        self
+    }
+
+    /// 覚えておく結果の数の上限を変える。
+    pub fn with_cache_limit(mut self, n: usize) -> AstarRouter {
+        self.cache_limit = n;
+        self
     }
 
     pub fn graph(&self, mode: LaneMode) -> &Graph {
@@ -102,15 +143,121 @@ impl AstarRouter {
         self.cache.len()
     }
 
-    fn solve(&self, r: &RouteRequest, s: &mut Scratches) -> Option<Arc<Route>> {
-        astar(self.graph(r.mode), r.from, r.to, s.get(r.mode)).map(Arc::new)
+    /// 依頼を解く単位に分ける。手段ごとに、着くリンクと出発のリンクのどちらで束ねるかを決め、
+    /// 下限に満たない組は 1 件ずつ A* で解く。
+    fn plan(&self, misses: &[RouteRequest]) -> Vec<Job> {
+        let mut jobs = Vec::new();
+        for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+            let mut by_to = BTreeMap::<LinkId, Vec<LinkId>>::new();
+            let mut by_from = BTreeMap::<LinkId, Vec<LinkId>>::new();
+            for r in misses.iter().filter(|r| r.mode == mode) {
+                by_to.entry(r.to).or_default().push(r.from);
+                by_from.entry(r.from).or_default().push(r.to);
+            }
+            // 下限以上の組に入る依頼が多いほうの向きで束ねる。同じなら着くリンクで束ねる。
+            let covered = |groups: &BTreeMap<LinkId, Vec<LinkId>>| -> usize {
+                groups
+                    .values()
+                    .map(Vec::len)
+                    .filter(|n| *n >= self.bundle_min)
+                    .sum()
+            };
+            let (groups, toward) = if covered(&by_to) >= covered(&by_from) {
+                (by_to, Toward::Backward)
+            } else {
+                (by_from, Toward::Forward)
+            };
+            for (root, others) in groups {
+                if others.len() >= self.bundle_min {
+                    jobs.push(Job::Bundle {
+                        mode,
+                        root,
+                        toward,
+                        others,
+                    });
+                    continue;
+                }
+                jobs.extend(others.into_iter().map(|o| {
+                    let (from, to) = match toward {
+                        Toward::Backward => (o, root),
+                        Toward::Forward => (root, o),
+                    };
+                    Job::Single(RouteRequest { from, to, mode })
+                }));
+            }
+        }
+        jobs
     }
+
+    fn solve(&self, job: &Job, s: &mut Scratches) -> Solved {
+        match job {
+            Job::Single(r) => vec![(
+                *r,
+                astar(self.graph(r.mode), r.from, r.to, s.get(r.mode)).map(Arc::new),
+            )],
+            Job::Bundle {
+                mode,
+                root,
+                toward,
+                others,
+            } => {
+                let g = self.graph(*mode);
+                let sc = s.get(*mode);
+                let routes: Vec<Option<Route>> = match search_many(g, *root, others, *toward, sc) {
+                    None => vec![None; others.len()],
+                    Some(r) => extract_all(g, sc, r, others, *toward),
+                };
+                others
+                    .iter()
+                    .zip(routes)
+                    .map(|(o, route)| {
+                        let (from, to) = match toward {
+                            Toward::Backward => (*o, *root),
+                            Toward::Forward => (*root, *o),
+                        };
+                        let r = RouteRequest {
+                            from,
+                            to,
+                            mode: *mode,
+                        };
+                        (r, route.map(Arc::new))
+                    })
+                    .collect()
+            }
+        }
+    }
+}
+
+/// 1 つの探索から、組の経路をすべて取り出す。組が大きければスレッドに分ける。
+/// 取り出しは探索の結果を読むだけなので、分け方で結果は変わらない。
+fn extract_all(
+    g: &Graph,
+    s: &mut Scratch,
+    root: u32,
+    others: &[LinkId],
+    toward: Toward,
+) -> Vec<Option<Route>> {
+    let mut m = s.take_marks();
+    let sc = &*s;
+    let one = |m: &mut Marks, o: &LinkId| extract(g, sc, m, root, *o, toward);
+    #[cfg(feature = "parallel")]
+    let out = if others.len() >= PARALLEL_EXTRACT_MIN {
+        others.par_iter().map_init(Marks::default, one).collect()
+    } else {
+        others.iter().map(|o| one(&mut m, o)).collect()
+    };
+    #[cfg(not(feature = "parallel"))]
+    let out = others.iter().map(|o| one(&mut m, o)).collect();
+    s.put_marks(m);
+    out
 }
 
 impl Router for AstarRouter {
     fn rebuild(&mut self, net: &Network) {
         *self = AstarRouter {
             band: self.band,
+            bundle_min: self.bundle_min,
+            cache_limit: self.cache_limit,
             ..AstarRouter::new(net)
         };
     }
@@ -132,18 +279,29 @@ impl Router for AstarRouter {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        let jobs = self.plan(&misses);
         let this = &*self;
         #[cfg(feature = "parallel")]
-        let solved: Vec<_> = misses
+        let solved: Vec<Solved> = jobs
             .par_iter()
-            .map_init(Scratches::default, |s, r| this.solve(r, s))
+            .map_init(Scratches::default, |s, j| this.solve(j, s))
             .collect();
         #[cfg(not(feature = "parallel"))]
-        let solved: Vec<_> = {
+        let solved: Vec<Solved> = {
             let mut s = Scratches::default();
-            misses.iter().map(|r| this.solve(r, &mut s)).collect()
+            jobs.iter().map(|j| this.solve(j, &mut s)).collect()
         };
-        self.cache.extend(misses.into_iter().zip(solved));
-        requests.iter().map(|r| self.cache[r].clone()).collect()
+        let fresh: BTreeMap<_, _> = solved.into_iter().flatten().collect();
+        let out = requests
+            .iter()
+            .map(|r| self.cache.get(r).unwrap_or_else(|| &fresh[r]).clone())
+            .collect();
+        if self.cache.len() + fresh.len() > self.cache_limit {
+            self.cache.clear();
+        }
+        // 1 回の一括だけで上限を超えるときは、鍵の順で上限までを覚え、残りは捨てる。
+        let room = self.cache_limit.saturating_sub(self.cache.len());
+        self.cache.extend(fresh.into_iter().take(room));
+        out
     }
 }
