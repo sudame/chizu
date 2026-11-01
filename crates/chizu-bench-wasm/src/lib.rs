@@ -29,7 +29,14 @@ fn memory_bytes() -> Option<u64> {
 }
 
 /// 測る項目をすべて回し、結果を JSON の文字列で返す。スレッド数は先に `initThreadPool` で決めておく。
+///
+/// ネイティブのベンチは `ThreadPool::install` でプールのスレッドの上から回す。
+/// それにそろえ、呼んだ Worker からではなく、プールのスレッドの上で回して終わるのを待つ。
 #[wasm_bindgen]
 pub fn run_all() -> String {
-    chizu_scenario::perf::run_all(&now_ns, &memory_bytes)
+    let (tx, rx) = std::sync::mpsc::channel();
+    rayon::spawn(move || {
+        let _ = tx.send(chizu_scenario::perf::run_all(&now_ns, &memory_bytes));
+    });
+    rx.recv().expect("プールのスレッドで測定が止まった")
 }
