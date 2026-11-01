@@ -174,8 +174,12 @@ impl Saved {
     /// `world` に加えて、止まっている車を見分けるための、[`STOPPED_TICKS`] tick 前の車の位置を返す。
     /// 続きを回すだけなので、街は `world` と同じになる。
     fn world_sampled(&self) -> (World, CarSample) {
+        self.world_sampled_over(STOPPED_TICKS)
+    }
+
+    fn world_sampled_over(&self, window: u64) -> (World, CarSample) {
         let mut world = World::new(self.seed);
-        let window = STOPPED_TICKS.min(self.tick);
+        let window = window.min(self.tick);
         replay(&mut world, &self.log, self.tick - window);
         let before = world.car_sample();
         replay(&mut world, &self.log, window);
@@ -733,6 +737,8 @@ pub fn run(args: &[String]) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    const TICKS_PER_DAY_FOR_TEST: u64 = chizu_core::TICKS_PER_DAY;
+
     fn commands() -> Vec<Value> {
         serde_json::from_value(json!([
             {"type":"BuildRoad","from":[0,10],"to":[30,10],"kind":"Small"},
@@ -775,5 +781,55 @@ mod tests {
         replay(&mut again, &log, 500);
         assert_eq!(again, world);
         assert_eq!(again.state_hash(), world.state_hash());
+    }
+
+    /// 止まっている車を見分ける見本は、いまでなく `window` tick 前の車の位置である。
+    #[test]
+    fn sample_is_taken_a_window_before_now() {
+        let seed = 42;
+        let line = chizu_core::world::highway_line(seed);
+        let (x, y) = (line.start.x, line.start.y);
+        let inward = -line.step.0 as i64;
+        // 家と職場を車で行くほど（500m）離して置いた、長い 1 本道。
+        let at = |d: i64| x + inward * d;
+        let mut log = CommandLog::new();
+        let mut world = World::new(seed);
+        let cmds: Vec<Value> = serde_json::from_value(json!([
+            {"type":"BuildRoad","from":[x,y],"to":[at(185),y],"kind":"Medium"},
+            {"type":"PaintZone","area":[[at(2),y+1],[at(20),y+6]],"zone":"Residential"},
+            {"type":"PaintZone","area":[[at(150),y-6],[at(185),y-1]],"zone":"Industrial"},
+            {"type":"PlaceBuilding","kind":"PowerPlant","at":[at(100),y+1],"rotation":0},
+            {"type":"PlaceBuilding","kind":"WaterPump","at":[at(110),y+1],"rotation":0},
+        ]))
+        .unwrap();
+        act(&mut world, &mut log, &cmds);
+        // 車が走っている朝のどこかまで進める。
+        let (mut found, mut tick) = (None, 0);
+        while tick < 5 * TICKS_PER_DAY_FOR_TEST && found.is_none() {
+            replay(&mut world, &log, 25);
+            tick += 25;
+            let day_tick = tick % TICKS_PER_DAY_FOR_TEST;
+            let moving = world.car_sample();
+            if tick > 3 * TICKS_PER_DAY_FOR_TEST && day_tick > 2000 && !moving.is_empty() {
+                found = Some(tick);
+            }
+        }
+        let tick = found.expect("車が走らなかった");
+        let saved = Saved {
+            state: Map::new(),
+            seed,
+            tick: world.tick().0,
+            log: log.clone(),
+        };
+        assert_eq!(tick, saved.tick);
+        let (replayed, before) = saved.world_sampled_over(50);
+        assert_eq!(replayed.state_hash(), world.state_hash());
+        // 見本は 50 tick 前の車の位置で、別に 50 tick 手前まで再生した街の位置と一致する。
+        let mut earlier = World::new(seed);
+        replay(&mut earlier, &log, tick - 50);
+        assert_eq!(before, earlier.car_sample());
+        // 走っている車は 50 tick のあいだに動いているので、止まっているとは数えない。
+        let now = replayed.car_sample();
+        assert!(now.unmoved_since(&before) < now.len(), "車が動いていない");
     }
 }

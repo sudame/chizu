@@ -9,7 +9,9 @@ use crate::clock::TICKS_PER_DAY;
 use crate::movement::Finished;
 use std::collections::BTreeMap;
 
-use crate::{LaneId, LaneMode, LaneOffset, TripId};
+use crate::movement::Trips;
+use crate::units::{Mm, WorldPos};
+use crate::{LaneMode, TripId};
 
 /// 1 日ぶんの、通勤の移動の結果。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -55,11 +57,25 @@ pub struct Traffic {
     pub yesterday: Option<DayTraffic>,
 }
 
-/// ある tick の、走っている車の車線と位置。止まっている車を見分けるのに使う。
+/// 同じ位置とみなすずれ（mm）。道路が分けられたときの、車線の中の位置の丸めを許す。
+const SAME_SPOT_MM: i64 = 5;
+
+/// ある tick の、走っている車のワールド座標の位置。止まっている車を見分けるのに使う。
+/// 車線の ID は、道路が分けられると変わるので、位置は車線によらない座標で持つ。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CarSample(BTreeMap<TripId, (LaneId, LaneOffset)>);
+pub struct CarSample(BTreeMap<TripId, WorldPos>);
 
 impl CarSample {
+    pub(crate) fn of(trips: &Trips) -> CarSample {
+        CarSample(
+            trips
+                .iter()
+                .filter(|(_, t)| t.mode() == LaneMode::Car)
+                .map(|(id, t)| (id, t.position().world()))
+                .collect(),
+        )
+    }
+
     /// 車の台数。車線に出る順番を待っている車も含む。
     pub fn len(&self) -> usize {
         self.0.len()
@@ -69,11 +85,17 @@ impl CarSample {
         self.0.is_empty()
     }
 
-    /// 車線の同じ位置にいる車の台数。`earlier` にいなかった車は、動いたものとして数えない。
+    /// 同じ場所（ずれは数 mm まで）にいる車の台数。`earlier` にいなかった車は、動いたものとして数えない。
     pub fn unmoved_since(&self, earlier: &CarSample) -> usize {
+        let near = |a: Mm, b: Mm| a.0.abs_diff(b.0) <= SAME_SPOT_MM.unsigned_abs();
         self.0
             .iter()
-            .filter(|(id, at)| earlier.0.get(id) == Some(at))
+            .filter(|(id, at)| {
+                earlier
+                    .0
+                    .get(id)
+                    .is_some_and(|p| near(p.x, at.x) && near(p.y, at.y))
+            })
             .count()
     }
 }
@@ -136,13 +158,7 @@ impl World {
 
     /// いま走っている車の位置。状態は変えない。
     pub fn car_sample(&self) -> CarSample {
-        CarSample(
-            self.trips
-                .iter()
-                .filter(|(_, t)| t.mode() == LaneMode::Car)
-                .map(|(id, t)| (id, (t.lane(), t.offset())))
-                .collect(),
-        )
+        CarSample::of(&self.trips)
     }
 
     /// 住民の居場所ごとの人数。状態は変えない。
@@ -215,7 +231,7 @@ mod tests {
         assert_eq!((y.abandoned, y.no_route), (0, 0), "つながった街で着けない");
     }
 
-    /// 道が切れると、移動中の人は着けずに消え、職場の割り当てを見直すまでに出発する人は経路が見つからない。
+    /// 道が切れると、移動中の人は着けずに消え、`abandoned` に数えられる。
     #[test]
     fn a_cut_road_shows_up_as_unreachable() {
         use crate::world::people::JOB_INTERVAL;

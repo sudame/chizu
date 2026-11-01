@@ -574,3 +574,59 @@ fn lane_shifts_follow_the_travelled_distance_across_road_kinds_and_turns() {
     }
     assert!(samples > 100 && turned, "走った車が少ない {samples}");
 }
+
+/// 先頭の車を動かさないことで、後ろの車を詰まらせて止める。先頭の車は、1 tick ごとに元の状態へ戻す。
+fn step_with_lead_pinned(c: &mut Cars, lead: TripId) {
+    let pinned = c.trips.get(lead).expect("先頭の車がない").clone();
+    c.step();
+    c.trips.rows[lead.slot()] = Some(pinned);
+}
+
+/// 詰まって止まった車は、そこに交差する道路が引かれて車線の ID が変わっても、止まったままと数える。
+#[test]
+fn stalled_cars_stay_stalled_when_the_road_is_split() {
+    use crate::world::CarSample;
+
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (60, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let lead = c.drive(at(40, 0, (1, 0), 0), at(59, 0, (1, 0), 0));
+    let followers: Vec<TripId> = (0..3)
+        .map(|i| c.drive(at(5 * i, 0, (1, 0), 0), at(59, 0, (1, 0), 0)))
+        .collect();
+    for _ in 0..150 {
+        step_with_lead_pinned(&mut c, lead);
+    }
+    let before = CarSample::of(&c.trips);
+    assert_eq!(before.len(), 4);
+    // 先頭の車に追いついて止まっている。動いている車は 1 台もない。
+    for _ in 0..20 {
+        step_with_lead_pinned(&mut c, lead);
+    }
+    let still = CarSample::of(&c.trips);
+    assert_eq!(still.unmoved_since(&before), 4, "詰まった車が動いている");
+
+    // 止まっている後ろの車の真ん中に、道路を交差させて区間を分ける。
+    let lanes: Vec<_> = followers
+        .iter()
+        .map(|id| c.trips.get(*id).unwrap().lane())
+        .collect();
+    let x = c.trips.get(followers[1]).unwrap().position().tile.x;
+    road(&mut c.net, (x, -5), (x, 5), RoadKind::Small);
+    c.router.rebuild(&c.net);
+    assert!(c.trips.reroute(&c.net, &mut c.router).is_empty());
+    for _ in 0..40 {
+        step_with_lead_pinned(&mut c, lead);
+    }
+    let after: Vec<_> = followers
+        .iter()
+        .map(|id| c.trips.get(*id).unwrap().lane())
+        .collect();
+    assert_ne!(lanes, after, "区間が分けられても車線が変わらない");
+    let later = CarSample::of(&c.trips);
+    assert_eq!(
+        later.unmoved_since(&before),
+        4,
+        "分けられた区間で止まった車が動いた扱いになった"
+    );
+}
