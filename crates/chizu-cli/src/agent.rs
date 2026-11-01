@@ -6,6 +6,7 @@
 
 mod command_json;
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use chizu_core::building::{Building, CityStats, demand};
@@ -19,11 +20,14 @@ use serde_json::{Map, Value, json};
 
 pub const USAGE: &str = r#"使い方:
   chizu-cli agent new <dir> <種>             セッションを作る（tick 0、空の記録）
+  chizu-cli agent new <dir> --from <fb>      フィードバックのディレクトリ <fb> の種、tick、記録を写してセッションを作る
   chizu-cli agent act <dir> <commands.json>  いまの tick でコマンドを順に適用し、記録に足す
   chizu-cli agent advance <dir> <tick 数>    時間を進める（1 tick はゲーム内の 12 秒、1 日は 7200 tick）
   chizu-cli agent observe <dir>              街の様子を JSON で出す
 
-<dir> は state.json と commands.rec を置くディレクトリで、feedback/<日時>-<番号>/ もそのまま渡せる。
+<dir> は state.json と commands.rec を置くディレクトリである。act と advance は agent new で作ったディレクトリにだけ書く。
+feedback/<日時>-<番号>/ は observe ではそのまま見られ、続きを遊ぶときは new --from で写してから遊ぶ。
+act と advance は、記録を再生したハッシュが state.json の stateHash と食い違うときは何も書かずに止まる。
 <commands.json> に - を渡すと標準入力から読む。中身はコマンドの配列か、コマンド 1 つである。
 どのサブコマンドも、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
 
@@ -64,11 +68,25 @@ act の結果:
 
 const STATE_FILE: &str = "state.json";
 const RECORD_FILE: &str = "commands.rec";
+const LOCK_FILE: &str = "session.lock";
+/// `agent new` で作ったセッションの `state.json` に入れる印。人間のフィードバックを書き換えないよう、
+/// 書き込むのは印のあるディレクトリだけにする。
+const SESSION_KEY: &str = "agentSession";
 
 /// 読み込んだセッション。
 struct Session {
     dir: PathBuf,
     /// `state.json` の中身。知らないキー（カメラの位置など）も書き戻すときに残す。
+    state: Map<String, Value>,
+    seed: u64,
+    tick: u64,
+    log: CommandLog,
+    /// ロックを外さないよう、書き終えるまで持つ。
+    _lock: Option<File>,
+}
+
+/// `state.json` と `commands.rec` の中身。
+struct Saved {
     state: Map<String, Value>,
     seed: u64,
     tick: u64,
@@ -87,57 +105,34 @@ fn read_u64(state: &Map<String, Value>, key: &str) -> Result<u64, String> {
     .ok_or_else(|| format!("{STATE_FILE} の {key} {v} を読めない"))
 }
 
-/// ファイルを書きかけのまま残さないよう、隣に書いてから置き換える。
-fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("{} に書けない: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{} に書けない: {e}", path.display()))
+fn read_saved(dir: &Path) -> Result<Saved, String> {
+    let path = dir.join(STATE_FILE);
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+    let state: Map<String, Value> =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    let seed = read_u64(&state, "seed")?;
+    let tick = read_u64(&state, "tick")?;
+    let path = dir.join(RECORD_FILE);
+    let bytes = std::fs::read(&path).map_err(|e| format!("{} を読めない: {e}", path.display()))?;
+    let log = CommandLog::decode(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    if let Some(last) = log.entries().last()
+        && last.tick.0 > tick
+    {
+        return Err(format!(
+            "記録に tick {} のコマンドがあり、{STATE_FILE} の tick {tick} より先にある",
+            last.tick.0
+        ));
+    }
+    Ok(Saved {
+        state,
+        seed,
+        tick,
+        log,
+    })
 }
 
-impl Session {
-    fn create(dir: &Path, seed: u64) -> Result<Session, String> {
-        if dir.join(STATE_FILE).exists() || dir.join(RECORD_FILE).exists() {
-            return Err(format!("{} にはもうセッションがある", dir.display()));
-        }
-        std::fs::create_dir_all(dir).map_err(|e| format!("{} を作れない: {e}", dir.display()))?;
-        Ok(Session {
-            dir: dir.to_path_buf(),
-            state: Map::new(),
-            seed,
-            tick: 0,
-            log: CommandLog::new(),
-        })
-    }
-
-    fn load(dir: &Path) -> Result<Session, String> {
-        let path = dir.join(STATE_FILE);
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("{} を読めない: {e}", path.display()))?;
-        let state: Map<String, Value> =
-            serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-        let seed = read_u64(&state, "seed")?;
-        let tick = read_u64(&state, "tick")?;
-        let path = dir.join(RECORD_FILE);
-        let bytes =
-            std::fs::read(&path).map_err(|e| format!("{} を読めない: {e}", path.display()))?;
-        let log = CommandLog::decode(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-        if let Some(last) = log.entries().last()
-            && last.tick.0 > tick
-        {
-            return Err(format!(
-                "記録に tick {} のコマンドがあり、{STATE_FILE} の tick {tick} より先にある",
-                last.tick.0
-            ));
-        }
-        Ok(Session {
-            dir: dir.to_path_buf(),
-            state,
-            seed,
-            tick,
-            log,
-        })
-    }
-
+impl Saved {
     /// 種から作った街に記録を再生して、いまの tick の街を作る。
     fn world(&self) -> World {
         let mut world = World::new(self.seed);
@@ -145,7 +140,103 @@ impl Session {
         world
     }
 
+    fn saved_hash(&self) -> Option<&str> {
+        self.state.get("stateHash").and_then(Value::as_str)
+    }
+}
+
+/// セッションのディレクトリのロックを取る。書くときは排他、読むだけのときは共有にする。
+/// ロックのファイルは `agent new` だけが作る。人間のフィードバックのディレクトリには何も足さないよう、
+/// ほかでは作らず、なければ `None` を返す。
+fn lock(dir: &Path, exclusive: bool, create: bool) -> Result<Option<File>, String> {
+    let path = dir.join(LOCK_FILE);
+    let file = match File::options()
+        .create(create)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+    {
+        Ok(f) => f,
+        Err(e) if !create && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{} を開けない: {e}", path.display())),
+    };
+    if exclusive {
+        file.lock()
+    } else {
+        file.lock_shared()
+    }
+    .map_err(|e| format!("{} をロックできない: {e}", path.display()))?;
+    Ok(Some(file))
+}
+
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().expect("ファイル名がない").to_os_string();
+    name.push(".tmp");
+    path.with_file_name(name)
+}
+
+impl Session {
+    /// 空のディレクトリに、新しいセッションを作る。
+    fn create(dir: &Path, saved: Saved) -> Result<Session, String> {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{} を作れない: {e}", dir.display()))?;
+        let lock = lock(dir, true, true)?;
+        if dir.join(STATE_FILE).exists() || dir.join(RECORD_FILE).exists() {
+            return Err(format!("{} にはもうセッションがある", dir.display()));
+        }
+        let mut state = saved.state;
+        // 画面の側だけで変えた操作の数で、作り直した街には当てはまらない。
+        state.remove("unrecordedOps");
+        state.insert(SESSION_KEY.into(), json!(1));
+        Ok(Session {
+            dir: dir.to_path_buf(),
+            state,
+            seed: saved.seed,
+            tick: saved.tick,
+            log: saved.log,
+            _lock: lock,
+        })
+    }
+
+    /// 書き込むために読み込み、いまの tick の街を作る。`agent new` で作ったセッションで、
+    /// 記録を再生したハッシュが `stateHash` と一致するときだけ受け付ける。
+    fn open_for_write(dir: &Path) -> Result<(Session, World), String> {
+        let lock = lock(dir, true, false)?;
+        let saved = read_saved(dir)?;
+        if lock.is_none() || saved.state.get(SESSION_KEY).is_none() {
+            return Err(format!(
+                "{} は agent new で作ったセッションではないので書き込まない。\
+                 フィードバックなどから続けるときは chizu-cli agent new <新しいディレクトリ> --from {} を使う",
+                dir.display(),
+                dir.display()
+            ));
+        }
+        let world = saved.world();
+        let hash = hash_text(&world);
+        if saved.saved_hash() != Some(hash.as_str()) {
+            return Err(format!(
+                "{STATE_FILE} の stateHash {:?} と、記録を tick {} まで再生したハッシュ {hash} が食い違うので書き込まない。\
+                 前の書き込みが途中で止まったか、シミュレーションの規則が変わったおそれがある。\
+                 中身は chizu-cli agent observe {} で見られる",
+                saved.saved_hash().unwrap_or(""),
+                saved.tick,
+                dir.display()
+            ));
+        }
+        let session = Session {
+            dir: dir.to_path_buf(),
+            state: saved.state,
+            seed: saved.seed,
+            tick: saved.tick,
+            log: saved.log,
+            _lock: lock,
+        };
+        Ok((session, world))
+    }
+
     /// `world` を、このセッションのいまの街として書き出す。
+    ///
+    /// 2 つのファイルを一時ファイルに書き終えてから、記録、`state.json` の順に置き換える。
+    /// 置き換えのあいだで止まると記録と `stateHash` が食い違うので、次の書き込みで気づける。
     fn save(&mut self, world: &World) -> Result<(), String> {
         debug_assert_eq!(world.tick().0, self.tick);
         let s = &mut self.state;
@@ -155,8 +246,20 @@ impl Session {
         s.insert("stateHash".into(), json!(hash_text(world)));
         let mut text = serde_json::to_string_pretty(&self.state).expect("JSON に書けない");
         text.push('\n');
-        write_file(&self.dir.join(RECORD_FILE), &self.log.encode())?;
-        write_file(&self.dir.join(STATE_FILE), text.as_bytes())
+        let files = [
+            (self.dir.join(RECORD_FILE), self.log.encode()),
+            (self.dir.join(STATE_FILE), text.into_bytes()),
+        ];
+        for (path, bytes) in &files {
+            let tmp = tmp_path(path);
+            std::fs::write(&tmp, bytes)
+                .map_err(|e| format!("{} に書けない: {e}", tmp.display()))?;
+        }
+        for (path, _) in &files {
+            std::fs::rename(tmp_path(path), path)
+                .map_err(|e| format!("{} に書けない: {e}", path.display()))?;
+        }
+        Ok(())
     }
 }
 
@@ -347,21 +450,60 @@ fn print(value: &Value) -> String {
     serde_json::to_string(value).expect("JSON に書けない")
 }
 
+/// 新しいセッションを作り、街の様子を返す。`from` があれば、そのディレクトリの種、tick、記録を写す。
+fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, String> {
+    let world = from.world();
+    let copied = from_dir.map(|d| {
+        let hash = hash_text(&world);
+        let recorded = from.saved_hash().map(str::to_string);
+        let mut c = json!({
+            "dir": d,
+            "recordedStateHash": recorded,
+            "replayedStateHash": hash,
+            "matches": recorded.as_deref() == Some(hash.as_str()),
+        });
+        let unrecorded = match from.state.get("unrecordedOps") {
+            Some(Value::Bool(b)) => *b,
+            Some(Value::Number(n)) => n.as_u64() != Some(0),
+            _ => false,
+        };
+        if unrecorded {
+            c["note"] = json!(
+                "記録に残らない操作（unrecordedOps）があるので、ハッシュは食い違うのが当然である"
+            );
+        }
+        c
+    });
+    let mut s = Session::create(Path::new(dir), from)?;
+    s.save(&world)?;
+    let mut out = observe(&world);
+    if let Some(c) = copied {
+        out["copiedFrom"] = c;
+    }
+    Ok(out)
+}
+
 /// `agent` のあとの引数を受けて、標準出力に書く文字列を返す。
 pub fn run(args: &[String]) -> Result<String, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args.as_slice() {
         [] | ["help" | "--help" | "-h"] => Ok(USAGE.trim_end().to_string()),
+        ["new", dir, "--from", from] => {
+            let saved = read_saved(Path::new(from))?;
+            Ok(print(&new_session(dir, saved, Some(from))?))
+        }
         ["new", dir, seed] => {
-            let mut s = Session::create(Path::new(dir), parse_u64(seed, "種")?)?;
-            let world = s.world();
-            s.save(&world)?;
-            Ok(print(&observe(&world)))
+            let saved = Saved {
+                state: Map::new(),
+                seed: parse_u64(seed, "種")?,
+                tick: 0,
+                log: CommandLog::new(),
+            };
+            Ok(print(&new_session(dir, saved, None)?))
         }
         ["act", dir, commands] => {
             let commands = read_commands(commands)?;
-            let mut s = Session::load(Path::new(dir))?;
-            let mut world = s.world();
+            let (mut s, mut world) = Session::open_for_write(Path::new(dir))?;
             let results = act(&mut world, &mut s.log, &commands);
             s.save(&world)?;
             Ok(print(&json!({
@@ -373,12 +515,13 @@ pub fn run(args: &[String]) -> Result<String, String> {
         }
         ["advance", dir, ticks] => {
             let ticks = parse_u64(ticks, "tick 数")?;
-            let mut s = Session::load(Path::new(dir))?;
+            let (mut s, mut world) = Session::open_for_write(Path::new(dir))?;
             s.tick = s
                 .tick
                 .checked_add(ticks)
                 .ok_or_else(|| "tick があふれる".to_string())?;
-            let world = s.world();
+            // 読み込んだときに tick まで適用してあるので、続きを回す。
+            replay(&mut world, &s.log, ticks);
             s.save(&world)?;
             Ok(print(&json!({
                 "tick": s.tick,
@@ -388,14 +531,17 @@ pub fn run(args: &[String]) -> Result<String, String> {
             })))
         }
         ["observe", dir] => {
-            let s = Session::load(Path::new(dir))?;
-            let world = s.world();
+            let dir = Path::new(dir);
+            // 人間のフィードバックも見られるよう、セッションでなくても読む。
+            let _lock = lock(dir, false, false)?;
+            let saved = read_saved(dir)?;
+            let world = saved.world();
             let hash = hash_text(&world);
-            if let Some(saved) = s.state.get("stateHash").and_then(Value::as_str)
-                && saved != hash
+            if let Some(recorded) = saved.saved_hash()
+                && recorded != hash
             {
                 eprintln!(
-                    "{STATE_FILE} の stateHash {saved} と、再生した街のハッシュ {hash} が食い違う"
+                    "{STATE_FILE} の stateHash {recorded} と、再生した街のハッシュ {hash} が食い違う"
                 );
             }
             Ok(print(&observe(&world)))

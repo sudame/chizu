@@ -1,7 +1,7 @@
 //! `chizu-cli agent` で遊んだセッションを、記録の再生と突き合わせる。
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn cli(args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_chizu-cli"))
@@ -78,18 +78,175 @@ fn observe_matches_replay() {
     assert_eq!(state["seed"], "42");
 }
 
-/// フィードバックのディレクトリから続きを遊べ、知らないキーは残る。
-#[test]
-fn continues_from_feedback_dir() {
-    let dir = session("agent-feedback");
+fn cli_fails(args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_chizu-cli"))
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "{args:?} が通ってしまった");
+    String::from_utf8(out.stderr).unwrap()
+}
+
+/// 遊んだセッションを、画面が書くフィードバックの形に直す。
+fn make_feedback(name: &str, unrecorded_ops: u32) -> PathBuf {
+    let dir = session(name);
     let d = dir.to_str().unwrap();
     cli(&["agent", "new", d, "5"]);
-    let camera = r#"{"seed":"5","tick":0,"camera":{"x":1,"y":2,"zoom":3}}"#;
-    write(&dir.join("state.json"), camera);
+    let cmd = write(
+        &dir.join("c.json"),
+        r#"{"type":"SetTaxRate","zone":"Office","permille":200}"#,
+    );
+    cli(&["agent", "act", d, &cmd]);
+    cli(&["agent", "advance", d, "10"]);
+    let mut state = json(&std::fs::read_to_string(dir.join("state.json")).unwrap());
+    let map = state.as_object_mut().unwrap();
+    map.remove("agentSession");
+    map.insert("camera".into(), serde_json::json!({"x":1,"y":2,"zoom":3}));
+    map.insert("unrecordedOps".into(), unrecorded_ops.into());
+    std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
+    std::fs::remove_file(dir.join("session.lock")).unwrap();
+    std::fs::remove_file(dir.join("c.json")).unwrap();
+    dir
+}
+
+fn files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            let name = e.file_name().into_string().unwrap();
+            (name, std::fs::read(e.path()).unwrap())
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// フィードバックのディレクトリには書かず、new --from で写したセッションで続きを遊ぶ。
+#[test]
+fn continues_from_feedback_dir() {
+    let fb = make_feedback("agent-feedback", 0);
+    let f = fb.to_str().unwrap();
+    let before = files(&fb);
+    let err = cli_fails(&["agent", "advance", f, "10"]);
+    assert!(err.contains("--from"), "{err}");
+    cli(&["agent", "observe", f]);
+    assert_eq!(files(&fb), before, "フィードバックのディレクトリが変わった");
+
+    let dir = session("agent-feedback-copy");
+    let d = dir.to_str().unwrap();
+    let made = json(&cli(&["agent", "new", d, "--from", f]));
+    assert_eq!(made["copiedFrom"]["matches"], true, "{made}");
+    assert!(made["copiedFrom"].get("note").is_none(), "{made}");
+    assert_eq!(made["tick"], 10);
     cli(&["agent", "advance", d, "10"]);
     let state = json(&std::fs::read_to_string(dir.join("state.json")).unwrap());
     assert_eq!(state["camera"]["zoom"], 3);
-    assert_eq!(state["tick"], 10);
+    assert_eq!(state["tick"], 20);
+    assert_eq!(state["agentSession"], 1);
+    assert!(state.get("unrecordedOps").is_none(), "{state}");
+    let log = std::fs::read(dir.join("commands.rec")).unwrap();
+    assert_eq!(chizu_core::CommandLog::decode(&log).unwrap().len(), 1);
+}
+
+/// 記録に残らない操作のあったフィードバックは、食い違うのが当然であることを添える。
+#[test]
+fn notes_unrecorded_ops_when_copying() {
+    let fb = make_feedback("agent-feedback-unrecorded", 2);
+    let mut state = json(&std::fs::read_to_string(fb.join("state.json")).unwrap());
+    state["stateHash"] = "0000000000000000".into();
+    std::fs::write(fb.join("state.json"), state.to_string()).unwrap();
+    let dir = session("agent-feedback-unrecorded-copy");
+    let made = json(&cli(&[
+        "agent",
+        "new",
+        dir.to_str().unwrap(),
+        "--from",
+        fb.to_str().unwrap(),
+    ]));
+    assert_eq!(made["copiedFrom"]["matches"], false, "{made}");
+    assert!(made["copiedFrom"]["note"].is_string(), "{made}");
+    // 新しいセッションには再生し直したハッシュを書くので、そのまま遊べる。
+    let saved = json(&std::fs::read_to_string(dir.join("state.json")).unwrap());
+    assert_eq!(saved["stateHash"], made["stateHash"]);
+    cli(&["agent", "advance", dir.to_str().unwrap(), "1"]);
+}
+
+/// 一時ファイルに書けなければ、記録も state.json も変えずに失敗する。
+#[test]
+fn failed_write_leaves_session_unchanged() {
+    let dir = session("agent-write-fail");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "3"]);
+    let cmd = write(
+        &dir.join("c.json"),
+        r#"{"type":"SetTaxRate","zone":"Office","permille":200}"#,
+    );
+    let before = (
+        std::fs::read(dir.join("commands.rec")).unwrap(),
+        std::fs::read(dir.join("state.json")).unwrap(),
+    );
+    std::fs::create_dir(dir.join("state.json.tmp")).unwrap();
+    cli_fails(&["agent", "act", d, &cmd]);
+    let after = (
+        std::fs::read(dir.join("commands.rec")).unwrap(),
+        std::fs::read(dir.join("state.json")).unwrap(),
+    );
+    assert_eq!(after, before);
+    std::fs::remove_dir(dir.join("state.json.tmp")).unwrap();
+    let _ = std::fs::remove_file(dir.join("commands.rec.tmp"));
+    cli(&["agent", "act", d, &cmd]);
+    let log = std::fs::read(dir.join("commands.rec")).unwrap();
+    assert_eq!(chizu_core::CommandLog::decode(&log).unwrap().len(), 1);
+}
+
+/// 記録だけ置き換わって state.json が古いまま（置き換えのあいだで止まった）なら、書き込まずに止まる。
+#[test]
+fn refuses_when_record_and_hash_disagree() {
+    let dir = session("agent-torn");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "3"]);
+    let old_state = std::fs::read(dir.join("state.json")).unwrap();
+    let cmd = write(
+        &dir.join("c.json"),
+        r#"{"type":"SetTaxRate","zone":"Office","permille":200}"#,
+    );
+    cli(&["agent", "act", d, &cmd]);
+    std::fs::write(dir.join("state.json"), &old_state).unwrap();
+    let rec = std::fs::read(dir.join("commands.rec")).unwrap();
+    for args in [vec!["act", d, &cmd], vec!["advance", d, "5"]] {
+        let err = cli_fails(&[&["agent"], args.as_slice()].concat());
+        assert!(err.contains("observe"), "{err}");
+    }
+    assert_eq!(std::fs::read(dir.join("commands.rec")).unwrap(), rec);
+    assert_eq!(std::fs::read(dir.join("state.json")).unwrap(), old_state);
+}
+
+/// 同じセッションに同時に打っても、操作は消えない。
+#[test]
+fn concurrent_acts_keep_every_command() {
+    let dir = session("agent-concurrent");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "3"]);
+    let cmd = write(
+        &dir.join("c.json"),
+        r#"{"type":"SetTaxRate","zone":"Office","permille":200}"#,
+    );
+    let n = 8;
+    let children: Vec<_> = (0..n)
+        .map(|_| {
+            Command::new(env!("CARGO_BIN_EXE_chizu-cli"))
+                .args(["agent", "act", d, &cmd])
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for mut c in children {
+        assert!(c.wait().unwrap().success());
+    }
+    let log = std::fs::read(dir.join("commands.rec")).unwrap();
+    assert_eq!(chizu_core::CommandLog::decode(&log).unwrap().len(), n);
 }
 
 #[test]
