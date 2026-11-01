@@ -10,6 +10,13 @@ describe("isWorkerToMain", () => {
     crossOriginIsolated: true,
     n: 3,
     sum: 6n,
+    roadCosts: [250, 450, 750, 8000, 11314],
+  };
+  const roads = {
+    kind: "roads",
+    revision: 1,
+    segments: new Float64Array([0, 0, 4, 0, 1]),
+    nodes: new Float64Array([0, 0, 1, 4, 0, 1]),
   };
   const chunk = { cx: -1, cy: 2, version: 3, owned: true, tiles: new ArrayBuffer(CHUNK_AREA) };
 
@@ -18,6 +25,10 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ kind: "error", message: "失敗" })).toBe(true);
     expect(isWorkerToMain({ kind: "chunks", chunks: [chunk] })).toBe(true);
     expect(isWorkerToMain({ kind: "chunks", chunks: [] })).toBe(true);
+    expect(isWorkerToMain(roads)).toBe(true);
+    expect(
+      isWorkerToMain({ kind: "outcome", command: "BuildRoad", outcome: "Denied", reason: "x" }),
+    ).toBe(true);
   });
 
   test("形の違うメッセージを捨てる", () => {
@@ -29,6 +40,8 @@ describe("isWorkerToMain", () => {
       isWorkerToMain({ kind: "chunks", chunks: [{ ...chunk, tiles: new ArrayBuffer(8) }] }),
     ).toBe(false);
     expect(isWorkerToMain({ kind: "chunks", chunks: [{ ...chunk, cx: 0.5 }] })).toBe(false);
+    expect(isWorkerToMain({ ...roads, segments: new Float64Array(4) })).toBe(false);
+    expect(isWorkerToMain({ ...roads, nodes: [0, 0, 1] })).toBe(false);
     expect(isWorkerToMain({ type: "wasm_bindgen_worker_ready" })).toBe(false);
   });
 });

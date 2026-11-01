@@ -5,7 +5,7 @@
 
 use core::fmt;
 
-use chizu_core::{Command, SimSpeed};
+use chizu_core::{ChunkCoord, Command, RoadKind, SimSpeed, TilePos, TileRect};
 
 /// オブジェクトのフィールドを読んだ値。
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +23,9 @@ pub enum InputError {
     MissingKind,
     UnknownKind(String),
     BadSpeed,
+    /// 整数で読めないフィールド。
+    BadInteger(&'static str),
+    BadRoadKind,
 }
 
 impl fmt::Display for InputError {
@@ -32,6 +35,8 @@ impl fmt::Display for InputError {
             InputError::MissingKind => write!(f, "コマンドに文字列の kind がない"),
             InputError::UnknownKind(kind) => write!(f, "知らないコマンド {kind}"),
             InputError::BadSpeed => write!(f, "速度は 1 から 48 までの整数で指定する"),
+            InputError::BadInteger(name) => write!(f, "{name} が範囲の中の整数でない"),
+            InputError::BadRoadKind => write!(f, "road は Small、Medium、Large のどれかで指定する"),
         }
     }
 }
@@ -55,8 +60,54 @@ pub fn parse(is_object: bool, field: impl Fn(&str) -> Field) -> Result<Command, 
             .ok_or(InputError::BadSpeed)?;
             Ok(Command::SetSimSpeed { speed })
         }
+        "BuildRoad" => {
+            let kind = match field("road") {
+                Field::Text(t) if t == "Small" => RoadKind::Small,
+                Field::Text(t) if t == "Medium" => RoadKind::Medium,
+                Field::Text(t) if t == "Large" => RoadKind::Large,
+                _ => return Err(InputError::BadRoadKind),
+            };
+            Ok(Command::BuildRoad {
+                from: tile(&field, "fromX", "fromY")?,
+                to: tile(&field, "toX", "toY")?,
+                kind,
+            })
+        }
+        "Bulldoze" => Ok(Command::Bulldoze {
+            area: TileRect {
+                min: tile(&field, "minX", "minY")?,
+                max: tile(&field, "maxX", "maxY")?,
+            },
+        }),
+        "BuyChunk" => {
+            let coord = |name: &'static str| {
+                integer(&field, name)
+                    .and_then(|v| i32::try_from(v).map_err(|_| InputError::BadInteger(name)))
+            };
+            Ok(Command::BuyChunk {
+                coord: ChunkCoord::new(coord("cx")?, coord("cy")?),
+            })
+        }
         _ => Err(InputError::UnknownKind(kind)),
     }
+}
+
+/// JS の数で誤差なく表せる整数の上限。
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+fn integer(field: &impl Fn(&str) -> Field, name: &'static str) -> Result<i64, InputError> {
+    match field(name) {
+        Field::Number(v) if v.fract() == 0.0 && v.abs() <= MAX_SAFE_INTEGER => Ok(v as i64),
+        _ => Err(InputError::BadInteger(name)),
+    }
+}
+
+fn tile(
+    field: &impl Fn(&str) -> Field,
+    x: &'static str,
+    y: &'static str,
+) -> Result<TilePos, InputError> {
+    Ok(TilePos::new(integer(field, x)?, integer(field, y)?))
 }
 
 fn integer_u16(v: f64) -> Option<u16> {
@@ -135,6 +186,72 @@ mod tests {
         ] {
             assert_eq!(speed(bad.clone()), Err(InputError::BadSpeed), "{bad:?}");
         }
+    }
+
+    fn numbers(kind: &str, fields: &[(&str, f64)]) -> Result<Command, InputError> {
+        let mut all = vec![("kind", Field::Text(kind.into()))];
+        all.extend(fields.iter().map(|(n, v)| (*n, Field::Number(*v))));
+        object(&all)
+    }
+
+    #[test]
+    fn accepts_build_road() {
+        let mut fields = vec![
+            ("kind", Field::Text("BuildRoad".into())),
+            ("road", Field::Text("Medium".into())),
+        ];
+        for (n, v) in [("fromX", -3.0), ("fromY", 4.0), ("toX", 5.0), ("toY", 4.0)] {
+            fields.push((n, Field::Number(v)));
+        }
+        assert_eq!(
+            object(&fields),
+            Ok(Command::BuildRoad {
+                from: TilePos::new(-3, 4),
+                to: TilePos::new(5, 4),
+                kind: RoadKind::Medium,
+            })
+        );
+        fields[1].1 = Field::Text("Huge".into());
+        assert_eq!(object(&fields), Err(InputError::BadRoadKind));
+    }
+
+    #[test]
+    fn accepts_bulldoze_and_buy_chunk() {
+        let rect = [("minX", 0.0), ("minY", -2.0), ("maxX", 3.0), ("maxY", 1.0)];
+        assert_eq!(
+            numbers("Bulldoze", &rect),
+            Ok(Command::Bulldoze {
+                area: TileRect {
+                    min: TilePos::new(0, -2),
+                    max: TilePos::new(3, 1),
+                }
+            })
+        );
+        assert_eq!(
+            numbers("BuyChunk", &[("cx", 2.0), ("cy", -1.0)]),
+            Ok(Command::BuyChunk {
+                coord: ChunkCoord::new(2, -1)
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_bad_coordinates() {
+        assert_eq!(
+            numbers(
+                "Bulldoze",
+                &[("minX", 0.5), ("minY", 0.0), ("maxX", 1.0), ("maxY", 1.0)]
+            ),
+            Err(InputError::BadInteger("minX"))
+        );
+        assert_eq!(
+            numbers("Bulldoze", &[("minX", 0.0), ("minY", 0.0), ("maxX", 1e300)]),
+            Err(InputError::BadInteger("maxX"))
+        );
+        assert_eq!(
+            numbers("BuyChunk", &[("cx", 3e9), ("cy", 0.0)]),
+            Err(InputError::BadInteger("cx"))
+        );
     }
 
     #[test]
