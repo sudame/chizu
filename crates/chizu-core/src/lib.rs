@@ -3,6 +3,7 @@
 pub mod chunk;
 pub mod clock;
 pub mod command;
+pub mod network;
 pub mod record;
 pub mod rng;
 pub mod round;
@@ -15,6 +16,10 @@ pub mod world;
 pub use chunk::{Chunk, Layer, LayerTiles, TileUse};
 pub use clock::{GameTime, TICKS_PER_DAY};
 pub use command::{Command, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
+pub use network::{
+    Dir, Lane, LaneId, LaneMode, Line, LinkId, Network, Node, NodeControl, Segment, SegmentId,
+    SegmentKind,
+};
 pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, replay};
 pub use rng::{Pcg32, RngPurpose, mix_words, rng};
 pub use state_hash::{StateHash, StateHasher, state_hash_of};

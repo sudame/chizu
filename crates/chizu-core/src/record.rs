@@ -471,7 +471,7 @@ mod tests {
         vec![
             Command::BuildRoad {
                 from: TilePos::new(-3, 4),
-                to: TilePos::new(i64::MAX, i64::MIN),
+                to: TilePos::new(5, -4),
                 kind: RoadKind::Medium,
             },
             Command::Bulldoze {
@@ -750,10 +750,10 @@ mod tests {
         assert_eq!(
             stats,
             ReplayStats {
-                applied: 2,
-                not_implemented: 5,
+                applied: 3,
+                not_implemented: 3,
                 rejected: 0,
-                denied: 1,
+                denied: 2,
             }
         );
         let mut pieces = World::new(9);
@@ -768,11 +768,21 @@ mod tests {
         let rect = (tile.clone(), tile.clone()).prop_map(|(a, b)| TileRect::from_corners(a, b));
         let zone = proptest::sample::select(ZoneKind::ALL.to_vec());
         prop_oneof![
-            (tile.clone(), tile.clone(), 1_u8..=3).prop_map(|(from, to, k)| Command::BuildRoad {
-                from,
-                to,
-                kind: RoadKind::from_code(k).unwrap(),
-            }),
+            (
+                -1_000_i64..1_000,
+                -1_000_i64..1_000,
+                -1_i64..=1,
+                -1_i64..=1,
+                1_i64..=1_024,
+                1_u8..=3
+            )
+                .prop_filter("向きがない", |(_, _, sx, sy, _, _)| (*sx, *sy)
+                    != (0, 0))
+                .prop_map(|(x, y, sx, sy, n, k)| Command::BuildRoad {
+                    from: TilePos::new(x, y),
+                    to: TilePos::new(x + sx * n, y + sy * n),
+                    kind: RoadKind::from_code(k).unwrap(),
+                }),
             rect.clone().prop_map(|area| Command::Bulldoze { area }),
             (rect, zone.clone()).prop_map(|(area, zone)| Command::PaintZone { area, zone }),
             (1_u8..=2, tile, any::<u8>()).prop_map(|(k, at, rotation)| Command::PlaceBuilding {

@@ -3,9 +3,10 @@
 use std::collections::BTreeMap;
 
 use crate::chunk::Chunk;
-use crate::command::{Command, SimSpeed, ZoneKind};
+use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
+use crate::network::{Line, Network, road_cost};
 use crate::state_hash::{StateHash, StateHasher};
-use crate::tile::ChunkCoord;
+use crate::tile::{ChunkCoord, TilePos, TileRect};
 use crate::units::{Money, Tick};
 
 /// 始めたときの所持金。
@@ -53,6 +54,7 @@ pub struct World {
     chunks: BTreeMap<ChunkCoord, Chunk>,
     /// 始めてから買ったチャンクの数。最初から買ってあるチャンクは数えない。
     chunks_bought: u32,
+    network: Network,
 }
 
 impl World {
@@ -74,6 +76,45 @@ impl World {
             tax_permille: [INITIAL_TAX_PERMILLE; 4],
             chunks,
             chunks_bought: 0,
+            network: Network::new(),
+        }
+    }
+
+    pub fn network(&self) -> &Network {
+        &self.network
+    }
+
+    /// 道路を引けるマスか。買った土地で、水辺でないマスである。
+    pub fn is_buildable(&self, t: TilePos) -> bool {
+        t.chunk()
+            .and_then(|c| self.chunks.get(&c))
+            .is_some_and(|c| {
+                let (lx, ly) = t.local();
+                c.owned() && !c.terrain().is_water(lx, ly)
+            })
+    }
+
+    fn build_road(&mut self, from: TilePos, to: TilePos, kind: RoadKind) -> ApplyOutcome {
+        let Ok(line) = Line::between(from, to) else {
+            return ApplyOutcome::Rejected;
+        };
+        if !line.tiles().all(|t| self.is_buildable(t)) {
+            return ApplyOutcome::Denied;
+        }
+        let cost = road_cost(kind, &line);
+        if self.money < cost || self.network.build_road(&line, kind).is_err() {
+            return ApplyOutcome::Denied;
+        }
+        self.money = self.money - cost;
+        ApplyOutcome::Applied
+    }
+
+    // 消した道路の建設費は払い戻さない。
+    fn bulldoze(&mut self, area: TileRect) -> ApplyOutcome {
+        if self.network.bulldoze(area) == 0 {
+            ApplyOutcome::Denied
+        } else {
+            ApplyOutcome::Applied
         }
     }
 
@@ -152,9 +193,9 @@ impl World {
                 ApplyOutcome::Applied
             }
             Command::BuyChunk { coord } => self.buy_chunk(coord),
-            Command::BuildRoad { .. }
-            | Command::Bulldoze { .. }
-            | Command::PaintZone { .. }
+            Command::BuildRoad { from, to, kind } => self.build_road(from, to, kind),
+            Command::Bulldoze { area } => self.bulldoze(area),
+            Command::PaintZone { .. }
             | Command::PlaceBuilding { .. }
             | Command::SetSignal { .. } => ApplyOutcome::NotImplemented,
         }
@@ -182,6 +223,7 @@ impl StateHash for World {
         h.write(&self.tax_permille);
         h.write(&self.chunks);
         h.write(&self.chunks_bought);
+        h.write(&self.network);
     }
 }
 
@@ -260,6 +302,77 @@ mod tests {
             on: true,
         };
         assert_eq!(w.apply(&cmd), ApplyOutcome::NotImplemented);
+        assert_eq!(w, before);
+    }
+
+    fn road(w: &mut World, from: (i64, i64), to: (i64, i64), kind: RoadKind) -> ApplyOutcome {
+        w.apply(&Command::BuildRoad {
+            from: TilePos::new(from.0, from.1),
+            to: TilePos::new(to.0, to.1),
+            kind,
+        })
+    }
+
+    #[test]
+    fn building_a_road_charges_its_cost() {
+        let mut w = World::new(0);
+        let before = w.state_hash();
+        assert_eq!(
+            road(&mut w, (0, 0), (10, 0), RoadKind::Small),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(w.money(), INITIAL_MONEY - Money(2_500));
+        assert_ne!(w.state_hash(), before);
+        assert_eq!(w.network().segments().count(), 1);
+        let area = TileRect::from_corners(TilePos::new(3, 0), TilePos::new(3, 0));
+        assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Applied);
+        assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Denied);
+        assert_eq!(w.money(), INITIAL_MONEY - Money(2_500));
+    }
+
+    #[test]
+    fn roads_are_denied_off_the_owned_land_on_water_and_without_money() {
+        let mut w = World::new(42);
+        let before = w.clone();
+        // 買った土地の端から 1 マスはみ出す。
+        assert_eq!(
+            road(&mut w, (100, 0), (128, 0), RoadKind::Small),
+            ApplyOutcome::Denied
+        );
+        // 1 本で所持金を超える。
+        w.money = Money(2_999);
+        assert_eq!(
+            road(&mut w, (-60, 0), (-56, 0), RoadKind::Large),
+            ApplyOutcome::Denied
+        );
+        w.money = Money(3_000);
+        assert_eq!(
+            road(&mut w, (-60, 0), (-56, 0), RoadKind::Large),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(w.money(), Money::ZERO);
+        w = before;
+
+        // 水辺のある土地を買い、水辺のマスを通る道路を引こうとする。
+        w.money = Money(1_000_000_000);
+        let coord = (2..40)
+            .map(|cx| ChunkCoord::new(cx, 0))
+            .find(|c| {
+                assert_eq!(buy(&mut w, c.cx, c.cy), ApplyOutcome::Applied);
+                w.chunk(*c).unwrap().terrain().water_count() > 0
+            })
+            .expect("水辺のある土地が見つからない");
+        let o = coord.origin();
+        let water = (0..crate::tile::CHUNK_AREA)
+            .map(|i| (i % crate::tile::CHUNK_SIDE, i / crate::tile::CHUNK_SIDE))
+            .find(|(lx, ly)| w.chunk(coord).unwrap().terrain().is_water(*lx, *ly))
+            .unwrap();
+        let t = (o.x + water.0 as i64, o.y + water.1 as i64);
+        let before = w.clone();
+        assert_eq!(
+            road(&mut w, (t.0 - 1, t.1), (t.0, t.1), RoadKind::Small),
+            ApplyOutcome::Denied
+        );
         assert_eq!(w, before);
     }
 
