@@ -137,6 +137,7 @@ pub struct World {
 }
 
 pub mod growth;
+pub mod people;
 
 /// 網から作り直せる経路探索。状態に入れず、`World` どうしを比べるときも見ない。
 #[derive(Clone, Debug)]
@@ -617,6 +618,7 @@ impl World {
         let (seed, tick) = (self.seed, self.tick);
         self.population
             .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
+        self.update_people();
         self.trips.step(&self.network, &mut self.router.router);
         self.grow_buildings();
         self.tick = tick.next();

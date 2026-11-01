@@ -54,23 +54,23 @@ impl Building {
         w * h
     }
 
-    /// 住める世帯の数の上限。住宅でなければ 0 である。
+    /// 住める世帯の数の上限。4 マスあたり段階ぶんの世帯で、端数は切り上げる。住宅でなければ 0 である。
     pub fn households(&self) -> u64 {
         match self.zone {
-            ZoneKind::Residential => self.tile_count() * u64::from(self.level),
+            ZoneKind::Residential => (self.tile_count() * u64::from(self.level)).div_ceil(4),
             _ => 0,
         }
     }
 
     /// 職場の数の上限。住宅なら 0 である。
     pub fn workplaces(&self) -> u64 {
-        let per_tile = match self.zone {
-            ZoneKind::Residential => 0,
+        let per_four_tiles = match self.zone {
+            ZoneKind::Residential => return 0,
             ZoneKind::Commercial => 2,
             ZoneKind::Industrial => 3,
             ZoneKind::Office => 4,
         };
-        self.tile_count() * per_tile * u64::from(self.level)
+        (self.tile_count() * per_four_tiles * u64::from(self.level)).div_ceil(4)
     }
 
     /// 駐車場の台数。1 マスに段階の数だけ停められる。
@@ -205,24 +205,114 @@ pub struct ZoneTotals {
     pub workplaces: [u64; 4],
 }
 
-/// 住民がまだいないあいだにも、住宅が建ち始めるための需要。
-const BASE_RESIDENTIAL_DEMAND: i64 = 20;
+/// 街の外から住みたい人が来る、いつもある需要。空き家が埋まっていれば、街はこの需要で育ち続ける。
+pub const BASE_RESIDENTIAL_DEMAND: i64 = 30;
 
-/// 住民がまだいないあいだにも、工業が建ち始めるための需要。
+/// 働き手がいないうちから、工業が建ち始めるための需要。
 const BASE_INDUSTRIAL_DEMAND: i64 = 10;
+
+/// 商業の職場 1 つが、何人ぶんの住民の買い物をまかなうか。
+const CITIZENS_PER_SHOP_JOB: u64 = 4;
+
+/// 商業を除く働き口のうち、工業の割合（‰）。残りがオフィスになる。
+const INDUSTRIAL_SHARE_PERMILLE: u64 = 600;
+
+/// 需要の式に使う、街の人口と働き口の数。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CityStats {
+    pub citizens: u64,
+    pub households: u64,
+    /// 働く年齢の住民の数。
+    pub working_age: u64,
+    /// 職場のある住民の数。
+    pub employed: u64,
+    /// 住宅に住める世帯の数の合計。
+    pub homes: u64,
+    /// 区画の種類ごとの職場の数。添え字は [`ZoneKind::index`]。
+    pub workplaces: [u64; 4],
+    /// 区画の種類ごとの、埋まっている職場の数。
+    pub filled: [u64; 4],
+    /// 区画の種類ごとの、塗られていて建てる空きがあるか、建物があるか。
+    pub zoned: [bool; 4],
+}
+
+impl CityStats {
+    /// 建物を 1 つ除いたときの値。
+    pub fn without(mut self, b: &Building) -> CityStats {
+        self.homes -= b.households();
+        self.workplaces[b.zone.index()] -= b.workplaces();
+        self
+    }
+
+    /// 建物を 1 つ足したときの値。
+    pub fn with(mut self, b: &Building) -> CityStats {
+        self.homes += b.households();
+        self.workplaces[b.zone.index()] += b.workplaces();
+        self
+    }
+}
 
 /// 区画の種類ごとの需要。正なら建物が建つ。添え字は [`ZoneKind::index`]。
 ///
-/// 住宅は職場の数と世帯の数の差から、商業・工業・オフィスは世帯の数（人口の代わり）から決める。
-pub fn demand(t: ZoneTotals) -> [i64; 4] {
-    let n = |v: u64| i64::try_from(v).expect("建物の数があふれた");
-    let jobs: u64 = t.workplaces.iter().sum();
-    let homes = n(t.households);
-    let w = |z: ZoneKind| n(t.workplaces[z.index()]);
+/// CS2 にならい、次のように決める。どれも差の式なので、街が釣り合えば 0 のまわりに収まる。
+/// - 住宅：いつもある需要に、働き口の空きを足し、空き家の 2 倍と職のない住民の 1/4 を引く。
+/// - 商業：住民の数の 1/[`CITIZENS_PER_SHOP_JOB`] が買い物に要る職場で、いまの商業の職場との差。
+/// - 工業とオフィス：働く年齢の住民のうち、商業で働かない人に要る職場を、塗られている区画の間で分けたものと、
+///   いまの職場との差。両方が塗られていれば決まった割合で、片方だけならその区画にすべてを割り当てる。
+///   商業が塗られていなければ、買い物の職場の分も工業とオフィスに回す。
+pub fn demand(s: &CityStats) -> [i64; 4] {
+    let n = |v: u64| i64::try_from(v).expect("街の数があふれた");
+    let zoned = |z: ZoneKind| s.zoned[z.index()];
+    let jobs: u64 = s.workplaces.iter().sum();
+    let filled: u64 = s.filled.iter().sum();
+    let vacant_jobs = n(jobs.saturating_sub(filled));
+    let vacant_homes = n(s.homes.saturating_sub(s.households));
+    let jobless_quarter = n(s.working_age.saturating_sub(s.employed) / 4);
+    let shop_jobs = s.citizens / CITIZENS_PER_SHOP_JOB;
+    let shop_workers = if zoned(ZoneKind::Commercial) {
+        shop_jobs
+    } else {
+        0
+    };
+    let other_jobs = s.working_age.saturating_sub(shop_workers);
+    let share = match (zoned(ZoneKind::Industrial), zoned(ZoneKind::Office)) {
+        (true, false) => 1_000,
+        (false, true) => 0,
+        _ => INDUSTRIAL_SHARE_PERMILLE,
+    };
+    let industry = other_jobs * share / 1_000;
+    let office = other_jobs - industry;
+    let w = |z: ZoneKind| n(s.workplaces[z.index()]);
     [
-        BASE_RESIDENTIAL_DEMAND + n(jobs) - homes,
-        n(t.households / 2) - w(ZoneKind::Commercial),
-        BASE_INDUSTRIAL_DEMAND + n(t.households / 2) - w(ZoneKind::Industrial),
-        n(t.households / 4) - w(ZoneKind::Office),
+        BASE_RESIDENTIAL_DEMAND + vacant_jobs - 2 * vacant_homes - jobless_quarter,
+        n(shop_jobs) - w(ZoneKind::Commercial),
+        BASE_INDUSTRIAL_DEMAND + n(industry) - w(ZoneKind::Industrial),
+        n(office) - w(ZoneKind::Office),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(zoned: [bool; 4]) -> CityStats {
+        CityStats {
+            citizens: 1_000,
+            working_age: 600,
+            zoned,
+            ..CityStats::default()
+        }
+    }
+
+    #[test]
+    fn workers_go_to_the_zones_that_are_painted() {
+        let all = demand(&stats([true; 4]));
+        assert_eq!(all[1..], [250, 10 + 210, 140]);
+        // 工業だけなら、商業の分も含めて工業がすべて受ける。
+        let industry = demand(&stats([true, false, true, false]));
+        assert_eq!(industry[2..], [10 + 600, 0]);
+        // オフィスだけでも同じである。
+        let office = demand(&stats([true, true, false, true]));
+        assert_eq!(office[2..], [10, 350]);
+    }
 }
