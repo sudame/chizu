@@ -9,7 +9,7 @@
 
 use std::process::ExitCode;
 
-use chizu_core::{CommandLog, World, replay};
+use chizu_core::{CommandLog, DenyReason, World, replay};
 
 const USAGE: &str = "使い方: chizu-cli <記録ファイル> <種> <tick 数>";
 
@@ -32,6 +32,12 @@ fn run(args: &[String]) -> Result<String, String> {
         "適用 {} 件、未実装で無視 {} 件、範囲外で無視 {} 件、却下 {} 件",
         stats.applied, stats.not_implemented, stats.rejected, stats.denied
     );
+    for reason in DenyReason::ALL {
+        let n = stats.denied_by[reason.index()];
+        if n > 0 {
+            eprintln!("  却下の理由 {reason:?}: {n} 件");
+        }
+    }
     Ok(format!("{:016x}", world.state_hash()))
 }
 

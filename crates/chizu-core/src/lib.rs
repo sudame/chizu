@@ -34,4 +34,4 @@ pub use state_hash::{StateHash, StateHasher, state_hash_of};
 pub use terrain::{TerrainTiles, is_water, terrain};
 pub use tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, TileRect};
 pub use units::{LaneOffset, Mm, MmPerTick, Money, Tick, WorldPos};
-pub use world::{ApplyOutcome, World};
+pub use world::{ApplyOutcome, DenyReason, World};

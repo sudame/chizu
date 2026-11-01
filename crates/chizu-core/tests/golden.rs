@@ -12,9 +12,22 @@
 use std::path::PathBuf;
 
 use chizu_core::{
-    ChunkCoord, Command, CommandLog, RecordedCommand, RoadKind, SimSpeed, StateHasher, Tick,
-    TilePos, TileRect, World, ZoneKind, replay,
+    ChunkCoord, Command, CommandLog, DenyReason, RecordedCommand, ReplayStats, RoadKind, SimSpeed,
+    StateHasher, Tick, TilePos, TileRect, World, ZoneKind, replay,
 };
+
+/// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
+fn denied_by(counts: &[(DenyReason, u64)]) -> [u64; DenyReason::ALL.len()] {
+    let mut by = [0; DenyReason::ALL.len()];
+    for (reason, n) in counts {
+        by[reason.index()] = *n;
+    }
+    by
+}
+
+fn assert_denied_by(stats: &ReplayStats, counts: &[(DenyReason, u64)]) {
+    assert_eq!(stats.denied_by, denied_by(counts));
+}
 
 /// 状態ハッシュの列に書き出す間隔（tick）。
 const CHECKPOINT_INTERVAL: u64 = 1_000;
@@ -199,6 +212,14 @@ fn land_purchase_covers_water_and_the_rules() {
     let mut world = World::new(s.seed);
     let stats = replay(&mut world, &s.log, s.ticks);
     assert_eq!((stats.applied, stats.denied), (5, 6));
+    assert_denied_by(
+        &stats,
+        &[
+            (DenyReason::NotEnoughMoney, 2),
+            (DenyReason::NotAdjacent, 2),
+            (DenyReason::AlreadyOwned, 2),
+        ],
+    );
     assert_eq!(world.money(), chizu_core::Money::ZERO);
     assert_eq!(world.chunks().filter(|c| c.owned()).count(), 9 + 5);
     let water: u32 = world.chunks().map(|c| c.terrain().water_count()).sum();
@@ -216,6 +237,15 @@ fn road_network_covers_the_rules() {
     let mut world = World::new(s.seed);
     let stats = replay(&mut world, &s.log, s.ticks);
     assert_eq!((stats.applied, stats.denied), (9, 4));
+    assert_denied_by(
+        &stats,
+        &[
+            (DenyReason::NotOwned, 1),
+            (DenyReason::Overlap, 1),
+            (DenyReason::CornerCrossing, 1),
+            (DenyReason::NothingToBulldoze, 1),
+        ],
+    );
     let net = world.network();
     let degree = |x, y| {
         let node = net.node_at(TilePos::new(x, y)).unwrap();
