@@ -3,6 +3,7 @@ import init, {
   parallel_sum,
   road_cost_table,
   type Simulation,
+  service_table,
   snapshot_layout,
   thread_count,
   ticks_per_second,
@@ -95,7 +96,11 @@ function sendBuildings(sim: Simulation): void {
   }
   sentBuildingsVersion = version;
   const buildings = sim.buildings();
-  reply({ kind: "buildings", buildings, stats: [...sim.city_stats()] }, [buildings.buffer]);
+  const facilities = sim.facilities();
+  reply({ kind: "buildings", buildings, facilities, stats: [...sim.city_stats()] }, [
+    buildings.buffer,
+    facilities.buffer,
+  ]);
 }
 
 // 実時間に合わせて tick を進める。何 tick 進めるかはここで決め、中核には整数の tick 数だけを渡す
@@ -150,6 +155,7 @@ const ready = (async () => {
     n: SUM_N,
     sum: parallel_sum(SUM_N),
     roadCosts: [...road_cost_table()],
+    serviceTable: [...service_table()],
   });
   return { sim, setPaused };
 })();
@@ -171,6 +177,13 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
       case "pause":
         setPaused(message.paused);
         break;
+      case "probe-service": {
+        const { service, x, y } = message;
+        const code = service === "PowerPlant" ? 1 : 2;
+        const results = [...sim.service_probe(code, x, y)] as (string | null)[];
+        reply({ kind: "service-probe", service, x, y, results });
+        break;
+      }
       case "feedback": {
         const commands = sim.encode_log().buffer as ArrayBuffer;
         reply({ kind: "feedback", state: sim.feedback_state(), commands }, [commands]);

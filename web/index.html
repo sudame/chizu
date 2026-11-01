@@ -63,7 +63,8 @@
         border-radius: 4px;
       }
       #status,
-      #city-numbers {
+      #city-numbers,
+      #city-utilities {
         margin: 0;
       }
       #city {
@@ -102,7 +103,10 @@
       <p id="status" data-state="loading">WASM を読み込んでいる</p>
       <canvas id="hud" width="480" height="96"></canvas>
       <div id="city">
-        <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
+        <div>
+          <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
+          <p id="city-utilities">電気 0 / 需要 0・水道 0 / 需要 0</p>
+        </div>
         <div id="demand" title="区画の種類ごとの需要">
           <div><div class="slot"><div class="bar" style="background: #26f226"></div></div><div class="label">住</div></div>
           <div><div class="slot"><div class="bar" style="background: #4073f2"></div></div><div class="label">商</div></div>
@@ -129,6 +133,8 @@
       <button type="button" data-tool="zone-Industrial" aria-pressed="false">工業</button>
       <button type="button" data-tool="zone-Office" aria-pressed="false">オフィス</button>
       <button type="button" data-tool="zone-Clear" aria-pressed="false">区画を消す</button>
+      <button type="button" data-tool="service-PowerPlant" aria-pressed="false">発電所</button>
+      <button type="button" data-tool="service-WaterPump" aria-pressed="false">浄水場</button>
       <button type="button" data-tool="buy" aria-pressed="false">土地を買う</button>
       <span id="tool-info"></span>
       <span id="tool-message" aria-live="polite"></span>
