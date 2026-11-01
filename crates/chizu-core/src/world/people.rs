@@ -1,12 +1,14 @@
 //! 外からの移住、職場の割り当て、1 日の予定。
 //!
 //! - 移住：電気と水道が届き、道路で「外の世界」とつながった住宅に空きがあり、住宅の需要があれば、
-//!   世帯が外から来て入る。家を失った世帯がいれば、新しい世帯より先に空き家へ入る。
+//!   世帯が外から来て入る。来る数は需要と空き家の数に応じて増える。家を失った世帯がいれば、
+//!   新しい世帯より先に空き家へ入る。家のないまま [`HOMELESS_LEAVE_TICKS`] たった世帯は街を出ていく。
+//! - 建物が消えたら、その tick のうちに住む世帯を家なしにし、働く住民の職場を外す。
 //! - 職場：[`assign_jobs`] で割り当て、職場ができた住民に通勤の予定を立てる。
 //! - 予定：家にいる住民は朝に職場へ、職場にいる住民は夕方に家へ出発する。出発の tick は
 //!   出発の待ち行列に積み、時刻が来たら居場所を切り替える。移動そのものはまだ作らない。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
 use crate::building::{BASE_RESIDENTIAL_DEMAND, CityStats};
@@ -22,8 +24,17 @@ use crate::units::Tick;
 /// 移住を見る間隔（tick）。等速で 2 秒に 1 回である。
 pub const MIGRATION_INTERVAL: u64 = 60;
 
-/// 1 回に外から来る世帯の数の上限。
+/// 住みたい人がいるときに、1 回に外から来る世帯の数の下限。
 pub const MIGRANTS_PER_INTERVAL: u64 = 4;
+
+/// 1 回に来る世帯の数に、住宅の需要の何分の 1 を足すか。
+pub const MIGRANTS_PER_DEMAND: u64 = 4;
+
+/// 1 回に来る世帯の数に、空き家の何分の 1 を足すか。
+pub const MIGRANTS_PER_VACANCY: u64 = 8;
+
+/// 家のない世帯が街を出ていくまでの時間（tick）。ゲーム内の 1 日である。
+pub const HOMELESS_LEAVE_TICKS: u64 = TICKS_PER_DAY;
 
 /// 職場の割り当てを見直す間隔（tick）。等速で 10 秒に 1 回である。
 pub const JOB_INTERVAL: u64 = 300;
@@ -46,19 +57,36 @@ fn next_time_of_day(after: Tick, at_in_day: u64) -> Tick {
 
 impl World {
     /// 需要の式に使う、街の人口と働き口の数。
+    ///
+    /// 住める世帯の数は、家のある世帯の数に、移り住める空き家（[`World::vacant_homes`]）の数を足したものとする。
+    /// 電気や水道が届かない家や、外の世界とつながらない家の空きを数えると、埋まらない空き家のせいで
+    /// 住宅の需要が負のまま動かなくなるためである。
     pub fn city_stats(&self) -> CityStats {
         let p = &self.population;
         let cap = self.buildings.capacity();
+        let households = p
+            .household_ids()
+            .filter(|h| {
+                p.home(*h)
+                    .flatten()
+                    .is_some_and(|b| self.buildings.get(b).is_some())
+            })
+            .count() as u64;
+        let vacant: u64 = self.vacant_homes().iter().map(|(_, n)| n).sum();
         let mut s = CityStats {
             citizens: p.citizen_count() as u64,
-            households: p
-                .household_ids()
-                .filter(|h| p.home(*h).flatten().is_some())
-                .count() as u64,
-            homes: cap.households,
+            households,
+            homes: households + vacant,
             workplaces: cap.workplaces,
             ..CityStats::default()
         };
+        for zone in ZoneKind::ALL {
+            let built = match zone {
+                ZoneKind::Residential => cap.households > 0,
+                _ => cap.workplaces[zone.index()] > 0,
+            };
+            s.zoned[zone.index()] = built || self.lots.has_zone(zone);
+        }
         for id in p.citizen_ids() {
             let row = p.citizen(id).expect("いる住民の行がない");
             if WORKING_AGES.contains(&row.age) {
@@ -160,41 +188,66 @@ impl World {
             .collect()
     }
 
-    /// 家を失った世帯を家なしにし、空き家に、家なしの世帯と外から来た世帯を入れる。
-    fn migrate(&mut self) {
+    /// 消えた建物に住む世帯を家なしにし、そこで働く住民の職場を外す。
+    pub(super) fn vacate(&mut self, removed: &[BuildingId]) {
+        if removed.is_empty() {
+            return;
+        }
+        let removed: BTreeSet<BuildingId> = removed.iter().copied().collect();
+        let gone = |b: Option<BuildingId>| b.is_some_and(|b| removed.contains(&b));
         let lost: Vec<HouseholdId> = self
             .population
             .household_ids()
-            .filter(|h| {
-                self.population.home(*h).flatten().is_some_and(|b| {
-                    self.buildings
-                        .get(b)
-                        .is_none_or(|b| b.zone != ZoneKind::Residential)
-                })
-            })
+            .filter(|h| gone(self.population.home(*h).flatten()))
             .collect();
         for h in lost {
-            self.population.set_home(h, None);
+            self.population.set_home(h, None, self.tick);
             let members = self.population.members(h).expect("世帯がない").to_vec();
             for id in members {
                 self.population.set_workplace(id, None);
                 self.population.set_schedule(id, ScheduleState::default());
             }
         }
-        let mut homes = self
-            .vacant_homes()
-            .into_iter()
-            .flat_map(|(id, free)| (0..free).map(move |_| id));
+        let jobless: Vec<CitizenId> = self
+            .population
+            .citizen_ids()
+            .filter(|id| gone(self.population.citizen(*id).and_then(|r| r.workplace)))
+            .collect();
+        for id in jobless {
+            self.population.set_workplace(id, None);
+            self.population.set_schedule(id, ScheduleState::default());
+        }
+    }
+
+    /// 家のないまま長くたった世帯を街から出し、空き家に、家なしの世帯と外から来た世帯を入れる。
+    fn migrate(&mut self) {
         let homeless: Vec<HouseholdId> = self
             .population
             .household_ids()
             .filter(|h| self.population.home(*h) == Some(None))
             .collect();
+        let mut staying = Vec::new();
         for h in homeless {
+            match self.population.homeless_since(h).flatten() {
+                Some(since) if self.tick.since(since) >= HOMELESS_LEAVE_TICKS => {
+                    self.population.remove_household(h);
+                }
+                _ => {
+                    self.population.set_home(h, None, self.tick);
+                    staying.push(h);
+                }
+            }
+        }
+        let vacant = self.vacant_homes();
+        let free: u64 = vacant.iter().map(|(_, n)| n).sum();
+        let mut homes = vacant
+            .into_iter()
+            .flat_map(|(id, free)| (0..free).map(move |_| id));
+        for h in staying {
             let Some(home) = homes.next() else {
                 return;
             };
-            self.population.set_home(h, Some(home));
+            self.population.set_home(h, Some(home), self.tick);
         }
         // 住宅の需要の式から空き家の項を除いた、住みたい人がいるかどうか。
         let s = self.city_stats();
@@ -207,14 +260,16 @@ impl World {
         if want <= 0 {
             return;
         }
-        for k in 0..MIGRANTS_PER_INTERVAL {
+        let pull = u64::try_from(want).expect("正の需要") / MIGRANTS_PER_DEMAND;
+        let count = MIGRANTS_PER_INTERVAL + pull + free / MIGRANTS_PER_VACANCY;
+        for k in 0..count {
             let Some(home) = homes.next() else {
                 return;
             };
             let mut r = rng(self.seed, RngPurpose::Migration, k, self.tick);
             let (money, ages) = draw_household(&mut r, MAX_HOUSEHOLD_SIZE);
             let h = self.population.add_household(money);
-            self.population.set_home(h, Some(home));
+            self.population.set_home(h, Some(home), self.tick);
             for age in ages {
                 self.population
                     .add_citizen(h, age)
@@ -377,10 +432,12 @@ mod tests {
     #[test]
     fn demand_settles_for_every_zone_mix() {
         use ZoneKind::*;
-        let mixes: [&[ZoneKind]; 4] = [
+        let mixes: [&[ZoneKind]; 6] = [
             &[Residential],
             &[Residential, Commercial],
             &[Residential, Industrial],
+            &[Residential, Commercial, Industrial],
+            &[Residential, Industrial, Office],
             &[Residential, Commercial, Industrial, Office],
         ];
         for mix in mixes {
@@ -398,14 +455,24 @@ mod tests {
             let late = w.city_stats();
             let d5 = demand(&late);
             assert!(late.citizens >= early.citizens, "{mix:?}：人口が減った");
-            // 4 種類そろった街は、働き口と住まいが互いを呼び合って、2 日目のあとも育ち続ける。
-            if mix.len() == 4 {
+            // 働き口のある区画が 2 種類以上ある街は、働き口と住まいが互いを呼び合って、2 日目のあとも育ち続ける。
+            if mix.len() >= 3 {
+                let (num, den) = if mix.len() == 4 { (3, 2) } else { (5, 4) };
                 assert!(
-                    late.citizens > early.citizens * 3 / 2,
+                    late.citizens * den > early.citizens * num,
                     "{mix:?}：{early:?} → {late:?}"
                 );
             }
+            // 工業かオフィスがあれば、塗られた区画で働き手を吸い切り、職のない住民が溜まらない。
+            if mix.contains(&Industrial) {
+                let jobless = late.working_age - late.employed;
+                assert!(jobless * 10 <= late.working_age, "{mix:?}：{late:?}");
+            }
+            // 塗っていない区画の需要は建物にならないので見ない。
             for (i, (a, b)) in d4.iter().zip(&d5).enumerate() {
+                if !late.zoned[i] {
+                    continue;
+                }
                 assert!(
                     b.abs() <= 150,
                     "{mix:?}：需要 {i} が {b} まで振れた（{late:?}）"
@@ -416,5 +483,33 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 建物が消えたその tick に、住む世帯は家なしになり、働く住民は職場を失う。
+    /// 家なしのまま 1 日たった世帯は街を出ていく。
+    #[test]
+    fn removed_buildings_free_their_households_and_workers_at_once() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 1);
+        let before = w.city_stats();
+        assert!(before.households > 0 && before.employed > 0);
+        // 区画を消すと、建物がすべて消える。
+        let area = TileRect::from_corners(TilePos::new(-59, 4), TilePos::new(19, 46));
+        apply(&mut w, Command::PaintZone { area, zone: None });
+        assert!(w.buildings().is_empty());
+        let p = w.population();
+        assert!(p.household_ids().all(|h| p.home(h) == Some(None)));
+        assert!(
+            p.citizen_ids()
+                .all(|id| p.citizen(id).unwrap().workplace.is_none())
+        );
+        assert!(p.departures().is_empty());
+        let s = w.city_stats();
+        assert_eq!((s.households, s.employed), (0, 0));
+        assert_eq!(s.citizens, before.citizens);
+        for _ in 0..TICKS_PER_DAY + MIGRATION_INTERVAL {
+            w.step();
+        }
+        assert_eq!(w.population().household_count(), 0, "家なしの世帯が残る");
     }
 }

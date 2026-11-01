@@ -276,6 +276,8 @@ fn utilities() -> CommandLog {
     };
     rec(5, place(ServiceKind::PowerPlant, 3, 9, 2));
     rec(5, place(ServiceKind::WaterPump, 7, 9, 2));
+    rec(5, place(ServiceKind::WaterPump, 11, 9, 2));
+    rec(5, place(ServiceKind::PowerPlant, 30, 9, 2));
     rec(5, place(ServiceKind::WaterPump, 20, 30, 2));
     rec(5, place(ServiceKind::WaterPump, 20, 10, 2));
     for c in connect_to_outside(42, 10, 0, 40) {
@@ -505,7 +507,7 @@ fn utilities_supply_only_the_connected_street() {
         &stats,
         &[(DenyReason::NoRoadAccess, 1), (DenyReason::Occupied, 1)],
     );
-    assert_eq!(world.facilities().len(), 2);
+    assert_eq!(world.facilities().len(), 4);
     let near = |b: &chizu_core::building::Building| b.area.min.y < 30;
     let buildings: Vec<_> = world.buildings().iter().map(|(_, b)| *b).collect();
     // 施設のある通りの住宅にだけ、外から世帯が移り住む。

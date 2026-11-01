@@ -15,6 +15,7 @@ use crate::command::ZoneKind;
 use crate::id::BuildingId;
 use crate::network::{Dir, LaneMode, LinkId};
 use crate::rng::{RngPurpose, rng};
+use crate::round;
 use crate::service::{Facility, Supply, evaluate_supply};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
 use crate::world::{ApplyOutcome, DenyReason};
@@ -38,8 +39,21 @@ pub(super) struct LotFronts {
     by_zone: [BTreeSet<TilePos>; 4],
 }
 
-/// 1 回に、区画の種類ごとに建てる建物の数の上限。
+impl LotFronts {
+    /// 区画の種類 `zone` に、建てる候補の間口があるか。
+    pub(super) fn has_zone(&self, zone: ZoneKind) -> bool {
+        !self.by_zone[zone.index()].is_empty()
+    }
+}
+
+/// 需要があるときに、1 回に区画の種類ごとに建てる建物の数の下限。
 pub const SPAWN_PER_ZONE: u32 = 2;
+
+/// 1 回に建てる数に、需要の何分の 1 を足すか。需要が強いほど速く建つ。
+pub const SPAWN_PER_DEMAND: i64 = 8;
+
+/// 1 回に、区画の種類ごとに建てる建物の数の上限。
+pub const MAX_SPAWN_PER_ZONE: u32 = 16;
 
 /// 段階が 1 つ上がるまでの時間（tick）。
 pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;
@@ -224,12 +238,17 @@ impl World {
             }
         }
         for zone in ZoneKind::ALL {
-            for attempt in 0..SPAWN_PER_ZONE {
+            let pull = round::div_floor(demand(&stats)[zone.index()].max(0), SPAWN_PER_DEMAND);
+            let spawns = u32::try_from(pull)
+                .unwrap_or(u32::MAX)
+                .saturating_add(SPAWN_PER_ZONE)
+                .min(MAX_SPAWN_PER_ZONE);
+            for attempt in 0..spawns {
                 let list = &self.lots.by_zone[zone.index()];
                 if list.is_empty() || demand(&stats)[zone.index()] <= 0 {
                     break;
                 }
-                let id = u64::from(zone as u8) * 16 + u64::from(attempt);
+                let id = u64::from(zone as u8) * u64::from(MAX_SPAWN_PER_ZONE) + u64::from(attempt);
                 let mut r = rng(self.seed, RngPurpose::BuildingGrowth, id, tick);
                 let len = u32::try_from(list.len()).expect("候補の数が u32 に収まらない");
                 let front = *list.iter().nth(r.below(len) as usize).expect("候補がない");
@@ -358,6 +377,7 @@ impl World {
         }
         let all: Vec<(BuildingId, Building)> =
             self.buildings.iter().map(|(id, b)| (id, *b)).collect();
+        let mut removed = Vec::new();
         for (id, b) in all {
             let rect_tiles = crate::zone::tiles_of(b.area).collect::<Vec<_>>();
             let intact = rect_tiles
@@ -369,6 +389,7 @@ impl World {
                 }
                 None => {
                     self.buildings.remove(id);
+                    removed.push(id);
                     let freed: Vec<_> = rect_tiles
                         .into_iter()
                         .filter(|t| {
@@ -381,6 +402,7 @@ impl World {
                 }
             }
         }
+        self.vacate(&removed);
         // 道路と施設の変化は、その場で供給に映す。
         self.update_supply();
     }
@@ -467,6 +489,10 @@ mod tests {
         );
         assert_eq!(
             place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (9, 9), 2),
             ApplyOutcome::Applied
         );
         w

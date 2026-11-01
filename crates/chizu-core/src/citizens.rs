@@ -158,6 +158,8 @@ pub struct Households {
     slots: Slots,
     /// 住んでいる建物。建物の表ができるまでは、どの世帯も `None` である。
     home: Vec<Option<BuildingId>>,
+    /// 家がないなら、家を失った（または家なしと分かった）tick。家があれば `None` である。
+    homeless_since: Vec<Option<Tick>>,
     money: Vec<Money>,
     /// 世帯の住民。加わった順に並ぶ。
     members: Vec<SmallVec<[CitizenId; 4]>>,
@@ -211,11 +213,25 @@ impl Population {
         })
     }
 
-    /// 世帯の住む家を決める。世帯がなければ何もしない。
-    pub(crate) fn set_home(&mut self, id: HouseholdId, home: Option<BuildingId>) {
+    /// 世帯の住む家を決める。家をなくすなら、すでに家なしでない限り `now` から家なしとする。
+    /// 世帯がなければ何もしない。
+    pub(crate) fn set_home(&mut self, id: HouseholdId, home: Option<BuildingId>, now: Tick) {
         if self.contains_household(id) {
-            self.households.home[id.slot()] = home;
+            let h = &mut self.households;
+            h.home[id.slot()] = home;
+            let since = &mut h.homeless_since[id.slot()];
+            *since = if home.is_some() {
+                None
+            } else {
+                since.or(Some(now))
+            };
         }
+    }
+
+    /// 世帯が家なしになった tick。家があるか、家なしとまだ分かっていなければ `Some(None)` である。
+    pub fn homeless_since(&self, id: HouseholdId) -> Option<Option<Tick>> {
+        self.contains_household(id)
+            .then(|| self.households.homeless_since[id.slot()])
     }
 
     /// 住民の職場を決める。住民がいなければ何もしない。
@@ -250,6 +266,7 @@ impl Population {
         let ((index, generation), grew) = h.slots.alloc();
         if grew {
             h.home.push(None);
+            h.homeless_since.push(None);
             h.money.push(money);
             h.members.push(SmallVec::new());
         } else {
@@ -270,6 +287,7 @@ impl Population {
         let h = &mut self.households;
         h.slots.release(id.index, id.generation);
         h.home[slot] = None;
+        h.homeless_since[slot] = None;
         h.money[slot] = Money::ZERO;
         true
     }
@@ -378,6 +396,7 @@ impl StateHash for Households {
     fn write_state(&self, h: &mut StateHasher) {
         h.write(&self.slots);
         h.write(&self.home);
+        h.write(&self.homeless_since);
         h.write(&self.money);
         h.write_len(self.members.len());
         for m in &self.members {
@@ -480,10 +499,16 @@ mod tests {
                 depart_at: Some(Tick(3)),
             },
         );
-        p.households.home[h.slot()] = Some(BuildingId {
+        let home = BuildingId {
             index: 1,
             generation: 0,
-        });
+        };
+        p.set_home(h, Some(home), Tick(1));
+        assert_eq!(p.homeless_since(h), Some(None));
+        p.set_home(h, None, Tick(2));
+        p.set_home(h, None, Tick(3));
+        assert_eq!(p.homeless_since(h), Some(Some(Tick(2))));
+        p.set_home(h, Some(home), Tick(4));
         assert!(p.remove_household(h));
         assert!(p.departures().is_empty());
         assert_eq!(p.citizen(a), None);
@@ -492,6 +517,7 @@ mod tests {
         assert_eq!((g.index, g.generation), (h.index, h.generation + 1));
         assert_eq!(p.members(g), Some(&[][..]));
         assert_eq!(p.home(g), Some(None));
+        assert_eq!(p.homeless_since(g), Some(None));
         assert_eq!(p.household_money(g), Some(Money(4)));
         assert_eq!(p.members(h), None);
     }
