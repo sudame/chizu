@@ -4,11 +4,11 @@
 //!   1 日あたりの見込みを [`World::finances`] で出し、ゲーム内の 1 時間ごとにその 1/24 を所持金に足す。
 //!   24 で割り切れない端数は持ち越すので、何時間たっても 1 日あたりの見込みとずれない。
 //!   所持金は負になってもよい。
-//! - マイルストーン：人口が段階に届くと、買えるチャンクの枠が増える。一度届いた段階は人口が減っても戻らない。
+//! - マイルストーン：家のある住民の数が段階に届くと、買えるチャンクの枠が増える。一度届いた段階は人口が減っても戻らない。
 
 use super::World;
 use crate::clock::TICKS_PER_DAY;
-use crate::command::{ServiceKind, ZoneKind};
+use crate::command::ZoneKind;
 use crate::network::{SegmentKind, TILE_MM, road_cost_per_tile};
 use crate::round;
 use crate::units::Money;
@@ -190,8 +190,21 @@ impl World {
         }
     }
 
+    /// 家のある住民の数。人口のマイルストーンはこの数で見る。
+    pub fn housed_citizens(&self) -> u64 {
+        let p = &self.population;
+        p.household_ids()
+            .filter(|h| {
+                p.home(*h)
+                    .flatten()
+                    .is_some_and(|b| self.buildings.get(b).is_some())
+            })
+            .map(|h| p.members(h).map_or(0, |m| m.len() as u64))
+            .sum()
+    }
+
     fn update_milestone(&mut self) {
-        let citizens = self.population.citizen_count() as u64;
+        let citizens = self.housed_citizens();
         while citizens >= milestone_population(self.milestone + 1) {
             self.milestone += 1;
         }
@@ -209,7 +222,7 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{Command, RoadKind};
+    use crate::command::{Command, RoadKind, ServiceKind};
     use crate::tile::{ChunkCoord, TilePos};
     use crate::world::people::tests::{city, run_days};
     use crate::world::{ApplyOutcome, DenyReason};
@@ -325,13 +338,17 @@ mod tests {
             ApplyOutcome::Denied(DenyReason::NoChunkSlot)
         );
         assert_eq!(w, before);
-        let mut days = 0;
         while w.milestone() == 0 {
-            run_days(&mut w, 1);
-            days += 1;
-            assert!(days <= 4, "{days} 日で {} 人", w.population().citizen_count());
+            w.step();
+            assert!(
+                w.tick().0 <= 4 * TICKS_PER_DAY,
+                "4 日で {} 人",
+                w.housed_citizens()
+            );
         }
-        assert!(w.population().citizen_count() as u64 >= MILESTONES[0].0);
+        // 精算の時刻に段階を上げるので、上がった直後は最初の段階の人口をまだ大きくは超えていない。
+        assert_eq!(w.milestone(), 1);
+        assert!(w.housed_citizens() >= MILESTONES[0].0);
         assert_eq!(w.chunk_slots(), MILESTONES[0].1);
         assert_eq!(buy(&mut w, next), ApplyOutcome::Applied);
     }

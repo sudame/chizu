@@ -191,6 +191,8 @@ pub struct CityStats {
     pub workplaces: [u64; 4],
     /// 区画の種類ごとの、埋まっている職場の数。
     pub filled: [u64; 4],
+    /// 区画の種類ごとの、塗られていて建てる空きがあるか、建物があるか。
+    pub zoned: [bool; 4],
 }
 
 impl CityStats {
@@ -214,18 +216,30 @@ impl CityStats {
 /// CS2 にならい、次のように決める。どれも差の式なので、街が釣り合えば 0 のまわりに収まる。
 /// - 住宅：いつもある需要に、働き口の空きを足し、空き家の 2 倍と職のない住民の 1/4 を引く。
 /// - 商業：住民の数の 1/[`CITIZENS_PER_SHOP_JOB`] が買い物に要る職場で、いまの商業の職場との差。
-/// - 工業とオフィス：働く年齢の住民のうち、商業で働かない人に要る職場を、決まった割合で分けたものと、
-///   いまの職場との差。
+/// - 工業とオフィス：働く年齢の住民のうち、商業で働かない人に要る職場を、塗られている区画の間で分けたものと、
+///   いまの職場との差。両方が塗られていれば決まった割合で、片方だけならその区画にすべてを割り当てる。
+///   商業が塗られていなければ、買い物の職場の分も工業とオフィスに回す。
 pub fn demand(s: &CityStats) -> [i64; 4] {
     let n = |v: u64| i64::try_from(v).expect("街の数があふれた");
+    let zoned = |z: ZoneKind| s.zoned[z.index()];
     let jobs: u64 = s.workplaces.iter().sum();
     let filled: u64 = s.filled.iter().sum();
     let vacant_jobs = n(jobs.saturating_sub(filled));
     let vacant_homes = n(s.homes.saturating_sub(s.households));
     let jobless_quarter = n(s.working_age.saturating_sub(s.employed) / 4);
     let shop_jobs = s.citizens / CITIZENS_PER_SHOP_JOB;
-    let other_jobs = s.working_age.saturating_sub(shop_jobs);
-    let industry = other_jobs * INDUSTRIAL_SHARE_PERMILLE / 1_000;
+    let shop_workers = if zoned(ZoneKind::Commercial) {
+        shop_jobs
+    } else {
+        0
+    };
+    let other_jobs = s.working_age.saturating_sub(shop_workers);
+    let share = match (zoned(ZoneKind::Industrial), zoned(ZoneKind::Office)) {
+        (true, false) => 1_000,
+        (false, true) => 0,
+        _ => INDUSTRIAL_SHARE_PERMILLE,
+    };
+    let industry = other_jobs * share / 1_000;
     let office = other_jobs - industry;
     let w = |z: ZoneKind| n(s.workplaces[z.index()]);
     [
@@ -234,4 +248,30 @@ pub fn demand(s: &CityStats) -> [i64; 4] {
         BASE_INDUSTRIAL_DEMAND + n(industry) - w(ZoneKind::Industrial),
         n(office) - w(ZoneKind::Office),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(zoned: [bool; 4]) -> CityStats {
+        CityStats {
+            citizens: 1_000,
+            working_age: 600,
+            zoned,
+            ..CityStats::default()
+        }
+    }
+
+    #[test]
+    fn workers_go_to_the_zones_that_are_painted() {
+        let all = demand(&stats([true; 4]));
+        assert_eq!(all[1..], [250, 10 + 210, 140]);
+        // 工業だけなら、商業の分も含めて工業がすべて受ける。
+        let industry = demand(&stats([true, false, true, false]));
+        assert_eq!(industry[2..], [10 + 600, 0]);
+        // オフィスだけでも同じである。
+        let office = demand(&stats([true, true, false, true]));
+        assert_eq!(office[2..], [10, 350]);
+    }
 }

@@ -3,9 +3,10 @@
 use chizu_core::citizens::draw_household;
 use chizu_core::routing::RouteRequest;
 use chizu_core::{
-    ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network, Population, RngPurpose, RoadKind,
-    ServiceKind, Tick, TilePos, TileRect, World, ZoneKind, rng,
+    CHUNK_SIDE, ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network, Population,
+    RngPurpose, RoadKind, ServiceKind, Tick, TilePos, TileRect, World, ZoneKind, rng,
 };
+use chizu_core::{LaneOffset, SidewalkPos};
 
 pub use chizu_core::citizens::MAX_HOUSEHOLD_SIZE;
 
@@ -35,8 +36,19 @@ pub fn synthetic_population(seed: u64, count: u32) -> Population {
 /// 街区ごとに 4 種類の区画を順に塗り、ところどころに発電所と浄水場を置き、外の世界とつないだ街。
 /// 水辺にかかる道路と区画は飛ばす。建物と住民はまだない。
 pub fn zoned_grid_city(seed: u64) -> World {
+    grid_city(seed, 3, false)
+}
+
+/// [`zoned_grid_city`] を 9×9 チャンクに広げ、5 列に 1 列の街区を区画にせず発電所と浄水場で埋めた街。
+/// 住民が 10 万人を超えるだけの土地と、そのぶんの電気と水道がある。
+pub fn serviced_grid_city(seed: u64) -> World {
+    grid_city(seed, 4, true)
+}
+
+/// 開始地点を中心とする (2 × `radius` + 1) 四方のチャンクの格子の街。
+fn grid_city(seed: u64, radius: i32, serviced: bool) -> World {
     let mut w = World::new_with_money(seed, Money(1_000_000_000)).with_unlimited_land();
-    for ring in 2..=3_i32 {
+    for ring in 2..=radius {
         for cy in -ring..=ring {
             for cx in -ring..=ring {
                 if cx.abs().max(cy.abs()) == ring {
@@ -48,14 +60,19 @@ pub fn zoned_grid_city(seed: u64) -> World {
         }
     }
     // 角のチャンクは辺で接するまで買えないので、もう一周して買い残しを埋める。
-    for cy in -3..=3 {
-        for cx in -3..=3 {
+    for cy in -radius..=radius {
+        for cx in -radius..=radius {
             w.apply(&Command::BuyChunk {
                 coord: ChunkCoord::new(cx, cy),
             });
         }
     }
-    let (min, max, step) = (-192_i64, 255_i64, 12_i64);
+    let side = CHUNK_SIDE as i64;
+    let (min, max, step) = (
+        -i64::from(radius) * side,
+        (i64::from(radius) + 1) * side - 1,
+        12_i64,
+    );
     let lines: Vec<i64> = (0..)
         .map(|i| min + i * step)
         .take_while(|v| *v <= max)
@@ -80,6 +97,34 @@ pub fn zoned_grid_city(seed: u64) -> World {
     }
     for (by, y) in lines.iter().enumerate() {
         for (bx, x) in lines.iter().enumerate() {
+            if serviced && bx % 5 == 0 {
+                // `dx` は施設の西の端。南の辺に向きを変えて置くと、角のマスから西へ延びるので、東の端を渡す。
+                let place = |kind: ServiceKind, dx: i64, dy: i64, rotation: u8| {
+                    let east = if rotation == 2 {
+                        kind.size().0 as i64 - 1
+                    } else {
+                        0
+                    };
+                    Command::PlaceBuilding {
+                        kind,
+                        at: TilePos::new(x + dx + east, y + dy),
+                        rotation,
+                    }
+                };
+                // 区画を塗らず、北と南の辺に施設を並べる。3 つに 1 つは浄水場だけ、残りは発電所 2 つと浄水場 1 つにする。
+                for (dy, rotation) in [(1, 0), (step - 1, 2)] {
+                    if by % 3 == 0 {
+                        for dx in [1, 3, 5, 7, 9] {
+                            w.apply(&place(ServiceKind::WaterPump, dx, dy, rotation));
+                        }
+                    } else {
+                        w.apply(&place(ServiceKind::PowerPlant, 1, dy, rotation));
+                        w.apply(&place(ServiceKind::PowerPlant, 5, dy, rotation));
+                        w.apply(&place(ServiceKind::WaterPump, 9, dy, rotation));
+                    }
+                }
+                continue;
+            }
             let zone = ZoneKind::ALL[(bx + by) % 4];
             w.apply(&Command::PaintZone {
                 area: TileRect::from_corners(
@@ -185,6 +230,32 @@ pub fn commute_requests(
         .collect()
 }
 
+/// `count` 人ぶんの、歩道の上の 2 点を結ぶ歩きの出発と行き先。どちらも歩道のリンクから一様に選び、
+/// リンクの上の位置も一様に選ぶ。
+pub fn walk_ends(seed: u64, net: &Network, count: u32) -> Vec<(SidewalkPos, SidewalkPos)> {
+    let links: Vec<LinkId> = net
+        .links()
+        .filter(|l| l.mode == LaneMode::Sidewalk)
+        .collect();
+    let len = u32::try_from(links.len()).expect("リンクが多すぎる");
+    (0..count)
+        .map(|i| {
+            let mut r = rng(seed, RngPurpose::DailySchedule, u64::from(i), Tick::ZERO);
+            let mut pick = || {
+                let link = links[r.below(len) as usize];
+                let length = net
+                    .segment_line(link.segment)
+                    .expect("リンクがない")
+                    .length();
+                let length = u32::try_from(length.0).expect("長さが u32 に収まらない");
+                let offset = LaneOffset(r.below(length));
+                SidewalkPos::on_link(net, link, offset).expect("歩道の位置がない")
+            };
+            (pick(), pick())
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,7 +338,7 @@ mod tests {
     fn golden_hash() {
         assert_eq!(
             state_hash_of(&synthetic_population(42, 1_000)),
-            3_943_354_908_999_942_000
+            4_188_700_687_358_249_876
         );
     }
 }

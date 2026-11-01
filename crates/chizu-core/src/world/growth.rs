@@ -15,6 +15,7 @@ use crate::command::ZoneKind;
 use crate::id::BuildingId;
 use crate::network::{Dir, LaneMode, LinkId};
 use crate::rng::{RngPurpose, rng};
+use crate::round;
 use crate::service::{Facility, Supply, evaluate_supply};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
 use crate::world::{ApplyOutcome, DenyReason};
@@ -38,8 +39,21 @@ pub(super) struct LotFronts {
     by_zone: [BTreeSet<TilePos>; 4],
 }
 
-/// 1 回に、区画の種類ごとに建てる建物の数の上限。
+impl LotFronts {
+    /// 区画の種類 `zone` に、建てる候補の間口があるか。
+    pub(super) fn has_zone(&self, zone: ZoneKind) -> bool {
+        !self.by_zone[zone.index()].is_empty()
+    }
+}
+
+/// 需要があるときに、1 回に区画の種類ごとに建てる建物の数の下限。
 pub const SPAWN_PER_ZONE: u32 = 2;
+
+/// 1 回に建てる数に、需要の何分の 1 を足すか。需要が強いほど速く建つ。
+pub const SPAWN_PER_DEMAND: i64 = 8;
+
+/// 1 回に、区画の種類ごとに建てる建物の数の上限。
+pub const MAX_SPAWN_PER_ZONE: u32 = 16;
 
 /// 段階が 1 つ上がるまでの時間（tick）。
 pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;
@@ -224,12 +238,17 @@ impl World {
             }
         }
         for zone in ZoneKind::ALL {
-            for attempt in 0..SPAWN_PER_ZONE {
+            let pull = round::div_floor(demand(&stats)[zone.index()].max(0), SPAWN_PER_DEMAND);
+            let spawns = u32::try_from(pull)
+                .unwrap_or(u32::MAX)
+                .saturating_add(SPAWN_PER_ZONE)
+                .min(MAX_SPAWN_PER_ZONE);
+            for attempt in 0..spawns {
                 let list = &self.lots.by_zone[zone.index()];
                 if list.is_empty() || demand(&stats)[zone.index()] <= 0 {
                     break;
                 }
-                let id = u64::from(zone as u8) * 16 + u64::from(attempt);
+                let id = u64::from(zone as u8) * u64::from(MAX_SPAWN_PER_ZONE) + u64::from(attempt);
                 let mut r = rng(self.seed, RngPurpose::BuildingGrowth, id, tick);
                 let len = u32::try_from(list.len()).expect("候補の数が u32 に収まらない");
                 let front = *list.iter().nth(r.below(len) as usize).expect("候補がない");
@@ -288,6 +307,41 @@ impl World {
         }
     }
 
+    /// 施設を `at` に `rotation` の向きで置けるか。置けるなら間口の歩道のリンクを返す。状態は変えない。
+    /// `rotation` は `0..=3` で、`at` から `DIRS[rotation]` へ 1 歩のマスが道路になる。
+    pub fn check_service(
+        &self,
+        kind: ServiceKind,
+        at: TilePos,
+        rotation: u8,
+    ) -> Result<LinkId, DenyReason> {
+        let toward_road = DIRS[usize::from(rotation)];
+        let (w, k) = kind.size();
+        for (_, _, t) in lot_tiles(at, toward_road, w, k) {
+            self.check_buildable(t)?;
+        }
+        let free = |t: TilePos| {
+            matches!(
+                self.tile_state(t),
+                Some((_, TileUse::Empty | TileUse::Building))
+            )
+        };
+        if !lot_tiles(at, toward_road, w, k).all(|(_, _, t)| free(t)) {
+            return Err(DenyReason::Occupied);
+        }
+        let entrance = self
+            .frontage(at, toward_road)
+            .ok_or(DenyReason::NoRoadAccess)?;
+        if lot_tiles(at, toward_road, w, 1).any(|(_, _, t)| self.frontage(t, toward_road).is_none())
+        {
+            return Err(DenyReason::NoRoadAccess);
+        }
+        if self.money < kind.cost() {
+            return Err(DenyReason::NotEnoughMoney);
+        }
+        Ok(entrance)
+    }
+
     /// 公共の施設を置く。`at` から `DIRS[rotation]` へ 1 歩のマスが道路で、敷地は反対側へ延びる。
     pub(super) fn place_service(
         &mut self,
@@ -295,34 +349,16 @@ impl World {
         at: TilePos,
         rotation: u8,
     ) -> ApplyOutcome {
+        let entrance = match self.check_service(kind, at, rotation) {
+            Ok(entrance) => entrance,
+            Err(reason) => return ApplyOutcome::Denied(reason),
+        };
         let toward_road = DIRS[usize::from(rotation)];
         let (w, k) = kind.size();
         let tiles: Vec<TilePos> = lot_tiles(at, toward_road, w, k)
             .map(|(_, _, t)| t)
             .collect();
-        if let Err(reason) = tiles.iter().try_for_each(|t| self.check_buildable(*t)) {
-            return ApplyOutcome::Denied(reason);
-        }
-        if tiles.iter().any(|t| {
-            !matches!(
-                self.tile_state(*t),
-                Some((_, TileUse::Empty | TileUse::Building))
-            )
-        }) {
-            return ApplyOutcome::Denied(DenyReason::Occupied);
-        }
-        let front_row = lot_tiles(at, toward_road, w, 1).map(|(_, _, t)| t);
-        let Some(entrance) = self.frontage(at, toward_road) else {
-            return ApplyOutcome::Denied(DenyReason::NoRoadAccess);
-        };
-        let mut front_row = front_row;
-        if front_row.any(|t| self.frontage(t, toward_road).is_none()) {
-            return ApplyOutcome::Denied(DenyReason::NoRoadAccess);
-        }
         let cost = kind.cost();
-        if self.money < cost {
-            return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
-        }
         self.money = self.money - cost;
         let far = *tiles.last().expect("敷地が空");
         self.facilities.push(Facility {
@@ -358,6 +394,7 @@ impl World {
         }
         let all: Vec<(BuildingId, Building)> =
             self.buildings.iter().map(|(id, b)| (id, *b)).collect();
+        let mut removed = Vec::new();
         for (id, b) in all {
             let rect_tiles = crate::zone::tiles_of(b.area).collect::<Vec<_>>();
             let intact = rect_tiles
@@ -369,6 +406,7 @@ impl World {
                 }
                 None => {
                     self.buildings.remove(id);
+                    removed.push(id);
                     let freed: Vec<_> = rect_tiles
                         .into_iter()
                         .filter(|t| {
@@ -381,6 +419,7 @@ impl World {
                 }
             }
         }
+        self.vacate(&removed);
         // 道路と施設の変化は、その場で供給に映す。
         self.update_supply();
     }
@@ -467,6 +506,10 @@ mod tests {
         );
         assert_eq!(
             place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (9, 9), 2),
             ApplyOutcome::Applied
         );
         w
@@ -611,18 +654,27 @@ mod tests {
             assert_eq!(w.apply(&paint), ApplyOutcome::Applied);
         }
         let money = w.money();
-        // 発電所は (0..=3, 6..=9)、浄水場は (6..=7, 8..=9) を占め、y = 10 の道路に面する。
-        assert_eq!(
-            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
-            ApplyOutcome::Applied
-        );
-        assert_eq!(
-            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
-            ApplyOutcome::Applied
-        );
+        // 発電所は (0..=3, 6..=9) と (10..=13, 6..=9)、浄水場は (6..=7, 8..=9) と (8..=9, 8..=9) を占め、
+        // y = 10 の道路に面する。
+        for x in [3, 13] {
+            assert_eq!(
+                place(&mut w, ServiceKind::PowerPlant, (x, 9), 2),
+                ApplyOutcome::Applied
+            );
+        }
+        for x in [7, 9] {
+            assert_eq!(
+                place(&mut w, ServiceKind::WaterPump, (x, 9), 2),
+                ApplyOutcome::Applied
+            );
+        }
         assert_eq!(
             w.money(),
-            money - ServiceKind::PowerPlant.cost() - ServiceKind::WaterPump.cost()
+            money
+                - ServiceKind::PowerPlant.cost()
+                - ServiceKind::PowerPlant.cost()
+                - ServiceKind::WaterPump.cost()
+                - ServiceKind::WaterPump.cost()
         );
         assert_eq!(
             w.tile_state(TilePos::new(0, 6)),

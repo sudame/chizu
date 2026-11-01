@@ -12,8 +12,9 @@
 use std::path::PathBuf;
 
 use chizu_core::{
-    ChunkCoord, Command, CommandLog, DenyReason, RecordedCommand, ReplayStats, RoadKind,
-    ServiceKind, SimSpeed, StateHasher, Tick, TilePos, TileRect, World, ZoneKind, replay,
+    ChunkCoord, Command, CommandLog, DenyReason, LaneOffset, RecordedCommand, ReplayStats,
+    RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed, StateHasher, Tick, TilePos, TileRect,
+    World, ZoneKind, replay, rng,
 };
 
 /// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
@@ -282,6 +283,8 @@ fn utilities() -> CommandLog {
     };
     rec(5, place(ServiceKind::PowerPlant, 3, 9, 2));
     rec(5, place(ServiceKind::WaterPump, 7, 9, 2));
+    rec(5, place(ServiceKind::WaterPump, 11, 9, 2));
+    rec(5, place(ServiceKind::PowerPlant, 30, 9, 2));
     rec(5, place(ServiceKind::WaterPump, 20, 30, 2));
     rec(5, place(ServiceKind::WaterPump, 20, 10, 2));
     for c in connect_to_outside(42, 10, 0, 40) {
@@ -566,7 +569,7 @@ fn utilities_supply_only_the_connected_street() {
         &stats,
         &[(DenyReason::NoRoadAccess, 1), (DenyReason::Occupied, 1)],
     );
-    assert_eq!(world.facilities().len(), 2);
+    assert_eq!(world.facilities().len(), 4);
     let near = |b: &chizu_core::building::Building| b.area.min.y < 30;
     let buildings: Vec<_> = world.buildings().iter().map(|(_, b)| *b).collect();
     // 施設のある通りの住宅にだけ、外から世帯が移り住む。
@@ -718,4 +721,103 @@ fn broken_records_change_the_checkpoints() {
     for (what, seed, log) in broken {
         assert_ne!(checkpoints(seed, &log, s.ticks), base, "{what}");
     }
+}
+
+/// 歩く人の記録。格子の道路を引き、決まった tick ごとに歩く移動を作る。途中で道路を消し、
+/// 交わる道路で分けて、歩いている人に経路を探し直させる。
+fn walking_log() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let road = |from: (i64, i64), to: (i64, i64)| Command::BuildRoad {
+        from: TilePos::new(from.0, from.1),
+        to: TilePos::new(to.0, to.1),
+        kind: RoadKind::Small,
+    };
+    for i in 0..=4 {
+        rec(0, road((0, i * 12), (48, i * 12)));
+        rec(0, road((i * 12, 0), (i * 12, 48)));
+    }
+    rec(
+        300,
+        Command::Bulldoze {
+            area: TileRect::from_corners(TilePos::new(18, 24), TilePos::new(18, 24)),
+        },
+    );
+    rec(400, road((6, -6), (6, 54)));
+    log
+}
+
+/// 格子の道路の上の、種から決めた歩道の位置。
+fn walk_end(seed: u64, k: u64, tick: u64) -> SidewalkPos {
+    let mut r = rng(seed, RngPurpose::DailySchedule, k, Tick(tick));
+    let line = i64::from(r.below(5)) * 12;
+    let along = i64::from(r.below(47));
+    let back = r.chance(1, 2);
+    let (tile, step) = match (r.chance(1, 2), back) {
+        (true, false) => (TilePos::new(along, line), (1, 0)),
+        (true, true) => (TilePos::new(along + 1, line), (-1, 0)),
+        (false, false) => (TilePos::new(line, along), (0, 1)),
+        (false, true) => (TilePos::new(line, along + 1), (0, -1)),
+    };
+    SidewalkPos {
+        tile,
+        step,
+        along: LaneOffset(r.below(8_000)),
+    }
+}
+
+/// 歩く人の記録を再生し、状態ハッシュの列と、作った移動の数、終わりの世界を返す。
+fn walking_checkpoints(seed: u64, ticks: u64) -> (String, u32, World) {
+    let log = walking_log();
+    let mut world = World::new(seed);
+    let mut digest = StateHasher::new();
+    let mut out = String::new();
+    let mut spawned = 0;
+    for _ in 0..ticks {
+        let t = world.tick().0;
+        if t < 600 && t.is_multiple_of(3) {
+            for k in 0..4 {
+                let (from, to) = (walk_end(seed, 2 * k, t), walk_end(seed, 2 * k + 1, t));
+                spawned += u32::from(world.spawn_walk(from, to).is_some());
+            }
+        }
+        replay(&mut world, &log, 1);
+        let h = world.state_hash();
+        digest.write(&h);
+        let t = world.tick().0;
+        if t.is_multiple_of(250) || t == ticks {
+            out.push_str(&format!("{t} {h:016x} {:016x}\n", digest.finish()));
+        }
+    }
+    (out, spawned, world)
+}
+
+#[test]
+fn walking_golden() {
+    const SEED: u64 = 42;
+    const TICKS: u64 = 1_500;
+    let mut world = World::new(SEED);
+    let stats = replay(&mut world, &walking_log(), 1);
+    assert_eq!((stats.applied, stats.denied), (10, 0));
+    let (got, spawned, end) = walking_checkpoints(SEED, TICKS);
+    assert!(spawned > 600, "作れた移動が少ない {spawned}");
+    assert!(
+        end.trips().len() < 100,
+        "着かずに残った移動が多い {}",
+        end.trips().len()
+    );
+    assert_eq!(walking_checkpoints(SEED, TICKS).0, got);
+    let path = golden_dir().join("walking.hash");
+    if updating() {
+        std::fs::write(&path, &got).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} を読めない: {e}", path.display()));
+    assert_eq!(
+        expected, got,
+        "意図した変更なら CHIZU_UPDATE_GOLDEN=1 cargo test -p chizu-core --test golden で書き直す"
+    );
 }
