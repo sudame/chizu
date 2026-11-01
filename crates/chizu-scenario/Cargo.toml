@@ -24,7 +24,15 @@ name = "growth"
 harness = false
 
 [[bench]]
+name = "population"
+harness = false
+
+[[bench]]
 name = "walk_tick"
+harness = false
+
+[[bench]]
+name = "car_tick"
 harness = false
 
 [dev-dependencies]

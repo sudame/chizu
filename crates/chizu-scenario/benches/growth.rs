@@ -31,8 +31,9 @@ fn main() {
     let cap = w.buildings().capacity();
     println!(
         "区間 {segments} 本：1 日 {total:?}、最悪の 1 tick {worst:?}、建つ処理 {runs} 回、建った {built} 棟、\
-         残った {} 棟、世帯の上限 {}、職場の上限 {:?}、建物の表のハッシュ {:016x}",
+         残った {} 棟、住民 {} 人、世帯の上限 {}、職場の上限 {:?}、建物の表のハッシュ {:016x}",
         w.buildings().len(),
+        w.population().citizen_count(),
         cap.households,
         cap.workplaces,
         state_hash_of(w.buildings()),

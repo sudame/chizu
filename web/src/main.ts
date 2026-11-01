@@ -48,6 +48,7 @@ import {
   type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
+import { setupSaves } from "./save/main-side.ts";
 
 function element<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
@@ -70,6 +71,7 @@ if (context === null) {
 }
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+setupSaves(worker, element<HTMLElement>("#controls"));
 
 function send(message: MainToWorker): void {
   worker.postMessage(message);
