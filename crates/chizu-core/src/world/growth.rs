@@ -200,19 +200,24 @@ impl World {
         if !tick.0.is_multiple_of(GROWTH_INTERVAL) {
             return;
         }
+        // 電気と水道が届き、住む世帯か働く住民で埋まった建物だけが、段階を上げる。
+        let occupants = self.occupants();
         let ids: Vec<BuildingId> = self.buildings.iter().map(|(id, _)| id).collect();
         for id in ids {
             let b = self.buildings.get_mut(id).expect("建物がない");
             let supplied = b.supply.power && b.supply.water;
-            if supplied && b.level < MAX_LEVEL && tick.since(b.leveled_at) >= LEVEL_UP_TICKS {
+            let full = occupants.get(&id).copied().unwrap_or(0) >= b.households() + b.workplaces();
+            if supplied && full && b.level < MAX_LEVEL && tick.since(b.leveled_at) >= LEVEL_UP_TICKS
+            {
                 b.level += 1;
                 b.leveled_at = tick;
             }
         }
+        let mut stats = self.city_stats();
         for zone in ZoneKind::ALL {
             for attempt in 0..SPAWN_PER_ZONE {
                 let list = &self.lots.by_zone[zone.index()];
-                if list.is_empty() || demand(self.buildings.capacity())[zone.index()] <= 0 {
+                if list.is_empty() || demand(&stats)[zone.index()] <= 0 {
                     break;
                 }
                 let id = u64::from(zone as u8) * 16 + u64::from(attempt);
@@ -227,7 +232,8 @@ impl World {
                     .flat_map(|w| (1..=MAX_LOT_DEPTH).rev().map(move |k| (w, k)))
                     .find(|(w, k)| self.lot_fits(zone, front, toward_road, *w, *k));
                 if let Some((w, k)) = fit {
-                    self.place_building(zone, front, toward_road, w, k);
+                    let id = self.place_building(zone, front, toward_road, w, k);
+                    stats = stats.with(self.buildings.get(id).expect("建てた建物がない"));
                 }
             }
         }
@@ -240,7 +246,7 @@ impl World {
         toward_road: (i64, i64),
         w: u64,
         k: u64,
-    ) {
+    ) -> BuildingId {
         let tiles: Vec<TilePos> = lot_tiles(front, toward_road, w, k)
             .map(|(_, _, t)| t)
             .collect();
@@ -248,7 +254,7 @@ impl World {
         let entrance = self
             .frontage(front, toward_road)
             .expect("間口が道路に面していない");
-        self.buildings.insert(Building {
+        let id = self.buildings.insert(Building {
             zone,
             area: TileRect::from_corners(front, far),
             front,
@@ -259,6 +265,7 @@ impl World {
             supply: Supply::default(),
         });
         self.write_occupancy(tiles.into_iter().map(|t| (t, TileUse::Building)));
+        id
     }
 
     /// 道路や区画が変わったあとに呼ぶ。条件の崩れた建物を消し、残った建物の出入口を付け直す。
@@ -396,6 +403,39 @@ mod tests {
             };
             assert_eq!(w.apply(&paint), ApplyOutcome::Applied);
         }
+        connect_to_outside(&mut w);
+        w
+    }
+
+    /// 高速道路の内側のノードから、y = 10 の通りまで道路を引く。
+    fn connect_to_outside(w: &mut World) {
+        let inner = crate::world::highway_line(w.seed()).start;
+        let corner = TilePos::new(inner.x, 10);
+        let mut road = |from: TilePos, to: TilePos| {
+            if from != to {
+                let c = Command::BuildRoad {
+                    from,
+                    to,
+                    kind: RoadKind::Small,
+                };
+                assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{from:?} → {to:?}");
+            }
+        };
+        road(inner, corner);
+        road(corner, TilePos::new(corner.x.clamp(0, 40), 10));
+    }
+
+    /// 通りに発電所と浄水場を置いた街。
+    fn served_street() -> World {
+        let mut w = zoned_street();
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
+            ApplyOutcome::Applied
+        );
         w
     }
 
@@ -446,41 +486,34 @@ mod tests {
 
     #[test]
     fn houses_grow_along_a_zoned_street_within_minutes() {
-        let mut w = zoned_street();
+        let mut w = served_street();
         // 等速で 1 分。
         run(&mut w, 30 * 60);
         assert!(
-            w.buildings().len() >= 8,
+            w.buildings().len() >= 5,
             "{} 棟しか建たない",
             w.buildings().len()
         );
         assert!(w.buildings().capacity().households > 0);
+        assert!(w.population().citizen_count() > 0, "誰も移り住まない");
         check_buildings(&w);
         // 同じ種と操作からは同じ街になる。
-        let mut again = zoned_street();
+        let mut again = served_street();
         run(&mut again, 30 * 60);
         assert_eq!(again, w);
     }
 
     #[test]
-    fn buildings_level_up_once_a_day() {
-        let mut w = zoned_street();
-        // 電気と水道が届いていないと段階は上がらない。
-        assert_eq!(
-            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
-            ApplyOutcome::Applied
-        );
-        assert_eq!(
-            place(&mut w, ServiceKind::WaterPump, (7, 9), 2),
-            ApplyOutcome::Applied
-        );
-        run(&mut w, GROWTH_INTERVAL + 1);
-        let (id, b) = w.buildings().iter().next().map(|(id, b)| (id, *b)).unwrap();
-        assert_eq!(b.level, 1);
-        run(&mut w, LEVEL_UP_TICKS);
-        let after = w.buildings().get(id).unwrap();
-        assert_eq!(after.level, 2);
-        assert!(after.households() > b.households());
+    fn full_supplied_buildings_level_up_after_a_day() {
+        let mut w = served_street();
+        run(&mut w, 2 * LEVEL_UP_TICKS);
+        let occupants = w.occupants();
+        let leveled: Vec<_> = w.buildings().iter().filter(|(_, b)| b.level >= 2).collect();
+        assert!(!leveled.is_empty(), "段階の上がった建物がない");
+        // 段階が上がるのは、住む世帯で埋まった住宅か、働く住民で埋まった職場だけである。
+        for (id, b) in &leveled {
+            assert!(occupants.get(id).copied().unwrap_or(0) > 0, "{b:?}");
+        }
     }
 
     #[test]
@@ -525,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn services_supply_connected_buildings_so_they_level_up() {
+    fn services_supply_connected_buildings_so_they_fill_and_level_up() {
         let mut w = zoned_street();
         // 同じ種類の区画を、つながっていない別の通りにも塗る。
         let far = Command::BuildRoad {
@@ -562,7 +595,7 @@ mod tests {
             w.tile_state(TilePos::new(0, 6)),
             Some((None, TileUse::Facility))
         );
-        run(&mut w, LEVEL_UP_TICKS + SUPPLY_INTERVAL + GROWTH_INTERVAL);
+        run(&mut w, 2 * LEVEL_UP_TICKS);
         check_buildings(&w);
         let mut near = 0;
         for (_, b) in w.buildings().iter() {

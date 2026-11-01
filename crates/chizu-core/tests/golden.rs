@@ -159,7 +159,24 @@ fn zoning() -> CommandLog {
     log
 }
 
+/// 高速道路の内側のノードから、y = `y` の通りの `x_min..=x_max` のどこかまで道路を引くコマンド。
+fn connect_to_outside(seed: u64, y: i64, x_min: i64, x_max: i64) -> Vec<Command> {
+    let inner = chizu_core::world::highway_line(seed).start;
+    let corner = TilePos::new(inner.x, y);
+    let end = TilePos::new(inner.x.clamp(x_min, x_max), y);
+    [(inner, corner), (corner, end)]
+        .into_iter()
+        .filter(|(a, b)| a != b)
+        .map(|(from, to)| Command::BuildRoad {
+            from,
+            to,
+            kind: RoadKind::Small,
+        })
+        .collect()
+}
+
 /// 道路に面した住宅・商業・工業・オフィスの区画に建物が建ち、途中で道路の一部を消す記録。
+/// 下の通りは外の世界とつながり、発電所と浄水場がある。
 fn growth() -> CommandLog {
     let mut log = CommandLog::new();
     let mut rec = |tick: u64, c: Command| {
@@ -191,6 +208,22 @@ fn growth() -> CommandLog {
             Command::PaintZone {
                 area,
                 zone: Some(zone),
+            },
+        );
+    }
+    for c in connect_to_outside(42, 0, -40, 40) {
+        rec(3, c);
+    }
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, -37),
+        (ServiceKind::WaterPump, -33),
+    ] {
+        rec(
+            3,
+            Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, -1),
+                rotation: 2,
             },
         );
     }
@@ -245,6 +278,9 @@ fn utilities() -> CommandLog {
     rec(5, place(ServiceKind::WaterPump, 7, 9, 2));
     rec(5, place(ServiceKind::WaterPump, 20, 30, 2));
     rec(5, place(ServiceKind::WaterPump, 20, 10, 2));
+    for c in connect_to_outside(42, 10, 0, 40) {
+        rec(5, c);
+    }
     log
 }
 

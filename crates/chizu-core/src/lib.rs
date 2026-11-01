@@ -6,6 +6,7 @@ pub mod citizens;
 pub mod clock;
 pub mod command;
 pub mod id;
+pub mod jobs;
 pub mod network;
 pub mod record;
 pub mod rng;

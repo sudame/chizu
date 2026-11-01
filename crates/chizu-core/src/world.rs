@@ -131,6 +131,7 @@ pub struct World {
 }
 
 pub mod growth;
+pub mod people;
 
 /// 外部接続の高速道路の通り道。始めたときに買ってある土地の端のマスから外へ向かう。
 /// どの辺から出るかと辺のどこから出るかは、種から決める。地形もこの通り道を見て水辺を抑える。
@@ -536,6 +537,7 @@ impl World {
         let (seed, tick) = (self.seed, self.tick);
         self.population
             .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
+        self.update_people();
         self.grow_buildings();
         self.tick = tick.next();
     }
