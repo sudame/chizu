@@ -29,6 +29,23 @@ impl TilePos {
     pub fn new(x: i64, y: i64) -> TilePos {
         TilePos { x, y }
     }
+
+    /// このマスを含むチャンク。チャンクの座標が `i32` に収まらないときは `None`。
+    pub fn chunk(self) -> Option<ChunkCoord> {
+        let side = CHUNK_SIDE as i64;
+        let c = |v: i64| i32::try_from(crate::round::div_floor(v, side)).ok();
+        Some(ChunkCoord::new(c(self.x)?, c(self.y)?))
+    }
+
+    /// チャンクの中での位置 `(lx, ly)`。
+    pub fn local(self) -> (usize, usize) {
+        let side = CHUNK_SIDE as u64;
+        // 2 の補数の下位ビットは、負の座標でも床の剰余と一致する。
+        (
+            (self.x as u64 % side) as usize,
+            (self.y as u64 % side) as usize,
+        )
+    }
 }
 
 /// マスの長方形。`min` と `max` の両端を含む。
@@ -94,6 +111,14 @@ mod tests {
         assert_eq!(ChunkCoord::new(-1, 2).origin(), TilePos::new(-64, 128));
         let far = ChunkCoord::new(i32::MIN, i32::MAX).origin();
         assert_eq!(far, TilePos::new(-(1_i64 << 37), ((1_i64 << 31) - 1) * 64));
+    }
+
+    #[test]
+    fn chunk_and_local_floor_negative_coordinates() {
+        let t = TilePos::new(-1, 64);
+        assert_eq!(t.chunk(), Some(ChunkCoord::new(-1, 1)));
+        assert_eq!(t.local(), (63, 0));
+        assert_eq!(TilePos::new(i64::MIN, 0).chunk(), None);
     }
 
     #[test]
