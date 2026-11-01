@@ -96,12 +96,12 @@ pub struct Supply {
 }
 
 /// 道路網の連結成分。ノードの添え字ごとに、成分の代表の添え字を持つ。
-struct Components {
+pub(crate) struct Components {
     parent: Vec<usize>,
 }
 
 impl Components {
-    fn of(network: &Network) -> Components {
+    pub(crate) fn of(network: &Network) -> Components {
         let len = network
             .nodes()
             .map(|(id, _)| id.index as usize + 1)
@@ -119,7 +119,7 @@ impl Components {
         c
     }
 
-    fn find(&mut self, mut i: usize) -> usize {
+    pub(crate) fn find(&mut self, mut i: usize) -> usize {
         while self.parent[i] != i {
             self.parent[i] = self.parent[self.parent[i]];
             i = self.parent[i];
@@ -128,7 +128,7 @@ impl Components {
     }
 
     /// リンクのある区間の成分。区間が消えていれば `None`。
-    fn of_link(&mut self, network: &Network, link: LinkId) -> Option<usize> {
+    pub(crate) fn of_link(&mut self, network: &Network, link: LinkId) -> Option<usize> {
         let s = network.segment(link.segment)?;
         Some(self.find(s.a.index as usize))
     }

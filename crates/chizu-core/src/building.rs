@@ -164,24 +164,55 @@ pub struct ZoneTotals {
     pub workplaces: [u64; 4],
 }
 
-/// 住民がまだいないあいだにも、住宅が建ち始めるための需要。
+/// 住民も職場もないうちから、住宅が建ち始めるための需要。
 const BASE_RESIDENTIAL_DEMAND: i64 = 20;
 
-/// 住民がまだいないあいだにも、工業が建ち始めるための需要。
+/// 働き手がいないうちから、工業が建ち始めるための需要。
 const BASE_INDUSTRIAL_DEMAND: i64 = 10;
+
+/// 住民 1 人あたりの買い物をまかなう商業の職場の数は、住民の数をこの値で割ったものとする。
+const CITIZENS_PER_SHOP_JOB: u64 = 4;
+
+/// 需要の式に使う、街の人口と働き口の数。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CityStats {
+    pub citizens: u64,
+    pub households: u64,
+    /// 働く年齢の住民の数。
+    pub working_age: u64,
+    /// 職場のある住民の数。
+    pub employed: u64,
+    /// 住宅に住める世帯の数の合計。
+    pub homes: u64,
+    /// 区画の種類ごとの職場の数。添え字は [`ZoneKind::index`]。
+    pub workplaces: [u64; 4],
+    /// 区画の種類ごとの、埋まっている職場の数。
+    pub filled: [u64; 4],
+}
+
+impl CityStats {
+    /// 建物を 1 つ足したときの値。
+    pub fn with(mut self, b: &Building) -> CityStats {
+        self.homes += b.households();
+        self.workplaces[b.zone.index()] += b.workplaces();
+        self
+    }
+}
 
 /// 区画の種類ごとの需要。正なら建物が建つ。添え字は [`ZoneKind::index`]。
 ///
-/// 住宅は職場の数と世帯の数の差から、商業・工業・オフィスは世帯の数（人口の代わり）から決める。
-pub fn demand(t: ZoneTotals) -> [i64; 4] {
-    let n = |v: u64| i64::try_from(v).expect("建物の数があふれた");
-    let jobs: u64 = t.workplaces.iter().sum();
-    let homes = n(t.households);
-    let w = |z: ZoneKind| n(t.workplaces[z.index()]);
+/// CS2 にならい、住宅は働き口の空きから、商業は住民の買い物から、工業とオフィスは働き手の空き
+/// （職のない働く年齢の住民）から決める。住宅は空き家のぶんだけ需要を下げる。
+pub fn demand(s: &CityStats) -> [i64; 4] {
+    let n = |v: u64| i64::try_from(v).expect("街の数があふれた");
+    let vacant = |z: ZoneKind| n(s.workplaces[z.index()].saturating_sub(s.filled[z.index()]));
+    let vacant_jobs = vacant(ZoneKind::Commercial) + vacant(ZoneKind::Industrial) + vacant(ZoneKind::Office);
+    let vacant_homes = n(s.homes.saturating_sub(s.households));
+    let jobless = s.working_age.saturating_sub(s.employed);
     [
-        BASE_RESIDENTIAL_DEMAND + n(jobs) - homes,
-        n(t.households / 2) - w(ZoneKind::Commercial),
-        BASE_INDUSTRIAL_DEMAND + n(t.households / 2) - w(ZoneKind::Industrial),
-        n(t.households / 4) - w(ZoneKind::Office),
+        BASE_RESIDENTIAL_DEMAND + vacant_jobs - vacant_homes,
+        n(s.citizens / CITIZENS_PER_SHOP_JOB) - n(s.workplaces[ZoneKind::Commercial.index()]),
+        BASE_INDUSTRIAL_DEMAND + n(jobless / 2) - vacant(ZoneKind::Industrial),
+        n(jobless / 3) - vacant(ZoneKind::Office),
     ]
 }

@@ -1,12 +1,12 @@
 //! テストとベンチマークに使う、種から決定論的に作る街。
 
+use chizu_core::citizens::draw_household;
 use chizu_core::routing::RouteRequest;
 use chizu_core::{
-    LaneMode, Line, LinkId, Money, Network, Population, RngPurpose, RoadKind, Tick, TilePos, rng,
+    LaneMode, Line, LinkId, Network, Population, RngPurpose, RoadKind, Tick, TilePos, rng,
 };
 
-/// 1 世帯の住民の数の上限。
-pub const MAX_HOUSEHOLD_SIZE: u32 = 4;
+pub use chizu_core::citizens::MAX_HOUSEHOLD_SIZE;
 
 /// 種 `seed` から `count` 人の合成の住民と世帯を作る。
 ///
@@ -20,19 +20,12 @@ pub fn synthetic_population(seed: u64, count: u32) -> Population {
     while made < count {
         let mut r = rng(seed, RngPurpose::Migration, household_no, Tick::ZERO);
         household_no += 1;
-        let size = (1 + r.below(MAX_HOUSEHOLD_SIZE)).min(count - made);
-        let money = Money(i64::from(r.below(100_000)));
+        let (money, ages) = draw_household(&mut r, count - made);
         let h = p.add_household(money);
-        for i in 0..size {
-            let age = if i == 0 {
-                18 + r.below(62)
-            } else {
-                r.below(80)
-            };
-            p.add_citizen(h, age as u8)
-                .expect("足したばかりの世帯がない");
+        for age in &ages {
+            p.add_citizen(h, *age).expect("足したばかりの世帯がない");
         }
-        made += size;
+        made += ages.len() as u32;
     }
     p
 }

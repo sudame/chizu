@@ -6,9 +6,27 @@
 use smallvec::SmallVec;
 
 use crate::id::{BuildingId, CitizenId, HouseholdId, Slots, TripId};
+use crate::rng::Pcg32;
 use crate::schedule::DepartureQueue;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::units::{Money, Tick};
+
+/// 1 世帯の住民の数の上限。
+pub const MAX_HOUSEHOLD_SIZE: u32 = 4;
+
+/// 働く年齢の範囲（歳）。
+pub const WORKING_AGES: core::ops::RangeInclusive<u8> = 18..=64;
+
+/// 1 つの世帯の所持金と住民の年齢を引く。人数は 1〜[`MAX_HOUSEHOLD_SIZE`] 人を引いてから `limit` で削る。
+/// 最初の 1 人は 18〜79 歳、残りは 0〜79 歳である。引く順番は人数、所持金、年齢の順に決めてある。
+pub fn draw_household(r: &mut Pcg32, limit: u32) -> (Money, SmallVec<[u8; 4]>) {
+    let size = (1 + r.below(MAX_HOUSEHOLD_SIZE)).min(limit);
+    let money = Money(i64::from(r.below(100_000)));
+    let ages = (0..size)
+        .map(|i| if i == 0 { 18 + r.below(62) } else { r.below(80) } as u8)
+        .collect();
+    (money, ages)
+}
 
 /// 幸福度の要素の点数の上限。点数は `0..=HAPPINESS_MAX` である。
 pub const HAPPINESS_MAX: u8 = 100;
@@ -182,6 +200,29 @@ impl Population {
             let (index, generation) = slots.current(slot)?;
             Some(CitizenId { index, generation })
         })
+    }
+
+    /// いる世帯の ID を ID の順に返す。
+    pub fn household_ids(&self) -> impl Iterator<Item = HouseholdId> + '_ {
+        let slots = &self.households.slots;
+        (0..slots.len()).filter_map(|slot| {
+            let (index, generation) = slots.current(slot)?;
+            Some(HouseholdId { index, generation })
+        })
+    }
+
+    /// 世帯の住む家を決める。世帯がなければ何もしない。
+    pub(crate) fn set_home(&mut self, id: HouseholdId, home: Option<BuildingId>) {
+        if self.contains_household(id) {
+            self.households.home[id.slot()] = home;
+        }
+    }
+
+    /// 住民の職場を決める。住民がいなければ何もしない。
+    pub(crate) fn set_workplace(&mut self, id: CitizenId, workplace: Option<BuildingId>) {
+        if self.contains_citizen(id) {
+            self.citizens.workplace[id.slot()] = workplace;
+        }
     }
 
     pub fn members(&self, id: HouseholdId) -> Option<&[CitizenId]> {
