@@ -1,10 +1,11 @@
 //! 住民データ層の 1 tick ぶんの組の更新にかかる時間。
 //!
-//! - `standard`：中核の標準の処理（`Population::step`）。いまは中身が空なので、組をなめる仕組みだけの時間になる。
+//! - `standard`：`World::step` と同じ標準の処理（`update_citizen`）。いまは中身が空なので、組をなめる仕組みだけの時間になる。
 //! - `rng_write`：住民ごとに乱数を引き、幸福度と出発の予定を書き戻す。中身が入ったときの目安にする。
 
 use std::hint::black_box;
 
+use chizu_core::schedule::update_citizen;
 use chizu_core::{
     Activity, BUCKET_COUNT, CitizenChange, CitizenId, CitizenRow, RngPurpose, ScheduleState, Tick,
     bucket_at, rng,
@@ -37,7 +38,9 @@ fn citizen_bucket(c: &mut Criterion) {
         let mut tick = Tick::ZERO;
         group.bench_function(BenchmarkId::new("standard", &label), |b| {
             b.iter(|| {
-                p.step(SEED, tick);
+                p.update_bucket(bucket_at(tick), |id, row| {
+                    update_citizen(SEED, tick, id, row)
+                });
                 tick = tick.next();
             });
         });

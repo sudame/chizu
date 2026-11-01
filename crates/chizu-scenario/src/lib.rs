@@ -74,6 +74,28 @@ mod tests {
     }
 
     #[test]
+    fn every_household_size_and_minors_appear() {
+        let p = synthetic_population(9, 10_000);
+        let mut sizes = [0_usize; MAX_HOUSEHOLD_SIZE as usize + 1];
+        let mut minors = 0;
+        for id in p.citizen_ids() {
+            let row = p.citizen(id).unwrap();
+            let members = p.members(row.household).unwrap();
+            if members[0] == id {
+                sizes[members.len()] += 1;
+            } else if row.age < 18 {
+                minors += 1;
+            }
+        }
+        // 人数は 1〜4 人から一様に引くので、どの人数の世帯も全体の 1/8 より多い。
+        let households = p.household_count();
+        for size in 1..=MAX_HOUSEHOLD_SIZE as usize {
+            assert!(sizes[size] * 8 > households, "{size} 人の世帯 {sizes:?}");
+        }
+        assert!(minors > 0);
+    }
+
+    #[test]
     fn golden_hash() {
         assert_eq!(
             state_hash_of(&synthetic_population(42, 1_000)),

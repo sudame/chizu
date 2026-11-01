@@ -1,0 +1,6 @@
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "反復順が決まらない。BTreeMap か ID で引く Vec を使う" },
+  { path = "std::collections::HashSet", reason = "反復順が決まらない。BTreeSet か ID で引く Vec を使う" },
+  { path = "f32", reason = "中核は固定小数点の整数で計算する" },
+  { path = "f64", reason = "中核は固定小数点の整数で計算する" },
+]
