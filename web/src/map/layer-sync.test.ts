@@ -1,7 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { CHUNK_AREA, type WorkerToMain } from "../protocol/messages.ts";
 import { LAYER_CHECK_MS, LayerSender, type LayerSource } from "./layer-sync.ts";
-import { DATA_LAYERS, PALETTE_SIZE, paletteArray } from "./layers.ts";
+import { DATA_LAYERS, PALETTE_SIZE, paletteArray, TRAFFIC_LAYER } from "./layers.ts";
 
 function fakeSource() {
   const calls: string[] = [];
@@ -79,6 +79,27 @@ describe("データレイヤーの色", () => {
       expect(a).toHaveLength(PALETTE_SIZE * 4);
       expect(a[3]).toBe(0);
       expect(layer.palette.length).toBeLessThanOrEqual(PALETTE_SIZE);
+    }
+  });
+
+  test("交通は値 1〜4 を、緑、黄、橙、赤の順に塗る", () => {
+    const traffic = DATA_LAYERS.find((l) => l.code === TRAFFIC_LAYER);
+    expect(traffic?.label).toBe("交通");
+    const [none, free, busy, heavy, jammed] = traffic?.palette ?? [];
+    expect(none?.[3]).toBe(0);
+    expect(traffic?.palette).toHaveLength(5);
+    // 緑は緑が強く、黄は赤と緑が強く、橙は赤が強く緑が半分ほど、赤は赤だけが強い
+    expect(free && free[1] > free[0] && free[1] > free[2]).toBe(true);
+    expect(busy && busy[0] > 0.9 && busy[1] > 0.8 && busy[2] < 0.3).toBe(true);
+    expect(heavy && heavy[0] > 0.9 && heavy[1] > 0.4 && heavy[1] < 0.7).toBe(true);
+    expect(jammed && jammed[0] > 0.8 && jammed[1] < 0.3 && jammed[2] < 0.3).toBe(true);
+    // 隣り合う段階の色は見分けられる
+    const colors = [free, busy, heavy, jammed];
+    for (const [i, a] of colors.entries()) {
+      for (const b of colors.slice(i + 1)) {
+        const d = [0, 1, 2].reduce((s, k) => s + Math.abs((a?.[k] ?? 0) - (b?.[k] ?? 0)), 0);
+        expect(d).toBeGreaterThan(0.4);
+      }
     }
   });
 });

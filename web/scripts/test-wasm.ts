@@ -764,6 +764,25 @@ try {
     isYellow(plantLeft) && !isYellow(plantRight),
     `電気と水道を重ねると、マスの左右に分けて塗る（左 ${plantLeft.join(", ")}、右 ${plantRight.join(", ")}）`,
   );
+  // 交通のレイヤーをオンにすると、車のいない道路は「空いている」の緑に塗られる
+  await page.locator('#layers button[data-layer="none"]').click();
+  const roadPoint = tilePoint(56, 32);
+  const roadPixel = () => pixel(roadPoint.x, roadPoint.y);
+  // 電気のレイヤーの青い道路と見分けるため、青が弱い緑だけを数える
+  const isTrafficGreen = (c: number[]) =>
+    isGreen(c) && (c[1] ?? 0) > (c[0] ?? 0) + 100 && (c[1] ?? 0) > (c[2] ?? 0) + 60;
+  await page.locator('#layers button[data-layer="3"]').click();
+  const untilRoad = Date.now() + TIMEOUT_MS;
+  let roadColor = await roadPixel();
+  while (!isTrafficGreen(roadColor) && Date.now() < untilRoad) {
+    await page.waitForTimeout(100);
+    roadColor = await roadPixel();
+  }
+  check(
+    isTrafficGreen(roadColor) &&
+      (await page.locator("#layers").getAttribute("data-active")) === "3",
+    `交通のレイヤーでは、道路が混み具合の色（空いていれば緑）で塗られる（${roadColor.join(", ")}）`,
+  );
   await page.locator('#layers button[data-layer="none"]').click();
   await page.waitForTimeout(100);
   const markAfter = await markPixels();

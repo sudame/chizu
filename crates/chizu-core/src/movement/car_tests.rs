@@ -696,3 +696,31 @@ fn stalled_cars_stay_stalled_when_the_road_is_split() {
         "分けられた区間で止まった車が動いた扱いになった"
     );
 }
+
+/// 先頭の車が動かず後ろに車が詰まった短い道路は「詰まっている」になり、走っている車だけの道路は空いている。
+#[test]
+fn a_queue_behind_a_pinned_car_is_jammed() {
+    use super::congestion::Congestion;
+
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    road(&mut n, (30, 10), (90, 10), RoadKind::Small);
+    let mut c = Cars::new(n);
+    // 長い道路を走る 1 台は、空いている
+    c.drive(at(30, 10, (1, 0), 0), at(89, 10, (1, 0), 0));
+    let lead = c.drive(at(15, 0, (1, 0), 0), at(19, 0, (1, 0), 0));
+    for i in 0..12 {
+        c.drive(at(i, 0, (1, 0), 0), at(19, 0, (1, 0), 0));
+    }
+    for _ in 0..200 {
+        step_with_lead_pinned(&mut c, lead);
+    }
+    let levels = c.trips.congestion(&c.net);
+    let on = |x: i64| {
+        let seg = c.net.segments_through(TilePos::new(x, 0))[0];
+        levels.get(&seg).copied().unwrap_or(Congestion::Free)
+    };
+    assert_eq!(on(10), Congestion::Jammed);
+    let far = c.net.segments_through(TilePos::new(60, 10))[0];
+    assert!(!levels.contains_key(&far), "1 台だけの道路が混んでいる");
+}

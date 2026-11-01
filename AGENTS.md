@@ -114,7 +114,7 @@ cargo run -p chizu-cli -- agent new <dir> --from <fb>     # フィードバッ�
 cargo run -p chizu-cli -- agent act <dir> <commands.json> # いまの tick でコマンドを適用する
 cargo run -p chizu-cli -- agent advance <dir> <ticks>     # 時間を進める
 cargo run -p chizu-cli -- agent observe <dir>             # 街の様子を JSON で出す
-cargo run -p chizu-cli -- agent map <dir> <x0> <y0> <x1> <y1> [--scale N]  # 範囲の地図を文字のマス目で出す
+cargo run -p chizu-cli -- agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic]  # 範囲の地図を文字のマス目で出す（traffic は道路を混み具合で出す）
 ```
 
 map は observe と同じく何も書かず、フィードバックのディレクトリにも打てる。1 マスを 1 文字にして、先頭に凡例、上に x、行頭に y の目盛りを付ける。
