@@ -12,7 +12,7 @@ import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync } 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium } from "playwright-core";
+import { chromium, type Page } from "playwright-core";
 import { preview } from "vite";
 
 const TIMEOUT_MS = 30_000;
@@ -63,6 +63,100 @@ const url = givenUrl ?? server?.resolvedUrls?.local[0];
 if (url === undefined) {
   throw new Error("preview の URL が分からない");
 }
+// 開発用の道具で歩く人を出し、描かれること、時間を進めると動くこと、着くと消えることを確かめる。
+// 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その左寄りと右寄りのマスのあいだに出す
+async function checkDevWalks(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  const map = page.locator("#map");
+  const hud = page.locator("#hud");
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  const waitMap = (key: string, expected: string, op: "eq" | "gt" | "ne") =>
+    page.waitForFunction(
+      ([k, v, o]) => {
+        const d = document.querySelector<HTMLElement>("#map")?.dataset[k] ?? "";
+        return o === "eq" ? d === v : o === "gt" ? Number(d) > Number(v) : d !== v;
+      },
+      [key, expected, op] as const,
+      { timeout: TIMEOUT_MS },
+    );
+  const setSpeed = async (speed: number) => {
+    await page.locator(`button[data-speed="${speed}"]`).click();
+    await hud.and(page.locator(`[data-speed="${speed}"]`)).waitFor({ timeout: TIMEOUT_MS });
+  };
+  const pause = async (paused: boolean) => {
+    await page.locator("#pause").click();
+    await hud.and(page.locator(`[data-paused=${paused}]`)).waitFor({ timeout: TIMEOUT_MS });
+  };
+  // 外部接続の高速道路が届いてから、引く前の区間の数を読む
+  await waitMap("roadSegments", "0", "gt");
+  const size = page.viewportSize() ?? { width: 1280, height: 720 };
+  const d0 = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  const zoom = Number(d0.zoom);
+  const tileCenter = (x: number, y: number) => ({
+    x: size.width / 2 + (x + 0.5 - Number(d0.cameraX)) * zoom,
+    y: size.height / 2 + (y + 0.5 - Number(d0.cameraY)) * zoom,
+  });
+  const pixel = (p: { x: number; y: number }) =>
+    map.evaluate((el, q) => {
+      const canvas = el as HTMLCanvasElement;
+      const gl = canvas.getContext("webgl2");
+      const out = new Uint8Array(4);
+      const dpr = window.devicePixelRatio;
+      const [x, y] = [Math.floor(q.x * dpr), canvas.height - 1 - Math.floor(q.y * dpr)];
+      gl?.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
+      return [...out];
+    }, p);
+  const brightness = (c: number[]) => (c[0] ?? 0) + (c[1] ?? 0) + (c[2] ?? 0);
+
+  await setSpeed(1);
+  await pause(true);
+  const segments = d0.roadSegments ?? "0";
+  await page.locator('button[data-tool="road-Small"]').click();
+  const [from, to] = [tileCenter(12, 32), tileCenter(52, 32)];
+  await page.mouse.click(from.x, from.y);
+  await page.mouse.click(to.x, to.y);
+  await page.keyboard.press("Escape");
+  await waitMap("roadSegments", segments, "gt");
+  await page.waitForTimeout(100);
+  const walkFrom = tileCenter(14, 32);
+  const walkTo = tileCenter(50, 32);
+  const roadColor = await pixel(walkFrom);
+  await page.locator('button[data-tool="dev-walks"]').click();
+  await page.mouse.click(walkFrom.x, walkFrom.y);
+  await page.mouse.click(walkTo.x, walkTo.y);
+  await waitMap("devWalks", "0", "gt");
+  await waitMap("drawnMovers", "0", "gt");
+  const spawned = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  const walkerColor = await pixel(walkFrom);
+  check(
+    brightness(walkerColor) > brightness(roadColor) + 200,
+    `歩く人を出すと移動体の点が描かれる（${spawned.drawnMovers} 人、${roadColor.join(", ")} → ${walkerColor.join(", ")}）`,
+  );
+  await pause(false);
+  await waitMap("firstMover", spawned.firstMover ?? "", "ne");
+  const moved = await map.getAttribute("data-first-mover");
+  check(true, `時間を進めると移動体の位置が変わる（${spawned.firstMover} → ${moved}）`);
+  check(
+    await page.locator("#dev-flag").isVisible(),
+    "開発用の道具を使うと、再現できないことの印が出る",
+  );
+  // 48 倍で着くまで進めたあと、等速に戻しても描かれないことで、送られなくなったのではなく着いて消えたと分かる
+  await setSpeed(48);
+  await waitMap("drawnMovers", "0", "eq");
+  await setSpeed(1);
+  const tickAtNormal = Number(await hud.getAttribute("data-tick"));
+  await page.waitForFunction(
+    (t) => Number(document.querySelector<HTMLElement>("#hud")?.dataset.tick) > t + 10,
+    tickAtNormal,
+    { timeout: TIMEOUT_MS },
+  );
+  check(
+    (await map.getAttribute("data-drawn-movers")) === "0",
+    "行き先に着いた移動体は消え、等速に戻しても描かれない",
+  );
+}
+
 const browser = await chromium.launch({ executablePath: findOnPath("chrome-headless-shell") });
 
 try {
@@ -735,6 +829,10 @@ try {
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   const afterClose = await ticksIn(500);
   check(afterClose > 0, `フィードバックの欄を閉じると再開する（${afterClose} tick）`);
+
+  // 歩く人を出す道具は記録に入らず、上の再生の確かめと食い違うので、新しいページで確かめる
+  await page.close();
+  await checkDevWalks(await browser.newPage(), url);
 } finally {
   await browser.close();
   await server?.close();

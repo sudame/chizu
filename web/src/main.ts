@@ -1,7 +1,9 @@
 import { parseCityStats, renderCityStats } from "./city-panel.ts";
+import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
+import { moverArea } from "./map/movers.ts";
 import { MapRenderer } from "./map/renderer.ts";
 import {
   buildingGeometry,
@@ -168,7 +170,8 @@ const inRange = (r: ChunkRange, cx: number, cy: number) =>
 let sentRange = "";
 // 見えているチャンクの範囲が変わったときだけ、その範囲と捨てたチャンクを Worker に伝える
 function sendView(range: ChunkRange): void {
-  const key = `${range.minCx},${range.maxCx},${range.minCy},${range.maxCy}`;
+  const movers = moverArea(range, camera.zoom);
+  const key = `${range.minCx},${range.maxCx},${range.minCy},${range.maxCy},${movers !== null}`;
   if (key === sentRange) {
     return;
   }
@@ -183,15 +186,23 @@ function sendView(range: ChunkRange): void {
     kind: "view",
     visible: visible.map(([cx, cy]) => ({ cx, cy })),
     forgotten: removed.map(({ cx, cy }) => ({ cx, cy })),
+    movers,
   });
 }
 
-function drawMap(): void {
+function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   const vp = viewport();
   const range = camera.visibleChunks(vp);
   sendView(range);
   const drawn = renderer?.draw(camera, vp, range) ?? 0;
+  const movers =
+    header === null
+      ? 0
+      : (renderer?.movers.draw(camera, vp, header, reader.movers(header.moverCount)) ?? 0);
   // test:wasm が読む
+  mapCanvas.dataset.drawnMovers = String(movers);
+  const first = renderer?.movers.first;
+  mapCanvas.dataset.firstMover = first ? `${first.x},${first.y}` : "";
   mapCanvas.dataset.drawnChunks = String(drawn);
   mapCanvas.dataset.visibleChunks = String(
     (range.maxCx - range.minCx + 1) * (range.maxCy - range.minCy + 1),
@@ -208,7 +219,7 @@ function startDrawing(reader: SnapshotReader, ctx: CanvasRenderingContext2D): vo
     if (header !== null) {
       draw(ctx, header);
     }
-    drawMap();
+    drawMap(reader, header);
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
@@ -329,6 +340,7 @@ function cancelTool(): void {
   if (pointer?.mode === "area") {
     pointer = null;
   }
+  devWalks.cancel();
   updatePreview();
 }
 
@@ -359,6 +371,8 @@ function clickTile(at: Tile): void {
     }
   } else if (tool.kind === "buy") {
     sendCommand(buyChunkCommand(at));
+  } else if (mapCanvas.dataset.tool === DEV_WALK_TOOL) {
+    devWalks.click(at);
   } else if (tool.kind === "service") {
     // 答えの届いていないマスでも送り、置けるかは中核に決めさせる
     sendCommand(placeServiceCommand(tool.service, at, serviceChoice(tool.service, at).rotation));
@@ -497,6 +511,14 @@ setupFeedback({
   camera: () => ({ x: camera.x, y: camera.y, zoom: camera.zoom }),
 });
 
+const devWalks = setupDevWalks({
+  button: element<HTMLButtonElement>(`button[data-tool="${DEV_WALK_TOOL}"]`),
+  info: element<HTMLElement>("#dev-info"),
+  flag: element<HTMLElement>("#dev-flag"),
+  map: mapCanvas,
+  send,
+});
+
 for (const button of toolButtons) {
   button.addEventListener("click", () => {
     const name = button.dataset.tool ?? "none";
@@ -600,6 +622,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "feedback-error") {
     feedbackWaiter?.reject(new Error(message.message));
     feedbackWaiter = null;
+    return;
+  }
+  if (message.kind === "dev-spawned") {
+    devWalks.spawned(message.count);
     return;
   }
   if (message.kind === "error") {
