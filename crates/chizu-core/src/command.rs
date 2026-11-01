@@ -11,6 +11,7 @@ use core::fmt;
 
 use crate::network::{Line, MAX_ROAD_TILES};
 use crate::tile::{ChunkCoord, TilePos, TileRect};
+use crate::zone::{MAX_ZONE_SIDE, rect_size};
 
 /// 道路の種類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -137,9 +138,10 @@ pub enum Command {
     Bulldoze {
         area: TileRect,
     },
+    /// 長方形の中の、塗れるマスに区画を塗る。`zone` が `None` なら区画を消す。
     PaintZone {
         area: TileRect,
-        zone: ZoneKind,
+        zone: Option<ZoneKind>,
     },
     PlaceBuilding {
         kind: ServiceKind,
@@ -170,6 +172,8 @@ pub enum InvalidCommand {
     UnorderedRect(TileRect),
     /// 税率が `MAX_TAX_PERMILLE` を超えている。
     TaxRateTooHigh(u16),
+    /// 区画を塗る長方形の辺が `MAX_ZONE_SIDE` マスより長い。
+    ZoneAreaTooLarge(TileRect),
     /// 道路の始点と終点が同じマスである。
     ZeroLengthRoad(TilePos),
     /// 道路が縦横と 45 度の斜めのどれでもない。
@@ -189,6 +193,11 @@ impl fmt::Display for InvalidCommand {
             InvalidCommand::TaxRateTooHigh(p) => {
                 write!(f, "税率 {p}‰ は上限の {MAX_TAX_PERMILLE}‰ を超えている")
             }
+            InvalidCommand::ZoneAreaTooLarge(r) => write!(
+                f,
+                "区画を塗る長方形 ({}, {})〜({}, {}) の辺が上限の {MAX_ZONE_SIDE} マスより長い",
+                r.min.x, r.min.y, r.max.x, r.max.y
+            ),
             InvalidCommand::ZeroLengthRoad(t) => {
                 write!(f, "道路の始点と終点が同じマス ({}, {}) である", t.x, t.y)
             }
@@ -212,11 +221,20 @@ impl Command {
     /// 値が受け付ける範囲にあるか。範囲の外のコマンドは記録せず、適用もしない。
     pub fn validate(&self) -> Result<(), InvalidCommand> {
         match *self {
-            Command::Bulldoze { area } | Command::PaintZone { area, .. } => {
+            Command::Bulldoze { area } => {
                 if area.is_ordered() {
                     Ok(())
                 } else {
                     Err(InvalidCommand::UnorderedRect(area))
+                }
+            }
+            Command::PaintZone { area, .. } => {
+                if !area.is_ordered() {
+                    return Err(InvalidCommand::UnorderedRect(area));
+                }
+                match rect_size(area) {
+                    Some((w, h)) if w <= MAX_ZONE_SIDE && h <= MAX_ZONE_SIDE => Ok(()),
+                    _ => Err(InvalidCommand::ZoneAreaTooLarge(area)),
                 }
             }
             Command::SetTaxRate { permille, .. } => {
@@ -267,12 +285,28 @@ mod tests {
             Err(InvalidCommand::UnorderedRect(rect))
         );
         let zone = ZoneKind::Office;
-        assert_eq!(
-            Command::PaintZone { area: rect, zone }.validate(),
-            Err(InvalidCommand::UnorderedRect(rect))
-        );
+        let paint = |area| {
+            Command::PaintZone {
+                area,
+                zone: Some(zone),
+            }
+            .validate()
+        };
+        assert_eq!(paint(rect), Err(InvalidCommand::UnorderedRect(rect)));
         let ok = TileRect::from_corners(rect.min, rect.max);
-        assert_eq!(Command::PaintZone { area: ok, zone }.validate(), Ok(()));
+        assert_eq!(paint(ok), Ok(()));
+        let side = MAX_ZONE_SIDE as i64;
+        let max = TileRect::from_corners(TilePos::new(0, 0), TilePos::new(side - 1, side - 1));
+        assert_eq!(paint(max), Ok(()));
+        let wide = TileRect::from_corners(TilePos::new(0, 0), TilePos::new(side, 0));
+        assert_eq!(paint(wide), Err(InvalidCommand::ZoneAreaTooLarge(wide)));
+        let huge = TileRect::from_corners(TilePos::new(i64::MIN, 0), TilePos::new(i64::MAX, 0));
+        assert_eq!(paint(huge), Err(InvalidCommand::ZoneAreaTooLarge(huge)));
+        let clear = Command::PaintZone {
+            area: ok,
+            zone: None,
+        };
+        assert_eq!(clear.validate(), Ok(()));
         let tax = |permille| Command::SetTaxRate { zone, permille }.validate();
         assert_eq!(tax(MAX_TAX_PERMILLE), Ok(()));
         assert_eq!(

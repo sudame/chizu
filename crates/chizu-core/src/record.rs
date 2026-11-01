@@ -24,7 +24,7 @@
 //! |---|---|---|
 //! | 1 | `BuildRoad` | from `TilePos`、to `TilePos`、kind `u8` |
 //! | 2 | `Bulldoze` | area `TileRect` |
-//! | 3 | `PaintZone` | area `TileRect`、zone `u8` |
+//! | 3 | `PaintZone` | area `TileRect`、zone `u8`（0 は区画を消す） |
 //! | 4 | `PlaceBuilding` | kind `u8`、at `TilePos`、rotation `u8` |
 //! | 5 | `SetSignal` | index `u32`、generation `u16`、on `u8`（0 か 1） |
 //! | 6 | `BuyChunk` | cx `i32`、cy `i32` |
@@ -331,6 +331,10 @@ impl<'a> Reader<'a> {
             Err(DecodeError::InvalidValue { what, at: self.pos })
         }
     }
+    fn check_code<T>(&self, what: &'static str, value: Option<T>) -> Result<T, DecodeError> {
+        value.ok_or(DecodeError::InvalidValue { what, at: self.pos })
+    }
+
     fn code<T>(&mut self, what: &'static str, from: fn(u8) -> Option<T>) -> Result<T, DecodeError> {
         let code = self.u8()?;
         from(code).ok_or(DecodeError::InvalidValue { what, at: self.pos })
@@ -352,7 +356,7 @@ fn encode_command(w: &mut Writer, c: &Command) {
         Command::PaintZone { area, zone } => {
             w.u8(3);
             w.rect(area);
-            w.u8(zone as u8);
+            w.u8(zone.map_or(0, |z| z as u8));
         }
         Command::PlaceBuilding { kind, at, rotation } => {
             w.u8(4);
@@ -393,7 +397,10 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
         2 => Command::Bulldoze { area: r.rect()? },
         3 => Command::PaintZone {
             area: r.rect()?,
-            zone: r.code("ZoneKind", ZoneKind::from_code)?,
+            zone: match r.u8()? {
+                0 => None,
+                code => Some(r.check_code("ZoneKind", ZoneKind::from_code(code))?),
+            },
         },
         4 => Command::PlaceBuilding {
             kind: r.code("ServiceKind", ServiceKind::from_code)?,
@@ -484,7 +491,11 @@ mod tests {
             },
             Command::PaintZone {
                 area: TileRect::from_corners(TilePos::new(0, 0), TilePos::new(3, 3)),
-                zone: ZoneKind::Industrial,
+                zone: Some(ZoneKind::Industrial),
+            },
+            Command::PaintZone {
+                area: TileRect::from_corners(TilePos::new(1, 1), TilePos::new(2, 2)),
+                zone: None,
             },
             Command::PlaceBuilding {
                 kind: ServiceKind::WaterPump,
@@ -755,8 +766,8 @@ mod tests {
         assert_eq!(
             stats,
             ReplayStats {
-                applied: 3,
-                not_implemented: 3,
+                applied: 5,
+                not_implemented: 2,
                 rejected: 0,
                 denied: 2,
                 denied_by: {
@@ -777,6 +788,11 @@ mod tests {
     fn arb_command() -> impl Strategy<Value = Command> {
         let tile = (any::<i64>(), any::<i64>()).prop_map(|(x, y)| TilePos::new(x, y));
         let rect = (tile.clone(), tile.clone()).prop_map(|(a, b)| TileRect::from_corners(a, b));
+        let small_rect =
+            (any::<i32>(), any::<i32>(), 0_i64..256, 0_i64..256).prop_map(|(x, y, w, h)| {
+                let min = TilePos::new(i64::from(x), i64::from(y));
+                TileRect::from_corners(min, TilePos::new(min.x + w, min.y + h))
+            });
         let zone = proptest::sample::select(ZoneKind::ALL.to_vec());
         prop_oneof![
             (
@@ -795,7 +811,8 @@ mod tests {
                     kind: RoadKind::from_code(k).unwrap(),
                 }),
             rect.clone().prop_map(|area| Command::Bulldoze { area }),
-            (rect, zone.clone()).prop_map(|(area, zone)| Command::PaintZone { area, zone }),
+            (small_rect, proptest::option::of(zone.clone()))
+                .prop_map(|(area, zone)| Command::PaintZone { area, zone }),
             (1_u8..=2, tile, any::<u8>()).prop_map(|(k, at, rotation)| Command::PlaceBuilding {
                 kind: ServiceKind::from_code(k).unwrap(),
                 at,

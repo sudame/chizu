@@ -15,6 +15,7 @@ pub mod terrain;
 pub mod tile;
 pub mod units;
 pub mod world;
+pub mod zone;
 
 pub use chunk::{Chunk, Layer, LayerTiles, TileUse};
 pub use citizens::{
