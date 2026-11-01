@@ -50,7 +50,7 @@ pub struct LaneOffset(pub u32);  // 車線の始点からの距離（mm）。1 �
 
 - 移動体の位置は「車線 ID ＋車線上の距離」で持ち、ワールド座標は描画のときだけ求める。毎 tick 触るデータを 32 ビットに収めるためである。
 - 割り算は丸め方を名前に入れた関数（`div_round_half_even` など）だけで行う。
-- `chizu-core` では clippy の `float_arithmetic` を deny にして、浮動小数点の混入を止める（事実 F7）。
+- `chizu-core` では、浮動小数点の混入を 2 段で止める（事実 F7）。clippy の `disallowed_types` で `f32` と `f64` を禁じ、`float_arithmetic` も deny にする。ただし、どちらも型を推論させた浮動小数点（`let a = 0.5;` や `2.5_f64.floor()`）は拾わない。そこで `scripts/check-no-float.sh` が、ソースから `f32`、`f64` と浮動小数点のリテラルを探して、見つかったら `lint:rust` を落とす。
 
 ### 1.2 チャンクと層
 
@@ -244,7 +244,7 @@ pub enum TripState {
 
 | 項目 | 方法 |
 |---|---|
-| 数値 | 1.1 の整数の型だけを使う。`float_arithmetic` を deny |
+| 数値 | 1.1 の整数の型だけを使う。`f32` と `f64` を `disallowed_types` で禁じ、浮動小数点のリテラルも `scripts/check-no-float.sh` で禁じる |
 | 乱数 | 自前の小さな生成器（SplitMix64 で種を混ぜ、PCG32 で引く）。外部クレートを使わないのは、版が上がって乱数の列が変わるのを避けるため |
 | 乱数の流れ | 共有の生成器を持たない。`rng(seed, 用途, 対象の ID, tick)` で毎回その場で作る。並列に回しても引く順番に左右されない |
 | 集合 | `HashMap` と `HashSet` を clippy の `disallowed_types` で禁じる。`BTreeMap`、ID で引く `Vec`、挿入順を保つ表のどれかを使う |

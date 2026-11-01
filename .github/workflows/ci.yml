@@ -8,12 +8,16 @@ on:
 permissions:
   contents: read
 
+# mise run が足りないツールを勝手に入れないようにし、各ジョブは install_args で入れたツールだけで動かす
+env:
+  MISE_AUTO_INSTALL: "false"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
+  lint-md:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -22,10 +26,10 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
-          install: false
-      - run: mise run test
+          install_args: rumdl
+      - run: mise run lint:md
 
-  lint:
+  lint-actions:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -34,5 +38,47 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
         with:
-          install_args: rumdl jactionlint shellcheck
-      - run: mise run lint
+          install_args: jactionlint shellcheck
+      - run: mise run lint:actions
+
+  lint-rust:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # キャッシュが古くても足りない分をビルドし直すだけなので、保存し直すのはツールチェーンか依存が変わったときだけにする。
+      # キーが外れたら前のキャッシュから戻し、新しいキーで保存する
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ github.job }}-
+      # rust の版は mise.toml の設定で rust-toolchain.toml から読む
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          install_args: rust ripgrep
+      - run: mise run lint:rust
+
+  test-rust:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo
+            target
+          key: cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: cargo-${{ github.job }}-
+      # rust の版は mise.toml の設定で rust-toolchain.toml から読む
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          install_args: rust
+      - run: mise run test:rust
