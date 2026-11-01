@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::chunk::Chunk;
+use crate::citizens::Population;
 use crate::command::{Command, SimSpeed, ZoneKind};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::ChunkCoord;
@@ -53,6 +54,7 @@ pub struct World {
     chunks: BTreeMap<ChunkCoord, Chunk>,
     /// 始めてから買ったチャンクの数。最初から買ってあるチャンクは数えない。
     chunks_bought: u32,
+    population: Population,
 }
 
 impl World {
@@ -74,6 +76,7 @@ impl World {
             tax_permille: [INITIAL_TAX_PERMILLE; 4],
             chunks,
             chunks_bought: 0,
+            population: Population::default(),
         }
     }
 
@@ -105,6 +108,10 @@ impl World {
     /// メモリに置いているチャンクを座標の順に返す。
     pub fn chunks(&self) -> impl Iterator<Item = &Chunk> {
         self.chunks.values()
+    }
+
+    pub fn population(&self) -> &Population {
+        &self.population
     }
 
     pub fn is_owned(&self, coord: ChunkCoord) -> bool {
@@ -162,6 +169,7 @@ impl World {
 
     /// 1 tick 進める。
     pub fn step(&mut self) {
+        self.population.step(self.seed, self.tick);
         self.tick = self.tick.next();
     }
 
@@ -182,6 +190,7 @@ impl StateHash for World {
         h.write(&self.tax_permille);
         h.write(&self.chunks);
         h.write(&self.chunks_bought);
+        h.write(&self.population);
     }
 }
 
