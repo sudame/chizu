@@ -255,7 +255,10 @@ try {
     `引いた道路の区間が届く（${await roadSegments()} 本）`,
   );
   await page.waitForFunction(
-    (expected) => Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) === expected,
+    // ゲーム内の 1 時間ごとに税収と維持費を精算するので、その分のずれは許す
+    (expected) =>
+      Math.abs(Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) - expected) <=
+      2_000,
     moneyBefore - built.cost,
     { timeout: TIMEOUT_MS },
   );
@@ -353,7 +356,10 @@ try {
     `隣のチャンクを買える（${bought.text}）`,
   );
   await page.waitForFunction(
-    (expected) => Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) === expected,
+    // ゲーム内の 1 時間ごとに税収と維持費を精算するので、その分のずれは許す
+    (expected) =>
+      Math.abs(Number(document.querySelector<HTMLElement>("#hud")?.dataset.money) - expected) <=
+      2_000,
     moneyBeforeBuy - 50_000,
     { timeout: TIMEOUT_MS },
   );

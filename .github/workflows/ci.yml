@@ -153,6 +153,19 @@ jobs:
           install_args: rust github:wasm-bindgen/wasm-bindgen node pnpm http:chrome-headless-shell
       - run: mise run test:wasm
 
+  test-play:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # bash と git だけで回るので、ツールは入れない
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          install: false
+      - run: mise run test:play
+
   build:
     runs-on: ubuntu-26.04
     timeout-minutes: 15

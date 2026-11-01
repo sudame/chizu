@@ -315,7 +315,11 @@ mod tests {
             permille: 200,
         };
         assert_eq!(w.apply(&cmd), ApplyOutcome::Applied);
-        assert!((2 * low..=2 * low + 1).contains(&tax(&w)), "{low} → {}", tax(&w));
+        assert!(
+            (2 * low..=2 * low + 1).contains(&tax(&w)),
+            "{low} → {}",
+            tax(&w)
+        );
     }
 
     /// 人口がマイルストーンに届くまでは枠を超えて買えず、届くと買えるようになる。
