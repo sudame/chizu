@@ -66,6 +66,23 @@ mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファ�
 ツールを足すときは、`mise.toml` の `[tools]` に版を固定して書く。`npx` などで実行時に取ってこない。
 タスクを足したり変えたりしたら、`.github/workflows/ci.yml` のジョブもそろえる。
 
+## フィードバック
+
+`mise run dev` のページで右上の「フィードバック」を押すと、ゲームが止まり、気づいたことを書く欄が出る。
+送ると、開発サーバーが `feedback/<日時>-<番号>/` に次の 4 つを書く。`feedback/` は Git に入れない。
+
+- `note.md`：書いた文
+- `screenshot.png`：そのときの地図
+- `state.json`：種、tick、所持金、状態ハッシュ、カメラの位置
+- `commands.rec`：それまでの操作の記録
+
+人間が見た状態は、記録を再生すれば手元で作り直せる。
+`state.json` の `seed` と `tick` を渡して再生し、出たハッシュが `stateHash` と同じことを確かめる。
+
+```sh
+cargo run -p chizu-cli -- feedback/<日時>-<番号>/commands.rec <seed> <tick>
+```
+
 ## 依存の更新
 
 依存は Renovate で上げる。設定は `renovate.json` にある。

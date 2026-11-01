@@ -44,9 +44,6 @@ pub const SPAWN_PER_ZONE: u32 = 2;
 /// 段階が 1 つ上がるまでの時間（tick）。
 pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;
 
-/// 電気と水道が届いているかを見直す間隔（tick）。等速で 10 秒に 1 回である。
-pub const SUPPLY_INTERVAL: u64 = 300;
-
 /// 間口のマスから道路へ向かう 1 歩の候補。この順に調べる。`PlaceBuilding` の `rotation` もこの順である。
 pub(super) const DIRS: [(i64, i64); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
 
@@ -194,7 +191,7 @@ impl World {
     /// 段階を上げ、需要のある区画に建物を建てる。`GROWTH_INTERVAL` ごとに呼ばれる。
     pub(super) fn grow_buildings(&mut self) {
         let tick = self.tick;
-        if tick.0.is_multiple_of(SUPPLY_INTERVAL) {
+        if self.supply_dirty {
             self.update_supply();
         }
         if !tick.0.is_multiple_of(GROWTH_INTERVAL) {
@@ -211,6 +208,8 @@ impl World {
             {
                 b.level += 1;
                 b.leveled_at = tick;
+                // 需要が増えたので、次の tick の頭で供給を判定し直す。
+                self.supply_dirty = true;
             }
         }
         let mut stats = self.city_stats();
@@ -265,12 +264,14 @@ impl World {
             supply: Supply::default(),
         });
         self.write_occupancy(tiles.into_iter().map(|t| (t, TileUse::Building)));
+        self.supply_dirty = true;
         id
     }
 
     /// 道路や区画が変わったあとに呼ぶ。条件の崩れた建物を消し、残った建物の出入口を付け直す。
     /// 建物ごとの電気と水道の届き方を見直す。
-    fn update_supply(&mut self) {
+    pub(super) fn update_supply(&mut self) {
+        self.supply_dirty = false;
         let result = evaluate_supply(&self.network, &self.facilities, &self.buildings);
         for (id, supply) in result {
             self.buildings.get_mut(id).expect("建物がない").supply = supply;
@@ -370,6 +371,28 @@ impl World {
                 }
             }
         }
+        // 道路と施設の変化は、その場で供給に映す。
+        self.update_supply();
+    }
+
+    /// 長方形にかかる施設を取り除き、取り除いた数を返す。払い戻しはしない。
+    pub(super) fn bulldoze_facilities(&mut self, area: TileRect) -> usize {
+        let overlaps = |r: TileRect| {
+            r.min.x <= area.max.x
+                && area.min.x <= r.max.x
+                && r.min.y <= area.max.y
+                && area.min.y <= r.max.y
+        };
+        let (gone, kept): (Vec<Facility>, Vec<Facility>) =
+            self.facilities.iter().partition(|f| overlaps(f.area));
+        self.facilities = kept;
+        let freed: Vec<_> = gone
+            .iter()
+            .flat_map(|f| crate::zone::tiles_of(f.area))
+            .map(|t| (t, TileUse::Empty))
+            .collect();
+        self.write_occupancy(freed);
+        gone.len()
     }
 }
 
@@ -650,6 +673,90 @@ mod tests {
         };
         assert_eq!(w.apply(&bad), ApplyOutcome::Rejected);
         assert!(w.facilities().is_empty());
+    }
+
+    fn build(w: &mut World, a: (i64, i64), b: (i64, i64)) {
+        let c = Command::BuildRoad {
+            from: TilePos::new(a.0, a.1),
+            to: TilePos::new(b.0, b.1),
+            kind: RoadKind::Small,
+        };
+        assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+    }
+
+    #[test]
+    fn supply_stops_the_moment_the_network_is_cut() {
+        let mut w = zoned_street();
+        // 施設は y = 30 の通りに置き、x = 40 の道路で y = 10 の通りとつなぐ。
+        build(&mut w, (0, 30), (40, 30));
+        build(&mut w, (40, 10), (40, 30));
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (3, 29), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            place(&mut w, ServiceKind::WaterPump, (7, 29), 2),
+            ApplyOutcome::Applied
+        );
+        run(&mut w, 4 * GROWTH_INTERVAL);
+        assert!(
+            w.buildings()
+                .iter()
+                .all(|(_, b)| b.supply.power && b.supply.water)
+        );
+        let levels: Vec<_> = w.buildings().iter().map(|(id, b)| (id, b.level)).collect();
+        let cut = Command::Bulldoze {
+            area: rect((40, 20), (40, 20)),
+        };
+        assert_eq!(w.apply(&cut), ApplyOutcome::Applied);
+        // 道路を消したその場で届かなくなり、そのあとも段階は上がらない。
+        assert!(
+            w.buildings()
+                .iter()
+                .all(|(_, b)| b.supply == Supply::default())
+        );
+        run(&mut w, LEVEL_UP_TICKS + 2 * GROWTH_INTERVAL);
+        for (id, level) in levels {
+            assert_eq!(w.buildings().get(id).map(|b| b.level), Some(level));
+        }
+    }
+
+    #[test]
+    fn bulldoze_removes_facilities_and_frees_their_tiles() {
+        let mut w = zoned_street();
+        let pump = ServiceKind::WaterPump;
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(place(&mut w, pump, (7, 9), 2), ApplyOutcome::Applied);
+        let origin = ChunkCoord::new(0, 0);
+        let version = w.chunk(origin).unwrap().version();
+        // 浄水場の 1 マスだけにかかる長方形でも、浄水場ごと取り除く。
+        let area = rect((6, 8), (6, 8));
+        assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Applied);
+        assert_eq!(w.facilities().len(), 1);
+        assert!(w.chunk(origin).unwrap().version() > version);
+        for t in crate::zone::tiles_of(rect((6, 8), (7, 9))) {
+            assert_eq!(w.tile_state(t), Some((None, TileUse::Empty)));
+        }
+        // 空いたマスには、また施設を置ける。
+        assert_eq!(place(&mut w, pump, (7, 9), 2), ApplyOutcome::Applied);
+        // 前の道路を消しても、施設は残るが供給はしない。
+        let street = Command::Bulldoze {
+            area: rect((20, 10), (20, 10)),
+        };
+        assert_eq!(w.apply(&street), ApplyOutcome::Applied);
+        assert_eq!(w.facilities().len(), 2);
+        assert!(w.facilities().iter().all(|f| f.entrance.is_none()));
+        // 何もない長方形は、これまでどおり却下する。
+        let empty = Command::Bulldoze {
+            area: rect((100, 100), (101, 101)),
+        };
+        assert_eq!(
+            w.apply(&empty),
+            ApplyOutcome::Denied(DenyReason::NothingToBulldoze)
+        );
     }
 
     #[test]
