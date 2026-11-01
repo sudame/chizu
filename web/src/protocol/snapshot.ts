@@ -1,0 +1,75 @@
+// 描画用のスナップショットの三重バッファを、読み手（メインスレッド）の側から読む。
+// 入れ替えの規約と書き手の側は crates/chizu-wasm/src/snapshot.rs にある。
+// 配置の定数は snapshot-layout.json にあり、Rust 側のテストがこのファイルと突き合わせる。
+
+import layout from "./snapshot-layout.json" with { type: "json" };
+
+export { layout };
+
+export type SnapshotHeader = {
+  tick: number;
+  day: number;
+  secondOfDay: number;
+  money: number;
+  population: number;
+  speed: number;
+  paused: boolean;
+  moverCount: number;
+};
+
+/** 枠 `slot` の先頭の語の、バッファの中での語の位置。 */
+export function slotBase(slot: number): number {
+  return layout.controlWords + slot * layout.slotWords;
+}
+
+export class SnapshotReader {
+  readonly #control: Int32Array;
+  readonly #words: Uint32Array;
+  readonly #signed: Int32Array;
+  #reading = layout.initial.reader;
+  #received = false;
+
+  constructor(buffer: SharedArrayBuffer, byteOffset: number) {
+    this.#control = new Int32Array(buffer, byteOffset, layout.controlWords);
+    this.#words = new Uint32Array(buffer, byteOffset, layout.totalWords);
+    this.#signed = new Int32Array(buffer, byteOffset, layout.totalWords);
+    const version = Atomics.load(this.#control, layout.control.version);
+    if (version !== layout.version) {
+      throw new Error(`三重バッファの配置の版が違う（WASM ${version}、画面 ${layout.version}）`);
+    }
+  }
+
+  /** いま読んでいる枠の番号。 */
+  get reading(): number {
+    return this.#reading;
+  }
+
+  /**
+   * 新しく書かれた枠があれば受け取り、読んでいる枠の先頭の数値を返す。
+   * まだ一度も書かれていなければ null を返す。
+   */
+  acquire(): SnapshotHeader | null {
+    const latest = layout.control.latest;
+    if ((Atomics.load(this.#control, latest) & layout.fresh) !== 0) {
+      const previous = Atomics.exchange(this.#control, latest, this.#reading);
+      this.#reading = previous & layout.indexMask;
+      this.#received = true;
+    }
+    if (!this.#received) {
+      return null;
+    }
+    const base = slotBase(this.#reading);
+    const w = (i: number) => this.#words[base + i] ?? 0;
+    const h = layout.header;
+    return {
+      tick: w(h.tickLo) + w(h.tickHi) * 2 ** 32,
+      day: w(h.day),
+      secondOfDay: w(h.secondOfDay),
+      money: w(h.moneyLo) + (this.#signed[base + h.moneyHi] ?? 0) * 2 ** 32,
+      population: w(h.population),
+      speed: w(h.speed),
+      paused: w(h.paused) !== 0,
+      moverCount: w(h.moverCount),
+    };
+  }
+}
