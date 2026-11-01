@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::building::Buildings;
+
 use crate::chunk::{Chunk, Layer, TileUse};
 use crate::citizens::{CitizenChange, CitizenRow, Population};
 use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
@@ -113,9 +115,13 @@ pub struct World {
     chunks_bought: u32,
     network: Network,
     population: Population,
+    buildings: Buildings,
+    lots: growth::LotFronts,
     /// 適用済みの記録の次の番号。記録から続きを回すときは、この番号から適用する。
     next_seq: u64,
 }
+
+pub mod growth;
 
 /// 外部接続の高速道路の通り道。始めたときに買ってある土地の端のマスから外へ向かう。
 /// どの辺から出るかと辺のどこから出るかは、種から決める。地形もこの通り道を見て水辺を抑える。
@@ -140,6 +146,14 @@ pub fn highway_line(seed: u64) -> Line {
 }
 
 impl World {
+    /// 所持金を `money` にして始める。テストとベンチマークで、広い土地を買い進めた街を作るのに使う。
+    pub fn new_with_money(seed: u64, money: Money) -> World {
+        World {
+            money,
+            ..World::new(seed)
+        }
+    }
+
     pub fn new(seed: u64) -> World {
         let r = START_CHUNK_RADIUS;
         let chunks = (-r..=r)
@@ -163,6 +177,8 @@ impl World {
             chunks_bought: 0,
             network,
             population: Population::default(),
+            buildings: Buildings::default(),
+            lots: Default::default(),
             next_seq: 0,
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
@@ -190,6 +206,7 @@ impl World {
                 .or_default()
                 .push((local_index(lx, ly), u));
         }
+        let touched = World::edited_tiles(&edits);
         for (coord, list) in edits {
             let chunk = self.chunks.get_mut(&coord).expect("チャンクがない");
             chunk.edit_layer(Layer::Ground, |tiles| {
@@ -202,6 +219,7 @@ impl World {
                 }
             });
         }
+        self.refresh_lot_fronts(touched);
     }
 
     /// マスの区画。メモリにないチャンクのマスは `None` である。
@@ -213,6 +231,7 @@ impl World {
 
     /// 区画の表をまとめて書き換え、変えたチャンクの版を上げる。
     fn write_zones(&mut self, edits: BTreeMap<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>) {
+        let touched = World::edited_tiles(&edits);
         for (coord, list) in edits {
             let chunk = self.chunks.get_mut(&coord).expect("チャンクがない");
             chunk.edit_layer(Layer::Ground, |tiles| {
@@ -221,6 +240,7 @@ impl World {
                 }
             });
         }
+        self.refresh_lot_fronts(touched);
     }
 
     /// 長方形の中の、区画を塗れるマスに `zone` を塗る。`None` なら区画を消す。
@@ -257,6 +277,7 @@ impl World {
             return ApplyOutcome::Denied(reason);
         }
         self.write_zones(edits);
+        self.refresh_buildings();
         ApplyOutcome::Applied
     }
 
@@ -330,6 +351,7 @@ impl World {
         }
         self.money = self.money - cost;
         self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
+        self.refresh_buildings();
         ApplyOutcome::Applied
     }
 
@@ -349,6 +371,7 @@ impl World {
         for line in &removed {
             self.prune_zones(around(line.start, line.end()));
         }
+        self.refresh_buildings();
         ApplyOutcome::Applied
     }
 
@@ -380,6 +403,11 @@ impl World {
     /// メモリに置いているチャンクを座標の順に返す。
     pub fn chunks(&self) -> impl Iterator<Item = &Chunk> {
         self.chunks.values()
+    }
+
+    /// 区画に建った建物。
+    pub fn buildings(&self) -> &Buildings {
+        &self.buildings
     }
 
     pub fn population(&self) -> &Population {
@@ -488,6 +516,7 @@ impl World {
         let (seed, tick) = (self.seed, self.tick);
         self.population
             .update_bucket(bucket_at(tick), |id, row| update(seed, tick, id, row));
+        self.grow_buildings();
         self.tick = tick.next();
     }
 
@@ -510,6 +539,7 @@ impl StateHash for World {
         h.write(&self.chunks_bought);
         h.write(&self.network);
         h.write(&self.population);
+        h.write(&self.buildings);
         h.write(&self.next_seq);
     }
 }

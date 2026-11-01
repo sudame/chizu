@@ -65,6 +65,12 @@ fn scenarios() -> Vec<Scenario> {
             ticks: 300,
             log: zoning(),
         },
+        Scenario {
+            name: "growth",
+            seed: 42,
+            ticks: 3_600,
+            log: growth(),
+        },
     ]
 }
 
@@ -144,6 +150,50 @@ fn zoning() -> CommandLog {
         },
     );
     rec(110, paint((0, 1), (5, 5), None));
+    log
+}
+
+/// 道路に面した住宅・商業・工業・オフィスの区画に建物が建ち、途中で道路の一部を消す記録。
+fn growth() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let rect = |a: (i64, i64), b: (i64, i64)| {
+        TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1))
+    };
+    for (y, kind) in [(0, RoadKind::Medium), (20, RoadKind::Small)] {
+        rec(
+            1,
+            Command::BuildRoad {
+                from: TilePos::new(-40, y),
+                to: TilePos::new(40, y),
+                kind,
+            },
+        );
+    }
+    let zones = [
+        (rect((-40, -6), (40, -1)), ZoneKind::Residential),
+        (rect((-40, 1), (0, 6)), ZoneKind::Industrial),
+        (rect((1, 1), (40, 6)), ZoneKind::Commercial),
+        (rect((-40, 14), (40, 19)), ZoneKind::Office),
+        (rect((-40, 21), (40, 26)), ZoneKind::Residential),
+    ];
+    for (area, zone) in zones {
+        rec(
+            2,
+            Command::PaintZone {
+                area,
+                zone: Some(zone),
+            },
+        );
+    }
+    rec(
+        1_800,
+        Command::Bulldoze {
+            area: rect((30, 20), (30, 20)),
+        },
+    );
     log
 }
 
@@ -328,6 +378,31 @@ fn zoning_covers_the_rules() {
     // 消した道路にだけ面していたマスは消え、残った下の道路に面するマスは残る。
     assert_eq!(zone(10, 15), None);
     assert_eq!(zone(10, 6), Some(ZoneKind::Residential));
+}
+
+/// 建物の記録が、4 種類の区画に建ち、道路を消すと消えることを確かめる。
+#[test]
+fn growth_builds_every_zone_and_removes_with_the_road() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "growth")
+        .unwrap();
+    let mut world = World::new(s.seed);
+    replay(&mut world, &s.log, 1_799);
+    let count =
+        |w: &World, zone: ZoneKind| w.buildings().iter().filter(|(_, b)| b.zone == zone).count();
+    for zone in ZoneKind::ALL {
+        assert!(count(&world, zone) > 0, "{zone:?} の建物が建たない");
+    }
+    let offices = count(&world, ZoneKind::Office);
+    replay(&mut world, &s.log, 1);
+    assert!(count(&world, ZoneKind::Office) < offices);
+    assert!(
+        world
+            .buildings()
+            .iter()
+            .all(|(_, b)| b.area.min.y < 14 || b.area.min.y > 26)
+    );
 }
 
 fn golden_dir() -> PathBuf {
