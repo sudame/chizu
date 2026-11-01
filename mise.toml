@@ -2,6 +2,12 @@
 # rust の版は rust-toolchain.toml から読む。mise が RUSTUP_TOOLCHAIN を立てるので、ここで別の版を書くとファイルより優先されてしまう
 idiomatic_version_file_enable_tools = ["rust"]
 
+[env]
+# 手元では、worktree が何本あっても依存のクレートや build-std の std をビルドし直さずに済むよう、sccache を通す。
+# sccache は入力の中身で引くので、ブランチごとに中身が違っても古い成果物を使わない。
+# CI は target/ をキャッシュしているので通さない。cargo は空の RUSTC_WRAPPER を、設定がないものとして扱う
+RUSTC_WRAPPER = "{% if get_env(name='CI', default='') == '' %}sccache{% endif %}"
+
 [tools]
 biome = "2.6.4"
 jactionlint = "2.4.0"
@@ -9,6 +15,7 @@ node = "26.13.0"
 pnpm = "12.16.1"
 ripgrep = "15.2.0"
 rumdl = "0.3.2"
+sccache = "0.19.0"
 shellcheck = "0.11.0"
 # crates/chizu-wasm の wasm-bindgen と同じ版にする
 "github:wasm-bindgen/wasm-bindgen" = "0.2.130"
@@ -58,6 +65,10 @@ run = ["biome check .", "pnpm exec tsc --noEmit"]
 
 [tasks.lint]
 depends = ["lint:md", "lint:actions", "lint:rust", "lint:wasm", "lint:web"]
+
+[tasks.cargo]
+description = "mise の環境で cargo を回す。shell に mise の [env] が入っていなくても sccache を通せる"
+run = "cargo"
 
 [tasks."test:rust"]
 run = "cargo test --workspace"
