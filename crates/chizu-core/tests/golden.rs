@@ -13,8 +13,8 @@ use std::path::PathBuf;
 
 use chizu_core::{
     BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneOffset, RecordedCommand,
-    ReplayStats, RngPurpose, RoadKind, SidewalkPos, SimSpeed, StateHasher, Tick, TilePos, TileRect,
-    World, ZoneKind, replay, rng,
+    ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed, StateHasher, Tick,
+    TilePos, TileRect, World, ZoneKind, replay, rng,
 };
 
 /// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
@@ -71,6 +71,12 @@ fn scenarios() -> Vec<Scenario> {
             seed: 42,
             ticks: 3_600,
             log: growth(),
+        },
+        Scenario {
+            name: "utilities",
+            seed: 42,
+            ticks: 7_200 + 1_200,
+            log: utilities(),
         },
     ]
 }
@@ -195,6 +201,51 @@ fn growth() -> CommandLog {
             area: rect((30, 20), (30, 20)),
         },
     );
+    log
+}
+
+/// 2 本の通りに区画を塗り、片方にだけ発電所と浄水場を置く記録。道路に面さない場所と、
+/// 道路の上に置こうとして却下される場合も混ぜる。
+fn utilities() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let rect = |a: (i64, i64), b: (i64, i64)| {
+        TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1))
+    };
+    for (i, y) in [10, 50].into_iter().enumerate() {
+        let t = 1 + 2 * i as u64;
+        rec(
+            t,
+            Command::BuildRoad {
+                from: TilePos::new(0, y),
+                to: TilePos::new(40, y),
+                kind: RoadKind::Small,
+            },
+        );
+        for (area, zone) in [
+            (rect((0, y - 6), (40, y - 1)), ZoneKind::Residential),
+            (rect((0, y + 1), (40, y + 6)), ZoneKind::Industrial),
+        ] {
+            rec(
+                t + 1,
+                Command::PaintZone {
+                    area,
+                    zone: Some(zone),
+                },
+            );
+        }
+    }
+    let place = |kind, x, y, rotation| Command::PlaceBuilding {
+        kind,
+        at: TilePos::new(x, y),
+        rotation,
+    };
+    rec(5, place(ServiceKind::PowerPlant, 3, 9, 2));
+    rec(5, place(ServiceKind::WaterPump, 7, 9, 2));
+    rec(5, place(ServiceKind::WaterPump, 20, 30, 2));
+    rec(5, place(ServiceKind::WaterPump, 20, 10, 2));
     log
 }
 
@@ -404,6 +455,32 @@ fn growth_builds_every_zone_and_removes_with_the_road() {
             .iter()
             .all(|(_, b)| b.area.min.y < 14 || b.area.min.y > 26)
     );
+}
+
+/// 施設のある通りの建物だけに電気と水道が届き、段階が上がることを確かめる。
+#[test]
+fn utilities_supply_only_the_connected_street() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "utilities")
+        .unwrap();
+    let mut world = World::new(s.seed);
+    let stats = replay(&mut world, &s.log, s.ticks);
+    assert_denied_by(
+        &stats,
+        &[(DenyReason::NoRoadAccess, 1), (DenyReason::Occupied, 1)],
+    );
+    assert_eq!(world.facilities().len(), 2);
+    let near = |b: &chizu_core::building::Building| b.area.min.y < 30;
+    let buildings: Vec<_> = world.buildings().iter().map(|(_, b)| *b).collect();
+    assert!(buildings.iter().any(|b| near(b) && b.level >= 2));
+    assert!(buildings.iter().any(|b| !near(b)));
+    for b in &buildings {
+        assert_eq!(b.supply.power && b.supply.water, near(b), "{b:?}");
+        if !near(b) {
+            assert_eq!(b.level, 1);
+        }
+    }
 }
 
 fn golden_dir() -> PathBuf {

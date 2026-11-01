@@ -4,6 +4,7 @@ import {
   CHUNK_SIDE,
   type CommandMessage,
   type RoadKindName,
+  type ServiceName,
   type ZoneName,
 } from "../protocol/messages.ts";
 import type { Camera, Viewport } from "./camera.ts";
@@ -19,6 +20,7 @@ export type Tool =
   | { kind: "road"; road: RoadKindName }
   | { kind: "bulldoze" }
   | { kind: "zone"; zone: ZoneName }
+  | { kind: "service"; service: ServiceName }
   | { kind: "buy" };
 
 /** 画面の点（CSS ピクセル）の下にあるマス。 */
@@ -117,6 +119,88 @@ export function paintZoneCommand(zone: ZoneName, a: Tile, b: Tile): CommandMessa
     maxX: Math.max(a.x, b.x),
     maxY: Math.max(a.y, b.y),
   };
+}
+
+/** chizu-wasm の service_table の中身。 */
+export type ServiceInfo = { cost: number; width: number; depth: number };
+
+export function parseServiceTable(table: ArrayLike<number>): Record<ServiceName, ServiceInfo> {
+  const at = (i: number) => {
+    const v = table[i];
+    if (v === undefined) {
+      throw new Error("施設の表が短い");
+    }
+    return v;
+  };
+  return {
+    PowerPlant: { cost: at(0), width: at(1), depth: at(2) },
+    WaterPump: { cost: at(3), width: at(4), depth: at(5) },
+  };
+}
+
+/**
+ * 施設の rotation ごとの、間口のマスから道路へ向かう 1 歩。chizu-core の growth::DIRS と同じ順である。
+ */
+export const ROTATION_STEPS: readonly (readonly [number, number])[] = [
+  [0, -1],
+  [1, 0],
+  [0, 1],
+  [-1, 0],
+];
+
+const stepOf = (rotation: number) => ROTATION_STEPS[((rotation % 4) + 4) % 4] ?? [0, -1];
+
+/**
+ * 間口のマス at から置く施設が占める長方形。間口は道路に沿って width マス、奥へ depth マス伸びる。
+ * chizu-core の lot_tiles と同じ向きに並べる。
+ */
+export function serviceFootprint(
+  at: Tile,
+  rotation: number,
+  width: number,
+  depth: number,
+): { min: Tile; max: Tile } {
+  const [dx, dy] = stepOf(rotation);
+  const along = [-dy, dx];
+  const back = [-dx, -dy];
+  const far = {
+    x: at.x + (along[0] ?? 0) * (width - 1) + (back[0] ?? 0) * (depth - 1),
+    y: at.y + (along[1] ?? 0) * (width - 1) + (back[1] ?? 0) * (depth - 1),
+  };
+  return {
+    min: { x: Math.min(at.x, far.x), y: Math.min(at.y, far.y) },
+    max: { x: Math.max(at.x, far.x), y: Math.max(at.y, far.y) },
+  };
+}
+
+/** 中核に問い合わせた、向き 0〜3 ごとの置けるか。置けるなら null、置けないなら理由の文。 */
+export type ServiceProbe = (string | null)[];
+
+export type ServiceChoice = { rotation: number; placeable: boolean; reason: string | null };
+
+/**
+ * 置く向きを決める。手で決めた向きがあればそれを使い、なければ置ける最初の向きを選ぶ。
+ * どの向きにも置けなければ向き 0 を、置けないものとして返す。
+ */
+export function chooseRotation(probe: ServiceProbe, manual: number | null): ServiceChoice {
+  const at = (r: number) => (probe[r] === undefined ? "まだ調べていない" : probe[r]);
+  const pick = (rotation: number): ServiceChoice => {
+    const reason = at(rotation) ?? null;
+    return { rotation, placeable: reason === null, reason };
+  };
+  if (manual !== null) {
+    return pick(manual);
+  }
+  const ok = [0, 1, 2, 3].find((r) => at(r) === null);
+  return pick(ok ?? 0);
+}
+
+export function placeServiceCommand(
+  service: ServiceName,
+  at: Tile,
+  rotation: number,
+): CommandMessage {
+  return { kind: "PlaceBuilding", service, atX: at.x, atY: at.y, rotation };
 }
 
 /** マスを含むチャンクを買う。 */
