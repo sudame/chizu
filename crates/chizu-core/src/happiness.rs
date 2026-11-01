@@ -1,7 +1,8 @@
 //! 住民の幸福度。
 //!
 //! 住民ごとに通勤・生活サービス・暮らし向きの 3 つの点数（`0..=HAPPINESS_MAX`）を持ち、組ごとの更新で
-//! [`update_citizen`] が書き直す。3 つを重みを付けて足したものを幸福度とする（[`total`]）。
+//! [`update_citizen`] が書き直す。3 つを重みを付けて足し、生活サービスに応じた上限で抑えたものを幸福度とする
+//! （[`total`]）。
 //! - 通勤：家から職場までの所要時間。いまは移動がないので、[`commute_seconds`] で直線距離から見積もる。
 //!   移動の実時間が測れるようになったら、この関数を差し替える。
 //! - 生活サービス：家に電気と水道が届いているか。
@@ -47,6 +48,9 @@ pub const SAVINGS_FOR_FULL_BONUS: Money = Money(100_000);
 
 /// 幸福度を足すときの、通勤・生活サービス・暮らし向きの重み。
 pub const WEIGHTS: [u64; 3] = [1, 1, 3];
+
+/// 電気も水道も届かない住民の幸福度の上限。出ていく境目（45）より低くしてある。
+pub const SERVICELESS_CAP: u8 = 40;
 
 /// 組ごとの更新で、住民 1 人の点数を求めるのに読むもの。
 pub struct CitizenContext<'a> {
@@ -97,6 +101,9 @@ pub fn wealth_score(age: u8, employed: bool, savings: Money, tax_permille: u16) 
 }
 
 /// 3 つの点数を [`WEIGHTS`] で重みを付けて平均した幸福度（`0..=HAPPINESS_MAX`）。
+///
+/// 生活サービスの点数に応じて上限を設け、0 点なら [`SERVICELESS_CAP`]、満点なら上限なしとし、そのあいだは
+/// 一様に上げる。重みを付けて足すだけでは、電気も水道もない街でも職のある世帯が出ていかないためである。
 pub fn total(h: HappinessParts) -> u8 {
     let parts = [h.commute, h.services, h.wealth];
     let sum: u64 = parts
@@ -104,7 +111,10 @@ pub fn total(h: HappinessParts) -> u8 {
         .zip(WEIGHTS)
         .map(|(p, w)| u64::from(*p) * w)
         .sum();
-    (sum / WEIGHTS.iter().sum::<u64>()) as u8
+    let max = u64::from(HAPPINESS_MAX);
+    let floor = u64::from(SERVICELESS_CAP);
+    let cap = floor + (max - floor) * u64::from(h.services) / max;
+    (sum / WEIGHTS.iter().sum::<u64>()).min(cap) as u8
 }
 
 /// 職を得て、電気と水道の届く家に住み、通勤が短い、蓄えが上限の半分の働く年齢の人が越してきたときの幸福度。
@@ -202,7 +212,11 @@ mod tests {
         };
         assert_eq!(total(h(100, 100, 100)), 100);
         assert_eq!(total(h(100, 100, 0)), 40);
-        assert_eq!(total(h(0, 0, 100)), 60);
+        assert_eq!(total(h(0, 100, 100)), 80);
+        // 生活サービスが 0 点なら 40 点、50 点なら 70 点が上限になる。
+        assert_eq!(total(h(100, 0, 100)), 40);
+        assert_eq!(total(h(100, 50, 100)), 70);
+        assert_eq!(total(h(0, 50, 0)), 10);
         assert_eq!(total(HappinessParts::NEUTRAL), 50);
     }
 }

@@ -2,7 +2,7 @@ import init, {
   initThreadPool,
   parallel_sum,
   road_cost_table,
-  Simulation,
+  type Simulation,
   service_table,
   snapshot_layout,
   thread_count,
@@ -13,10 +13,12 @@ import type {
   ChunkData,
   CommandMessage,
   MainToWorker,
+  MoverArea,
   Outcome,
   WorkerToMain,
 } from "./protocol/messages.ts";
 import { layout } from "./protocol/snapshot.ts";
+import { startSimulation } from "./save/worker-side.ts";
 
 const SUM_N = 10_000_000;
 const FRAME_MS = 1000 / 60;
@@ -48,6 +50,11 @@ function sendChunks(sim: Simulation): void {
     { kind: "chunks", chunks },
     chunks.map((c) => c.tiles),
   );
+}
+
+function setMoverView(sim: Simulation, area: MoverArea | null): void {
+  const a = area ?? { minX: 0, minY: 0, maxX: 0, maxY: 0 };
+  sim.set_mover_view(a.minX, a.minY, a.maxX, a.maxY, area === null);
 }
 
 // 記録の通し番号から、画面が振った番号を引く
@@ -135,7 +142,8 @@ const ready = (async () => {
   if (JSON.stringify(JSON.parse(snapshot_layout())) !== JSON.stringify(layout)) {
     throw new Error("三重バッファの配置が WASM と画面で食い違う。WASM をビルドし直す");
   }
-  const sim = new Simulation(0n);
+  // 新しく始めるか、保存データから作り直すかは画面が決める
+  const sim = await startSimulation();
   sim.advance(0);
   // 三重バッファを確保するとメモリが伸びることがある。伸びたあとの SharedArrayBuffer を渡す。
   // 枠の位置はこのあと変わらないので、のちにメモリが伸びても渡した SharedArrayBuffer の範囲に収まる
@@ -190,7 +198,16 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
       case "view":
         // 送るのはタイマーの側だけにして、1 周期に送る数を CHUNKS_PER_FRAME に抑える
         chunkSync.setView(message.visible, message.forgotten);
+        setMoverView(sim, message.movers);
         break;
+      case "dev-spawn-walks": {
+        const { from, to, count } = message;
+        reply({
+          kind: "dev-spawned",
+          count: sim.spawn_dev_walks(from.x, from.y, to.x, to.y, count),
+        });
+        break;
+      }
     }
   } catch (error) {
     console.error(`操作を受け付けなかった：${String(error)}`);

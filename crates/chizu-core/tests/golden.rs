@@ -12,9 +12,9 @@
 use std::path::PathBuf;
 
 use chizu_core::{
-    ChunkCoord, Command, CommandLog, DenyReason, LaneOffset, Money, RecordedCommand, ReplayStats,
-    RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed, StateHasher, TICKS_PER_DAY, Tick,
-    TilePos, TileRect, World, ZoneKind, replay, rng,
+    BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneOffset, Money, RecordedCommand,
+    ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed, StateHasher,
+    TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind, replay, rng,
 };
 
 /// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
@@ -685,10 +685,11 @@ fn economy_settles_every_hour() {
     assert!(f.taxes[ZoneKind::Industrial.index()].0 > 0, "{f:?}");
     assert!(f.road_upkeep.0 > 0 && f.facility_upkeep.iter().all(|m| m.0 > 0));
     assert_eq!(stats.denied, 0);
-    // 1 時間ぶん進めると、1 日の見込みのおよそ 1/24 だけ所持金が動く。
-    let (money, net) = (world.money().0, world.finances().net().0);
-    replay(&mut world, &s.log, 300);
-    let moved = world.money().0 - money;
+    // 精算の tick を進めると、その tick の終わりの 1 日の見込みのおよそ 1/24 だけ所持金が動く。
+    replay(&mut world, &s.log, 200);
+    let money = world.money().0;
+    replay(&mut world, &s.log, 1);
+    let (moved, net) = (world.money().0 - money, world.finances().net().0);
     assert!((moved * 24 - net).abs() <= 24, "{moved} × 24 と {net}");
 }
 
@@ -891,9 +892,13 @@ fn walking_golden() {
         end.trips().len()
     );
     assert_eq!(walking_checkpoints(SEED, TICKS).0, got);
-    let path = golden_dir().join("walking.hash");
+    compare_golden("walking", &got);
+}
+
+fn compare_golden(name: &str, got: &str) {
+    let path = golden_dir().join(format!("{name}.hash"));
     if updating() {
-        std::fs::write(&path, &got).unwrap();
+        std::fs::write(&path, got).unwrap();
         return;
     }
     let expected = std::fs::read_to_string(&path)
@@ -902,4 +907,73 @@ fn walking_golden() {
         expected, got,
         "意図した変更なら CHIZU_UPDATE_GOLDEN=1 cargo test -p chizu-core --test golden で書き直す"
     );
+}
+
+/// 車の記録を再生し、状態ハッシュの列と、作った移動の数、終わりの世界を返す。建物が建ったあと、
+/// 決まった tick ごとに種から選んだ建物どうしを車で行き来させる。途中で道路を消し、建物も消える。
+/// 毎 tick、停めてある台数と押さえた台数の和が駐車場の台数を超えず、押さえた台数がその駐車場へ
+/// 向かう主体の数と同じで、駐車場が建っている建物にだけあることを確かめる。
+fn driving_checkpoints(seed: u64, ticks: u64) -> (String, u32, World) {
+    let log = growth();
+    let mut world = World::new(seed);
+    let mut digest = StateHasher::new();
+    let mut out = String::new();
+    let mut spawned = 0;
+    for _ in 0..ticks {
+        let t = world.tick().0;
+        if (1_200..2_000).contains(&t) && t.is_multiple_of(4) {
+            let ids: Vec<BuildingId> = world.buildings().iter().map(|(id, _)| id).collect();
+            let len = u32::try_from(ids.len()).unwrap();
+            for k in 0..3 {
+                let mut r = rng(seed, RngPurpose::DailySchedule, k, Tick(t));
+                let (a, b) = (ids[r.below(len) as usize], ids[r.below(len) as usize]);
+                spawned += u32::from(world.spawn_drive(a, b).is_some());
+            }
+        }
+        replay(&mut world, &log, 1);
+        let mut heading = std::collections::BTreeMap::<BuildingId, u32>::new();
+        for (_, t) in world.trips().iter() {
+            if let Some(b) = t
+                .parking_lot()
+                .filter(|b| world.buildings().get(*b).is_some())
+            {
+                *heading.entry(b).or_default() += 1;
+            }
+        }
+        for (id, lot) in world.trips().lots() {
+            let b = world
+                .buildings()
+                .get(id)
+                .expect("消えた建物に駐車場が残った");
+            assert!(u64::from(lot.parked + lot.reserved) <= b.parking_spaces());
+            assert_eq!(lot.reserved, heading.remove(&id).unwrap_or(0), "{id:?}");
+        }
+        assert!(
+            heading.is_empty(),
+            "押さえた空きが数えられていない {heading:?}"
+        );
+        let h = world.state_hash();
+        digest.write(&h);
+        let t = world.tick().0;
+        if t.is_multiple_of(250) || t == ticks {
+            out.push_str(&format!("{t} {h:016x} {:016x}\n", digest.finish()));
+        }
+    }
+    (out, spawned, world)
+}
+
+#[test]
+fn driving_golden() {
+    const SEED: u64 = 42;
+    const TICKS: u64 = 2_600;
+    let (got, spawned, end) = driving_checkpoints(SEED, TICKS);
+    assert!(spawned > 300, "作れた移動が少ない {spawned}");
+    assert!(
+        end.trips().len() < 30,
+        "着かずに残った移動が多い {}",
+        end.trips().len()
+    );
+    assert!(end.trips().lots().any(|(_, l)| l.parked > 0));
+    assert_eq!(driving_checkpoints(SEED, TICKS).0, got);
+    compare_golden("driving", &got);
 }

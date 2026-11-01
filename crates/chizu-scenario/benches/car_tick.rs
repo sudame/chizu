@@ -17,12 +17,12 @@ fn car_tick(c: &mut Criterion) {
     let ids = trips.spawn_drives(&net, &mut router, &walk_ends(1, &net, 10_000), Tick::ZERO);
     assert!(ids.iter().all(Option::is_some));
     for _ in 0..20 {
-        trips.step(&net, router.connectors());
+        trips.step(&net, &mut router);
     }
     c.bench_function("car_tick_10k", |b| {
         b.iter_batched(
             || trips.clone(),
-            |mut t| black_box(t.step(&net, router.connectors())),
+            |mut t| black_box(t.step(&net, &mut router)),
             BatchSize::LargeInput,
         );
     });

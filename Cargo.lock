@@ -139,6 +139,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chizu-bench-wasm"
+version = "0.1.0"
+dependencies = [
+ "chizu-scenario",
+ "wasm-bindgen",
+ "wasm-bindgen-rayon",
+]
+
+[[package]]
 name = "chizu-cli"
 version = "0.1.0"
 dependencies = [
@@ -161,6 +170,7 @@ version = "0.1.0"
 dependencies = [
  "chizu-core",
  "criterion",
+ "rayon",
 ]
 
 [[package]]

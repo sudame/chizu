@@ -4,7 +4,8 @@
 //!   世帯が外から来て入る。来る数は需要と空き家の数に応じて増える。家を失った世帯がいれば、
 //!   新しい世帯より先に空き家へ入る。家のないまま [`HOMELESS_LEAVE_TICKS`] たった世帯は街を出ていく。
 //! - 建物が消えたら、その tick のうちに住む世帯を家なしにし、働く住民の職場を外す。
-//! - 出ていく：幸福度の低い世帯は、1 時間ごとに一定の確率で街を出ていく。幸福度の平均は住宅の需要にも効く。
+//! - 出ていく：幸福度の平均が境目より低い世帯は、1 時間ごとに、下回った点数に比例する確率で街を出ていく。
+//!   幸福度の平均は住宅の需要にも効く。
 //! - 職場：[`assign_jobs`] で割り当て、職場ができた住民に通勤の予定を立てる。
 //! - 予定：家にいる住民は朝に職場へ、職場にいる住民は夕方に家へ出発する。出発の tick は
 //!   出発の待ち行列に積み、時刻が来たら居場所を切り替える。移動そのものはまだ作らない。
@@ -413,6 +414,11 @@ pub(crate) mod tests {
     /// 2 本の通り（y = 10、40）に区画を塗り、y = -40 の通りに発電所と浄水場を並べ、外の世界とつないだ街。
     /// 区画の種類は、4 つの帯を `zones` の順に繰り返して塗る。
     pub(crate) fn city(zones: &[ZoneKind]) -> World {
+        city_with(zones, true)
+    }
+
+    /// [`city`] と同じ街で、`services` が偽なら発電所と浄水場を置かない。
+    fn city_with(zones: &[ZoneKind], services: bool) -> World {
         let mut w = World::new_with_money(3, crate::units::Money(100_000_000));
         for y in [-40, 10, 40] {
             road(&mut w, (-60, y), (20, y));
@@ -427,7 +433,7 @@ pub(crate) mod tests {
         if !(-60..=20).contains(&corner.x) {
             road(&mut w, (corner.x, 10), (corner.x.clamp(-60, 20), 10));
         }
-        for i in 0..10 {
+        for i in (0..10).filter(|_| services) {
             let plant = Command::PlaceBuilding {
                 kind: ServiceKind::PowerPlant,
                 at: TilePos::new(-56 + 4 * i, -41),
@@ -435,7 +441,7 @@ pub(crate) mod tests {
             };
             apply(&mut w, plant);
         }
-        for i in 0..14 {
+        for i in (0..14).filter(|_| services) {
             let pump = Command::PlaceBuilding {
                 kind: ServiceKind::WaterPump,
                 at: TilePos::new(-55 + 2 * i, -39),
@@ -711,5 +717,22 @@ pub(crate) mod tests {
         let before = w.population().household_count();
         w.emigrate();
         assert_eq!(w.population().household_count(), before);
+    }
+
+    /// 電気も水道もない街は、移り住んでもすぐ出ていくので、人口が伸び続けない。
+    #[test]
+    fn a_city_without_services_does_not_keep_growing() {
+        let zones = [ZoneKind::Residential, ZoneKind::Industrial];
+        let mut w = city_with(&zones, false);
+        run_days(&mut w, 2);
+        let early = w.city_stats();
+        assert!(early.happiness < LEAVE_BELOW, "{early:?}");
+        run_days(&mut w, 2);
+        let late = w.city_stats();
+        assert!(late.citizens <= early.citizens, "{early:?} → {late:?}");
+        // 施設のある同じ街は、ずっと大きく育つ。
+        let mut served = city(&zones);
+        run_days(&mut served, 4);
+        assert!(served.city_stats().citizens > late.citizens * 2);
     }
 }

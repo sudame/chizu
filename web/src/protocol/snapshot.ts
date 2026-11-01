@@ -15,6 +15,9 @@ export type SnapshotHeader = {
   speed: number;
   paused: boolean;
   moverCount: number;
+  /** 移動体の座標の基準にするチャンク。移動体の x・y はこのチャンクの原点からのマスの数である。 */
+  baseCx: number;
+  baseCy: number;
 };
 
 /** 枠 `slot` の先頭の語の、バッファの中での語の位置。 */
@@ -70,6 +73,18 @@ export class SnapshotReader {
       speed: w(h.speed),
       paused: w(h.paused) !== 0,
       moverCount: w(h.moverCount),
+      baseCx: this.#signed[base + h.baseCx] ?? 0,
+      baseCy: this.#signed[base + h.baseCy] ?? 0,
     };
+  }
+
+  /**
+   * 読んでいる枠の移動体の語を、1 体 moverWords 語で並べたまま返す。中身は次に acquire するまで変わらない。
+   * count は acquire が返した moverCount にする。
+   */
+  movers(count: number): Uint32Array {
+    const start = slotBase(this.#reading) + layout.slotHeaderWords;
+    const n = Math.min(count, layout.maxMovers);
+    return this.#words.subarray(start, start + n * layout.moverWords);
   }
 }

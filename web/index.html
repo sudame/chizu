@@ -49,6 +49,32 @@
         width: 28em;
         height: 6em;
       }
+      #dev-tools {
+        position: fixed;
+        top: 40px;
+        right: 8px;
+        max-width: 20em;
+        text-align: right;
+      }
+      #dev-tools button[aria-pressed="true"] {
+        background: #2d6cdf;
+        color: #fff;
+      }
+      #dev-flag {
+        margin: 0;
+        font-size: 12px;
+        font-weight: bold;
+        color: #a33;
+      }
+      #dev-info {
+        margin: 4px 0 0;
+        font-size: 12px;
+        color: #a33;
+        background: rgb(255 255 255 / 85%);
+      }
+      #dev-info:empty {
+        display: none;
+      }
       #tool-info,
       #tool-message {
         min-width: 10em;
@@ -102,6 +128,7 @@
     <div id="overlay">
       <p id="status" data-state="loading">WASM を読み込んでいる</p>
       <canvas id="hud" width="480" height="96"></canvas>
+      <p id="dev-flag" hidden>開発用の操作あり：再現不可</p>
       <div id="city">
         <div>
           <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
@@ -140,6 +167,10 @@
       <span id="tool-message" aria-live="polite"></span>
     </div>
     <button type="button" id="feedback-open" hidden>フィードバック</button>
+    <div id="dev-tools">
+      <button type="button" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>
+      <p id="dev-info"></p>
+    </div>
     <dialog id="feedback">
       <form method="dialog">
         <p>気づいたことを書く。画面、状態、これまでの操作の記録と一緒に保存する。</p>
