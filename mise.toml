@@ -1,0 +1,8 @@
+[tools]
+rumdl = "0.3.2"
+
+[tasks.test]
+run = "echo 'テストはまだない'"
+
+[tasks.lint]
+run = "rumdl check ."
