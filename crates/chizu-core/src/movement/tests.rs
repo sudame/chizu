@@ -239,19 +239,110 @@ proptest! {
         let (from, to) = (at(pa.0, pa.1, pa.2, ao), at(pb.0, pb.1, pb.2, bo));
         let mut w = Walkers::new(n);
         let id = w.spawn(from, to).unwrap();
-        // 歩く距離は、経路のリンクの長さの和から、最初のリンクの手前と最後のリンクの先を引いたもの。
-        let links = w.trips.get(id).unwrap().route().links.clone();
-        let total: u64 = links
-            .iter()
-            .map(|l| u64::from(pos::link_geometry(&w.net, *l).unwrap().2.0))
-            .sum();
-        let start = u64::from(from.resolve(&w.net).unwrap().1.0);
-        let last = *links.last().unwrap();
-        let end = u64::from(to.resolve(&w.net).unwrap().1.0);
-        let last_len = u64::from(pos::link_geometry(&w.net, last).unwrap().2.0);
-        let mm = total - start - (last_len - end);
+        let mm = walked_mm(&w, id, from, to);
         prop_assert_eq!(w.ticks_to_arrive(id), walk_ticks(mm).max(1));
     }
+
+    #[test]
+    fn walks_across_diagonals_take_the_route_length(
+        a in 0_u64..30, b in 0_u64..30, ao in 0_u32..11_314, bo in 0_u32..11_314,
+    ) {
+        // 縦横と斜めの区間が交互に並ぶ輪の道路の上の 2 点。
+        let mut n = Network::new();
+        road(&mut n, (0, 0), (10, 0));
+        road(&mut n, (10, 0), (15, 5));
+        road(&mut n, (15, 5), (5, 5));
+        road(&mut n, (5, 5), (0, 0));
+        let ring = |k: u64| -> (i64, i64, (i8, i8)) {
+            let k = k as i64;
+            match k {
+                0..10 => (k, 0, (1, 0)),
+                10..15 => (k, k - 10, (1, 1)),
+                15..25 => (30 - k, 5, (-1, 0)),
+                _ => (30 - k, 30 - k, (-1, -1)),
+            }
+        };
+        let per = |s: (i8, i8)| if s.0 != 0 && s.1 != 0 { 11_314 } else { 8_000 };
+        let (pa, pb) = (ring(a), ring(b));
+        let from = at(pa.0, pa.1, pa.2, ao % per(pa.2));
+        let to = at(pb.0, pb.1, pb.2, bo % per(pb.2));
+        let mut w = Walkers::new(n);
+        let id = w.spawn(from, to).unwrap();
+        let mm = walked_mm(&w, id, from, to);
+        prop_assert_eq!(w.ticks_to_arrive(id), walk_ticks(mm).max(1));
+    }
+}
+
+/// 歩く距離。経路のリンクの長さの和から、最初のリンクの手前と最後のリンクの先を引いたもの。
+fn walked_mm(w: &Walkers, id: TripId, from: SidewalkPos, to: SidewalkPos) -> u64 {
+    let links = w.trips.get(id).unwrap().route().links.clone();
+    let len = |l: &LinkId| u64::from(pos::link_geometry(&w.net, *l).unwrap().2.0);
+    let total: u64 = links.iter().map(len).sum();
+    let start = u64::from(from.resolve(&w.net).unwrap().1.0);
+    let end = u64::from(to.resolve(&w.net).unwrap().1.0);
+    total - start - (len(links.last().unwrap()) - end)
+}
+
+#[test]
+fn walking_onto_a_diagonal_carries_the_rest_of_the_step() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0));
+    road(&mut n, (10, 0), (15, 5));
+    let mut w = Walkers::new(n);
+    let id = w
+        .spawn(at(2, 0, (1, 0), 0), at(12, 2, (1, 1), 5_000))
+        .unwrap();
+    assert_eq!(
+        w.ticks_to_arrive(id),
+        walk_ticks(8 * 8_000 + 2 * 11_314 + 5_000)
+    );
+}
+
+#[test]
+fn a_destination_behind_on_a_diagonal_goes_around() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (5, 5));
+    let mut w = Walkers::new(n);
+    let id = w.spawn(at(3, 3, (1, 1), 0), at(1, 1, (1, 1), 0)).unwrap();
+    // 先の端まで 2 歩、向こう側を 5 歩戻り、元の端から 1 歩。
+    assert_eq!(w.ticks_to_arrive(id), walk_ticks(8 * 11_314));
+}
+
+#[test]
+fn rerouting_with_an_old_router_rebuilds_it_first() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0));
+    road(&mut n, (10, 0), (20, 0));
+    road(&mut n, (10, 0), (10, 10));
+    road(&mut n, (10, 10), (20, 10));
+    road(&mut n, (20, 10), (20, 0));
+    let mut w = Walkers::new(n);
+    let id = w
+        .spawn(at(0, 0, (1, 0), 0), at(20, 0, (0, 1), 4_000))
+        .unwrap();
+    w.net
+        .bulldoze(TileRect::from_corners(
+            TilePos::new(15, 0),
+            TilePos::new(15, 0),
+        ))
+        .unwrap();
+    // 経路探索を作り直さずに呼んでも、古いグラフで経路を組まない。
+    assert!(w.trips.reroute(&w.net, &mut w.router).is_empty());
+    assert_eq!(w.router.version(), w.net.version());
+    w.ticks_to_arrive(id);
+}
+
+#[test]
+fn highways_have_no_sidewalk_positions() {
+    let mut n = Network::new();
+    n.add_highway(TilePos::new(0, 0), TilePos::new(10, 0));
+    let seg = n.segments().next().unwrap().0;
+    let link = LinkId {
+        segment: seg,
+        dir: Dir::Forward,
+        mode: LaneMode::Sidewalk,
+    };
+    assert_eq!(SidewalkPos::on_link(&n, link, LaneOffset(0)), None);
 }
 
 #[cfg(feature = "parallel")]
