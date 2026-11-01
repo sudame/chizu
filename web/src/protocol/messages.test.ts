@@ -11,6 +11,7 @@ describe("isWorkerToMain", () => {
     n: 3,
     sum: 6n,
     roadCosts: [250, 450, 750, 8000, 11314],
+    serviceTable: [60000, 4, 4, 25000, 2, 2],
   };
   const roads = {
     kind: "roads",
@@ -28,9 +29,11 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain(roads)).toBe(true);
     const buildings = {
       kind: "buildings",
-      buildings: new Float64Array(6),
-      stats: [1, 2, 3, 4, 5, 6, 7],
+      buildings: new Float64Array(7),
+      facilities: new Float64Array(5),
+      stats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     };
+    expect(isWorkerToMain({ ...buildings, facilities: new Float64Array(4) })).toBe(false);
     expect(isWorkerToMain(buildings)).toBe(true);
     expect(isWorkerToMain({ ...buildings, buildings: new Float64Array(5) })).toBe(false);
     expect(isWorkerToMain({ ...buildings, stats: [1, 2] })).toBe(false);

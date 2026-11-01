@@ -498,13 +498,82 @@ try {
     `時間を進めると住宅が建ち、数が出る（${await cityNumbers.textContent()}）`,
   );
   await page.waitForTimeout(100);
-  const house = await colorOfTile(bx, by);
+  // 印と重ならない、左上のマスの下寄りを読む
+  const house = await pixel(
+    cx + (bx + 0.5 - view.x) * view.zoom,
+    cy + (by + 0.8 - view.y) * view.zoom,
+  );
   check(
     (house[1] ?? 0) > (house[0] ?? 0) + 50 && brightness(house) < 250,
     `建物が住宅の濃い緑で描かれる（マス (${bx}, ${by})、${house.join(", ")}）`,
   );
   const residentialDemand = await page.locator("#demand .bar").first().getAttribute("data-demand");
   check(residentialDemand !== null, `住宅の需要の棒が出る（${residentialDemand}）`);
+
+  // 電気と水道。施設がないので、建物には届いていない印が出る
+  const unsupplied = async () => Number((await map.getAttribute("data-unsupplied")) ?? 0);
+  const waitUnsupplied = (test: "zero" | "some") =>
+    page.waitForFunction(
+      (t) => {
+        const n = Number(document.querySelector<HTMLElement>("#map")?.dataset.unsupplied ?? 0);
+        return t === "zero" ? n === 0 : n > 0;
+      },
+      test,
+      { timeout: TIMEOUT_MS },
+    );
+  // 電気の印は建物の左上のマスの (0.25, 0.3) を中心に置く（roads.ts の markCenter）。
+  // 縮小すると水道の印と重なるので、左の端寄りを読む
+  const markPixel = () =>
+    pixel(cx + (bx + 0.1 - view.x) * view.zoom, cy + (by + 0.3 - view.y) * view.zoom);
+  const isYellow = (c: number[]) => (c[0] ?? 0) > 200 && (c[1] ?? 0) > 180 && (c[2] ?? 0) < 100;
+  const markBefore = await markPixel();
+  check(
+    (await unsupplied()) > 0 && isYellow(markBefore),
+    `電気の届かない建物に黄色の印が出る（${await unsupplied()} 棟、${markBefore.join(", ")}）`,
+  );
+  // 道路を (52, 32) から (60, 32) へ延ばし、その下に発電所と浄水場を置く
+  await page.locator('button[data-tool="road-Small"]').click();
+  for (const [x, y] of [
+    [52, 32],
+    [60, 32],
+  ] as const) {
+    const p = tilePoint(x, y);
+    await page.mouse.click(p.x, p.y);
+  }
+  await page.keyboard.press("Escape");
+  const place = async (service: string, x: number, y: number) => {
+    await page.locator(`button[data-tool="service-${service}"]`).click();
+    const p = tilePoint(x, y);
+    await page.mouse.move(p.x, p.y);
+    const before = await outcomeCount();
+    await page.mouse.click(p.x, p.y);
+    return nextOutcome(before);
+  };
+  const plant = await place("PowerPlant", 53, 33);
+  const pump = await place("WaterPump", 57, 33);
+  check(
+    plant.outcome === "Applied" && pump.outcome === "Applied",
+    `発電所と浄水場を置ける（${plant.text}、${pump.text}）`,
+  );
+  await waitUnsupplied("zero");
+  await page.waitForTimeout(100);
+  const markAfter = await markPixel();
+  const plantColor = await colorOfTile(54, 34);
+  check(
+    !isYellow(markAfter) && (plantColor[0] ?? 0) > 200 && (plantColor[2] ?? 0) < 100,
+    `施設が橙で描かれ、建物に供給が届いて印が消える（施設 ${plantColor.join(", ")}、印の場所 ${markAfter.join(", ")}）`,
+  );
+  // 施設の前の道路を消すと、つながりが切れて印がまた出る
+  await page.locator('button[data-tool="bulldoze"]').click();
+  const cut = tilePoint(59, 32);
+  const beforeCut = await outcomeCount();
+  await page.mouse.click(cut.x, cut.y);
+  const cutResult = await nextOutcome(beforeCut);
+  await waitUnsupplied("some");
+  check(
+    cutResult.outcome === "Applied" && (await unsupplied()) > 0,
+    `施設の前の道路を消すと印がまた出る（${await unsupplied()} 棟）`,
+  );
   await page.locator('button[data-tool="none"]').click();
 
   await page.mouse.move(cx, cy);

@@ -1,6 +1,10 @@
 // メインスレッドと Worker のあいだでやりとりするメッセージ。
 
 export type RoadKindName = "Small" | "Medium" | "Large";
+/** 施設の種類。 */
+export type ServiceName = "PowerPlant" | "WaterPump";
+/** chizu-wasm の city_stats の数の個数。 */
+export const CITY_STATS_LENGTH = 10;
 /** 区画の種類。Clear は区画を消す。 */
 export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
 
@@ -24,7 +28,8 @@ export type CommandMessage =
       maxX: number;
       maxY: number;
     }
-  | { kind: "BuyChunk"; cx: number; cy: number };
+  | { kind: "BuyChunk"; cx: number; cy: number }
+  | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number };
 
 /** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
 export type Outcome = "Applied" | "Denied" | "Rejected" | "NotImplemented";
@@ -32,7 +37,12 @@ export type Outcome = "Applied" | "Denied" | "Rejected" | "NotImplemented";
 /** 区間 1 本の数の個数。chizu-wasm の road_segments と同じ。 */
 export const SEGMENT_STRIDE = 5;
 /** 建物 1 つの数の個数。chizu-wasm の buildings と同じ。 */
-export const BUILDING_STRIDE = 6;
+export const BUILDING_STRIDE = 7;
+/** 建物の供給の値のうち、電気が届いていることを表す値。水道は 2 を足す。 */
+export const SUPPLY_POWER = 1;
+export const SUPPLY_WATER = 2;
+/** 施設 1 つの数の個数。chizu-wasm の facilities と同じ。 */
+export const FACILITY_STRIDE = 5;
 /** ノード 1 つの数の個数。chizu-wasm の road_nodes と同じ。 */
 export const NODE_STRIDE = 3;
 
@@ -84,6 +94,8 @@ export type WorkerToMain =
       sum: bigint;
       /** chizu-wasm の road_cost_table。 */
       roadCosts: number[];
+      /** chizu-wasm の service_table。 */
+      serviceTable: number[];
     }
   | { kind: "chunks"; chunks: ChunkData[] }
   /** state は chizu-wasm の feedback_state の JSON、commands は記録を encode したもの。 */
@@ -96,7 +108,7 @@ export type WorkerToMain =
    * 建物と街の数字。建物の表が変わったときだけ送る。stats は chizu-wasm の city_stats で、
    * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並ぶ。
    */
-  | { kind: "buildings"; buildings: Float64Array; stats: number[] }
+  | { kind: "buildings"; buildings: Float64Array; facilities: Float64Array; stats: number[] }
   /**
    * id は画面が振ったコマンドの番号、seq は記録の通し番号。
    * 記録する前に受け付けなかったコマンドには seq がない。
@@ -133,7 +145,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         typeof v.crossOriginIsolated === "boolean" &&
         typeof v.n === "number" &&
         typeof v.sum === "bigint" &&
-        Array.isArray(v.roadCosts)
+        Array.isArray(v.roadCosts) &&
+        Array.isArray(v.serviceTable)
       );
     case "chunks":
       return Array.isArray(v.chunks) && v.chunks.every(isChunkData);
@@ -150,7 +163,9 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.buildings instanceof Float64Array &&
         v.buildings.length % BUILDING_STRIDE === 0 &&
         Array.isArray(v.stats) &&
-        v.stats.length === 7
+        v.facilities instanceof Float64Array &&
+        v.facilities.length % FACILITY_STRIDE === 0 &&
+        v.stats.length === CITY_STATS_LENGTH
       );
     case "outcome":
       return (

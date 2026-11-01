@@ -3,18 +3,31 @@ import { setupFeedback } from "./feedback.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { MapRenderer } from "./map/renderer.ts";
-import { buildingGeometry, type Color, Geometry, halfWidthOf, roadGeometry } from "./map/roads.ts";
+import {
+  buildingGeometry,
+  type Color,
+  FACILITY_COLOR,
+  Geometry,
+  halfWidthOf,
+  roadGeometry,
+  unsuppliedCount,
+} from "./map/roads.ts";
 import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
   clampArea,
+  facingRotation,
   MAX_ZONE_SIDE,
   paintZoneCommand,
   parseRoadCostTable,
+  parseServiceTable,
+  placeServiceCommand,
   type RoadCostTable,
   roadCost,
+  type ServiceInfo,
   screenToTile,
+  serviceFootprint,
   snapToEightDirections,
   type Tile,
   type Tool,
@@ -22,11 +35,14 @@ import {
 import {
   CHUNK_SIDE,
   type CommandMessage,
+  FACILITY_STRIDE,
   isWorkerToMain,
   type MainToWorker,
   type Outcome,
   type RoadKindName,
   SEGMENT_STRIDE,
+  type ServiceName,
+  TILE_ROAD,
   type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
@@ -214,6 +230,9 @@ const BUY_AREA: Color = [1, 1, 1, 0.2];
 
 let tool: Tool = { kind: "none" };
 let roadCosts: RoadCostTable | null = null;
+let services: Record<ServiceName, ServiceInfo> | null = null;
+// 施設の向き。近くの道路に向くよう自動で決め、R キーで回すと手で決めた向きを使う
+let manualRotation: number | null = null;
 let money = 0;
 let roadStart: Tile | null = null;
 let cursor: Tile | null = null;
@@ -234,6 +253,7 @@ const tileAt = (event: PointerEvent): Tile => {
 function updatePreview(): void {
   let geometry: Geometry | null = null;
   let info = "";
+  let infoText = "";
   if (tool.kind === "road" && cursor !== null) {
     const from = roadStart ?? cursor;
     const to = roadStart === null ? cursor : snapToEightDirections(roadStart, cursor);
@@ -258,6 +278,15 @@ function updatePreview(): void {
       { x: Math.max(start.x, end.x), y: Math.max(start.y, end.y) },
       color,
     );
+  } else if (tool.kind === "service" && cursor !== null && services !== null) {
+    const info = services[tool.service];
+    const rotation = serviceRotation(cursor, info);
+    const { min, max } = serviceFootprint(cursor, rotation, info.width, info.depth);
+    geometry = new Geometry(min);
+    const base = FACILITY_COLOR[tool.service === "PowerPlant" ? 1 : 2] ?? PREVIEW_OK;
+    const color: Color = info.cost > money ? PREVIEW_BAD : [base[0], base[1], base[2], 0.6];
+    geometry.rect(min, max, color);
+    infoText = `費用 ${info.cost.toLocaleString("ja-JP")}・R で回す`;
   } else if (tool.kind === "buy" && cursor !== null) {
     const c = buyChunkCommand(cursor);
     if (c.kind === "BuyChunk") {
@@ -268,7 +297,19 @@ function updatePreview(): void {
     }
   }
   renderer?.roads.setPreview(geometry);
-  toolInfo.textContent = info;
+  toolInfo.textContent = infoText === "" ? info : infoText;
+}
+
+/** マスに道路が通っているか。手元にないチャンクは通っていないとみなす。 */
+function isRoad(t: Tile): boolean {
+  const chunk = store.get(Math.floor(t.x / CHUNK_SIDE), Math.floor(t.y / CHUNK_SIDE));
+  const lx = t.x - Math.floor(t.x / CHUNK_SIDE) * CHUNK_SIDE;
+  const ly = t.y - Math.floor(t.y / CHUNK_SIDE) * CHUNK_SIDE;
+  return ((chunk?.tiles[ly * CHUNK_SIDE + lx] ?? 0) & TILE_ROAD) !== 0;
+}
+
+function serviceRotation(at: Tile, info: ServiceInfo): number {
+  return manualRotation ?? facingRotation(at, info.width, isRoad) ?? 0;
 }
 
 function cancelTool(): void {
@@ -285,6 +326,7 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
     b.setAttribute("aria-pressed", String(b === button));
   }
   mapCanvas.dataset.tool = button.dataset.tool;
+  manualRotation = null;
   if (renderer !== null) {
     renderer.showZonable = next.kind === "zone";
   }
@@ -305,6 +347,8 @@ function clickTile(at: Tile): void {
     }
   } else if (tool.kind === "buy") {
     sendCommand(buyChunkCommand(at));
+  } else if (tool.kind === "service" && services !== null) {
+    sendCommand(placeServiceCommand(tool.service, at, serviceRotation(at, services[tool.service])));
   }
 }
 
@@ -312,6 +356,11 @@ mapCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
 window.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     cancelTool();
+  } else if ((event.key === "r" || event.key === "R") && tool.kind === "service") {
+    const info = services?.[tool.service];
+    const current = cursor !== null && info !== undefined ? serviceRotation(cursor, info) : 0;
+    manualRotation = (current + 1) % 4;
+    updatePreview();
   }
 });
 // 押している指やボタンのポインター。2 つ目が来たら、どの操作も確定させずに取り消す
@@ -432,23 +481,27 @@ for (const button of toolButtons) {
     const name = button.dataset.tool ?? "none";
     const road = name.startsWith("road-") ? (name.slice(5) as RoadKindName) : null;
     const zone = name.startsWith("zone-") ? (name.slice(5) as ZoneName) : null;
+    const service = name.startsWith("service-") ? (name.slice(8) as ServiceName) : null;
     const next: Tool =
       road !== null
         ? { kind: "road", road }
         : zone !== null
           ? { kind: "zone", zone }
-          : name === "bulldoze" || name === "buy"
-            ? { kind: name }
-            : { kind: "none" };
+          : service !== null
+            ? { kind: "service", service }
+            : name === "bulldoze" || name === "buy"
+              ? { kind: name }
+              : { kind: "none" };
     selectTool(next, button);
   });
 }
 
 const DONE: Record<CommandMessage["kind"], string> = {
   BuildRoad: "道路を引いた",
-  Bulldoze: "道路を消した",
+  Bulldoze: "取り壊した",
   BuyChunk: "土地を買った",
   PaintZone: "区画を塗った",
+  PlaceBuilding: "施設を置いた",
   SetSimSpeed: "速度を変えた",
 };
 function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?: string): void {
@@ -491,11 +544,13 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   if (message.kind === "buildings") {
-    buildings = buildingGeometry(message.buildings);
+    buildings = buildingGeometry(message.buildings, message.facilities);
     renderer?.roads.setBuildings(buildings);
     renderCityStats(parseCityStats(message.stats));
     // test:wasm が読む
     mapCanvas.dataset.firstBuilding = Array.from(message.buildings.subarray(0, 4)).join(",");
+    mapCanvas.dataset.unsupplied = String(unsuppliedCount(message.buildings));
+    mapCanvas.dataset.facilities = String(message.facilities.length / FACILITY_STRIDE);
     return;
   }
   if (message.kind === "outcome") {
@@ -522,6 +577,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   roadCosts = parseRoadCostTable(message.roadCosts);
+  services = parseServiceTable(message.serviceTable);
   let reader: SnapshotReader;
   try {
     reader = new SnapshotReader(message.memory, message.snapshotOffset);

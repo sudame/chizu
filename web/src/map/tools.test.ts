@@ -5,12 +5,16 @@ import {
   bulldozeCommand,
   buyChunkCommand,
   clampArea,
+  facingRotation,
   MAX_ROAD_TILES,
   MAX_ZONE_SIDE,
   paintZoneCommand,
   parseRoadCostTable,
+  parseServiceTable,
+  placeServiceCommand,
   roadCost,
   screenToTile,
+  serviceFootprint,
   snapToEightDirections,
 } from "./tools.ts";
 
@@ -121,5 +125,46 @@ describe("コマンドの組み立て", () => {
     expect(buyChunkCommand({ x: 64, y: -1 })).toEqual({ kind: "BuyChunk", cx: 1, cy: -1 });
     expect(buyChunkCommand({ x: 63, y: -64 })).toEqual({ kind: "BuyChunk", cx: 0, cy: -1 });
     expect(buyChunkCommand({ x: -65, y: 0 })).toEqual({ kind: "BuyChunk", cx: -2, cy: 0 });
+  });
+});
+
+describe("施設", () => {
+  test("向きごとの占める長方形は、間口が道路に沿い、奥行きが道路から離れる", () => {
+    const at = { x: 10, y: 10 };
+    // 0：道路は上。間口は右へ、奥行きは下へ
+    expect(serviceFootprint(at, 0, 4, 2)).toEqual({ min: { x: 10, y: 10 }, max: { x: 13, y: 11 } });
+    // 1：道路は右。間口は下へ、奥行きは左へ
+    expect(serviceFootprint(at, 1, 4, 2)).toEqual({ min: { x: 9, y: 10 }, max: { x: 10, y: 13 } });
+    // 2：道路は下。間口は左へ、奥行きは上へ
+    expect(serviceFootprint(at, 2, 4, 2)).toEqual({ min: { x: 7, y: 9 }, max: { x: 10, y: 10 } });
+    // 3：道路は左。間口は上へ、奥行きは右へ
+    expect(serviceFootprint(at, 3, 4, 2)).toEqual({ min: { x: 10, y: 7 }, max: { x: 11, y: 10 } });
+  });
+
+  test("間口がすべて道路に面する向きを選ぶ", () => {
+    // y = 20 の横の道路の下側に置くと、道路は上（0）
+    const road = (t: { x: number; y: number }) => t.y === 20 && t.x >= 0 && t.x <= 30;
+    expect(facingRotation({ x: 5, y: 21 }, 4, road)).toBe(0);
+    // 上側に置くと、道路は下（2）。間口は左へ伸びる
+    expect(facingRotation({ x: 5, y: 19 }, 4, road)).toBe(2);
+    // 道路の端からはみ出す間口では面していない
+    expect(facingRotation({ x: 29, y: 21 }, 4, road)).toBeNull();
+    expect(facingRotation({ x: 5, y: 25 }, 2, road)).toBeNull();
+  });
+
+  test("施設の表を読み、置くコマンドを組み立てる", () => {
+    expect(parseServiceTable([60000, 4, 4, 25000, 2, 2]).WaterPump).toEqual({
+      cost: 25000,
+      width: 2,
+      depth: 2,
+    });
+    expect(() => parseServiceTable([1, 2])).toThrow();
+    expect(placeServiceCommand("PowerPlant", { x: -3, y: 4 }, 2)).toEqual({
+      kind: "PlaceBuilding",
+      service: "PowerPlant",
+      atX: -3,
+      atY: 4,
+      rotation: 2,
+    });
   });
 });
