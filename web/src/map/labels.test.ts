@@ -240,6 +240,36 @@ describe("道路の名前", () => {
     }
   });
 
+  test("道路を延ばしても、同じ位置のラベルは同じ識別子のまま残る", () => {
+    const camera = { x: 0, y: 0, zoom: 4 };
+    const before = roadCandidates(roadRuns(0, [-200, 0, 100, 0, 3]), camera, vp, 0, measure);
+    const after = roadCandidates(
+      roadRuns(0, [-200, 0, 100, 0, 3, 100, 0, 300, 0, 3]),
+      camera,
+      vp,
+      0,
+      measure,
+    );
+    expect(before.length).toBeGreaterThan(0);
+    for (const c of before) {
+      const same = after.find((d) => d.id === c.id);
+      expect(same?.wx).toBeCloseTo(c.wx);
+    }
+  });
+
+  test("画面の端にかかって字が収まらない位置には置かず、見えている部分の真ん中にずらさない", () => {
+    const runs = roadRuns(0, [-200, 0, 200, 0, 3]);
+    // 倍率 4 では、繰り返す位置は x = (k + 0.5) × 90 マスにある。x = 45 が画面の右端に来るときは出さない
+    const camera = { x: 45 - 400 / 4, y: 0, zoom: 4 };
+    const xs = roadCandidates(runs, camera, vp, STAGE_FAR, measure).map((c) => c.wx);
+    expect(xs.length).toBeGreaterThan(0);
+    for (const x of xs) {
+      const r = x / 90 - 0.5;
+      expect(r - Math.round(r)).toBeCloseTo(0);
+    }
+    expect(xs.some((x) => Math.abs(x - 45) < 1e-6)).toBe(false);
+  });
+
   test("段で出さない種類の道路には置かない", () => {
     const runs = roadRuns(0, [0, 0, 100, 0, 1]);
     const camera = { x: 50, y: 0, zoom: 6 };

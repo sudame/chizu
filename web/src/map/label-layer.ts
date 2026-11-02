@@ -25,6 +25,7 @@ import {
   type TextStyle,
   type Viewport,
 } from "./labels.ts";
+import { chunkOf } from "./names.ts";
 
 const FONT_FAMILY = '"Hiragino Sans", "Noto Sans JP", system-ui, sans-serif';
 const HALO = "#ffffff";
@@ -37,16 +38,8 @@ const SHIELD_PAD_Y = 3;
 const VERTICAL_ADVANCE = 1.05;
 // 覚えておく画像の数の上限。超えたら全部捨てて作り直す
 const MAX_SPRITES = 2000;
-// パネルの下になる所。ここにはラベルを置かない
-const OBSTACLE_SELECTORS = [
-  "#hudbar",
-  "#inspector",
-  "#growth-notice",
-  "#toolstack",
-  "#map-controls",
-  "#map-meta",
-  "#feedback-open",
-];
+// 地図の上に重なるパネル。見えているものの下にはラベルを置かない
+const PANEL_SELECTOR = "[data-map-panel]";
 
 type Sprite = { image: HTMLCanvasElement; w: number; h: number };
 
@@ -80,7 +73,6 @@ export class LabelLayer {
   #placesDirty = false;
   #stage = STAGE_STANDARD;
   #viewKey = "";
-  #obstacles: Rect[] | null = null;
   #lastFrame: number | null = null;
   #animating = false;
   #dpr = 1;
@@ -94,18 +86,42 @@ export class LabelLayer {
     }
     this.#ctx = ctx;
     this.#measureCtx = measure;
-    // パネルの大きさや出し入れが変わったら、置かない所を測り直す
-    const observer = new ResizeObserver(() => {
-      this.#obstacles = null;
+    // パネルの開け閉め、知らせの出し入れ、大きさの変化で置き直す
+    const replace = () => {
       this.#viewKey = "";
+    };
+    const resized = new ResizeObserver(replace);
+    for (const el of document.querySelectorAll(PANEL_SELECTOR)) resized.observe(el);
+    new MutationObserver((records) => {
+      if (records.some((r) => this.#panelChanged(r, resized))) replace();
+    }).observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["hidden", "open", "class", "style"],
+      attributeOldValue: true,
     });
-    for (const selector of OBSTACLE_SELECTORS) {
-      const el = document.querySelector(selector);
-      if (el !== null) observer.observe(el);
+  }
+
+  /**
+   * パネルの見え方が変わりうる変化か。毎フレーム同じ値を書き直す属性と、文字だけの書き換え
+   * （時計など）は数えない。足されたパネルは大きさの変化も見る。
+   */
+  #panelChanged(r: MutationRecord, resized: ResizeObserver): boolean {
+    if (r.type === "attributes") {
+      return (
+        r.target instanceof Element &&
+        r.attributeName !== null &&
+        r.target.getAttribute(r.attributeName) !== r.oldValue
+      );
     }
-    window.addEventListener("resize", () => {
-      this.#obstacles = null;
-    });
+    let changed = false;
+    for (const node of [...r.addedNodes, ...r.removedNodes]) {
+      if (!(node instanceof Element)) continue;
+      changed = true;
+      if (node.isConnected && node.matches(PANEL_SELECTOR)) resized.observe(node);
+    }
+    return changed;
   }
 
   /** 街の種。名前はこの種から作る。 */
@@ -137,6 +153,9 @@ export class LabelLayer {
   }
 
   readonly #isWaterside = (cx: number, cy: number) => this.#water.get(`${cx},${cy}`) === true;
+  // マスが届く前のチャンクは水辺か分からず、「浜」の地区が別の名前で出てしまうので、届くまで出さない
+  readonly #known = (x: number, y: number) =>
+    this.#water.has(`${chunkOf(Math.floor(x))},${chunkOf(Math.floor(y))}`);
 
   /** 毎フレーム呼ぶ。要るときだけ置き場所を求め直し、描き直す。 */
   frame(camera: CameraView, viewport: Viewport, now: number): void {
@@ -150,8 +169,12 @@ export class LabelLayer {
       changed = true;
     }
     if (this.#seed !== null && this.#placesDirty) {
-      this.#districts = districtLabels(this.#seed, this.#buildings, this.#isWaterside);
-      this.#facilityLabels = facilityLabels(this.#seed, this.#facilities, this.#isWaterside);
+      this.#districts = districtLabels(this.#seed, this.#buildings, this.#isWaterside).filter((d) =>
+        this.#water.has(`${d.cx},${d.cy}`),
+      );
+      this.#facilityLabels = facilityLabels(this.#seed, this.#facilities, this.#isWaterside).filter(
+        (f) => this.#known(f.x, f.y),
+      );
       this.#placesDirty = false;
       changed = true;
     }
@@ -197,24 +220,21 @@ export class LabelLayer {
     this.canvas.dataset.placeMs = (performance.now() - start).toFixed(3);
   }
 
+  /** 見えているパネルの範囲。置き場所を求めるたびに読み直す。 */
   #readObstacles(): Rect[] {
-    if (this.#obstacles === null) {
-      const map = this.canvas.getBoundingClientRect();
-      this.#obstacles = [];
-      for (const selector of OBSTACLE_SELECTORS) {
-        const el = document.querySelector<HTMLElement>(selector);
-        if (el === null) continue;
-        const r = el.getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) continue;
-        this.#obstacles.push({
-          x0: r.left - map.left,
-          y0: r.top - map.top,
-          x1: r.right - map.left,
-          y1: r.bottom - map.top,
-        });
-      }
+    const map = this.canvas.getBoundingClientRect();
+    const out: Rect[] = [];
+    for (const el of document.querySelectorAll(PANEL_SELECTOR)) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) continue;
+      out.push({
+        x0: r.left - map.left,
+        y0: r.top - map.top,
+        x1: r.right - map.left,
+        y1: r.bottom - map.top,
+      });
     }
-    return this.#obstacles;
+    return out;
   }
 
   #draw(camera: CameraView, viewport: Viewport): void {

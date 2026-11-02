@@ -854,6 +854,7 @@ setupFeedback({
       send({ kind: "feedback" });
     }),
   map: mapCanvas,
+  overlays: [labels.canvas],
   camera: () => ({ x: camera.x, y: camera.y, zoom: camera.zoom }),
 });
 

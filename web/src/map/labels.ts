@@ -148,9 +148,14 @@ export type Candidate = {
 
 // ---- 道路 ----
 
-/** 同じ直線の上で続いている、同じ種類の区間をつないだもの。端点はマスの中心のワールド座標。 */
+/**
+ * 同じ直線の上で続いている、同じ種類の区間をつないだもの。端点はマスの中心のワールド座標。
+ * key は直線の鍵と種類で、同じ直線の上の離れた区間も同じ鍵になる。道路を延ばしても変わらない。
+ */
 export type RoadRun = {
   key: string;
+  /** 直線の原点から a までの、直線に沿ったワールドの距離（マス）。繰り返す位置をこの原点から決める。 */
+  start: number;
   kind: number;
   name: string;
   orientation: Orientation;
@@ -198,6 +203,7 @@ export function roadRuns(seed: Seed, segments: ArrayLike<number>): RoadRun[] {
       // 45 度でない向きは作れないが、来たらその区間だけで置く
       runs.push({
         key: `${lineKey}|${kind}`,
+        start: 0,
         kind,
         name: roadName(seed, lineKey, kind),
         orientation: "angled",
@@ -239,7 +245,8 @@ export function roadRuns(seed: Seed, segments: ArrayLike<number>): RoadRun[] {
       const a = linePoint(lineKey, lo);
       const b = linePoint(lineKey, hi);
       runs.push({
-        key: `${groupKey}|${lo}`,
+        key: groupKey,
+        start: (lo + 0.5) * (orientation === "angled" ? Math.SQRT2 : 1),
         kind,
         name,
         orientation,
@@ -311,8 +318,9 @@ const toWorld = (camera: CameraView, vp: Viewport, sx: number, sy: number) => ({
 });
 
 /**
- * 道路の名前の候補。見えている部分ごとに置き、長い区間は ROAD_LABEL_REPEAT ごとに繰り返す。
- * 繰り返す位置は区間の端からの距離で決めるので、カメラを動かしても地図と一緒に動く。
+ * 道路の名前の候補。直線の原点から ROAD_LABEL_REPEAT ごとの位置に置き、画面に収まるものだけを出す。
+ * 位置は直線の上で決まっているので、カメラを動かしても地図と一緒に動き、道路を延ばしても同じラベルが残る。
+ * その位置が 1 つも入らない短い区間は、区間の真ん中に置く。
  */
 export function roadCandidates(
   runs: readonly RoadRun[],
@@ -353,14 +361,20 @@ export function roadCandidates(
         : size.w;
     const need = along + ROAD_LABEL_SLACK;
     if (hi - lo < need) continue;
+    // 直線の原点からの距離（画面のピクセル）で、区間は [origin, origin + length] にある
+    const origin = run.start * camera.zoom;
     const half = ROAD_LABEL_REPEAT / 2;
-    const first = Math.ceil((lo + need / 2 - half) / ROAD_LABEL_REPEAT);
-    const last = Math.floor((hi - need / 2 - half) / ROAD_LABEL_REPEAT);
+    const first = Math.ceil((origin + need / 2 - half) / ROAD_LABEL_REPEAT);
+    const last = Math.floor((origin + length - need / 2 - half) / ROAD_LABEL_REPEAT);
     const spots: [string, number][] = [];
-    for (let k = first; k <= last; k++) spots.push([String(k), half + k * ROAD_LABEL_REPEAT]);
-    if (spots.length === 0) spots.push(["m", (lo + hi) / 2]);
+    for (let k = first; k <= last; k++) {
+      spots.push([String(k), half + k * ROAD_LABEL_REPEAT - origin]);
+    }
+    if (spots.length === 0) spots.push([`c${run.start}`, length / 2]);
     const [hw, hh] = rotatedHalf(size.w, size.h, angle);
-    for (const [tag, p] of spots) {
+    // 見えている部分に、字の長さと余白ごと収まるものだけを出す
+    const visible = spots.filter(([, p]) => p - need / 2 >= lo && p + need / 2 <= hi);
+    for (const [tag, p] of visible) {
       const sx = a.x + ux * p;
       const sy = a.y + uy * p;
       const world = toWorld(camera, vp, sx, sy);
