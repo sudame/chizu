@@ -14,7 +14,9 @@ import {
 
 describe("街の数字", () => {
   test("city_stats の並びを読む", () => {
-    expect(parseCityStats([3, 40, 12, 20, -5, 0, 7, 400, 300, 25, 1, 0, 2, 0, 9, 0])).toEqual({
+    expect(
+      parseCityStats([3, 40, 12, 20, -5, 0, 7, 400, 300, 25, 1, 0, 2, 0, 9, 0, 200, 150, 25, 1, 0]),
+    ).toEqual({
       buildings: 3,
       households: 40,
       workplaces: 12,
@@ -28,6 +30,11 @@ describe("街の数字", () => {
       waterIsolated: 0,
       powerGap: 9,
       waterGap: 0,
+      mainPower: 200,
+      mainWater: 150,
+      mainDemand: 25,
+      powerOthers: 1,
+      waterOthers: 0,
     });
     expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 0, 1200, 1, 2]))).toBe(
       "電気 400 / 需要 1,200・水道 0 / 需要 1,200",
@@ -35,6 +42,19 @@ describe("街の数字", () => {
     expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 300, 10, 0, 0]))).toBe(
       "電気 400 / 需要 10・水道 300 / 需要 10",
     );
+  });
+
+  test("余りは主の網で見て、ほかの網にある施設の分は足さない", () => {
+    // 合計の電気は 7,200 だが、主の網は 3,600 で需要 3,500 しかない。つながっていない発電所が 1 基ある。
+    const stats = parseCityStats([
+      5, 0, 0, 0, 0, 0, 0, 7200, 3000, 3500, 1, 0, 0, 0, 0, 0, 3600, 3000, 3500, 1, 0,
+    ]);
+    expect(formatUtilities(stats)).toBe(
+      "電気 3,600 / 需要 3,500（ほかの網 1）・水道 3,000 / 需要 3,500",
+    );
+    expect(utilityLowHeadroom(stats)?.reasons).toEqual([
+      "電気の余りが 2% になった。発電所を足す用意をする",
+    ]);
   });
 
   test("届いていない建物がなければ知らせない", () => {

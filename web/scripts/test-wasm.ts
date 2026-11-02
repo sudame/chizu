@@ -1338,6 +1338,69 @@ try {
     !(await growth.isVisible()),
     `施設を置いて余裕が戻ると、建たない理由の知らせが消える（${await growth.textContent()}）`,
   );
+  // 道路を消して入口を失った浄水場は、孤立した施設として知らせが出る。押すとそこへ移る。
+  // 区画が止まっているかは街の育ち方しだいなので、時計を止めてから確かめる
+  await pickTool(page, "road-Small");
+  for (const [x, y] of [
+    [52, 12],
+    [60, 12],
+  ] as const) {
+    const p = tilePoint(x, y);
+    await page.mouse.click(p.x, p.y);
+  }
+  await page.keyboard.press("Escape");
+  // 所持金が残り少ないので、安いほうの浄水場を置く
+  const cutOff = await place("WaterPump", 53, 13);
+  check(cutOff.outcome === "Applied", `つながっていない道路に浄水場を置ける（${cutOff.text}）`);
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
+  await page.locator('button[data-tool="bulldoze"]').click();
+  const beforeRoadCut = await outcomeCount();
+  const roadCutFrom = tilePoint(52, 12);
+  const roadCutTo = tilePoint(60, 12);
+  await page.mouse.move(roadCutFrom.x, roadCutFrom.y);
+  await page.mouse.down();
+  await page.mouse.move(roadCutTo.x, roadCutTo.y, { steps: 4 });
+  await page.mouse.up();
+  const roadCut = await nextOutcome(beforeRoadCut);
+  check(roadCut.outcome === "Applied", `浄水場の前の道路を消せる（${roadCut.text}）`);
+  await page.keyboard.press("Escape");
+  await page
+    .waitForFunction(
+      () =>
+        document
+          .querySelector<HTMLElement>("#growth-notice")
+          ?.textContent?.includes("つながっていない"),
+      undefined,
+      { timeout: TIMEOUT_MS },
+    )
+    .catch(() => undefined);
+  check(
+    (await growth.isVisible()) &&
+      /施設はあるが、街の道路網につながっていない（浄水場 1）/.test(
+        (await growth.textContent()) ?? "",
+      ),
+    `つながっていない浄水場の知らせが出る（${await growth.textContent()}）`,
+  );
+  // 止まっている区画があれば、行き先に先に入る。押すたびに次へ移るので、孤立した施設に着くまで押す
+  const beforeCutOff = await mapState();
+  await stallButton.focus();
+  let atCutOff = beforeCutOff;
+  for (let i = 0; i < 8; i++) {
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    atCutOff = await mapState();
+    if (Math.abs(atCutOff.x - 53.5) < 8 && Math.abs(atCutOff.y - 13.5) < 8) {
+      break;
+    }
+  }
+  check(
+    Math.abs(atCutOff.x - 53.5) < 8 && Math.abs(atCutOff.y - 13.5) < 8,
+    `知らせを押すと、つながっていない浄水場へカメラが動く（カメラ ${atCutOff.x.toFixed(1)}, ${atCutOff.y.toFixed(1)}）`,
+  );
+  await panCameraBy(beforeCutOff.x - atCutOff.x, beforeCutOff.y - atCutOff.y);
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
   // 電気の主題図では地図を白で薄めるが、発電所は薄めずにそのまま（橙）出す。

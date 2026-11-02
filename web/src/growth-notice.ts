@@ -1,4 +1,5 @@
 // 区画が建たない理由の知らせ。電気か水道の余裕がなくて新築が止まっている間口を、区画の種類ごとに数えて出す。
+// 施設はあるが街の道路網につながっていない場合も、同じ知らせに出す。
 
 /** 区画の種類の順。chizu-wasm の overview の並びと合わせる。 */
 export const ZONE_NAMES = ["住宅", "商業", "工業", "オフィス"] as const;
@@ -15,6 +16,34 @@ export function parseGrowthBlocks(overview: number[]): GrowthBlocks {
     const base = GROWTH_OFFSET + z * 3;
     return { blocked: at(base), noPower: at(base + 1), noWater: at(base + 2) };
   });
+}
+
+/** つながっていない施設 1 つ。x, y は施設の道路に面したマス、kind は施設の種類の値（発電所が 1、浄水場が 2）。 */
+export type Isolated = { x: number; y: number; kind: number };
+
+/** worker から届いた平らな配列 [x, y, 種類, ...] を読む。 */
+export function parseIsolated(flat: number[]): Isolated[] {
+  const out: Isolated[] = [];
+  for (let i = 0; i + 2 < flat.length; i += 3) {
+    out.push({ x: flat[i] ?? 0, y: flat[i + 1] ?? 0, kind: flat[i + 2] ?? 0 });
+  }
+  return out;
+}
+
+/** 施設はあるが、街の道路網につながっていない。なければ null。 */
+export function isolatedNotice(isolated: Isolated[]): GrowthNotice | null {
+  if (isolated.length === 0) {
+    return null;
+  }
+  const count = (kind: number) => isolated.filter((f) => f.kind === kind).length;
+  const parts = [
+    ...(count(1) > 0 ? [`発電所 ${count(1)}`] : []),
+    ...(count(2) > 0 ? [`浄水場 ${count(2)}`] : []),
+  ];
+  return {
+    headline: `施設はあるが、街の道路網につながっていない（${parts.join("・")}）`,
+    action: "道路でつなぐか、街の道路網のそばに置き直す。つながっていない分の余りは数えない",
+  };
 }
 
 export type GrowthNotice = { headline: string; action: string };
@@ -58,7 +87,10 @@ const before = (a: { x: number; y: number }, b: { x: number; y: number }) =>
  * 前に移った網の代表のマス last より座標の順で後ろにある、最初の網を選ぶ。後ろがなければ最初の網へ戻る。
  * last が null なら最初の網である。網の数が変わっても、同じ網に戻ったり、飛ばしたりしにくい。
  */
-export function pickStall(stalls: Stall[], last: { x: number; y: number } | null): Stall | null {
+export function pickStall<T extends { x: number; y: number }>(
+  stalls: T[],
+  last: { x: number; y: number } | null,
+): T | null {
   const sorted = [...stalls].sort((a, b) => (before(a, b) ? -1 : before(b, a) ? 1 : 0));
   if (last === null) {
     return sorted[0] ?? null;
@@ -66,21 +98,41 @@ export function pickStall(stalls: Stall[], last: { x: number; y: number } | null
   return sorted.find((s) => before(last, s)) ?? sorted[0] ?? null;
 }
 
-/** 知らせの見た目。ボタンの文言は網の数で決まる。 */
+/** 知らせの見た目。ボタンの文言は移る先の数と種類で決まる。 */
 export type NoticeView = { headline: string; action: string; jump: string | null };
 
-export function noticeView(blocks: GrowthBlocks, stalls: Stall[]): NoticeView | null {
-  const notice = growthNotice(blocks);
-  if (notice === null) {
+/**
+ * 止まっている区画の知らせと、つながっていない施設の知らせを 1 つにまとめる。どちらもなければ null。
+ * 両方あるときは、見出しは区画の知らせで、施設の知らせを行動の文の後ろに足す。
+ */
+export function noticeView(
+  blocks: GrowthBlocks,
+  stalls: Stall[],
+  isolated: Isolated[] = [],
+): NoticeView | null {
+  const growth = growthNotice(blocks);
+  const cut = isolatedNotice(isolated);
+  if (growth === null && cut === null) {
     return null;
   }
+  const targets = (growth === null ? 0 : stalls.length) + isolated.length;
+  const what =
+    growth !== null && cut !== null
+      ? "止まっている区画・つながっていない施設"
+      : cut !== null
+        ? "つながっていない施設"
+        : "止まっている区画";
   const jump =
-    stalls.length === 0
+    targets === 0
       ? null
-      : stalls.length > 1
-        ? "止まっている区画へ移る（押すたびに次の道路網）"
-        : "止まっている区画へ移る";
-  return { ...notice, jump };
+      : targets > 1
+        ? `${what}へ移る（押すたびに次の${cut === null ? "道路網" : "場所"}）`
+        : `${what}へ移る`;
+  if (growth !== null && cut !== null) {
+    return { headline: growth.headline, action: `${growth.action}。${cut.headline}`, jump };
+  }
+  const only = growth ?? cut;
+  return only === null ? null : { ...only, jump };
 }
 
 /** 前に出した見た目と同じなら、DOM に触らなくてよい。触ると読み上げが繰り返され、フォーカスも外れる。 */
@@ -100,17 +152,17 @@ export function sameView(a: NoticeView | null, b: NoticeView | null): boolean {
  * 要素は index.html に置いてあり、ここでは文言だけを書き換える。読み上げるのは見出しの文だけである。
  */
 export function setupGrowthNotice(jump: (x: number, y: number) => void): {
-  render: (blocks: GrowthBlocks, stalls: Stall[]) => void;
+  render: (blocks: GrowthBlocks, stalls: Stall[], isolated?: Isolated[]) => void;
 } {
   const root = document.querySelector<HTMLElement>("#growth-notice");
   const head = document.querySelector<HTMLElement>("#growth-notice-head");
   const action = document.querySelector<HTMLElement>("#growth-notice-action");
   const button = document.querySelector<HTMLButtonElement>("#growth-notice-jump");
-  let stalls: Stall[] = [];
+  let targets: { x: number; y: number }[] = [];
   let last: { x: number; y: number } | null = null;
   let shown: NoticeView | null = null;
   button?.addEventListener("click", () => {
-    const picked = pickStall(stalls, last);
+    const picked = pickStall(targets, last);
     if (picked === null) {
       return;
     }
@@ -118,9 +170,11 @@ export function setupGrowthNotice(jump: (x: number, y: number) => void): {
     jump(picked.x, picked.y);
   });
   return {
-    render(blocks, next) {
-      stalls = next;
-      const view = noticeView(blocks, next);
+    render(blocks, next, isolated = []) {
+      const view = noticeView(blocks, next, isolated);
+      // 区画の知らせが出ていないときの止まっている網には移らない
+      const stalled = growthNotice(blocks) === null ? [] : next;
+      targets = [...stalled, ...isolated];
       if (view === null) {
         // 知らせが消えたら、次は最初の網から数え直す
         last = null;

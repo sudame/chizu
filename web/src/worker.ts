@@ -160,6 +160,7 @@ function sendOverview(sim: Simulation, now: number, paused: boolean, force = fal
     kind: "overview",
     overview: all.slice(0, OVERVIEW_LENGTH),
     stalls: all.slice(OVERVIEW_LENGTH),
+    isolated: [...sim.isolated_facilities()],
   });
 }
 

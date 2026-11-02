@@ -196,6 +196,11 @@ impl Simulation {
         self.0.city_stats()
     }
 
+    /// 孤立した施設ごとに `[道路に面したマスの x, y, 種類]`。並びは `sim::Sim::isolated_facilities` にある。
+    pub fn isolated_facilities(&self) -> Vec<f64> {
+        self.0.isolated_facilities()
+    }
+
     /// 収支の見込みの 12 個の数。並びは `sim::Sim::finance` にある。
     pub fn finance(&self) -> Vec<f64> {
         self.0.finance()
