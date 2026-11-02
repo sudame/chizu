@@ -488,3 +488,70 @@ fn bundles_pick_the_same_route_as_astar_among_ties() {
         }
     }
 }
+
+/// 整合を崩した網から、手段ごとのグラフ、車線のつながり、経路探索のどれを作っても panic せず `Err` になる。
+fn assert_rejected(n: &Network, want: &GraphError) {
+    for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+        assert_eq!(Graph::try_build(n, mode).as_ref(), Err(want));
+    }
+    assert_eq!(try_connectors(n).as_ref(), Err(want));
+    assert_eq!(AstarRouter::try_new(n).err().as_ref(), Some(want));
+}
+
+#[test]
+fn broken_network_is_rejected_without_panic() {
+    let base = || {
+        let mut n = Network::new();
+        road(&mut n, (0, 0), (4, 0), RoadKind::Small);
+        road(&mut n, (4, 0), (4, 4), RoadKind::Small);
+        n
+    };
+    let at = |n: &Network, x, y| n.node_at(TilePos::new(x, y)).unwrap();
+    let seg = |n: &Network, a: (i64, i64), b: (i64, i64)| link(n, a, b, LaneMode::Car).segment;
+
+    // 区間の端のノードがない。
+    let mut n = base();
+    let corner = at(&n, 4, 0);
+    n.remove_node_unchecked(corner);
+    assert_rejected(&n, &GraphError::MissingNode(corner));
+
+    // 区間の車線がない。
+    let mut n = base();
+    let s = seg(&n, (0, 0), (4, 0));
+    let lane = n.segment(s).unwrap().lanes[0];
+    n.remove_lane_unchecked(lane);
+    assert_rejected(&n, &GraphError::MissingLane(lane));
+
+    // 区間の両端が 8 方向の直線で結べない。
+    let mut n = base();
+    road(&mut n, (4, 4), (6, 4), RoadKind::Small);
+    let s = seg(&n, (0, 0), (4, 0));
+    n.segment_mut(s).unwrap().b = at(&n, 6, 4);
+    assert_rejected(&n, &GraphError::NotStraight(s));
+
+    // ノードが、そのノードを端に持たない区間を指す。
+    let mut n = base();
+    let start = at(&n, 0, 0);
+    let s2 = seg(&n, (4, 0), (4, 4));
+    n.node_mut(start).unwrap().segments.push(s2);
+    assert_rejected(
+        &n,
+        &GraphError::NodeNotOnSegment {
+            node: start,
+            segment: s2,
+        },
+    );
+}
+
+#[test]
+fn try_new_matches_new_on_networks_built_by_commands() {
+    let n = grid(4);
+    let reqs = requests(&n, 50);
+    assert_eq!(
+        AstarRouter::try_new(&n).unwrap().route_batch(&reqs),
+        AstarRouter::new(&n).route_batch(&reqs)
+    );
+    for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+        assert_eq!(Graph::try_build(&n, mode).unwrap(), Graph::build(&n, mode));
+    }
+}

@@ -366,14 +366,17 @@ impl Line {
 
     /// 長さ（mm）。
     pub fn length(&self) -> Mm {
+        self.checked_length().expect("道路の長さがあふれた")
+    }
+
+    /// 長さ（mm）。`i64` に収まらなければ `None` を返す。
+    pub fn checked_length(&self) -> Option<Mm> {
         let per_step = if self.is_diagonal() {
             DIAGONAL_TILE_MM
         } else {
             TILE_MM
         };
-        Mm(per_step)
-            .checked_mul(i64::try_from(self.len).expect("歩数が i64 に収まらない"))
-            .expect("道路の長さがあふれた")
+        Mm(per_step).checked_mul(i64::try_from(self.len).ok()?)
     }
 }
 
@@ -430,6 +433,30 @@ impl Network {
     /// 網が変わるたびに 1 上がる版。道路を引く、消す、高速道路を置くたびに上がる。
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// 網の整合を崩すテストのために、区間を書き換える。
+    #[cfg(test)]
+    pub(crate) fn segment_mut(&mut self, id: SegmentId) -> Option<&mut Segment> {
+        self.segments.get_mut(id)
+    }
+
+    /// 網の整合を崩すテストのために、ノードを書き換える。
+    #[cfg(test)]
+    pub(crate) fn node_mut(&mut self, id: NodeId) -> Option<&mut Node> {
+        self.nodes.get_mut(id)
+    }
+
+    /// 網の整合を崩すテストのために、区間から指されたままのノードを消す。
+    #[cfg(test)]
+    pub(crate) fn remove_node_unchecked(&mut self, id: NodeId) {
+        self.nodes.remove(id);
+    }
+
+    /// 網の整合を崩すテストのために、区間から指されたままの車線を消す。
+    #[cfg(test)]
+    pub(crate) fn remove_lane_unchecked(&mut self, id: LaneId) {
+        self.lanes.remove(id);
     }
 
     fn bump_version(&mut self) {

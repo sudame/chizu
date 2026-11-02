@@ -28,6 +28,7 @@ use core::fmt;
 
 use xxhash_rust::xxh3::xxh3_64;
 
+use crate::routing::GraphError;
 use crate::world::World;
 
 const MAGIC: &[u8; 8] = b"CHIZUSTA";
@@ -53,6 +54,8 @@ pub enum SnapshotError {
     TrailingBytes(usize),
     /// 読めた中身を、呼び出し側が受け入れなかった。
     Rejected,
+    /// 読めた網の中身が食い違っていて、経路探索のグラフを作れない。
+    Network(GraphError),
 }
 
 impl fmt::Display for SnapshotError {
@@ -67,6 +70,7 @@ impl fmt::Display for SnapshotError {
             SnapshotError::Decode(e) => write!(f, "街の状態を読めない：{e}"),
             SnapshotError::Rejected => write!(f, "街の状態が保存データのほかの欄と食い違う"),
             SnapshotError::TrailingBytes(n) => write!(f, "街の状態のあとに {n} バイトの余りがある"),
+            SnapshotError::Network(e) => write!(f, "街の状態の道路網が食い違っている：{e}"),
         }
     }
 }
@@ -119,7 +123,7 @@ impl World {
         if !accept(&world) {
             return Err(SnapshotError::Rejected);
         }
-        world.rebuild_router();
+        world.rebuild_router().map_err(SnapshotError::Network)?;
         Ok(world)
     }
 }
@@ -204,5 +208,23 @@ pub(crate) mod big_array {
         {
             super::deserialize_boxed(d)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 検査の値を通ったまま網の整合が崩れた状態は、panic せず `Network` で断る。
+    #[test]
+    fn broken_network_is_rejected_without_panic() {
+        let mut world = World::new(1);
+        let (node, _) = world.network().nodes().next().expect("高速道路のノードがない");
+        world.network_mut().remove_node_unchecked(node);
+        let bytes = world.to_snapshot();
+        assert_eq!(
+            World::from_snapshot(&bytes).err(),
+            Some(SnapshotError::Network(GraphError::MissingNode(node)))
+        );
     }
 }

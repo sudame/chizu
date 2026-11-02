@@ -572,6 +572,11 @@ impl World {
     }
 
     #[cfg(test)]
+    pub(crate) fn network_mut(&mut self) -> &mut Network {
+        &mut self.network
+    }
+
+    #[cfg(test)]
     pub(crate) fn population_mut(&mut self) -> &mut Population {
         &mut self.population
     }
@@ -704,9 +709,11 @@ impl World {
     }
 
     /// 読み戻した街の経路探索を、網から作り直す。グラフを作ったときの網の版は書き出したときのままにする。
-    pub(crate) fn rebuild_router(&mut self) {
+    /// 網の中身が食い違っていたら、経路探索を変えずに `Err` を返す。
+    pub(crate) fn rebuild_router(&mut self) -> Result<(), GraphError> {
         let version = self.router.router.version();
-        self.router.router = AstarRouter::new(&self.network).with_version(version);
+        self.router.router = AstarRouter::try_new(&self.network)?.with_version(version);
+        Ok(())
     }
 
     /// 状態ハッシュ。表は決まった順番で書き出す。

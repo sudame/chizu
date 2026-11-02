@@ -17,7 +17,9 @@ use rayon::prelude::*;
 
 use astar::{Marks, extract, search_many};
 pub use astar::{Route, Scratch, Toward, astar, one_to_many};
-pub use graph::{Connector, Graph, WALK_SPEED, connectors, speed_limit};
+pub use graph::{
+    Connector, Graph, GraphError, WALK_SPEED, connectors, speed_limit, try_connectors,
+};
 
 use crate::network::{LaneMode, LinkId, Network};
 
@@ -100,17 +102,23 @@ enum Job {
 type Solved = Vec<(RouteRequest, Option<Arc<Route>>)>;
 
 impl AstarRouter {
+    /// 網からグラフを作る。網の中身が食い違っていたら panic する。
     pub fn new(net: &Network) -> AstarRouter {
-        AstarRouter {
+        AstarRouter::try_new(net).expect("網の中身が食い違っている")
+    }
+
+    /// 網からグラフを作る。網の中身が食い違っていたら `Err` を返す。読み戻した街に使う。
+    pub fn try_new(net: &Network) -> Result<AstarRouter, GraphError> {
+        Ok(AstarRouter {
             version: net.version(),
-            car: Graph::build(net, LaneMode::Car),
-            walk: Graph::build(net, LaneMode::Sidewalk),
-            connectors: connectors(net),
+            car: Graph::try_build(net, LaneMode::Car)?,
+            walk: Graph::try_build(net, LaneMode::Sidewalk)?,
+            connectors: try_connectors(net)?,
             band: 0,
             bundle_min: DEFAULT_BUNDLE_MIN,
             cache_limit: DEFAULT_CACHE_LIMIT,
             cache: BTreeMap::new(),
-        }
+        })
     }
 
     /// グラフを作ったときの網の版。
