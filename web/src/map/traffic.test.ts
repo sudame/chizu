@@ -13,6 +13,8 @@ import {
   JAMMED_EXTRA_PX,
   TRAFFIC_BAND_ALPHA,
   TRAFFIC_BAND_WIDTH,
+  TRAFFIC_FINE_BAND_ALPHA,
+  TRAFFIC_FINE_BAND_WIDTH,
   TRAFFIC_LINE_SHARE,
   TRAFFIC_UNCOUNTED_COLOR,
   TrafficLines,
@@ -98,6 +100,24 @@ describe("交通の主題図の形", () => {
     expect(bands.every((v) => Math.abs(v.half - TRAFFIC_BAND_WIDTH / 2) < 1e-6)).toBe(true);
     // 帯の中心は縁石から半分の幅だけ内側にあり、帯の外の縁が縁石（車道の端）にそろう
     const center = asphaltHalfWidth(2) - TRAFFIC_BAND_WIDTH / 2;
+    const offsets = new Set(bands.map((v) => Math.round((v.y - 2.5) * 1e6) / 1e6));
+    expect([...offsets].sort((a, b) => a - b)).toEqual(
+      [-center, center].map((v) => Math.round(v * 1e6) / 1e6),
+    );
+  });
+
+  test("細部の段の帯は、寄りの帯より細く薄く、外の縁を縁石にそろえる", () => {
+    expect(meshes.fineBands).toBeNull();
+    const fine = net.meshes(new Uint8Array([4, 4, 4, 4, 1]), true).fineBands;
+    expect(fine).not.toBeNull();
+    const bands = vertices(fine as MeshSource).filter(
+      (v) => v.color.join() === colorOf(1, TRAFFIC_FINE_BAND_ALPHA),
+    );
+    expect(TRAFFIC_FINE_BAND_WIDTH).toBe(0.04);
+    expect(TRAFFIC_FINE_BAND_ALPHA).toBe(0.5);
+    expect(bands.length).toBe(12);
+    expect(bands.every((v) => Math.abs(v.half - TRAFFIC_FINE_BAND_WIDTH / 2) < 1e-6)).toBe(true);
+    const center = asphaltHalfWidth(2) - TRAFFIC_FINE_BAND_WIDTH / 2;
     const offsets = new Set(bands.map((v) => Math.round((v.y - 2.5) * 1e6) / 1e6));
     expect([...offsets].sort((a, b) => a - b)).toEqual(
       [-center, center].map((v) => Math.round(v * 1e6) / 1e6),
@@ -196,6 +216,20 @@ describe("交通の主題図の状態", () => {
     expect(lines.take()?.busy.vertexCount).toBe(6);
   });
 
+  test("細部の段に入ったときだけ、値が変わらなくても細部の帯を足して作り直す", () => {
+    const lines = new TrafficLines();
+    lines.setRoads(1, two, twoNodes);
+    lines.setValues(1, new Uint8Array([1, 2]));
+    expect(lines.take(false)?.fineBands).toBeNull();
+    expect(lines.take(true)?.fineBands?.vertexCount).toBeGreaterThan(0);
+    expect(lines.take(true)).toBeUndefined();
+    // 引いても作り直さない（細部の帯は描かないだけ）
+    expect(lines.take(false)).toBeUndefined();
+    lines.setValues(1, new Uint8Array([2, 2]));
+    expect(lines.take(false)?.fineBands).toBeNull();
+    expect(lines.take(true)?.fineBands?.vertexCount).toBeGreaterThan(0);
+  });
+
   test("主題図を交通から外すと、線を消す", () => {
     const lines = new TrafficLines();
     lines.setRoads(1, two, twoNodes);
@@ -256,6 +290,15 @@ describe("交通の主題図の段", () => {
     expect(alphaOf(20, "trafficBands")).toBe(1);
     expect(alphaOf(12, "trafficBusy")).toBeCloseTo(0.5);
     expect(alphaOf(12, "trafficBands")).toBeCloseTo(0.5);
+  });
+
+  test("細部の段では、寄りの帯を細く薄い帯に 32〜48 で入れ替える", () => {
+    expect(alphaOf(32, "trafficFineBands")).toBe(0);
+    expect(alphaOf(32, "trafficBands")).toBe(1);
+    expect(alphaOf(40, "trafficFineBands")).toBeCloseTo(0.5);
+    expect(alphaOf(40, "trafficBands")).toBeCloseTo(0.5);
+    expect(alphaOf(64, "trafficFineBands")).toBe(1);
+    expect(alphaOf(64, "trafficBands")).toBe(0);
   });
 
   test("交通の主題図は道路と信号の上、仮の表示の下に描く", () => {

@@ -19,6 +19,11 @@ export const DETAIL_BAND: Band = [10, 14];
 export const MOVER_BAND: Band = [12, 16];
 /** 交通の主題図の「空いている」（緑）が現れる幅。引きでは、やや混んでいる以上だけを描く。 */
 export const TRAFFIC_FREE_BAND: Band = [4, 6];
+/**
+ * 細部（家の形、車の窓、人の形、低木、停止線、3 つ並びの信号）が現れる幅。
+ * 細部の段は寄りの描き方に描き足すだけで、寄りの描き方は消さない。
+ */
+export const FINE_BAND: Band = [32, 48];
 
 /** これより引いたら移動体を描かず、Worker にも移動体の範囲を頼まない。 */
 export const MIN_MOVER_ZOOM = MOVER_BAND[0];
@@ -47,6 +52,8 @@ export type StageWeights = {
   marks: number;
   /** 交通の主題図の「空いている」の濃さ。引きで 0、標準で 1。 */
   trafficFree: number;
+  /** 細部の段で描き足すものの濃さ。寄りで 0、細部で 1。 */
+  fine: number;
 };
 
 export function stageWeights(zoom: number): StageWeights {
@@ -60,10 +67,16 @@ export function stageWeights(zoom: number): StageWeights {
     movers: showsMovers(zoom) ? weight(MOVER_BAND, zoom) : 0,
     marks: block,
     trafficFree: weight(TRAFFIC_FREE_BAND, zoom),
+    fine: showsFine(zoom) ? weight(FINE_BAND, zoom) : 0,
   };
 }
 
 /** 移動体を描き、Worker に範囲を頼む倍率か。 */
 export function showsMovers(zoom: number): boolean {
   return zoom >= MIN_MOVER_ZOOM;
+}
+
+/** 細部を描く倍率か。これより引いたら、細部の頂点を作らない。 */
+export function showsFine(zoom: number): boolean {
+  return zoom > FINE_BAND[0];
 }
