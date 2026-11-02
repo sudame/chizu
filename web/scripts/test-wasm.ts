@@ -15,7 +15,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright-core";
 import { preview } from "vite";
-import { chooseLayer, pickSpeed, pickTool } from "./ui.ts";
+import { stageWeights } from "../src/map/stages.ts";
+import { chooseLayer, pickSpeed, pickTool, zoomInTo } from "./ui.ts";
 
 const TIMEOUT_MS = 30_000;
 const MIN_THREADS = 2;
@@ -28,6 +29,18 @@ const INITIAL_MONEY = 500_000;
 // web/src/map/camera.ts の値
 // 買った土地の地面の色（docs/map-style.md の色の表）
 const GROUND_HEX = "#f4f2ec";
+
+/** 色の表の 2 つの値（`#rrggbb`）を、b を t の割合で重ねた色にする。 */
+function mixHex(a: string, b: string, t: number): string {
+  const ch = (code: string, at: number) => Number.parseInt(code.slice(at, at + 2), 16);
+  return `#${[1, 3, 5]
+    .map((at) =>
+      Math.round(ch(a, at) * (1 - t) + ch(b, at) * t)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
+}
 // 地面に買える土地の仮の表示（#1a73e8 の 10%）が重なった色
 const GROUND_ON_HINT_HEX = "#dee5ec";
 const MIN_ZOOM = 1;
@@ -297,6 +310,8 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   };
   // 外部接続の高速道路が届いてから、引く前の区間の数を読む
   await waitMap("roadSegments", "0", "gt");
+  // 歩く人は寄りの段でだけ描くので、濃さがそろう倍率まで寄ってから引く
+  await zoomInTo(page, 16);
   const size = page.viewportSize() ?? { width: 1280, height: 720 };
   const d0 = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
   const zoom = Number(d0.zoom);
@@ -638,8 +653,11 @@ try {
   // カーソルのある道路には始点の印が重なるので、道路から離れたところへ動かしてから色を読む
   await page.mouse.move(cx, cy - 120, { steps: 2 });
   await page.waitForTimeout(100);
-  // 小さい道路は白の塗り、地面は淡い地面の色（#f4f2ec）で、白とは青の強さで見分けられる
-  const isRoad = (c: number[]) => near(c, "#ffffff", 4);
+  // 小さい道路は白の塗りに縁（#c8c2b6）、地面は淡い地面の色（#f4f2ec）で、白とは青の強さで見分けられる。
+  // 引きの段では、小さい道路の縁と塗りを薄く重ねる（stages.ts）。ノードのマスは四角を重ねるので白に近い
+  const minor = stageWeights(zoom).minorRoad;
+  const minorRoadHex = mixHex(mixHex(GROUND_HEX, "#c8c2b6", minor), "#ffffff", minor);
+  const isRoad = (c: number[]) => near(c, minorRoadHex, 4) || near(c, "#ffffff", 4);
   const isGround = (c: number[]) => near(c, GROUND_HEX, 4);
   const colorAt = async (x: number, y: number) => {
     const p = tileCenter(x, y);
@@ -943,8 +961,10 @@ try {
     { timeout: TIMEOUT_MS },
   );
   const commercial = await colorOfTile(45, 34);
+  // 引きと標準のあいだでは、区画の地面に街区の面（空き）を重ねる
+  const blocks = stageWeights(view.zoom).blocks;
   check(
-    near(commercial, "#eaf0f8", 4),
+    near(commercial, mixHex("#eaf0f8", "#dde6f3", blocks), 4),
     `塗ったマスが商業の淡い青の地面で描かれる（${commercial.join(", ")}）`,
   );
   const farZone = await (async () => {
@@ -998,8 +1018,14 @@ try {
     cx + (bx + 0.5 - view.x) * view.zoom,
     cy + (by + 0.8 - view.y) * view.zoom,
   );
+  // 引きと標準のあいだでは、街区の面（建物）の上に、建物のまとまりを薄く重ねる
+  const houseHex = mixHex(
+    mixHex("#eef4e6", "#cde0b9", stageWeights(view.zoom).blocks),
+    "#d3e3c0",
+    stageWeights(view.zoom).clusters,
+  );
   check(
-    near(house, "#d3e3c0", 4),
+    near(house, houseHex, 4),
     `建物が住宅の緑の色で描かれる（マス (${bx}, ${by})、${house.join(", ")}）`,
   );
   const residentialDemand = await page.locator("#demand .bar").first().getAttribute("data-demand");

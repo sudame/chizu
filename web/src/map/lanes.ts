@@ -81,11 +81,3 @@ export function laneCenter(kindCode: number, index: number): number {
   const i = Math.min(Math.max(index, 0), lanes - 1);
   return (lanes - i - 0.5) * laneWidth(kindCode);
 }
-
-/** 道路の線をこの倍率（1 マスのピクセル数）以上で車線ごとに描く。これより縮小したら 1 本の線にする。 */
-export const LANE_DETAIL_ZOOM = 6;
-
-/** 車線ごとの描き方に切り替える倍率か。 */
-export function showsLanes(zoom: number): boolean {
-  return zoom >= LANE_DETAIL_ZOOM;
-}

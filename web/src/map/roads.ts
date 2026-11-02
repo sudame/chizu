@@ -18,9 +18,9 @@ import {
   hasSidewalks,
   roadHalfWidth,
   SIDEWALK_WIDTH,
-  showsLanes,
 } from "./lanes.ts";
 import { type Color, hex } from "./palette.ts";
+import { stageWeights } from "./stages.ts";
 
 export type { Color };
 
@@ -188,16 +188,6 @@ export function roadFootprint(geometry: Geometry, a: Tile, b: Tile, color: Color
   for (const t of tilesOnLine(a, b)) {
     geometry.square(t, ROAD_VISUAL_HALF, color, min);
   }
-}
-
-// 路面の線（中央線、車線の区切り）は、この倍率から描き始め、MARKING_FULL_ZOOM で濃さがそろう。
-// 縮小したときに細かい線がちらつかないようにするためである
-export const MARKING_ZOOM = 10;
-export const MARKING_FULL_ZOOM = 16;
-
-/** 倍率 zoom での路面の線の濃さ（0〜1）。 */
-export function markingAlpha(zoom: number): number {
-  return Math.min(Math.max((zoom - MARKING_ZOOM) / (MARKING_FULL_ZOOM - MARKING_ZOOM), 0), 1);
 }
 
 /** 種類ごとの中央線と車線の区切りの色。小の道路には中央線も区切りもない。 */
@@ -434,7 +424,9 @@ export function halfWidthOf(kindCode: number): number {
 type ZoneColors = {
   /** 区画の地面（標準と寄り）。 */
   ground: Color;
-  /** 街区の面・建物（区画を塗る仮の表示に使う）。 */
+  /** 街区の面・空き（引き）。 */
+  blockEmpty: Color;
+  /** 街区の面・建物（引き。区画を塗る仮の表示にも使う）。 */
   block: Color;
   building: Color;
   edge: Color;
@@ -443,24 +435,28 @@ type ZoneColors = {
 export const ZONE_COLORS: Record<number, ZoneColors> = {
   1: {
     ground: hex("#eef4e6"),
+    blockEmpty: hex("#e3edd7"),
     block: hex("#cde0b9"),
     building: hex("#d3e3c0"),
     edge: hex("#a7c18e"),
   },
   2: {
     ground: hex("#eaf0f8"),
+    blockEmpty: hex("#dde6f3"),
     block: hex("#bdcfeb"),
     building: hex("#c9d7ee"),
     edge: hex("#91a9d4"),
   },
   3: {
     ground: hex("#f5efdf"),
+    blockEmpty: hex("#efe5c9"),
     block: hex("#e1cd99"),
     building: hex("#e6d7ae"),
     edge: hex("#c0a462"),
   },
   4: {
     ground: hex("#e7f3f4"),
+    blockEmpty: hex("#d8ebed"),
     block: hex("#b3dade"),
     building: hex("#c2e0e3"),
     edge: hex("#84bbc1"),
@@ -468,6 +464,7 @@ export const ZONE_COLORS: Record<number, ZoneColors> = {
 };
 const UNKNOWN_ZONE: ZoneColors = {
   ground: hex("#f4f2ec"),
+  blockEmpty: hex("#e6e6e6"),
   block: hex("#d0d0d0"),
   building: hex("#d8d8d8"),
   edge: hex("#a8a8a8"),
@@ -522,20 +519,46 @@ const shade = ([r, g, b, a]: Color, k: number): Color => [r * k, g * k, b * k, a
 
 type Box = { x0: number; y0: number; x1: number; y1: number; color: Color; edge: Color };
 
+/** 標準の段で、建物のまとまりを描くときに内側に縮める幅（マス）。隣の建物とのあいだに細い隙間だけを残す。 */
+export const CLUSTER_INSET = 0.06;
+
 /**
- * Worker から届いた建物と施設を頂点に直す。建物は隣と見分けられるよう、少し内側に縮めて描く。
- * 下から順に、すべての影、施設と建物の縁と本体、届いていない印を重ねる。
+ * 建物と施設の頂点。段ごとに濃さを変えて重ねるので、描く順に分けて持つ。
+ * - `clusters`：標準の段の、建物のまとまり（隙間を細く、縁なし）
+ * - `details`：寄りの段の、建物と施設の影と、建物の縁
+ * - `facilities`：施設の縁と本体。どの段でも描く
+ * - `bodies`：寄りの段の、1 軒ずつの建物の本体
+ * - `marks`：電気か水道が届いていない印
  */
-export function buildingGeometry(buildings: Float64Array, facilities: Float64Array): Geometry {
-  const geometry = new Geometry({
+export type BuildingMeshes = {
+  clusters: Geometry;
+  details: Geometry;
+  facilities: Geometry;
+  bodies: Geometry;
+  marks: Geometry;
+};
+
+/**
+ * Worker から届いた建物と施設を頂点に直す。寄りの段では、建物は隣と見分けられるよう少し内側に縮め、
+ * 影と縁を付ける。標準の段では、隙間を細くした縁なしの面にする。引きの段の街区の面は、チャンクのシェーダーで塗る。
+ */
+export function buildingMeshes(buildings: Float64Array, facilities: Float64Array): BuildingMeshes {
+  const origin = {
     x: buildings[0] ?? facilities[0] ?? 0,
     y: buildings[1] ?? facilities[1] ?? 0,
-  });
-  const boxes: Box[] = [];
+  };
+  const meshes: BuildingMeshes = {
+    clusters: new Geometry(origin),
+    details: new Geometry(origin),
+    facilities: new Geometry(origin),
+    bodies: new Geometry(origin),
+    marks: new Geometry(origin),
+  };
+  const facilityBoxes: Box[] = [];
   for (let i = 0; i + FACILITY_STRIDE <= facilities.length; i += FACILITY_STRIDE) {
     const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, kind = 0] = facilities.subarray(i, i + FACILITY_STRIDE);
     const color = FACILITY_COLOR[kind] ?? [0.6, 0.6, 0.6, 1];
-    boxes.push({
+    facilityBoxes.push({
       x0: x0 + 0.05,
       y0: y0 + 0.05,
       x1: x1 + 0.95,
@@ -544,6 +567,7 @@ export function buildingGeometry(buildings: Float64Array, facilities: Float64Arr
       edge: shade(color, BUILDING_EDGE_SHADE),
     });
   }
+  const buildingBoxes: Box[] = [];
   const marks: [number, number, number][] = [];
   for (let i = 0; i + BUILDING_STRIDE <= buildings.length; i += BUILDING_STRIDE) {
     const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, zone = 0, , supply = 0] = buildings.subarray(
@@ -551,7 +575,7 @@ export function buildingGeometry(buildings: Float64Array, facilities: Float64Arr
       i + BUILDING_STRIDE,
     );
     const [i0, i1] = [BUILDING_INSET, 1 - BUILDING_INSET];
-    boxes.push({
+    buildingBoxes.push({
       x0: x0 + i0,
       y0: y0 + i0,
       x1: x1 + i1,
@@ -559,28 +583,34 @@ export function buildingGeometry(buildings: Float64Array, facilities: Float64Arr
       color: buildingColor(zone),
       edge: buildingEdgeColor(zone),
     });
+    const c = CLUSTER_INSET;
+    meshes.clusters.box(x0 + c, y0 + c, x1 + 1 - c, y1 + 1 - c, buildingColor(zone));
     marks.push([x0, y0, supply]);
   }
-  for (const { x0, y0, x1, y1 } of boxes) {
-    geometry.box(x0, y0, x1, y1, SHADOW_COLOR, BUILDING_SHADOW_PX);
+  for (const { x0, y0, x1, y1 } of [...facilityBoxes, ...buildingBoxes]) {
+    meshes.details.box(x0, y0, x1, y1, SHADOW_COLOR, BUILDING_SHADOW_PX);
   }
-  for (const { x0, y0, x1, y1, color, edge } of boxes) {
-    const e = BUILDING_EDGE;
-    geometry.box(x0, y0, x1, y1, edge);
-    geometry.box(x0 + e, y0 + e, x1 - e, y1 - e, color);
+  const e = BUILDING_EDGE;
+  for (const { x0, y0, x1, y1, color, edge } of facilityBoxes) {
+    meshes.facilities.box(x0, y0, x1, y1, edge);
+    meshes.facilities.box(x0 + e, y0 + e, x1 - e, y1 - e, color);
   }
-  // 印は建物より上に描く
+  // 寄りの段に移るあいだは、本体を濃く描いたまま縁を濃くしていくので、縁と本体を分ける
+  for (const { x0, y0, x1, y1, color, edge } of buildingBoxes) {
+    meshes.details.box(x0, y0, x1, y1, edge);
+    meshes.bodies.box(x0 + e, y0 + e, x1 - e, y1 - e, color);
+  }
   for (const [x, y, supply] of marks) {
     if ((supply & SUPPLY_POWER) === 0) {
       const c = markCenter({ x, y }, "power");
-      geometry.shape(c.x, c.y, MARK_HALF, NO_POWER_COLOR, BOLT_SHAPE);
+      meshes.marks.shape(c.x, c.y, MARK_HALF, NO_POWER_COLOR, BOLT_SHAPE);
     }
     if ((supply & SUPPLY_WATER) === 0) {
       const c = markCenter({ x, y }, "water");
-      geometry.shape(c.x, c.y, MARK_HALF, NO_WATER_COLOR, DROP_SHAPE);
+      meshes.marks.shape(c.x, c.y, MARK_HALF, NO_WATER_COLOR, DROP_SHAPE);
     }
   }
-  return geometry;
+  return meshes;
 }
 
 /** 電気か水道が届いていない建物の数。 */
@@ -610,6 +640,8 @@ type RoadNode = {
   /** つなぐ区間の、縮小したときの線の世界の半分の幅のいちばん大きい値。 */
   line: number;
   minPx: number;
+  /** つなぐ区間のいちばん大きい種類の番号。 */
+  widest: number;
   sidewalk: boolean;
   arms: Arm[];
 };
@@ -630,6 +662,7 @@ function roadNodes(segments: Float64Array): RoadNodes {
       edgeColor: style.edge,
       line: 0,
       minPx: 0,
+      widest: 0,
       sidewalk: false,
       arms: [],
     };
@@ -641,6 +674,7 @@ function roadNodes(segments: Float64Array): RoadNodes {
     }
     node.line = Math.max(node.line, LINE_HALF[kind] ?? 0.31);
     node.minPx = Math.max(node.minPx, style.minPx);
+    node.widest = Math.max(node.widest, kind);
     node.sidewalk ||= hasSidewalks(kind);
     const len = Math.hypot(other.x - x, other.y - y);
     node.arms.push({ segment, dx: (other.x - x) / len, dy: (other.y - y) / len });
@@ -688,27 +722,45 @@ function roadNet(segments: Float64Array, nodes: Float64Array): RoadNet {
   return { ends, nodeList, each };
 }
 
+/** 小の道路の種類の番号。引いたときに細く薄く描く。 */
+export const MINOR_CODE = 1;
+
+/** 線で描くときに、どの道路を描くか。`minor` は小の道路だけ、`major` は中以上の道路だけである。 */
+export type RoadPart = "all" | "minor" | "major";
+
 /**
  * Worker から届いた道路網の形を頂点に直す。基準のマスは最初のノードにする。縮小したときの描き方で、
  * 区間ごとに、縁の色の帯の上に、種類ごとの塗りの帯を重ねて縁取りにする。
  * 縮小しても種類を見分けられるよう、帯の太さの下限を種類ごとに変える。
+ * `part` で小の道路とそれ以外を分ける。小の道路だけを引いたときに薄く描くためで、
+ * ノードは、つながる区間のいちばん大きい種類の側に入れる。
  */
-export function roadGeometry(segments: Float64Array, nodes: Float64Array): Geometry {
+export function roadGeometry(
+  segments: Float64Array,
+  nodes: Float64Array,
+  part: RoadPart = "all",
+): Geometry {
   const geometry = new Geometry({ x: nodes[0] ?? 0, y: nodes[1] ?? 0 });
   const { nodeList, each } = roadNet(segments, nodes);
+  const takes = (kind: number) => part === "all" || (part === "minor") === (kind === MINOR_CODE);
+  const parted = nodeList.filter(({ node }) => takes(node.widest));
   // 縁の帯は、塗りの帯と同じ幅（世界と画面の下限）に、画面で両側に 1px ずつ足す
   each((a, b, kind) => {
-    const style = roadStyle(kind);
-    geometry.segment(a, b, lineHalfWidth(kind, a, b), style.edge, style.minPx, EDGE_EXTRA_PX);
+    if (takes(kind)) {
+      const style = roadStyle(kind);
+      geometry.segment(a, b, lineHalfWidth(kind, a, b), style.edge, style.minPx, EDGE_EXTRA_PX);
+    }
   });
-  for (const { x, y, node } of nodeList) {
+  for (const { x, y, node } of parted) {
     geometry.square({ x, y }, node.line, node.edgeColor, node.minPx, EDGE_EXTRA_PX);
   }
   each((a, b, kind) => {
-    const style = roadStyle(kind);
-    geometry.segment(a, b, lineHalfWidth(kind, a, b), style.asphalt, style.minPx);
+    if (takes(kind)) {
+      const style = roadStyle(kind);
+      geometry.segment(a, b, lineHalfWidth(kind, a, b), style.asphalt, style.minPx);
+    }
   });
-  for (const { x, y, node } of nodeList) {
+  for (const { x, y, node } of parted) {
     geometry.square({ x, y }, node.line, node.asphaltColor, node.minPx);
   }
   return geometry;
@@ -1091,12 +1143,16 @@ export function signalGeometry(lights: Float64Array): Geometry {
   return geometry;
 }
 
-/** 縮小したときの描き方と、拡大したときの車線ごとの描き方と、その上に重ねる路面の線。 */
-export type RoadMeshes = { simple: Geometry; lanes: Geometry; markings: Geometry };
+/**
+ * 縮小したときの描き方（小の道路と、中以上の道路）と、拡大したときの車線ごとの描き方と、
+ * その上に重ねる路面の線。
+ */
+export type RoadMeshes = { minor: Geometry; major: Geometry; lanes: Geometry; markings: Geometry };
 
 export function roadMeshes(segments: Float64Array, nodes: Float64Array): RoadMeshes {
   return {
-    simple: roadGeometry(segments, nodes),
+    minor: roadGeometry(segments, nodes, "minor"),
+    major: roadGeometry(segments, nodes, "major"),
     lanes: roadLaneGeometry(segments, nodes),
     markings: roadMarkingGeometry(segments, nodes),
   };
@@ -1104,17 +1160,52 @@ export function roadMeshes(segments: Float64Array, nodes: Float64Array): RoadMes
 
 type Mesh = { buffer: WebGLBuffer; vao: WebGLVertexArrayObject; count: number; origin: Tile };
 
+const MESH_NAMES = [
+  "clusters",
+  "details",
+  "facilities",
+  "bodies",
+  "marks",
+  "minor",
+  "major",
+  "lanes",
+  "markings",
+  "signals",
+  "preview",
+] as const;
+export type MeshName = (typeof MESH_NAMES)[number];
+
+/**
+ * 倍率 zoom で、下から順に描くメッシュとその濃さ。濃さが 0 のメッシュは描かない。
+ * 段の境目の幅（stages.ts）のあいだだけ、前の段と次の段の両方を描く。
+ */
+export function roadDrawOrder(zoom: number): [MeshName, number][] {
+  const w = stageWeights(zoom);
+  // 線で描く道路は、寄りの描き方がそろうまでその下に残す。車線ごとの描き方は、
+  // 歩道と植え込みでマスいっぱいを覆うので、上に重ねて濃くしていけば線が見えなくなる
+  const lines = w.detail < 1 ? 1 : 0;
+  return [
+    ["clusters", w.clusters],
+    ["details", w.detail],
+    ["facilities", 1],
+    // 寄りに移るあいだは、本体を濃いまま描き、縁と影と隙間だけを濃くしていく
+    ["bodies", w.detail > 0 ? 1 : 0],
+    ["marks", w.marks],
+    ["minor", lines * w.minorRoad],
+    ["major", lines],
+    ["lanes", w.detail],
+    ["markings", w.detail],
+    ["signals", w.detail],
+    ["preview", 1],
+  ];
+}
+
 // 道路と建物は、1 つ変わるたびに全体を受け取り直して頂点を作り直す。重くなったらチャンクごとのメッシュに分ける。
 export class RoadLayer {
   readonly #gl: WebGL2RenderingContext;
   readonly #program: WebGLProgram;
   readonly #u: Record<"offset" | "zoom" | "viewport" | "alpha", WebGLUniformLocation | null>;
-  readonly #buildings: Mesh;
-  readonly #roads: Mesh;
-  readonly #lanes: Mesh;
-  readonly #markings: Mesh;
-  readonly #signals: Mesh;
-  readonly #preview: Mesh;
+  readonly #meshes: Record<MeshName, Mesh>;
 
   constructor(
     gl: WebGL2RenderingContext,
@@ -1128,12 +1219,10 @@ export class RoadLayer {
       viewport: gl.getUniformLocation(this.#program, "u_viewport"),
       alpha: gl.getUniformLocation(this.#program, "u_alpha"),
     };
-    this.#buildings = this.#mesh();
-    this.#roads = this.#mesh();
-    this.#lanes = this.#mesh();
-    this.#markings = this.#mesh();
-    this.#signals = this.#mesh();
-    this.#preview = this.#mesh();
+    this.#meshes = Object.fromEntries(MESH_NAMES.map((name) => [name, this.#mesh()])) as Record<
+      MeshName,
+      Mesh
+    >;
   }
 
   #mesh(): Mesh {
@@ -1162,30 +1251,36 @@ export class RoadLayer {
     return { buffer, vao, count: 0, origin: { x: 0, y: 0 } };
   }
 
-  #upload(mesh: Mesh, geometry: Geometry): void {
+  #upload(name: MeshName, geometry: Geometry): void {
     const gl = this.#gl;
+    const mesh = this.#meshes[name];
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buffer);
     gl.bufferData(gl.ARRAY_BUFFER, geometry.build(), gl.DYNAMIC_DRAW);
     mesh.count = geometry.vertexCount;
     mesh.origin = geometry.origin;
   }
 
-  setBuildings(geometry: Geometry): void {
-    this.#upload(this.#buildings, geometry);
+  setBuildings(meshes: BuildingMeshes): void {
+    this.#upload("clusters", meshes.clusters);
+    this.#upload("details", meshes.details);
+    this.#upload("facilities", meshes.facilities);
+    this.#upload("bodies", meshes.bodies);
+    this.#upload("marks", meshes.marks);
   }
 
   setRoads(meshes: RoadMeshes): void {
-    this.#upload(this.#roads, meshes.simple);
-    this.#upload(this.#lanes, meshes.lanes);
-    this.#upload(this.#markings, meshes.markings);
+    this.#upload("minor", meshes.minor);
+    this.#upload("major", meshes.major);
+    this.#upload("lanes", meshes.lanes);
+    this.#upload("markings", meshes.markings);
   }
 
   setSignals(geometry: Geometry): void {
-    this.#upload(this.#signals, geometry);
+    this.#upload("signals", geometry);
   }
 
   setPreview(geometry: Geometry | null): void {
-    this.#upload(this.#preview, geometry ?? new Geometry({ x: 0, y: 0 }));
+    this.#upload("preview", geometry ?? new Geometry({ x: 0, y: 0 }));
   }
 
   draw(camera: Camera, viewport: Viewport): void {
@@ -1195,16 +1290,8 @@ export class RoadLayer {
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    const lanes = showsLanes(camera.zoom);
-    const marking = lanes ? markingAlpha(camera.zoom) : 0;
-    const meshes: [Mesh, number][] = [
-      [this.#buildings, 1],
-      [lanes ? this.#lanes : this.#roads, 1],
-      [this.#markings, marking],
-      [this.#signals, 1],
-      [this.#preview, 1],
-    ];
-    for (const [mesh, alpha] of meshes) {
+    for (const [name, alpha] of roadDrawOrder(camera.zoom)) {
+      const mesh = this.#meshes[name];
       if (mesh.count === 0 || alpha === 0) {
         continue;
       }

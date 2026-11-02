@@ -39,8 +39,9 @@ import {
 } from "./map/palette.ts";
 import { MapRenderer } from "./map/renderer.ts";
 import {
+  type BuildingMeshes,
   buildingEdgeColor,
-  buildingGeometry,
+  buildingMeshes,
   type Color,
   type CrosswalkArm,
   crosswalkArms,
@@ -234,7 +235,7 @@ function createRenderer(): MapRenderer | null {
 let renderer = createRenderer();
 // 最後に届いた道路網と建物。コンテキストを失ったあとに貼り直す
 let roads: RoadMeshes | null = null;
-let buildings: Geometry | null = null;
+let buildings: BuildingMeshes | null = null;
 let signals: Geometry | null = null;
 let activeLayers: number[] = [];
 setupHudPanel(element<HTMLButtonElement>("#hud-toggle"), element<HTMLElement>("#hud-details"));
@@ -975,7 +976,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   if (message.kind === "buildings") {
-    buildings = buildingGeometry(message.buildings, message.facilities);
+    buildings = buildingMeshes(message.buildings, message.facilities);
     renderer?.roads.setBuildings(buildings);
     renderCityStats(parseCityStats(message.stats), unsuppliedCount(message.buildings));
     // test:wasm が読む

@@ -1,7 +1,13 @@
 // WebGL2 でチャンクを描く。チャンクごとに 64×64 の整数テクスチャを 1 枚持ち、1 枚の四角に貼る。
 // 位置はカメラからの相対で CPU が求めて渡す。遠くの座標でも f32 の桁が足りるようにするためである。
 
-import { CHUNK_SIDE, TILE_WATER, TILE_ZONABLE, TILE_ZONE_SHIFT } from "../protocol/messages.ts";
+import {
+  CHUNK_SIDE,
+  TILE_BUILDING,
+  TILE_WATER,
+  TILE_ZONABLE,
+  TILE_ZONE_SHIFT,
+} from "../protocol/messages.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { chunkKey, type StoredChunk } from "./chunk-sync.ts";
 import { LayerOverlay } from "./layers.ts";
@@ -16,21 +22,29 @@ import {
   ZONABLE_COLOR,
   ZONABLE_MIX,
 } from "./palette.ts";
-import { RoadLayer, ZONE_COLORS, zoneGroundColor } from "./roads.ts";
+import { buildingEdgeColor, RoadLayer, ZONE_COLORS, zoneGroundColor } from "./roads.ts";
+import { stageWeights } from "./stages.ts";
 
 const vec3 = ([r, g, b]: readonly number[]) => `vec3(${r}, ${g}, ${b})`;
 
-// 区画の地面の色は roads.ts と共有する（1〜4 の順）
-const ZONE_GROUND = [1, 2, 3, 4].map((zone) => vec3(zoneGroundColor(zone)));
-
-// 区画のマスの枠は、建物の縁の色を地面の色に半分混ぜた淡い色で、細く引く。
-// 枠を描き始める倍率と、濃さがそろう倍率（1 マスのピクセル数）
-const ZONE_EDGE = [1, 2, 3, 4].map((zone) => {
-  const [g, e] = [ZONE_COLORS[zone]?.ground ?? [0, 0, 0], ZONE_COLORS[zone]?.edge ?? [0, 0, 0]];
-  return vec3([0, 1, 2].map((i) => ((g[i] ?? 0) + (e[i] ?? 0)) / 2));
-});
-const ZONE_EDGE_ZOOM = 4;
-const ZONE_EDGE_FULL_ZOOM = 8;
+// 区画ごとの色を、区画 1〜4 の順に 4 つずつ並べる。地面（roads.ts と共有する）、引きの段の街区の面の
+// 建物のないマスと建物のあるマス（濃い）、寄りの段の空き地の模様（建物の縁の色）の順である。
+// シェーダーの定数の配列にすると、ソフトウェアの描画ではマスの画素ごとに配列を作り直して重くなるので、uniform で渡す
+const ZONE_PALETTE = new Float32Array(
+  [1, 2, 3, 4].flatMap((zone) =>
+    [
+      zoneGroundColor(zone),
+      ZONE_COLORS[zone]?.blockEmpty ?? [0, 0, 0],
+      ZONE_COLORS[zone]?.block ?? [0, 0, 0],
+      buildingEdgeColor(zone),
+    ].flatMap(([r = 0, g = 0, b = 0]) => [r, g, b]),
+  ),
+);
+// 模様は、建物の縁の色を区画の地面に 60% 重ねる
+const PATTERN_MIX = 0.6;
+// 模様の周期は 0.5 マスにする（商業の点の間隔、オフィスの横線の間隔。工業の斜線は x + y の方向に 1 マス）。
+// チャンクの 1 辺は、この周期の数で何個分か
+const PATTERN_CELLS = CHUNK_SIDE * 2;
 
 // 買っていない土地の斜線。画面で、線と線の間隔が 10px、線の太さが 1px の 45 度の線にする。
 // x + y の方向では、間隔が 10 × √2、太さが √2 になる
@@ -56,15 +70,28 @@ uniform bool u_owned;
 uniform bool u_zonable;
 uniform highp float u_size;
 uniform highp float u_hatch;
+// 街区の面の濃さ（引きで 1）と、空き地の模様の濃さ（寄りで 1）
+uniform float u_block;
+uniform float u_pattern;
 in highp vec2 v_uv;
 out vec4 color;
-// 区画の地面は淡い色で塗る。色は CS2 にならう（住宅は緑、商業は青、工業は黄、オフィスは水色）
-const vec3 ZONE_GROUND[4] = vec3[4](
-  ${ZONE_GROUND.join(",\n  ")}
-);
-const vec3 ZONE_EDGE[4] = vec3[4](
-  ${ZONE_EDGE.join(",\n  ")}
-);
+// 区画の色（ZONE_PALETTE）。区画の地面は淡い色で塗る。色は CS2 にならう（住宅は緑、商業は青、工業は黄、オフィスは水色）
+uniform vec3 u_zone[16];
+// 空き地の模様（住宅は無地、商業は点、工業は斜線、オフィスは横線）が、この画素にかかるか。
+// 線と点の太さは画面で 1px ほどにする。ソフトウェアの描画では分岐の両方を計算するので、安い計算にとどめる
+bool pattern(uint zone) {
+  highp vec2 cell = fract(v_uv * ${PATTERN_CELLS}.0);
+  float cellPx = u_size / ${PATTERN_CELLS}.0;
+  if (zone == 2u) {
+    vec2 d = (cell - 0.5) * cellPx;
+    float r = max(1.0, 0.08 * cellPx);
+    return dot(d, d) < r * r;
+  }
+  if (zone == 3u) {
+    return fract((v_uv.x + v_uv.y) * ${CHUNK_SIDE}.0) * cellPx * 2.0 < 1.4;
+  }
+  return cell.y * cellPx < 1.0;
+}
 bool isWater(ivec2 t) {
   if (t.x < 0 || t.y < 0 || t.x >= ${CHUNK_SIDE} || t.y >= ${CHUNK_SIDE}) {
     return true;
@@ -104,13 +131,19 @@ void main() {
     c = ${vec3(GROUND_COLOR)};
     uint zone = (tile >> ${TILE_ZONE_SHIFT}u) & 7u;
     if (zone >= 1u && zone <= 4u) {
-      // マスの縁からの距離（画面のピクセル）。隣のマスと合わせて 1 ピクセルほどの枠になる
-      float px = u_size / ${CHUNK_SIDE}.0;
-      highp vec2 f = fract(v_uv * ${CHUNK_SIDE}.0);
-      float e = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)) * px;
-      float edge = (e < 0.6 ? 1.0 : 0.0)
-        * clamp((px - ${ZONE_EDGE_ZOOM}.0) / ${ZONE_EDGE_FULL_ZOOM - ZONE_EDGE_ZOOM}.0, 0.0, 1.0);
-      c = mix(ZONE_GROUND[zone - 1u], ZONE_EDGE[zone - 1u], edge);
+      int i = int(zone - 1u) * 4;
+      bool built = (tile & ${TILE_BUILDING}u) != 0u;
+      c = u_zone[i];
+      // 引きでは街区の面で塗り、建物のあるマスを濃くする
+      if (u_block > 0.0) {
+        c = mix(c, u_zone[i + (built ? 2 : 1)], u_block);
+      }
+      // 寄りでは、建物のない区画に模様を付ける。住宅は無地
+      if (u_pattern > 0.0 && !built && zone != 1u) {
+        if (pattern(zone)) {
+          c = mix(c, u_zone[i + 3], ${PATTERN_MIX} * u_pattern);
+        }
+      }
     } else if (u_zonable && (tile & ${TILE_ZONABLE}u) != 0u) {
       c = mix(c, ${vec3(ZONABLE_COLOR)}, ${ZONABLE_MIX});
     }
@@ -165,7 +198,7 @@ export class MapRenderer {
   readonly movers: MoverLayer;
   readonly #textures = new Map<string, Texture>();
   readonly #u: Record<
-    "offset" | "size" | "viewport" | "tiles" | "owned" | "zonable" | "hatch",
+    "offset" | "size" | "viewport" | "tiles" | "owned" | "zonable" | "hatch" | "block" | "pattern",
     WebGLUniformLocation
   >;
   /** 区画を塗れるマスを明るく示すか。区画の道具を選んでいるあいだだけ true にする。 */
@@ -190,8 +223,11 @@ export class MapRenderer {
       owned: uniform(gl, program, "u_owned"),
       zonable: uniform(gl, program, "u_zonable"),
       hatch: uniform(gl, program, "u_hatch"),
+      block: uniform(gl, program, "u_block"),
+      pattern: uniform(gl, program, "u_pattern"),
     };
     gl.uniform1i(this.#u.tiles, 0);
+    gl.uniform3fv(uniform(gl, program, "u_zone"), ZONE_PALETTE);
 
     this.#vao = gl.createVertexArray();
     gl.bindVertexArray(this.#vao);
@@ -268,6 +304,9 @@ export class MapRenderer {
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     const size = CHUNK_SIDE * camera.zoom;
     gl.uniform1f(this.#u.size, size);
+    const weights = stageWeights(camera.zoom);
+    gl.uniform1f(this.#u.block, weights.blocks);
+    gl.uniform1f(this.#u.pattern, weights.detail);
     let drawn = 0;
     for (let cy = range.minCy; cy <= range.maxCy; cy++) {
       for (let cx = range.minCx; cx <= range.maxCx; cx++) {
