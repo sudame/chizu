@@ -15,6 +15,7 @@ import {
   roadCost,
   screenToTile,
   serviceFootprint,
+  signalCommand,
   snapToEightDirections,
 } from "./tools.ts";
 
@@ -176,6 +177,23 @@ describe("施設", () => {
       atX: -3,
       atY: 4,
       rotation: 2,
+    });
+  });
+});
+
+describe("signalCommand", () => {
+  test("押したマスと、置くか外すかをそのまま送る", () => {
+    expect(signalCommand({ x: -3, y: 7 }, true)).toEqual({
+      kind: "SetSignal",
+      x: -3,
+      y: 7,
+      on: true,
+    });
+    expect(signalCommand({ x: 0, y: 0 }, false)).toEqual({
+      kind: "SetSignal",
+      x: 0,
+      y: 0,
+      on: false,
     });
   });
 });

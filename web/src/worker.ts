@@ -96,6 +96,18 @@ function sendRoads(sim: Simulation): void {
   reply({ kind: "roads", revision, segments, nodes }, [segments.buffer, nodes.buffer]);
 }
 
+// 信号の灯火は tick ごとに変わりうるので毎回求め、前と違うときだけ送る
+let sentSignals = "";
+function sendSignals(sim: Simulation): void {
+  const lights = sim.signal_lights();
+  const key = lights.join(",");
+  if (key === sentSignals) {
+    return;
+  }
+  sentSignals = key;
+  reply({ kind: "signals", lights }, [lights.buffer]);
+}
+
 // 建物と街の数字は、建物の表か道路網が変わったときだけ全体を送り直す。足りない網の数は網のつながりで変わる
 let sentBuildingsVersion = -1;
 function sendBuildings(sim: Simulation): void {
@@ -163,6 +175,7 @@ function run(sim: Simulation): {
     sim.advance(step.ticks);
     sendOutcomes(sim);
     sendRoads(sim);
+    sendSignals(sim);
     sendBuildings(sim);
     sendFinance(sim, now);
     sendOverview(sim, now, paused);
@@ -223,6 +236,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         submit(sim, message.id, message.command);
         sendOutcomes(sim);
         sendRoads(sim);
+        sendSignals(sim);
         sendBuildings(sim);
         sendFinance(sim, performance.now(), true);
         sendOverview(sim, performance.now(), false, true);

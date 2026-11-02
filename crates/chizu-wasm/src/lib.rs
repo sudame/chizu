@@ -84,7 +84,8 @@ impl Simulation {
 
     /// 画面から届いたコマンドを `Command` に直し、検証して記録し、その場で適用する。記録した番号を返す。
     pub fn submit(&mut self, command: JsValue) -> Result<f64, JsError> {
-        let command = command_from_js(&command)?;
+        let net = self.0.world().network();
+        let command = command_from_js(&command, |t| net.node_at(t))?;
         self.0
             .submit(command)
             .map(|seq| seq as f64)
@@ -130,6 +131,11 @@ impl Simulation {
     /// ノードごとに `[x, y, つながる区間の数]`。
     pub fn road_nodes(&self) -> Vec<f64> {
         self.0.road_nodes()
+    }
+
+    /// 信号の腕ごとに `[ノードの x, ノードの y, 腕の向きの x, 腕の向きの y, 灯火]`。並びは `sim::Sim::signal_lights` にある。
+    pub fn signal_lights(&self) -> Vec<f64> {
+        self.0.signal_lights()
     }
 
     /// 建物の表の版。変わったときだけ建物を読み直す。
@@ -281,17 +287,22 @@ impl Simulation {
     }
 }
 
-fn command_from_js(value: &JsValue) -> Result<Command, JsError> {
+fn command_from_js(
+    value: &JsValue,
+    node_at: impl Fn(TilePos) -> Option<chizu_core::NodeId>,
+) -> Result<Command, JsError> {
     let field = |name: &str| match Reflect::get(value, &JsValue::from_str(name)) {
         Ok(v) if v.is_undefined() => Field::Missing,
-        Ok(v) => match (v.as_f64(), v.as_string()) {
-            (Some(n), _) => Field::Number(n),
-            (None, Some(s)) => Field::Text(s),
-            (None, None) => Field::Other,
+        Ok(v) => match (v.as_f64(), v.as_string(), v.as_bool()) {
+            (Some(n), _, _) => Field::Number(n),
+            (None, Some(s), _) => Field::Text(s),
+            (None, None, Some(b)) => Field::Bool(b),
+            (None, None, None) => Field::Other,
         },
         Err(_) => Field::Missing,
     };
-    command_input::parse(value.is_object(), field).map_err(|e| JsError::new(&e.to_string()))
+    command_input::parse(value.is_object(), field, node_at)
+        .map_err(|e| JsError::new(&e.to_string()))
 }
 
 #[cfg(test)]

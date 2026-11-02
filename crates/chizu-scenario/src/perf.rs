@@ -112,7 +112,7 @@ pub fn movers(each: u32, ticks: u64, now: &dyn Fn() -> u64) -> TickStats {
     let start = now();
     for _ in 0..ticks {
         let t = now();
-        black_box(trips.step(&net, &mut router));
+        black_box(trips.step(&net, &mut router, Tick::ZERO));
         worst = u64::max(worst, now() - t);
     }
     TickStats {

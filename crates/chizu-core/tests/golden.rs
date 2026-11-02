@@ -11,6 +11,8 @@
 
 use std::path::PathBuf;
 
+use chizu_core::movement::signal;
+
 use chizu_core::{
     Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneMode, LaneOffset, Money,
     RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed,
@@ -107,6 +109,13 @@ fn scenarios() -> Vec<Scenario> {
             seed: 42,
             ticks: COMMUTE_TICKS,
             log: commute(),
+            money: None,
+        },
+        Scenario {
+            name: "signals",
+            seed: 42,
+            ticks: COMMUTE_TICKS,
+            log: signals(),
             money: None,
         },
         Scenario {
@@ -403,6 +412,72 @@ fn commute() -> CommandLog {
         );
     }
     log
+}
+
+/// 通勤のシナリオの街に、2 本の通りを横切る南北の道路を足し、できた 2 つの十字路に信号を置く記録。
+/// 住宅から東の工業へ向かう車は、どちらかの信号を通る。
+fn signals() -> CommandLog {
+    let mut log = commute();
+    log.record(
+        Tick(4),
+        Command::BuildRoad {
+            from: TilePos::new(40, -10),
+            to: TilePos::new(40, 30),
+            kind: RoadKind::Small,
+        },
+    )
+    .unwrap();
+    // ノードの ID は網の作り方で決まるので、ここまでを再生して引く。
+    let mut world = World::new(42);
+    replay(&mut world, &log, 5);
+    for y in [0, 20] {
+        let node = world.network().node_at(TilePos::new(40, y)).unwrap();
+        log.record(Tick(5), Command::SetSignal { node, on: true })
+            .unwrap();
+    }
+    log
+}
+
+/// 信号のシナリオで、信号が 2 つとも置けていて、車が赤の信号の手前で止まることを確かめる。
+#[test]
+fn signals_scenario_stops_cars_on_red() {
+    let log = signals();
+    let mut world = World::new(42);
+    let stats = replay(&mut world, &log, 6);
+    assert_eq!(stats.denied, 0);
+    let lit: Vec<_> = world
+        .network()
+        .nodes()
+        .filter(|(_, n)| n.control == chizu_core::NodeControl::Signal)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(lit.len(), 2);
+    let mut waited = 0;
+    for _ in 6..COMMUTE_TICKS {
+        replay(&mut world, &log, 1);
+        let net = world.network();
+        for (_, t) in world.trips().iter() {
+            if t.mode() != LaneMode::Car || t.speed().0 != 0 {
+                continue;
+            }
+            let s = net.segment(t.link().segment).unwrap();
+            let end = match t.link().dir {
+                chizu_core::Dir::Forward => s.b,
+                chizu_core::Dir::Backward => s.a,
+            };
+            // 向き合う腕は同じ軸なので、区間の向きから軸が決まる。
+            let line = net.segment_line(t.link().segment).unwrap();
+            let axis = signal::axis(line.step);
+            // 停止線の手前（車 1 台ぶんと車間の内）で止まった車だけを数える。
+            let at_line = i64::from(t.offset().0) + 7_000 >= line.length().0;
+            let red = at_line
+                && lit.contains(&end)
+                && signal::state(net, end, world.tick())
+                    .is_some_and(|st| st.light_for(axis) != signal::Light::Green);
+            waited += usize::from(red);
+        }
+    }
+    assert!(waited > 0, "信号の手前で止まった車がない");
 }
 
 /// 通勤のシナリオで、朝に住民が歩きと車の両方で職場へ向かい、着いたら職場にいることを確かめる。

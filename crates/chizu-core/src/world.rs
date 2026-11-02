@@ -84,10 +84,14 @@ pub enum DenyReason {
     NoRoadAccess = 12,
     /// 買えるチャンクの枠を使い切っている。人口のマイルストーンに届くと枠が増える。
     NoChunkSlot = 13,
+    /// 信号を置くノードが、3 本以上の区間が集まる交差点でない。
+    NotJunction = 14,
+    /// 信号がもう置いてあるか、外す信号がない。
+    SignalUnchanged = 15,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 14] = [
+    pub const ALL: [DenyReason; 16] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -102,6 +106,8 @@ impl DenyReason {
         DenyReason::Occupied,
         DenyReason::NoRoadAccess,
         DenyReason::NoChunkSlot,
+        DenyReason::NotJunction,
+        DenyReason::SignalUnchanged,
     ];
 
     pub fn index(self) -> usize {
@@ -635,7 +641,10 @@ impl World {
             Command::Bulldoze { area } => self.bulldoze(area),
             Command::PaintZone { area, zone } => self.paint_zone(area, zone),
             Command::PlaceBuilding { kind, at, rotation } => self.place_service(kind, at, rotation),
-            Command::SetSignal { .. } => ApplyOutcome::NotImplemented,
+            Command::SetSignal { node, on } => match self.network.set_signal(node, on) {
+                Ok(()) => ApplyOutcome::Applied,
+                Err(reason) => ApplyOutcome::Denied(reason),
+            },
         }
     }
 
@@ -664,7 +673,9 @@ impl World {
                 update(&ctx, id, row)
             });
         self.update_people();
-        let ended = self.trips.step(&self.network, &mut self.router.router);
+        let ended = self
+            .trips
+            .step(&self.network, &mut self.router.router, tick);
         self.end_commutes(ended);
         self.grow_buildings();
         self.update_economy();
@@ -726,12 +737,14 @@ mod tests {
             | DenyReason::ZoneUnchanged
             | DenyReason::Occupied
             | DenyReason::NoRoadAccess
-            | DenyReason::NoChunkSlot => DenyReason::ALL.contains(&r),
+            | DenyReason::NoChunkSlot
+            | DenyReason::NotJunction
+            | DenyReason::SignalUnchanged => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 14);
+        assert_eq!(DenyReason::ALL.len(), 16);
     }
-    use crate::command::{MAX_TAX_PERMILLE, NodeId};
+    use crate::command::MAX_TAX_PERMILLE;
 
     #[test]
     fn step_advances_tick() {
@@ -792,18 +805,42 @@ mod tests {
     }
 
     #[test]
-    fn not_implemented_commands_leave_state_unchanged() {
+    fn signals_go_only_on_junctions() {
         let mut w = World::new(0);
-        let before = w.clone();
-        let cmd = Command::SetSignal {
-            node: NodeId {
-                index: 0,
-                generation: 0,
-            },
-            on: true,
+        road(&mut w, (0, 5), (10, 5), RoadKind::Small);
+        let signal = |w: &mut World, x, y, on| {
+            let node = w.network().node_at(TilePos::new(x, y)).unwrap();
+            w.apply(&Command::SetSignal { node, on })
         };
-        assert_eq!(w.apply(&cmd), ApplyOutcome::NotImplemented);
+        let before = w.clone();
+        // 2 本しか集まらないノードと、道路の端には置けない。
+        assert_eq!(
+            signal(&mut w, 0, 5, true),
+            ApplyOutcome::Denied(DenyReason::NotJunction)
+        );
         assert_eq!(w, before);
+        road(&mut w, (5, 5), (5, 10), RoadKind::Small);
+        let hash = w.state_hash();
+        assert_eq!(signal(&mut w, 5, 5, true), ApplyOutcome::Applied);
+        assert_ne!(w.state_hash(), hash);
+        assert_eq!(
+            signal(&mut w, 5, 5, true),
+            ApplyOutcome::Denied(DenyReason::SignalUnchanged)
+        );
+        assert_eq!(signal(&mut w, 5, 5, false), ApplyOutcome::Applied);
+        assert_eq!(w.state_hash(), hash);
+        // 交差点でなくなったノードからは、信号が外れる。
+        assert_eq!(signal(&mut w, 5, 5, true), ApplyOutcome::Applied);
+        let node = w.network().node_at(TilePos::new(5, 5)).unwrap();
+        w.apply(&Command::Bulldoze {
+            area: TileRect {
+                min: TilePos::new(5, 8),
+                max: TilePos::new(5, 10),
+            },
+        });
+        let n = w.network().node(node).unwrap();
+        assert_eq!(n.segments.len(), 2);
+        assert_eq!(n.control, crate::network::NodeControl::None);
     }
 
     fn road(w: &mut World, from: (i64, i64), to: (i64, i64), kind: RoadKind) -> ApplyOutcome {

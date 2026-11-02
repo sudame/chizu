@@ -21,6 +21,7 @@ export type Tool =
   | { kind: "bulldoze" }
   | { kind: "zone"; zone: ZoneName }
   | { kind: "service"; service: ServiceName }
+  | { kind: "signal"; on: boolean }
   | { kind: "buy" };
 
 /** 画面の点（CSS ピクセル）の下にあるマス。 */
@@ -201,6 +202,11 @@ export function placeServiceCommand(
   rotation: number,
 ): CommandMessage {
   return { kind: "PlaceBuilding", service, atX: at.x, atY: at.y, rotation };
+}
+
+/** マスの交差点に信号を置くか（on が true）、外す。 */
+export function signalCommand(at: Tile, on: boolean): CommandMessage {
+  return { kind: "SetSignal", x: at.x, y: at.y, on };
 }
 
 /** マスを含むチャンクを買う。 */

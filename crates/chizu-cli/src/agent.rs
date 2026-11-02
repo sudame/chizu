@@ -11,12 +11,14 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use chizu_core::building::{Building, CityStats, demand};
+use chizu_core::movement::signal;
 use chizu_core::service::supply_balance;
 use chizu_core::world::economy::Finances;
 use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, CitizenPlaces, CommandLog, DayTraffic, GameTime,
-    MigrationOutlook, ServiceKind, TilePos, TileRect, Traffic, World, ZoneKind, replay,
+    MigrationOutlook, NodeControl, ServiceKind, TilePos, TileRect, Traffic, World, ZoneKind,
+    replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -55,6 +57,10 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  blockedHouseholds 来ようとしても空き家が足りず入れない世帯の数。
                  vacantHomes が 0 なのに wantingHouseholds があるときは、住宅が足りないか、外の世界とつながっていない。
 
+observe の signals:
+  信号のある交差点ごとに、at マス、node ノードの ID、arms 腕ごとの toward（交差点から出ていく 1 歩の向き）と
+  light（Green、Yellow、Red。次の tick に効く灯火）。
+
 地図（map）:
   observe と同じく何も書かず、フィードバックのディレクトリにも打てる。角 (x0,y0)〜(x1,y1) は両端を含み、順番は問わない。
   1 文字が 1 マスで、先頭に凡例、上に x、行頭に y の目盛りが付く。座標は act のコマンドと同じである。
@@ -85,8 +91,12 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
   {"type":"PlaceBuilding","kind":"PowerPlant"|"WaterPump","at":[x,y],"rotation":0..3}
       施設を置く。発電所は 4×4 で 60000、浄水場は 2×2 で 25000。at は間口の角のマスで、
       rotation 0、1、2、3 のとき、at から y-1、x+1、y+1、x-1 の向きに 1 歩のマスが道路でなければならない。
-  {"type":"SetSignal","node":{"index":n,"generation":g},"on":true|false}
-      信号を付け外しする（まだ中身がない）。
+  {"type":"SetSignal","at":[x,y],"on":true|false}
+      マス at の交差点（3 本以上の道路が集まるノード）に信号を置くか、外す。費用はかからない。
+      at の代わりに "node":{"index":n,"generation":g} でノードを指してもよい（記録に入るのはこの形）。
+      マスにノードがなければ Invalid、交差点でなければ Denied（NotJunction）、変わらなければ Denied（SignalUnchanged）。
+      信号は交差点の腕を向き（東西、南北、2 つの斜め）ごとにまとめ、順に青 20 tick、黄 3 tick、全方向の赤 2 tick にする。
+      黄と赤の腕の車は、止まれるかぎり交差点の手前で止まる。いまの灯火は observe の signals にある。
   {"type":"BuyChunk","chunk":[cx,cy]}
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
   {"type":"SetTaxRate","zone":"Residential"|...,"permille":0..300}
@@ -342,7 +352,11 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value]) -> Vec<Value
         .map(|(i, value)| {
             let kind = value.get("type").cloned().unwrap_or(Value::Null);
             let invalid = |message: String| json!({"index": i, "type": kind, "outcome": "Invalid", "message": message});
-            let command = match command_json::parse(value) {
+            let value = match command_json::resolve_signal_at(value, |t| world.network().node_at(t)) {
+                Ok(v) => v,
+                Err(e) => return invalid(e),
+            };
+            let command = match command_json::parse(&value) {
                 Ok(c) => c,
                 Err(e) => return invalid(e),
             };
@@ -645,7 +659,30 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "end": [highway.start.x, highway.start.y],
             "outward": [highway.step.0, highway.step.1],
         },
+        "signals": signals(world),
     })
+}
+
+/// 信号のある交差点と、腕ごとのいまの灯火。
+fn signals(world: &World) -> Value {
+    let net = world.network();
+    let lit = net
+        .nodes()
+        .filter(|(_, n)| n.control == NodeControl::Signal)
+        .map(|(id, n)| {
+            let t = n.tile();
+            let arms: Vec<Value> = signal::arm_lights(net, id, world.tick())
+                .into_iter()
+                .map(|((dx, dy), light)| json!({"toward": [dx, dy], "light": format!("{light:?}")}))
+                .collect();
+            json!({
+                "at": [t.x, t.y],
+                "node": {"index": id.index, "generation": id.generation},
+                "arms": arms,
+            })
+        })
+        .collect();
+    Value::Array(lit)
 }
 
 fn parse_u64(text: &str, what: &str) -> Result<u64, String> {

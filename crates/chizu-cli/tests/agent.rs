@@ -588,3 +588,41 @@ fn observe_shows_why_growth_is_blocked() {
             >= 1
     );
 }
+
+#[test]
+fn act_places_a_signal_by_tile_and_observe_and_map_show_it() {
+    let dir = session("agent-signal");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,5],"to":[10,5],"kind":"Small"},
+            {"type":"BuildRoad","from":[5,0],"to":[5,10],"kind":"Small"},
+            {"type":"SetSignal","at":[5,5],"on":true},
+            {"type":"SetSignal","at":[0,5],"on":true},
+            {"type":"SetSignal","at":[3,3],"on":true}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let results = acted["results"].as_array().unwrap();
+    let outcomes: Vec<&str> = results
+        .iter()
+        .map(|r| r["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        outcomes,
+        ["Applied", "Applied", "Applied", "Denied", "Invalid"]
+    );
+    assert_eq!(results[3]["reason"], "NotJunction");
+    // 記録に入るのはノードの ID の形である。
+    assert!(results[2]["command"]["node"]["index"].is_u64(), "{acted}");
+    let seen = json(&cli(&["agent", "observe", d]));
+    let signals = seen["signals"].as_array().unwrap();
+    assert_eq!(signals.len(), 1, "{seen}");
+    assert_eq!(signals[0]["at"], serde_json::json!([5, 5]));
+    let arms = signals[0]["arms"].as_array().unwrap();
+    assert_eq!(arms.len(), 4);
+    let greens = arms.iter().filter(|a| a["light"] == "Green").count();
+    assert!(greens <= 2, "{seen}");
+    let map = cli(&["agent", "map", d, "4", "4", "6", "6"]);
+    assert_eq!(grid_rows(&map, 3, 3), [".1.", "1S1", ".1."], "{map}");
+}

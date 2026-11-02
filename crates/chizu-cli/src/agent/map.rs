@@ -4,7 +4,7 @@
 //! 書き込みはせず、中核の公開の読み出し口だけを使う。
 
 use chizu_core::chunk::Layer;
-use chizu_core::network::SegmentKind;
+use chizu_core::network::{NodeControl, SegmentKind};
 use chizu_core::tile::local_index;
 use chizu_core::{
     CHUNK_SIDE, Congestion, ServiceKind, TilePos, TileRect, World, ZoneKind, is_water,
@@ -23,6 +23,7 @@ const HIGHWAY: u8 = 4;
 pub const LEGEND: &str = "\
 凡例（重なったときは上のものを出す）
   P W      公共施設（P 発電所、W 浄水場）
+  S        信号のある交差点
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
   R C I O  建物（住宅、商業、工業、オフィスの区画に建っている）
   r c i o  建物のない区画（同じ並び）
@@ -67,6 +68,8 @@ struct Cell {
     /// 通る区間の混み具合の最大。交通の層でだけ入れる。
     congestion: Option<Congestion>,
     facility: [u32; 2],
+    /// 信号のある交差点があるか。
+    signal: bool,
     /// 道路の最大の種類。0 は道路なし。
     road: u8,
     building: [u32; 4],
@@ -104,11 +107,14 @@ fn facility_letter(k: ServiceKind) -> char {
 }
 
 impl Cell {
-    /// 載せる文字。公共施設、道路、建物、区画、水辺、買っていない土地、空きマスの順に選び、
+    /// 載せる文字。公共施設、信号、道路、建物、区画、水辺、買っていない土地、空きマスの順に選び、
     /// 同じ種類の中では数の多いものを選ぶ（道路は種類の大きいもの）。
     fn glyph(&self) -> char {
         if let Some(i) = argmax(&self.facility) {
             return facility_letter(ServiceKind::ALL[i]);
+        }
+        if self.signal {
+            return 'S';
         }
         match self.road {
             0 => {}
@@ -305,6 +311,14 @@ pub fn render(
                 cell.road = cell.road.max(kind);
                 cell.congestion = cell.congestion.max(level);
             }
+        }
+    }
+
+    for (_, n) in world.network().nodes() {
+        if n.control == NodeControl::Signal
+            && let Some(cell) = grid.cell_mut(n.tile())
+        {
+            cell.signal = true;
         }
     }
 

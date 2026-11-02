@@ -23,6 +23,7 @@ import {
   halfWidthOf,
   type RoadMeshes,
   roadMeshes,
+  signalGeometry,
   unsuppliedCount,
 } from "./map/roads.ts";
 import {
@@ -50,6 +51,7 @@ import {
   type ServiceProbe,
   screenToTile,
   serviceFootprint,
+  signalCommand,
   type Tile,
   type Tool,
 } from "./map/tools.ts";
@@ -65,6 +67,7 @@ import {
   type RoadKindName,
   SEGMENT_STRIDE,
   type ServiceName,
+  SIGNAL_STRIDE,
   type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
@@ -179,6 +182,7 @@ let renderer = createRenderer();
 // 最後に届いた道路網と建物。コンテキストを失ったあとに貼り直す
 let roads: RoadMeshes | null = null;
 let buildings: Geometry | null = null;
+let signals: Geometry | null = null;
 let activeLayers: number[] = [];
 setupLayerPanel(element<HTMLElement>("#layers"), (active) => {
   activeLayers = active;
@@ -204,6 +208,9 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
   }
   if (buildings !== null) {
     renderer?.roads.setBuildings(buildings);
+  }
+  if (signals !== null) {
+    renderer?.roads.setSignals(signals);
   }
   renderer?.layers.setActive(activeLayers);
   send({ kind: "layers", active: activeLayers });
@@ -384,6 +391,12 @@ function updatePreview(): void {
     // test:wasm が読む
     mapCanvas.dataset.serviceRotation = String(choice.rotation);
     mapCanvas.dataset.servicePlaceable = String(choice.placeable);
+  } else if (tool.kind === "signal" && cursor !== null) {
+    geometry = new Geometry(cursor);
+    geometry.rect(cursor, cursor, BUY_AREA);
+    info = tool.on
+      ? "3 本以上の道路が集まる交差点を押して信号を置く"
+      : "信号のある交差点を押して外す";
   } else if (tool.kind === "buy" && cursor !== null) {
     const c = buyChunkCommand(cursor);
     if (c.kind === "BuyChunk") {
@@ -485,6 +498,8 @@ function clickTile(at: Tile): void {
     }
   } else if (tool.kind === "buy") {
     sendCommand(buyChunkCommand(at));
+  } else if (tool.kind === "signal") {
+    sendCommand(signalCommand(at, tool.on));
   } else if (mapCanvas.dataset.tool === DEV_WALK_TOOL) {
     devWalks.click(at);
   } else if (tool.kind === "service") {
@@ -653,9 +668,11 @@ for (const button of toolButtons) {
           ? { kind: "zone", zone }
           : service !== null
             ? { kind: "service", service }
-            : name === "bulldoze" || name === "buy"
-              ? { kind: name }
-              : { kind: "none" };
+            : name === "signal-on" || name === "signal-off"
+              ? { kind: "signal", on: name === "signal-on" }
+              : name === "bulldoze" || name === "buy"
+                ? { kind: name }
+                : { kind: "none" };
     selectTool(next, button);
   });
 }
@@ -666,6 +683,7 @@ const DONE: Record<CommandMessage["kind"], string> = {
   BuyChunk: "土地を買った",
   PaintZone: "区画を塗った",
   PlaceBuilding: "施設を置いた",
+  SetSignal: "信号を切り替えた",
   SetSimSpeed: "速度を変えた",
   SetTaxRate: "税率を変えた",
 };
@@ -723,6 +741,13 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);
     mapCanvas.dataset.roadSegments = String(message.segments.length / SEGMENT_STRIDE);
+    return;
+  }
+  if (message.kind === "signals") {
+    signals = signalGeometry(message.lights);
+    renderer?.roads.setSignals(signals);
+    // test:wasm が読む
+    mapCanvas.dataset.signalArms = String(message.lights.length / SIGNAL_STRIDE);
     return;
   }
   if (message.kind === "buildings") {
