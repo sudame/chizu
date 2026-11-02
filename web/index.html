@@ -108,6 +108,14 @@
         touch-action: none;
         cursor: grab;
       }
+      /* 道路名、地区名、施設名。地図の上に重ね、操作は下の地図に通す */
+      #labels {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
       #map:not([data-tool="none"]) {
         cursor: crosshair;
       }
@@ -870,6 +878,7 @@
       </defs>
     </svg>
     <canvas id="map" data-tool="none"></canvas>
+    <canvas id="labels" aria-hidden="true"></canvas>
     <div id="overlay">
       <div id="hudbar">
         <p id="hud">

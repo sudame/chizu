@@ -12,6 +12,7 @@ describe("isWorkerToMain", () => {
     sum: 6n,
     roadCosts: [250, 450, 750, 8000, 11314],
     serviceTable: [60000, 4, 4, 25000, 2, 2],
+    seed: "0",
   };
   const roads = {
     kind: "roads",
@@ -23,6 +24,8 @@ describe("isWorkerToMain", () => {
 
   test("正しい形のメッセージを受け入れる", () => {
     expect(isWorkerToMain(ready)).toBe(true);
+    const { seed: _, ...noSeed } = ready;
+    expect(isWorkerToMain(noSeed)).toBe(false);
     expect(isWorkerToMain({ kind: "error", message: "失敗" })).toBe(true);
     expect(isWorkerToMain({ kind: "chunks", chunks: [chunk] })).toBe(true);
     expect(isWorkerToMain({ kind: "chunks", chunks: [] })).toBe(true);
