@@ -49,7 +49,12 @@ fn run(args: &[String]) -> Result<String, String> {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.split_first() {
-        Some((first, rest)) if first == "agent" => agent::run(rest),
+        Some((first, rest)) if first == "agent" => {
+            // キャッシュの鍵は、ロックを待つ前に取る。待つあいだに作り直された実行ファイルの鍵を、
+            // いま動いている古いビルドで再生した街に付けないためである。
+            agent::fix_build_key();
+            agent::run(rest)
+        }
         _ => run(&args),
     };
     match result {
