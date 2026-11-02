@@ -591,3 +591,133 @@ fn try_new_matches_new_on_networks_built_by_commands() {
         assert_eq!(Graph::try_build(&n, mode).unwrap(), Graph::build(&n, mode));
     }
 }
+
+#[test]
+fn delays_steer_cars_to_the_parallel_road_and_survive_a_rebuild() {
+    // (0, 0) から (20, 0) へ、まっすぐの道と、北へ回る道がある。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    road(&mut n, (0, 0), (0, -4), RoadKind::Small);
+    road(&mut n, (0, -4), (20, -4), RoadKind::Small);
+    road(&mut n, (20, -4), (20, 0), RoadKind::Small);
+    road(&mut n, (20, 0), (24, 0), RoadKind::Small);
+    road(&mut n, (-4, 0), (0, 0), RoadKind::Small);
+    let car = LaneMode::Car;
+    let req = RouteRequest {
+        from: link(&n, (-4, 0), (0, 0), car),
+        to: link(&n, (20, 0), (24, 0), car),
+        mode: car,
+    };
+    let walk = RouteRequest {
+        from: link(&n, (-4, 0), (0, 0), LaneMode::Sidewalk),
+        to: link(&n, (20, 0), (24, 0), LaneMode::Sidewalk),
+        mode: LaneMode::Sidewalk,
+    };
+    let straight = link(&n, (0, 0), (20, 0), car);
+    let mut router = AstarRouter::new(&n);
+    let free = router.route_batch(&[req, walk]);
+    assert!(free[0].as_ref().unwrap().links.contains(&straight));
+    // まっすぐの道に、回り道の 8 マスぶんより長い遅れを足すと、車は北へ回る。歩く経路は変わらない。
+    let detour_ms = router
+        .graph(car)
+        .link_cost(link(&n, (0, 0), (0, -4), car))
+        .unwrap()
+        * 3;
+    let delays = Delays::from_sorted([(straight, detour_ms)]);
+    router.set_delays(&delays);
+    assert_eq!(router.cached(), 1, "歩く経路の覚えた結果は残す");
+    let jammed = router.route_batch(&[req, walk]);
+    let r = jammed[0].as_ref().unwrap();
+    assert!(!r.links.contains(&straight), "混んだ道を避けない {r:?}");
+    check_route(router.graph(car), r);
+    assert_eq!(jammed[1], free[1]);
+    // 網を作り直しても遅れは残り、遅れを消せば元の経路に戻る。
+    router.rebuild(&n);
+    assert_eq!(router.delays(), &delays);
+    assert_eq!(router.route_batch(&[req])[0], jammed[0]);
+    router.set_delays(&Delays::default());
+    assert_eq!(router.route_batch(&[req])[0], free[0]);
+}
+
+#[test]
+fn surely_connected_links_always_have_a_route() {
+    let mut n = grid(3);
+    // 離れた道路は、どこともつながらない。
+    road(&mut n, (100, 100), (110, 100), RoadKind::Small);
+    let router = AstarRouter::new(&n);
+    let mut s = Scratch::default();
+    let mut connected = 0;
+    for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+        let links: Vec<LinkId> = n.links().filter(|l| l.mode == mode).collect();
+        for a in &links {
+            for b in &links {
+                if a != b && router.surely_connected(mode, *a, *b) {
+                    connected += 1;
+                    assert!(
+                        astar(router.graph(mode), *a, *b, &mut s).is_some(),
+                        "{a:?} から {b:?} への経路がない"
+                    );
+                }
+            }
+        }
+    }
+    assert!(connected > 0);
+    let far = link(&n, (100, 100), (110, 100), LaneMode::Car);
+    let near = link(&n, (0, 0), (4, 0), LaneMode::Car);
+    assert!(router.surely_connected(LaneMode::Car, near, link(&n, (4, 4), (0, 4), LaneMode::Car)));
+    assert!(!router.surely_connected(LaneMode::Car, near, far));
+}
+
+/// 外の世界へ出る高速道路と、行き止まりと、離れた道路のある網。外の世界のノードでは折り返せないので、
+/// 出ていく高速道路のリンクは抜け出せない行き止まりになり、入ってくるリンクには戻れない。
+fn highway_city() -> Network {
+    let mut n = Network::new();
+    n.add_highway(TilePos::new(8, 8), TilePos::new(8, 40));
+    for i in 0..=2 {
+        road(&mut n, (0, i * 4), (8, i * 4), RoadKind::Small);
+        road(&mut n, (i * 4, 0), (i * 4, 8), RoadKind::Medium);
+    }
+    road(&mut n, (0, 8), (-6, 8), RoadKind::Small);
+    road(&mut n, (100, 100), (110, 100), RoadKind::Small);
+    n
+}
+
+#[test]
+fn surely_connected_agrees_with_the_search_around_a_highway_exit() {
+    let n = highway_city();
+    let router = AstarRouter::new(&n);
+    let mut s = Scratch::default();
+    for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+        let g = router.graph(mode);
+        let links: Vec<LinkId> = n.links().filter(|l| l.mode == mode).collect();
+        let (mut sure, mut found, mut missing) = (0, 0, 0);
+        for a in &links {
+            for b in &links {
+                let route = if a == b {
+                    // 同じリンクへ戻る輪があるか。次のリンクのどれかから戻れればよい。
+                    let v = g.vertex(*a).unwrap();
+                    g.edges(v)
+                        .iter()
+                        .any(|e| astar(g, g.link(e.to), *a, &mut s).is_some())
+                } else {
+                    astar(g, *a, *b, &mut s).is_some()
+                };
+                let surely = router.surely_connected(mode, *a, *b);
+                assert!(!surely || route, "{mode:?} {a:?} から {b:?} へは経路がない");
+                sure += usize::from(surely);
+                found += usize::from(route);
+                missing += usize::from(!route);
+            }
+        }
+        assert!(sure > 0 && missing > 0, "{mode:?} {sure} {missing}");
+        if mode == LaneMode::Car {
+            // 高速道路へ出ていくリンクには行けるが、成分が違うので網の形だけでは言えない組がある。
+            assert!(found > sure, "{found} {sure}");
+        }
+    }
+    // 外の世界へ出ていく高速道路のリンクからは、どこへも行けない。
+    let out = link(&n, (8, 8), (8, 40), LaneMode::Car);
+    let back = link(&n, (8, 40), (8, 8), LaneMode::Car);
+    assert!(!router.surely_connected(LaneMode::Car, out, back));
+    assert!(astar(router.graph(LaneMode::Car), out, back, &mut s).is_none());
+}

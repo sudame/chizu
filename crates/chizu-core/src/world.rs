@@ -15,7 +15,7 @@ use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
 use crate::rng::{RngPurpose, mix_words};
-use crate::routing::{AstarRouter, GraphError};
+use crate::routing::{AstarRouter, BAND_TICKS, Delays, GraphError};
 use crate::schedule::bucket_at;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, WORLD_LIMIT, local_index};
@@ -129,6 +129,10 @@ impl DenyReason {
     }
 }
 
+/// 時間帯の中で、車の経路の遅れを見積もり直す tick。住民の職場の割り当てなど、重い処理の重なる
+/// 300 の倍数の tick を避け、時間帯の真ん中にする。
+const DELAY_PHASE: u64 = BAND_TICKS / 2;
+
 /// 街全体の状態の入れ物。
 ///
 /// 状態を変えるのは [`World::apply`] と [`World::step`] だけである。
@@ -163,6 +167,8 @@ pub struct World {
     /// 適用済みの記録の次の番号。記録から続きを回すときは、この番号から適用する。
     next_seq: u64,
     trips: Trips,
+    /// 車の経路の費用に足す、混み具合から見積もった遅れ。時間帯ごとに 1 回見積もり直す。
+    delays: Delays,
     errands: errand::Errands,
     /// 通勤の移動の結果の集計。読み取り用で、状態ハッシュには入れない。
     traffic: traffic::TrafficTally,
@@ -286,6 +292,7 @@ impl World {
             lots: Default::default(),
             next_seq: 0,
             trips: Trips::default(),
+            delays: Delays::default(),
             errands: Default::default(),
             traffic: Default::default(),
             router,
@@ -746,6 +753,9 @@ impl World {
                 };
                 update(&ctx, id, row)
             });
+        if tick.0 % BAND_TICKS == DELAY_PHASE {
+            self.estimate_delays();
+        }
         self.update_people();
         let ended = self
             .trips
@@ -756,11 +766,18 @@ impl World {
         self.tick = tick.next();
     }
 
+    /// 車線に並んでいる車から、車のリンクごとの遅れを見積もり直し、経路探索の費用に入れる。
+    fn estimate_delays(&mut self) {
+        self.delays = self.trips.queue_delays(&self.network);
+        self.router.router.set_delays(&self.delays);
+    }
+
     /// 読み戻した街の経路探索を、網から作り直す。グラフを作ったときの網の版は書き出したときのままにする。
     /// 網の中身が食い違っていたら、経路探索を変えずに `Err` を返す。
     pub(crate) fn rebuild_router(&mut self) -> Result<(), GraphError> {
         let version = self.router.router.version();
         self.router.router = AstarRouter::try_new(&self.network)?.with_version(version);
+        self.router.router.set_delays(&self.delays);
         Ok(())
     }
 
@@ -787,6 +804,7 @@ impl StateHash for World {
         h.write(&self.network);
         h.write(&self.population);
         h.write(&self.trips);
+        h.write(&self.delays);
         h.write(&self.errands);
         h.write(&self.buildings);
         h.write(&self.facilities);
