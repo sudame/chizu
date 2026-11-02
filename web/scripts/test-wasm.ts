@@ -25,6 +25,10 @@ const TICKS_PER_DAY = 7_200;
 const GAME_SECONDS_PER_TICK = 12;
 const INITIAL_MONEY = 500_000;
 // web/src/map/camera.ts の値
+// 買った土地の地面の色（docs/map-style.md の色の表）
+const GROUND_HEX = "#f4f2ec";
+// 地面に買える土地の仮の表示（#1a73e8 の 10%）が重なった色
+const GROUND_ON_HINT_HEX = "#dee5ec";
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 32;
 
@@ -420,7 +424,11 @@ try {
       },
       { x, y },
     );
-  const brightness = (c: number[]) => (c[0] ?? 0) + (c[1] ?? 0) + (c[2] ?? 0);
+  // 画素の色（0〜255）が、色の表の値（`#rrggbb`）に近いか
+  const near = (c: number[], code: string, tolerance = 6) =>
+    [1, 3, 5].every(
+      (at, i) => Math.abs((c[i] ?? 0) - Number.parseInt(code.slice(at, at + 2), 16)) <= tolerance,
+    );
 
   await waitAllDrawn();
   const first = await mapState();
@@ -431,10 +439,8 @@ try {
   // 画面の中心は開始地点の買ってある土地で、水辺はない
   const owned = await pixel(cx, cy);
   check(
-    (owned[1] ?? 0) > (owned[0] ?? 0) &&
-      (owned[1] ?? 0) > (owned[2] ?? 0) &&
-      brightness(owned) > 300,
-    `画面の中心に買ってある陸が描かれる（${owned.join(", ")}）`,
+    near(owned, GROUND_HEX),
+    `画面の中心に買ってある陸が淡い地面の色で描かれる（${owned.join(", ")}）`,
   );
 
   const initialSegments = Number(await map.getAttribute("data-road-segments"));
@@ -519,10 +525,9 @@ try {
   // カーソルのある道路には始点の印が重なるので、道路から離れたところへ動かしてから色を読む
   await page.mouse.move(cx, cy - 120, { steps: 2 });
   await page.waitForTimeout(100);
-  // 道路とノードは灰色、地面は緑が強い
-  const isRoad = (c: number[]) =>
-    Math.abs((c[1] ?? 0) - (c[0] ?? 0)) < 20 && Math.abs((c[2] ?? 0) - (c[1] ?? 0)) < 20;
-  const isGround = (c: number[]) => (c[1] ?? 0) > (c[0] ?? 0) + 30;
+  // 小さい道路は白の塗り、地面は淡い地面の色（#f4f2ec）で、白とは青の強さで見分けられる
+  const isRoad = (c: number[]) => near(c, "#ffffff", 4);
+  const isGround = (c: number[]) => near(c, GROUND_HEX, 4);
   const colorAt = async (x: number, y: number) => {
     const p = tileCenter(x, y);
     return pixel(p.x, p.y);
@@ -717,7 +722,20 @@ try {
     return nextOutcome(before);
   };
   const east = chunkPoint(2, 0);
-  const eastBefore = await pixel(east.x, east.y);
+  // 水辺のマスは買っても色が変わらないので、チャンクの真ん中のまわりの 7×7 点のうち、
+  // 買った土地の地面の色（#f4f2ec）の点を数える。買っていない土地は #e6e3db と斜線の #d9d5ca で塗る。
+  // 買う道具のカーソルが載っていれば、買える土地の仮の表示（青の 10%）が重なって #dee5ec になる
+  const ownedPixels = async () => {
+    let n = 0;
+    for (let i = -3; i <= 3; i++) {
+      for (let j = -3; j <= 3; j++) {
+        const c = await pixel(east.x + i * 0.1 * 64 * view.zoom, east.y + j * 0.1 * 64 * view.zoom);
+        n += near(c, GROUND_HEX, 2) || near(c, GROUND_ON_HINT_HEX, 2) ? 1 : 0;
+      }
+    }
+    return n;
+  };
+  const eastBefore = await ownedPixels();
   const tickBeforeBuy = await tick();
   const moneyBeforeBuy = await moneyNow();
   const bought = await buy(2, 0);
@@ -727,33 +745,15 @@ try {
   );
   await waitMoney(moneyBeforeBuy - 50_000, tickBeforeBuy);
   check(true, `所持金が値段の分だけ減る（${moneyBeforeBuy} → ${await moneyNow()}）`);
-  await page.waitForFunction(
-    ({ x, y, before }) => {
-      const canvas = document.querySelector<HTMLCanvasElement>("#map");
-      const gl = canvas?.getContext("webgl2");
-      if (canvas === null || canvas === undefined || gl === null || gl === undefined) {
-        return false;
-      }
-      const out = new Uint8Array(4);
-      const dpr = window.devicePixelRatio;
-      gl.readPixels(
-        Math.floor(x * dpr),
-        canvas.height - 1 - Math.floor(y * dpr),
-        1,
-        1,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        out,
-      );
-      return (out[0] ?? 0) + (out[1] ?? 0) + (out[2] ?? 0) > before * 1.5;
-    },
-    { x: east.x, y: east.y, before: brightness(eastBefore) },
-    { timeout: TIMEOUT_MS },
-  );
-  const eastAfter = await pixel(east.x, east.y);
+  const untilOwned = Date.now() + TIMEOUT_MS;
+  let eastAfter = await ownedPixels();
+  while (eastAfter === 0 && Date.now() < untilOwned) {
+    await page.waitForTimeout(100);
+    eastAfter = await ownedPixels();
+  }
   check(
-    brightness(eastAfter) > brightness(eastBefore) * 1.5,
-    `買ったチャンクが明るく描き直される（${eastBefore.join(", ")} → ${eastAfter.join(", ")}）`,
+    eastBefore === 0 && eastAfter > 0,
+    `買ったチャンクが買った土地の色に描き直される（地面の色の点 ${eastBefore} → ${eastAfter}）`,
   );
   const far = await buy(3, 1);
   check(
@@ -787,9 +787,12 @@ try {
   await page.waitForTimeout(100);
   const zonable = await colorOfTile(45, 37);
   const tooFar = await colorOfTile(45, 45);
+  // 塗れるマスは、地面に青（#1a73e8）を 10% 重ねる。赤が下がり、青の強さが赤を上回る
   check(
-    brightness(zonable) > brightness(tooFar) + 30,
-    `区画の道具を選ぶと、道路から 6 マス以内のマスが明るく示される（${zonable.join(", ")} と ${tooFar.join(", ")}）`,
+    near(tooFar, GROUND_HEX, 2) &&
+      (tooFar[0] ?? 0) - (zonable[0] ?? 0) > 12 &&
+      (zonable[2] ?? 0) > (zonable[0] ?? 0) + 8,
+    `区画の道具を選ぶと、道路から 6 マス以内のマスが青みがかって示される（${zonable.join(", ")} と ${tooFar.join(", ")}）`,
   );
   const beforeZone = await outcomeCount();
   const z0 = tilePoint(40, 33);
@@ -820,15 +823,16 @@ try {
         gl.UNSIGNED_BYTE,
         out,
       );
-      return (out[2] ?? 0) > (out[0] ?? 0) + 50;
+      // 商業の区画の地面（#eaf0f8）は、買った土地の地面（#f4f2ec）と違って青が赤を上回る
+      return (out[2] ?? 0) > (out[0] ?? 0) + 8;
     },
     tilePoint(45, 34),
     { timeout: TIMEOUT_MS },
   );
   const commercial = await colorOfTile(45, 34);
   check(
-    (commercial[2] ?? 0) > (commercial[0] ?? 0) + 50 && (commercial[2] ?? 0) > (commercial[1] ?? 0),
-    `塗ったマスが商業の青で描かれる（${commercial.join(", ")}）`,
+    near(commercial, "#eaf0f8", 4),
+    `塗ったマスが商業の淡い青の地面で描かれる（${commercial.join(", ")}）`,
   );
   const farZone = await (async () => {
     const before = await outcomeCount();
@@ -882,8 +886,8 @@ try {
     cy + (by + 0.8 - view.y) * view.zoom,
   );
   check(
-    (house[1] ?? 0) > (house[0] ?? 0) + 50 && brightness(house) < 250,
-    `建物が住宅の濃い緑で描かれる（マス (${bx}, ${by})、${house.join(", ")}）`,
+    near(house, "#d3e3c0", 4),
+    `建物が住宅の緑の色で描かれる（マス (${bx}, ${by})、${house.join(", ")}）`,
   );
   const residentialDemand = await page.locator("#demand .bar").first().getAttribute("data-demand");
   check(residentialDemand !== null, `住宅の需要の棒が出る（${residentialDemand}）`);
@@ -994,10 +998,7 @@ try {
     Math.abs(restored.x - homeCamera.x) < 0.2 && Math.abs(restored.y - homeCamera.y) < 0.2,
     `カメラを元の位置へ戻した（${restored.x.toFixed(2)}, ${restored.y.toFixed(2)}）`,
   );
-  check(
-    (await page.locator("#legend-body li").count()) >= 10,
-    "凡例に区画・建物の段階・印・施設が並ぶ",
-  );
+  check((await page.locator("#legend-body li").count()) >= 10, "凡例に区画・建物・印・施設が並ぶ");
   // 電気のデータレイヤーに切り替えると、建物が届いているかどうかの色で塗られる
   const layerPixel = () =>
     pixel(cx + (bx + 0.5 - view.x) * view.zoom, cy + (by + 0.8 - view.y) * view.zoom);
@@ -1190,9 +1191,10 @@ try {
   );
   // 中心から 300 マス右は、買っていない土地
   const unowned = await pixel(cx + 300, cy);
+  // 買っていない土地は、#e6e3db の地に #d9d5ca の斜線を引く。斜線の上でも地の上でも、買った土地の色とは違う
   check(
-    brightness(unowned) < brightness(owned) * 0.6,
-    `買っていない土地は暗く描かれる（${unowned.join(", ")}）`,
+    (near(unowned, "#e6e3db", 2) || near(unowned, "#d9d5ca", 2)) && !near(unowned, GROUND_HEX, 2),
+    `買っていない土地は斜線のある別の色で描かれる（${unowned.join(", ")}）`,
   );
 
   const anchor = { x: cx + 200, y: cy + 100 };

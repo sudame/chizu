@@ -17,8 +17,12 @@ import {
   HIGHWAY_CODE,
   hasSidewalks,
   roadHalfWidth,
+  SIDEWALK_WIDTH,
   showsLanes,
 } from "./lanes.ts";
+import { type Color, hex } from "./palette.ts";
+
+export type { Color };
 
 /** マスの座標。 */
 export type Tile = { x: number; y: number };
@@ -28,7 +32,9 @@ export const MIN_PX = 1.5;
 /** 車線の区切りなど細い線の、半分の太さの下限（画面のピクセル）。 */
 export const THIN_PX = 0.5;
 
-// 半分の太さは、世界の単位の a_half を画面に直した値と、画面のピクセルの下限 a_min の大きいほうにする。
+// 半分の太さは、世界の単位の a_half を画面に直した値と、画面のピクセルの下限 a_min の大きいほうに、
+// 画面のピクセルの a_extra を足した値にする。a_dash が正なら、a_along（世界の距離）に沿って、
+// 画面で a_dash ピクセルの周期の破線にする。
 // u_alpha は、拡大したときだけ描く路面の線を、縮尺に合わせて薄くするのに使う
 const VERTEX = `#version 300 es
 in vec2 a_pos;
@@ -36,30 +42,39 @@ in vec2 a_normal;
 in float a_half;
 in float a_min;
 in vec4 a_color;
+in float a_extra;
+in float a_along;
+in float a_dash;
 uniform vec2 u_offset;
 uniform float u_zoom;
 uniform vec2 u_viewport;
 uniform float u_alpha;
 out vec4 v_color;
+out float v_distance;
+flat out float v_dash;
 void main() {
-  float half_px = max(a_half * u_zoom, a_min);
+  float half_px = max(a_half * u_zoom, a_min) + a_extra;
   vec2 p = (a_pos * u_zoom + u_offset + a_normal * half_px) / (u_viewport * 0.5);
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
   v_color = vec4(a_color.rgb, a_color.a * u_alpha);
+  v_distance = a_along * u_zoom;
+  v_dash = a_dash;
 }`;
 
 const FRAGMENT = `#version 300 es
 precision mediump float;
 in vec4 v_color;
+in float v_distance;
+flat in float v_dash;
 out vec4 color;
 void main() {
-  color = v_color;
+  // 破線は、discard せずに不透明度で抜く（実線は v_dash が 0）
+  float on = v_dash > 0.0 ? step(mod(v_distance, v_dash), v_dash * 0.5) : 1.0;
+  color = vec4(v_color.rgb, v_color.a * on);
 }`;
 
-/** 頂点 1 つの数の個数。位置 2、法線 2、半分の太さ 1、半分の太さの下限 1、色 4。 */
-export const VERTEX_FLOATS = 10;
-
-export type Color = readonly [number, number, number, number];
+/** 頂点 1 つの数の個数。位置 2、法線 2、半分の太さ 1、半分の太さの下限 1、色 4、足す太さ 1、破線の位置 1、破線の周期 1。 */
+export const VERTEX_FLOATS = 13;
 
 /** 図形の三角形。頂点は [-1, 1] の範囲の (x, y) で、y は下向きが正である。 */
 export type Triangle = readonly [
@@ -102,29 +117,39 @@ export const DROP_SHAPE: readonly Triangle[] = [
 ];
 
 /**
- * 道路の見た目。CS2 の俯瞰にならい、道路はマスいっぱいに描く。車道の幅は車線の数に合わせ、
- * 車道の外からマスの縁までを歩道（高速道路は橙の路肩）で埋める。車道は広い道路ほど濃くする。
+ * 道路の見た目（docs/map-style.md の「道路」）。`asphalt` は車道の塗り、`edge` は車道の縁の色である。
+ * 縮小したときは、縁の色の帯の上に塗りの帯を重ねて縁取りにする。拡大したときは、車道の端（縁石）の線にする。
  * `minPx` は、縮小したときに車道の半分の太さが下回らない画面のピクセル数で、広い道路ほど太く残す。
  */
 export type RoadStyle = { asphalt: Color; edge: Color; minPx: number };
 
 /** 道路をマスの中心からこの幅（マス）まで描く。マスいっぱいである。 */
 export const ROAD_VISUAL_HALF = 0.5;
-export const SIDEWALK_COLOR: Color = [0.77, 0.76, 0.73, 1];
-export const SHOULDER_COLOR: Color = [0.93, 0.6, 0.2, 1];
-// 道路と隣の区画の境目の線
-export const CURB_COLOR: Color = [0.42, 0.42, 0.42, 1];
-const CURB_HALF = 0.0125;
-// 高速道路の車道の半分の幅。車線 2 本の外側（0.45〜0.5 マス）を路肩にする。外側の車線の車は 0.44 マスまでに収まる
+export const SIDEWALK_COLOR = hex("#e6e2d8");
+/** 歩道の外の縁の線。 */
+export const SIDEWALK_EDGE_COLOR = hex("#cfc8ba");
+/** 歩道の外からマスの縁までの植え込み。 */
+export const PLANTING_COLOR = hex("#e4eedb");
+// 高速道路の車道の半分の幅。車線 2 本の外側（0.45〜0.5 マス）を、縁の色の路肩にする。外側の車線の車は 0.44 マスまでに収まる
 const HIGHWAY_ASPHALT_HALF = 0.45;
-// 縮小したとき、歩道（路肩）を車道より片側でこのピクセル数だけ広く残す
-const EDGE_EXTRA_PX = 0.6;
+// 縮小したとき、縁の帯を塗りの帯より片側でこのピクセル数だけ広く残す
+export const EDGE_EXTRA_PX = 1;
+
+// 縮小したときの線の、世界の幅の半分（マス）。決まりの表の幅（小 0.62、中 0.80、大 0.96、高速 1.00）の半分である。
+// 画面での太さは `max(下限, 世界の幅 × 倍率)` で、下限は RoadStyle の minPx（表の下限の半分）にする
+const LINE_HALF: Record<number, number> = { 1: 0.31, 2: 0.4, 3: 0.48, [HIGHWAY_CODE]: 0.5 };
+
+/** 縮小したときの線の、世界の半分の幅（マス）。斜めの区間は脇のマスの建物にかからない幅に抑える。 */
+export function lineHalfWidth(kindCode: number, a: Tile, b: Tile): number {
+  const half = LINE_HALF[kindCode] ?? 0.31;
+  return isDiagonal(a, b) ? Math.min(half, DIAGONAL_ASPHALT_HALF) : half;
+}
 
 export const ROAD_STYLES: Record<number, RoadStyle> = {
-  1: { asphalt: [0.43, 0.43, 0.45, 1], edge: SIDEWALK_COLOR, minPx: 0.6 },
-  2: { asphalt: [0.33, 0.33, 0.36, 1], edge: SIDEWALK_COLOR, minPx: 0.9 },
-  3: { asphalt: [0.22, 0.22, 0.25, 1], edge: SIDEWALK_COLOR, minPx: 1.2 },
-  [HIGHWAY_CODE]: { asphalt: [0.2, 0.19, 0.19, 1], edge: SHOULDER_COLOR, minPx: 1.5 },
+  1: { asphalt: hex("#ffffff"), edge: hex("#c8c2b6"), minPx: 0.9 },
+  2: { asphalt: hex("#ffffff"), edge: hex("#b8b2a5"), minPx: 1.1 },
+  3: { asphalt: hex("#ffe69a"), edge: hex("#ddb04a"), minPx: 1.6 },
+  [HIGHWAY_CODE]: { asphalt: hex("#f7b267"), edge: hex("#d4843a"), minPx: 2.0 },
 };
 
 export function roadStyle(kindCode: number): RoadStyle {
@@ -175,8 +200,41 @@ export function markingAlpha(zoom: number): number {
   return Math.min(Math.max((zoom - MARKING_ZOOM) / (MARKING_FULL_ZOOM - MARKING_ZOOM), 0), 1);
 }
 
-export const CENTER_LINE_COLOR: Color = [0.98, 0.8, 0.22, 0.9];
-export const DIVIDER_COLOR: Color = [0.95, 0.95, 0.95, 0.6];
+/** 種類ごとの中央線と車線の区切りの色。小の道路には中央線も区切りもない。 */
+export const MARKING_COLORS: Record<number, { center: Color; divider: Color } | undefined> = {
+  2: { center: hex("#d9d3c7"), divider: hex("#e6e1d7") },
+  3: { center: hex("#e0b450"), divider: hex("#f0cf7c") },
+  [HIGHWAY_CODE]: { center: hex("#ffffff"), divider: hex("#fde3c4") },
+};
+
+/**
+ * 線 a〜b が通るマスの縁。縦横の線は 1 つの長方形の縁にし、斜めの線と 1 マスは、通るマスごとの縁にする。
+ * `dashPx` が正なら、画面でその周期の破線にする。
+ */
+export function footprintOutline(
+  geometry: Geometry,
+  a: Tile,
+  b: Tile,
+  color: Color,
+  px: number,
+  dashPx = 0,
+): void {
+  if (isDiagonal(a, b)) {
+    for (const t of tilesOnLine(a, b)) {
+      geometry.outline(t.x, t.y, t.x + 1, t.y + 1, color, px, dashPx);
+    }
+    return;
+  }
+  geometry.outline(
+    Math.min(a.x, b.x),
+    Math.min(a.y, b.y),
+    Math.max(a.x, b.x) + 1,
+    Math.max(a.y, b.y) + 1,
+    color,
+    px,
+    dashPx,
+  );
+}
 
 /** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
 export class Geometry {
@@ -199,12 +257,26 @@ export class Geometry {
     half: number,
     min: number,
     color: Color,
+    extra = 0,
+    along = 0,
+    dash = 0,
   ): void {
-    this.#data.push(x - this.origin.x, y - this.origin.y, nx, ny, half, min, ...color);
+    this.#data.push(
+      x - this.origin.x,
+      y - this.origin.y,
+      nx,
+      ny,
+      half,
+      min,
+      ...color,
+      extra,
+      along,
+      dash,
+    );
   }
 
   /** マス a の中心からマス b の中心への線。半分の太さは画面で `min` ピクセルを下回らない。 */
-  segment(a: Tile, b: Tile, half: number, color: Color, min = MIN_PX): void {
+  segment(a: Tile, b: Tile, half: number, color: Color, min = MIN_PX, extra = 0): void {
     const ax = a.x + 0.5;
     const ay = a.y + 0.5;
     const bx = b.x + 0.5;
@@ -216,7 +288,7 @@ export class Geometry {
     const nx = -(by - ay) / len;
     const ny = (bx - ax) / len;
     const v = (x: number, y: number, s: number) =>
-      this.#vertex(x, y, nx * s, ny * s, half, min, color);
+      this.#vertex(x, y, nx * s, ny * s, half, min, color, extra);
     v(ax, ay, 1);
     v(ax, ay, -1);
     v(bx, by, 1);
@@ -263,13 +335,13 @@ export class Geometry {
   }
 
   /** マスの中心に置く正方形。 */
-  square(t: Tile, half: number, color: Color, min = MIN_PX): void {
-    this.dot(t.x + 0.5, t.y + 0.5, half, color, min);
+  square(t: Tile, half: number, color: Color, min = MIN_PX, extra = 0): void {
+    this.dot(t.x + 0.5, t.y + 0.5, half, color, min, extra);
   }
 
   /** ワールド座標 (x, y)（マスの単位）を中心にした正方形。 */
-  dot(x: number, y: number, half: number, color: Color, min = MIN_PX): void {
-    const v = (sx: number, sy: number) => this.#vertex(x, y, sx, sy, half, min, color);
+  dot(x: number, y: number, half: number, color: Color, min = MIN_PX, extra = 0): void {
+    const v = (sx: number, sy: number) => this.#vertex(x, y, sx, sy, half, min, color, extra);
     v(-1, -1);
     v(1, -1);
     v(-1, 1);
@@ -295,15 +367,57 @@ export class Geometry {
     this.box(min.x + inset, min.y + inset, max.x + 1 - inset, max.y + 1 - inset, color);
   }
 
-  /** ワールド座標の (x0, y0) から (x1, y1) までの長方形。 */
-  box(x0: number, y0: number, x1: number, y1: number, color: Color): void {
-    const v = (x: number, y: number) => this.#vertex(x, y, 0, 0, 0, 0, color);
+  /**
+   * ワールド座標の (x0, y0) から (x1, y1) までの長方形。`shiftPx` があれば、右下へ画面でそのピクセル数だけ
+   * ずらす（縮尺によらない）。
+   */
+  box(x0: number, y0: number, x1: number, y1: number, color: Color, shiftPx = 0): void {
+    const n = shiftPx === 0 ? 0 : 1;
+    const v = (x: number, y: number) => this.#vertex(x, y, n, n, 0, shiftPx, color);
     v(x0, y0);
     v(x1, y0);
     v(x0, y1);
     v(x0, y1);
     v(x1, y0);
     v(x1, y1);
+  }
+
+  /**
+   * ワールド座標の (x0, y0) から (x1, y1) までの長方形の縁。太さは画面で `px` ピクセルで、縮尺によらない。
+   * 辺の真ん中に線を引くので、半分は長方形の外にはみ出す。
+   */
+  outline(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    color: Color,
+    px: number,
+    dashPx = 0,
+  ): void {
+    const h = px / 2;
+    const v = (x: number, y: number, nx: number, ny: number, along: number) =>
+      this.#vertex(x, y, nx, ny, 0, h, color, 0, along, dashPx);
+    // 辺ごとに、外側と内側の 2 点ずつを両端に置く。角では隣の辺と重なって、角まで塗る
+    const edges: [number, number, number, number, number, number][] = [
+      [x0, y0, x1, y0, 0, -1],
+      [x1, y0, x1, y1, 1, 0],
+      [x1, y1, x0, y1, 0, 1],
+      [x0, y1, x0, y0, -1, 0],
+    ];
+    for (const [ax, ay, bx, by, nx, ny] of edges) {
+      // 辺の向き (dx, dy) に沿って両端を h だけ外へ伸ばす
+      const dx = Math.sign(bx - ax);
+      const dy = Math.sign(by - ay);
+      const corner = (x: number, y: number, along: number, side: number) =>
+        v(x, y, dx * along + nx * side, dy * along + ny * side, dx !== 0 ? x : y);
+      corner(ax, ay, -1, 1);
+      corner(ax, ay, -1, -1);
+      corner(bx, by, 1, 1);
+      corner(bx, by, 1, 1);
+      corner(ax, ay, -1, -1);
+      corner(bx, by, 1, -1);
+    }
   }
 
   build(): Float32Array {
@@ -316,50 +430,78 @@ export function halfWidthOf(kindCode: number): number {
   return roadHalfWidth(kindCode);
 }
 
-// 区画の色（地面の塗りと凡例も同じ値を使う）。建物の色は、これを暗くし、段階が上がるほど明るくする
-export const ZONE_BASE: Record<number, readonly [number, number, number]> = {
-  1: [0.15, 0.95, 0.15],
-  2: [0.25, 0.45, 0.95],
-  3: [0.95, 0.8, 0.2],
-  4: [0.3, 0.85, 0.95],
+/** 区画の色。住宅は緑、商業は青、工業は黄、オフィスは水色（CS2 にならう）。凡例と道具の仮の表示も同じ値を使う。 */
+type ZoneColors = {
+  /** 区画の地面（標準と寄り）。 */
+  ground: Color;
+  /** 街区の面・建物（区画を塗る仮の表示に使う）。 */
+  block: Color;
+  building: Color;
+  edge: Color;
 };
+
+export const ZONE_COLORS: Record<number, ZoneColors> = {
+  1: {
+    ground: hex("#eef4e6"),
+    block: hex("#cde0b9"),
+    building: hex("#d3e3c0"),
+    edge: hex("#a7c18e"),
+  },
+  2: {
+    ground: hex("#eaf0f8"),
+    block: hex("#bdcfeb"),
+    building: hex("#c9d7ee"),
+    edge: hex("#91a9d4"),
+  },
+  3: {
+    ground: hex("#f5efdf"),
+    block: hex("#e1cd99"),
+    building: hex("#e6d7ae"),
+    edge: hex("#c0a462"),
+  },
+  4: {
+    ground: hex("#e7f3f4"),
+    block: hex("#b3dade"),
+    building: hex("#c2e0e3"),
+    edge: hex("#84bbc1"),
+  },
+};
+const UNKNOWN_ZONE: ZoneColors = {
+  ground: hex("#f4f2ec"),
+  block: hex("#d0d0d0"),
+  building: hex("#d8d8d8"),
+  edge: hex("#a8a8a8"),
+};
+const zoneColors = (zone: number): ZoneColors => ZONE_COLORS[zone] ?? UNKNOWN_ZONE;
 const BUILDING_INSET = 0.15;
-export const GRASS_COLOR: readonly [number, number, number] = [0.56, 0.72, 0.42];
-// 区画を塗った地面は、区画の色を明るい地の色に混ぜた薄い色にし、マスの縁を区画の濃い色の枠で示す。
-// ZONE_MIX は地面の、ZONE_EDGE_MIX は枠の、区画の色の割合である
-const ZONE_PAPER: readonly [number, number, number] = [0.88, 0.89, 0.85];
-export const ZONE_MIX = 0.42;
-export const ZONE_EDGE_MIX = 0.85;
 
-const zoneMix = (zone: number, base: readonly number[], k: number): Color => {
-  const c = ZONE_BASE[zone] ?? [0.6, 0.6, 0.6];
-  const m = (i: number) => (base[i] ?? 0) * (1 - k) + (c[i] ?? 0) * k;
-  return [m(0), m(1), m(2), 1];
-};
-
-/** 区画を塗った地面の色。 */
+/** 区画の地面の色。 */
 export function zoneGroundColor(zone: number): Color {
-  return zoneMix(zone, ZONE_PAPER, ZONE_MIX);
+  return zoneColors(zone).ground;
 }
 
-/** 区画のマスの縁の枠の色。 */
-export function zoneEdgeColor(zone: number): Color {
-  return zoneMix(zone, GRASS_COLOR, ZONE_EDGE_MIX);
+/** 区画を塗る仮の表示の色。街区の面・建物の色の 70% である。 */
+export function zoneBlockColor(zone: number): Color {
+  const [r, g, b] = zoneColors(zone).block;
+  return [r, g, b, 0.7];
 }
 
-/** 段階 level（1〜5）の建物の色。区画の色を少し灰色に寄せ、区画の地面より濃くする。 */
-export function buildingColor(zone: number, level: number): Color {
-  const [r, g, b] = zoneMix(zone, [0.5, 0.5, 0.5], 0.8);
-  const k = 0.42 + 0.09 * Math.min(Math.max(level, 1), 5);
-  return [r * k, g * k, b * k, 1];
+/** 建物の色。建物の段階（1〜5）は色では分けない。 */
+export function buildingColor(zone: number): Color {
+  return zoneColors(zone).building;
 }
 
-// 建物の縁は本体の色をこの割合に暗くし、幅は BUILDING_EDGE（マス）にする。
-// 影は右下へ BUILDING_SHADOW（マス）ずらした半透明の黒で、建物の大きさを見やすくする
+/** 建物の縁の色。 */
+export function buildingEdgeColor(zone: number): Color {
+  return zoneColors(zone).edge;
+}
+
+// 建物の縁の幅は BUILDING_EDGE（マス）にする。
+// 影は右下へ画面で BUILDING_SHADOW_PX ずらした `#3c4043` の 18% で、建物の大きさを見やすくする
 const BUILDING_EDGE = 0.05;
 const BUILDING_EDGE_SHADE = 0.68;
-const BUILDING_SHADOW = 0.08;
-const SHADOW_COLOR: Color = [0, 0, 0, 0.28];
+const BUILDING_SHADOW_PX = 2;
+const SHADOW_COLOR = hex("#3c4043", 0.18);
 
 // 施設の色。発電所は橙、浄水場は青緑。値は ServiceKind の値である
 export const FACILITY_COLOR: Record<number, Color> = {
@@ -378,6 +520,8 @@ export function markCenter(min: Tile, which: "power" | "water"): { x: number; y:
 
 const shade = ([r, g, b, a]: Color, k: number): Color => [r * k, g * k, b * k, a];
 
+type Box = { x0: number; y0: number; x1: number; y1: number; color: Color; edge: Color };
+
 /**
  * Worker から届いた建物と施設を頂点に直す。建物は隣と見分けられるよう、少し内側に縮めて描く。
  * 下から順に、すべての影、施設と建物の縁と本体、届いていない印を重ねる。
@@ -387,30 +531,42 @@ export function buildingGeometry(buildings: Float64Array, facilities: Float64Arr
     x: buildings[0] ?? facilities[0] ?? 0,
     y: buildings[1] ?? facilities[1] ?? 0,
   });
-  const boxes: [number, number, number, number, Color][] = [];
+  const boxes: Box[] = [];
   for (let i = 0; i + FACILITY_STRIDE <= facilities.length; i += FACILITY_STRIDE) {
     const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, kind = 0] = facilities.subarray(i, i + FACILITY_STRIDE);
     const color = FACILITY_COLOR[kind] ?? [0.6, 0.6, 0.6, 1];
-    boxes.push([x0 + 0.05, y0 + 0.05, x1 + 0.95, y1 + 0.95, color]);
+    boxes.push({
+      x0: x0 + 0.05,
+      y0: y0 + 0.05,
+      x1: x1 + 0.95,
+      y1: y1 + 0.95,
+      color,
+      edge: shade(color, BUILDING_EDGE_SHADE),
+    });
   }
   const marks: [number, number, number][] = [];
   for (let i = 0; i + BUILDING_STRIDE <= buildings.length; i += BUILDING_STRIDE) {
-    const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, zone = 0, level = 1, supply = 0] = buildings.subarray(
+    const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, zone = 0, , supply = 0] = buildings.subarray(
       i,
       i + BUILDING_STRIDE,
     );
-    const color = buildingColor(zone, level);
     const [i0, i1] = [BUILDING_INSET, 1 - BUILDING_INSET];
-    boxes.push([x0 + i0, y0 + i0, x1 + i1, y1 + i1, color]);
+    boxes.push({
+      x0: x0 + i0,
+      y0: y0 + i0,
+      x1: x1 + i1,
+      y1: y1 + i1,
+      color: buildingColor(zone),
+      edge: buildingEdgeColor(zone),
+    });
     marks.push([x0, y0, supply]);
   }
-  for (const [x0, y0, x1, y1] of boxes) {
-    const d = BUILDING_SHADOW;
-    geometry.box(x0 + d, y0 + d, x1 + d, y1 + d, SHADOW_COLOR);
+  for (const { x0, y0, x1, y1 } of boxes) {
+    geometry.box(x0, y0, x1, y1, SHADOW_COLOR, BUILDING_SHADOW_PX);
   }
-  for (const [x0, y0, x1, y1, color] of boxes) {
+  for (const { x0, y0, x1, y1, color, edge } of boxes) {
     const e = BUILDING_EDGE;
-    geometry.box(x0, y0, x1, y1, shade(color, BUILDING_EDGE_SHADE));
+    geometry.box(x0, y0, x1, y1, edge);
     geometry.box(x0 + e, y0 + e, x1 - e, y1 - e, color);
   }
   // 印は建物より上に描く
@@ -443,13 +599,16 @@ type Arm = { segment: number; dx: number; dy: number };
 
 /**
  * 道路のノード。`half` はつながる区間の道路の端（歩道を含む）までのいちばん広い半分の幅、`asphalt` は
- * 濃く塗る車道のいちばん広い半分の幅で、`asphaltColor` はその車道の色である。`minPx` は縮小したときの
- * 車道の太さの下限のいちばん大きい値、`sidewalk` は歩道のある区間がつながっているかである。
+ * 塗る車道のいちばん広い半分の幅で、`asphaltColor` と `edgeColor` はその車道の塗りと縁の色である。
+ * `minPx` は縮小したときの車道の太さの下限のいちばん大きい値、`sidewalk` は歩道のある区間がつながっているかである。
  */
 type RoadNode = {
   half: number;
   asphalt: number;
   asphaltColor: Color;
+  edgeColor: Color;
+  /** つなぐ区間の、縮小したときの線の世界の半分の幅のいちばん大きい値。 */
+  line: number;
   minPx: number;
   sidewalk: boolean;
   arms: Arm[];
@@ -468,6 +627,8 @@ function roadNodes(segments: Float64Array): RoadNodes {
       half: 0,
       asphalt: 0,
       asphaltColor: style.asphalt,
+      edgeColor: style.edge,
+      line: 0,
       minPx: 0,
       sidewalk: false,
       arms: [],
@@ -476,7 +637,9 @@ function roadNodes(segments: Float64Array): RoadNodes {
     if (asphaltHalfWidth(kind) > node.asphalt) {
       node.asphalt = asphaltHalfWidth(kind);
       node.asphaltColor = style.asphalt;
+      node.edgeColor = style.edge;
     }
+    node.line = Math.max(node.line, LINE_HALF[kind] ?? 0.31);
     node.minPx = Math.max(node.minPx, style.minPx);
     node.sidewalk ||= hasSidewalks(kind);
     const len = Math.hypot(other.x - x, other.y - y);
@@ -494,7 +657,8 @@ function roadNodes(segments: Float64Array): RoadNodes {
   return nodes;
 }
 
-const edgeColorOf = (node: RoadNode): Color => (node.sidewalk ? SIDEWALK_COLOR : SHOULDER_COLOR);
+// ノードのマスを拡大したときに埋める色。歩道のある道路がつながっていれば歩道の色、高速道路だけなら縁の色にする
+const groundOf = (node: RoadNode): Color => (node.sidewalk ? SIDEWALK_COLOR : node.edgeColor);
 
 type RoadNet = {
   ends: RoadNodes;
@@ -526,29 +690,26 @@ function roadNet(segments: Float64Array, nodes: Float64Array): RoadNet {
 
 /**
  * Worker から届いた道路網の形を頂点に直す。基準のマスは最初のノードにする。縮小したときの描き方で、
- * 区間ごとに、マスいっぱいの歩道（路肩）の色の帯の上に、種類ごとの太さと濃さの車道の帯を重ねる。
+ * 区間ごとに、縁の色の帯の上に、種類ごとの塗りの帯を重ねて縁取りにする。
  * 縮小しても種類を見分けられるよう、帯の太さの下限を種類ごとに変える。
  */
 export function roadGeometry(segments: Float64Array, nodes: Float64Array): Geometry {
   const geometry = new Geometry({ x: nodes[0] ?? 0, y: nodes[1] ?? 0 });
   const { nodeList, each } = roadNet(segments, nodes);
+  // 縁の帯は、塗りの帯と同じ幅（世界と画面の下限）に、画面で両側に 1px ずつ足す
   each((a, b, kind) => {
     const style = roadStyle(kind);
-    if (isDiagonal(a, b)) {
-      roadFootprint(geometry, a, b, style.edge, style.minPx + EDGE_EXTRA_PX);
-    } else {
-      geometry.segment(a, b, ROAD_VISUAL_HALF, style.edge, style.minPx + EDGE_EXTRA_PX);
-    }
+    geometry.segment(a, b, lineHalfWidth(kind, a, b), style.edge, style.minPx, EDGE_EXTRA_PX);
   });
   for (const { x, y, node } of nodeList) {
-    geometry.square({ x, y }, ROAD_VISUAL_HALF, edgeColorOf(node), node.minPx + EDGE_EXTRA_PX);
+    geometry.square({ x, y }, node.line, node.edgeColor, node.minPx, EDGE_EXTRA_PX);
   }
   each((a, b, kind) => {
     const style = roadStyle(kind);
-    geometry.segment(a, b, drawnAsphaltHalf(kind, a, b), style.asphalt, style.minPx);
+    geometry.segment(a, b, lineHalfWidth(kind, a, b), style.asphalt, style.minPx);
   });
   for (const { x, y, node } of nodeList) {
-    geometry.square({ x, y }, node.asphalt, node.asphaltColor, node.minPx);
+    geometry.square({ x, y }, node.line, node.asphaltColor, node.minPx);
   }
   return geometry;
 }
@@ -614,8 +775,8 @@ function trimmer(segments: Float64Array, ends: RoadNodes) {
 }
 
 /**
- * 拡大したときの、車線ごとの道路の描き方。下から順に、ノードのマスを埋める歩道（路肩）の色の四角、
- * 車道の外からマスの縁までの歩道（路肩）の帯、隣の区画との境目の線、車道、ノードの車道の四角を重ねる。
+ * 拡大したときの、車線ごとの道路の描き方。下から順に、ノードのマスを埋める歩道（高速道路は縁）の色の四角、
+ * 車道の外の植え込み（高速道路は縁の色の路肩）、歩道とその外の縁の線、車道、車道の縁石の線、ノードの車道の四角を重ねる。
  * 交差点の四角は車道の幅だけを埋めるので、交差点の角には歩道が残る。
  * 路面の線は、縮尺に合わせて薄くするので roadMarkingGeometry で別に作る。
  */
@@ -623,50 +784,97 @@ export function roadLaneGeometry(segments: Float64Array, nodes: Float64Array): G
   const geometry = new Geometry({ x: nodes[0] ?? 0, y: nodes[1] ?? 0 });
   const { ends, nodeList, each } = roadNet(segments, nodes);
   const trimOf = trimmer(segments, ends);
+  // 歩道と植え込みの帯は、ノードのマスの手前（マスの縁）で止める。まっすぐ通り抜けるノードでは、帯をつなげる
+  const nodeTrim = (n: number, atEnd: boolean) => {
+    const [ax = 0, ay = 0, bx = 0, by = 0] = segments.subarray(
+      n * SEGMENT_STRIDE,
+      (n + 1) * SEGMENT_STRIDE,
+    );
+    const node = ends.get(atEnd ? nodeKey(bx, by) : nodeKey(ax, ay));
+    return node === undefined || isThrough(node) ? 0 : ROAD_VISUAL_HALF;
+  };
 
   for (const { x, y, node } of nodeList) {
-    geometry.square({ x, y }, ROAD_VISUAL_HALF, edgeColorOf(node), 0);
+    if (!isThrough(node)) {
+      geometry.square({ x, y }, ROAD_VISUAL_HALF, groundOf(node), 0);
+    }
   }
-  // 歩道（路肩）の帯。交差点ではノードの四角が埋めるので縮めない。斜めの区間は道路のマスを階段状に塗る
+  // 車道の外の帯。斜めの区間は道路のマスを階段状に塗る
   each((a, b, kind, n) => {
     if (isDiagonal(a, b)) {
-      roadFootprint(geometry, a, b, roadStyle(kind).edge);
+      roadFootprint(geometry, a, b, hasSidewalks(kind) ? SIDEWALK_COLOR : roadStyle(kind).edge);
       return;
     }
     const inner = asphaltHalfWidth(kind);
-    const half = (ROAD_VISUAL_HALF - inner) / 2;
+    // 歩道のある道路は、歩道の外からマスの縁までが植え込み。高速道路は車道の外が縁の色の路肩である
+    const outer = hasSidewalks(kind) ? inner + SIDEWALK_WIDTH : inner;
+    const half = (ROAD_VISUAL_HALF - outer) / 2;
+    const color = hasSidewalks(kind) ? PLANTING_COLOR : roadStyle(kind).edge;
     for (const side of [-1, 1]) {
-      const offset = side * (inner + half);
-      const trimA = trimOf(n, false, offset, () => 0);
-      const trimB = trimOf(n, true, offset, () => 0);
-      geometry.strip(a, b, offset, half, roadStyle(kind).edge, 0, trimA, trimB);
+      geometry.strip(
+        a,
+        b,
+        side * (outer + half),
+        half,
+        color,
+        0,
+        nodeTrim(n, false),
+        nodeTrim(n, true),
+      );
     }
   });
-  // 歩道と隣の区画との境目の線。交差点では、ほかの腕の道路に入らないようマスの縁で止め、
-  // 腕のないマスの辺に引く。高速道路は路肩の色で縁が分かるので引かない。斜めの区間には引かない
+  // 歩道と、その外の縁の線。斜めの区間と高速道路には歩道がない
   each((a, b, kind, n) => {
     if (!hasSidewalks(kind) || isDiagonal(a, b)) {
       return;
     }
+    const inner = asphaltHalfWidth(kind);
+    const [trimA, trimB] = [nodeTrim(n, false), nodeTrim(n, true)];
     for (const side of [-1, 1]) {
-      const offset = side * (ROAD_VISUAL_HALF - CURB_HALF);
-      const trimA = trimOf(n, false, offset, () => ROAD_VISUAL_HALF);
-      const trimB = trimOf(n, true, offset, () => ROAD_VISUAL_HALF);
-      geometry.strip(a, b, offset, CURB_HALF, CURB_COLOR, THIN_PX, trimA, trimB);
+      const offset = side * (inner + SIDEWALK_WIDTH / 2);
+      geometry.strip(a, b, offset, SIDEWALK_WIDTH / 2, SIDEWALK_COLOR, 0, trimA, trimB);
+      const line = side * (inner + SIDEWALK_WIDTH);
+      geometry.strip(a, b, line, 0, SIDEWALK_EDGE_COLOR, THIN_PX, trimA, trimB);
     }
   });
+  // ノードのマスの、腕のない辺。歩道の色で埋めたマスの縁に、歩道の外の縁の線を引く
   for (const { x, y, node } of nodeList) {
-    if (node.sidewalk && node.arms.length !== 2) {
+    if (node.sidewalk && !isThrough(node)) {
       nodeCurbs(geometry, { x, y }, node);
     }
   }
   each((a, b, kind) => {
     geometry.strip(a, b, 0, drawnAsphaltHalf(kind, a, b), roadStyle(kind).asphalt, 0);
   });
+  // 車道の縁石の線。斜めの区間には引かない。交差点では、ノードの車道の四角の手前で止める
+  each((a, b, kind, n) => {
+    if (isDiagonal(a, b)) {
+      return;
+    }
+    for (const side of [-1, 1]) {
+      const offset = side * asphaltHalfWidth(kind);
+      const trimA = trimOf(n, false, offset, (node) => node.asphalt);
+      const trimB = trimOf(n, true, offset, (node) => node.asphalt);
+      geometry.strip(a, b, offset, 0, roadStyle(kind).edge, THIN_PX, trimA, trimB);
+    }
+  });
   for (const { x, y, node } of nodeList) {
     geometry.square({ x, y }, node.asphalt, node.asphaltColor, 0);
   }
   return geometry;
+}
+
+/** 2 本の縦横の区間が、まっすぐ反対の向きにつながるノードか。 */
+function isThrough(node: RoadNode): boolean {
+  const [p, q] = node.arms;
+  return (
+    node.arms.length === 2 &&
+    p !== undefined &&
+    q !== undefined &&
+    p.dx === -q.dx &&
+    p.dy === -q.dy &&
+    (p.dx === 0 || p.dy === 0)
+  );
 }
 
 // ノードのマスの 4 つの辺。`dx`、`dy` は辺の外向き、`a`〜`b` は辺に沿う線（マスの中心からの相対）、
@@ -678,7 +886,7 @@ const NODE_SIDES = [
   { dx: 1, dy: 0, a: [0, -0.5], b: [0, 0.5], offset: -1 },
 ] as const;
 
-/** 行き止まりと交差点のノードの、縦横の腕がない辺に、隣の区画との境目の線を引く。 */
+/** 行き止まりと交差点のノードの、縦横の腕がない辺に、歩道の外の縁の線を引く。 */
 function nodeCurbs(geometry: Geometry, at: Tile, node: RoadNode): void {
   for (const side of NODE_SIDES) {
     if (node.arms.some((arm) => arm.dx === side.dx && arm.dy === side.dy)) {
@@ -686,15 +894,10 @@ function nodeCurbs(geometry: Geometry, at: Tile, node: RoadNode): void {
     }
     const a = { x: at.x + side.a[0], y: at.y + side.a[1] };
     const b = { x: at.x + side.b[0], y: at.y + side.b[1] };
-    const offset = side.offset * (ROAD_VISUAL_HALF - CURB_HALF);
-    geometry.strip(a, b, offset, CURB_HALF, CURB_COLOR, THIN_PX);
+    const offset = side.offset * ROAD_VISUAL_HALF;
+    geometry.strip(a, b, offset, 0, SIDEWALK_EDGE_COLOR, THIN_PX);
   }
 }
-
-const MARKING_COLOR: Record<"center" | "divider", Color> = {
-  center: CENTER_LINE_COLOR,
-  divider: DIVIDER_COLOR,
-};
 
 /**
  * 拡大したときに車道の上に描く路面の線。中央線と車線の区切りと、交差点の横断歩道の縞である。
@@ -706,6 +909,10 @@ export function roadMarkingGeometry(segments: Float64Array, nodes: Float64Array)
   const { ends, nodeList, each } = roadNet(segments, nodes);
   const trimOf = trimmer(segments, ends);
   each((a, b, kind, n) => {
+    const colors = MARKING_COLORS[kind];
+    if (colors === undefined) {
+      return;
+    }
     for (const strip of crossSection(kind)) {
       if (strip.role !== "center" && strip.role !== "divider") {
         continue;
@@ -716,7 +923,7 @@ export function roadMarkingGeometry(segments: Float64Array, nodes: Float64Array)
       }
       const trimA = trimOf(n, false, strip.offset, (node) => node.half);
       const trimB = trimOf(n, true, strip.offset, (node) => node.half);
-      const color = MARKING_COLOR[strip.role];
+      const color = colors[strip.role];
       geometry.strip(a, b, strip.offset, strip.half, color, THIN_PX, trimA, trimB);
     }
   });
@@ -804,7 +1011,8 @@ export function crosswalkArms(segments: Float64Array, nodes: Float64Array): Cros
   return out;
 }
 
-export const ZEBRA_COLOR: Color = [0.95, 0.95, 0.95, 0.9];
+/** 横断歩道の縞（と、入れるときの停止線）。白い車道の上でも黄の車道の上でも見える色にする。 */
+export const ZEBRA_COLOR = hex("#a9b3c2");
 // 縞の、腕の向きの長さと、横の間隔と太さの半分（マス）
 const ZEBRA_LENGTH = 0.16;
 const ZEBRA_SPACING = 0.14;
@@ -847,11 +1055,11 @@ export function zebra(
 
 // 信号の灯火の色。値は chizu-core の Light の値（0 青、1 黄、2 赤）である
 export const SIGNAL_COLOR: Record<number, Color> = {
-  0: [0.2, 0.9, 0.35, 1],
-  1: [1, 0.8, 0.1, 1],
-  2: [0.95, 0.2, 0.2, 1],
+  0: hex("#34a853"),
+  1: hex("#fbbc04"),
+  2: hex("#ea4335"),
 };
-const SIGNAL_BASE_COLOR: Color = [0.12, 0.12, 0.14, 1];
+export const SIGNAL_BASE_COLOR = hex("#3c4043");
 const SIGNAL_BASE_HALF = 0.16;
 const SIGNAL_LAMP_HALF = 0.1;
 // 灯火を置く位置。交差点の中心から腕の向きへ ALONG、入ってくる車線の側へ SIDE（マス）だけずらす
@@ -941,6 +1149,9 @@ export class RoadLayer {
       ["a_half", 1, 4],
       ["a_min", 1, 5],
       ["a_color", 4, 6],
+      ["a_extra", 1, 10],
+      ["a_along", 1, 11],
+      ["a_dash", 1, 12],
     ];
     for (const [name, size, offset] of attributes) {
       const location = gl.getAttribLocation(this.#program, name);
