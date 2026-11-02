@@ -423,3 +423,29 @@ fn between_150_and_500_m_only_households_with_a_car_drive() {
     assert!(drives(0), "車を持つ世帯が歩いた");
     assert!(!drives(1), "車を持たない世帯が車に乗った");
 }
+
+#[test]
+fn walking_instead_of_driving_starts_on_the_building_side() {
+    // 家の出入口は北の側の、西向きの歩道にある。東の店へ向かう車は、東向きの車線（建物と反対の向き）から出る。
+    let (mut s, ids) = Street::new(&[5, 50]);
+    let id = s.drive(ids[0], ids[1]).unwrap();
+    for _ in 0..10 {
+        if s.trips.get(id).is_some_and(|t| t.mode() == LaneMode::Car) {
+            break;
+        }
+        s.step();
+    }
+    let car = s.trips.get(id).unwrap();
+    assert_eq!(car.mode(), LaneMode::Car);
+    assert_eq!(car.link().dir, Dir::Forward);
+    assert!(car.walk.far);
+    let mut ended = Vec::new();
+    s.trips
+        .walk_instead(&s.net, &mut s.router, vec![id.slot()], &mut ended);
+    assert!(ended.is_empty());
+    let walker = s.trips.get(id).unwrap();
+    assert_eq!(walker.mode(), LaneMode::Sidewalk);
+    // 建物の側（西向きの歩道のリンクの右）にいる。東へ歩くなら左の側である。
+    assert_eq!(walker.link().dir == Dir::Backward, !walker.walk.far);
+    assert_eq!(walker.walk.jay, None);
+}

@@ -58,6 +58,11 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  walking 歩いて移動中（車を降りて歩く区切りを含む）、driving 車で移動中、homeless 家のない世帯の住民。
   traffic.cars   車の台数。total 全部、stopped 直前の 100 tick（ゲーム内の約 20 分）のあいだ同じ車線の同じ位置にいる車、
                  moving それ以外。stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。
+  traffic.walkers 車道を渡るところの歩く人。atCrosswalks 交差点の横断歩道を渡っているか渡るのを待っている人、
+                 midblock 区間の途中で道路を横切っているか横切るのを待っている人。横断歩道は 3 本以上の道路が集まる
+                 交差点の、高速道路でないどの腕にも自動で置かれ、人が渡っているあいだ、その腕から入る車と出る車は止まる。
+                 区間の途中を横切る人の手前でも車は止まる。歩く人は、近くの横断歩道までの遠回りが 100m より
+                 短ければ横切らない。信号のある交差点では、歩く人も信号に従う。
   traffic.trips  通勤や買い物の移動。inProgress 移動中の数（歩くのも含む）。today と yesterday は
                  ゲーム内の日ごとの結果で、arrived 着いた数、abandoned 道路が変わるなどして途中で着けなくなった数、
                  noRoute 出発のときに経路がなく始められなかった数、avgTravelTicks と avgTravelMinutes 着いた移動の平均の移動時間
@@ -83,10 +88,10 @@ observe の signals:
   observe と同じく何も書かず、フィードバックのディレクトリにも打てる。角 (x0,y0)〜(x1,y1) は両端を含み、順番は問わない。
   1 文字が 1 マスで、先頭に凡例、上に x、行頭に y の目盛りが付く。座標は act のコマンドと同じである。
   --scale N を付けると、N×N マスを 1 文字にまとめる（既定は 1）。まとめた文字は、
-  公共施設、信号のある交差点、道路、建物、区画、水辺、買っていない土地、空きマスの順で、最初に当てはまるものにする。
+  公共施設、信号のある交差点、信号のない交差点、道路、建物、区画、水辺、買っていない土地、空きマスの順で、
+  最初に当てはまるものにする。ただし --layer traffic では、道路の混み具合を交差点の文字より先に出す。
   建物は、電気か水が届いていないものが 1 つでもあれば * ^ % にする（まとめた文字では、セルの中の建物のうち 1 つでも届いていなければ印が付く）。
   どの網の電気や水が足りないかは observe の utilities の shortAt を見て、その at を map で眺める。
-  ただし --layer traffic では、道路の混み具合を信号より先に出す。
   同じ種類が混ざるときは数の多いほう（道路は大きいほう）にする。水辺と買った土地は、セルの中の見本のマスの多数決である。
   出力は 9216 文字（96×96 など）までで、超える範囲は、必要な --scale を添えて断る。
   いまの買った土地の範囲は observe の land.ownedBounds にある。
@@ -572,8 +577,17 @@ fn day_traffic(d: Option<DayTraffic>) -> Value {
 
 fn traffic(world: &World, before: &CarSample) -> Value {
     let Traffic { today, yesterday } = world.traffic();
+    let (mut crosswalks, mut midblock) = (0, 0);
+    for (_, t) in world.trips().iter() {
+        match t.crossing() {
+            Some(true) => midblock += 1,
+            Some(false) => crosswalks += 1,
+            None => {}
+        }
+    }
     json!({
         "cars": cars(world, before),
+        "walkers": {"atCrosswalks": crosswalks, "midblock": midblock},
         "trips": {
             "inProgress": world.trips().len(),
             "today": day_traffic(Some(today)),

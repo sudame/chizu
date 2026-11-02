@@ -36,7 +36,7 @@ const MAGIC: &[u8; 8] = b"CHIZUSTA";
 const HEADER_LEN: usize = 8 + 4 + 8;
 
 /// 書き出す形式の版。
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 /// 街の状態を読み戻せない理由。
 #[derive(Clone, Debug, PartialEq, Eq)]

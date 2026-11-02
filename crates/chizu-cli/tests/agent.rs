@@ -873,3 +873,23 @@ fn decode_base64(text: &str) -> Vec<u8> {
     }
     out
 }
+
+#[test]
+fn map_marks_junctions_with_crosswalks_and_observe_counts_crossing_walkers() {
+    let dir = session("agent-crosswalk");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,5],"to":[10,5],"kind":"Small"},
+            {"type":"BuildRoad","from":[5,0],"to":[5,10],"kind":"Small"}]"#,
+    );
+    cli(&["agent", "act", d, &cmds]);
+    let map = cli(&["agent", "map", d, "4", "4", "6", "6"]);
+    assert_eq!(grid_rows(&map, 3, 3), [".1.", "1Z1", ".1."], "{map}");
+    assert!(map.contains("Z        信号のない交差点"), "{map}");
+    let seen = json(&cli(&["agent", "observe", d]));
+    let walkers = &seen["traffic"]["walkers"];
+    assert_eq!(walkers["atCrosswalks"], 0, "{seen}");
+    assert_eq!(walkers["midblock"], 0, "{seen}");
+}
