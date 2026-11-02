@@ -618,6 +618,15 @@ try {
     Number(await cityNumbers.getAttribute("data-buildings")) > 0,
     `時間を進めると住宅が建ち、数が出る（${await cityNumbers.textContent()}）`,
   );
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#overview")?.dataset.population !== undefined,
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(
+    ((await page.locator("#overview-happiness").textContent()) ?? "").startsWith("幸福度"),
+    "人口と幸福度が出る",
+  );
   await page.waitForTimeout(100);
   // 印と重ならない、左上のマスの下寄りを読む
   const house = await pixel(

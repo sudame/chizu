@@ -5,6 +5,9 @@ export type RoadKindName = "Small" | "Medium" | "Large";
 export type ServiceName = "PowerPlant" | "WaterPump";
 /** chizu-wasm の city_stats の数の個数。 */
 export const CITY_STATS_LENGTH = 16;
+
+/** chizu-wasm の overview の数の個数。 */
+export const OVERVIEW_LENGTH = 9;
 /** 区画の種類。Clear は区画を消す。 */
 export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
 
@@ -169,6 +172,8 @@ export type WorkerToMain =
    * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並ぶ。
    */
   | { kind: "buildings"; buildings: Float64Array; facilities: Float64Array; stats: number[] }
+  /** 人口と幸福度とマイルストーン。overview は chizu-wasm の overview で、数の並びは overview.ts にある。 */
+  | { kind: "overview"; overview: number[] }
   /**
    * id は画面が振ったコマンドの番号、seq は記録の通し番号。
    * 記録する前に受け付けなかったコマンドには seq がない。
@@ -243,6 +248,12 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.facilities instanceof Float64Array &&
         v.facilities.length % FACILITY_STRIDE === 0 &&
         v.stats.length === CITY_STATS_LENGTH
+      );
+    case "overview":
+      return (
+        Array.isArray(v.overview) &&
+        v.overview.length === OVERVIEW_LENGTH &&
+        v.overview.every((x) => typeof x === "number")
       );
     case "outcome":
       return (

@@ -175,6 +175,41 @@
         background: #555;
         border-radius: 2px;
       }
+      #overview {
+        font-size: 13px;
+      }
+      #overview summary {
+        cursor: pointer;
+      }
+      #overview p {
+        margin: 2px 0 0;
+      }
+      #overview-parts {
+        margin-top: 2px;
+      }
+      #milestone-notice {
+        position: fixed;
+        bottom: 64px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: 24em;
+        padding: 8px 16px;
+        font-size: 14px;
+        color: #0b4a1c;
+        background: #c9f2d3;
+        border: 1px solid #2c9a4a;
+        border-radius: 4px;
+      }
+      #milestone-notice[hidden] {
+        display: none;
+      }
+      @media (max-width: 900px) {
+        /* 足りない知らせ（下から 104px）の上に積む */
+        #milestone-notice {
+          bottom: 240px;
+          max-width: calc(100vw - 32px);
+        }
+      }
       #demand {
         display: flex;
         gap: 4px;
@@ -217,6 +252,11 @@
           <div><div class="slot"><div class="bar" style="background: #4dd9f2"></div></div><div class="label">オ</div></div>
         </div>
       </div>
+      <details id="overview">
+        <summary><span id="overview-population">人口 0</span>・<span id="overview-happiness">幸福度 0 / 100</span>・<span id="overview-remaining">次の段階まで</span></summary>
+        <p id="overview-next"></p>
+        <div id="overview-parts"></div>
+      </details>
       <div id="controls">
         <button type="button" id="pause">一時停止</button>
         <button type="button" data-speed="0.25">0.25 倍</button>
@@ -229,6 +269,7 @@
       <div id="layers" title="データレイヤー"></div>
     </div>
     <div id="city-shortage" role="status" hidden></div>
+    <div id="milestone-notice" role="status" hidden></div>
     <div id="toolbar">
       <button type="button" data-tool="none" aria-pressed="true">見る</button>
       <button type="button" data-tool="road-Small" aria-pressed="false">道路 小</button>
