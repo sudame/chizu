@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
-use crate::building::{BASE_RESIDENTIAL_DEMAND, CityStats, happiness_pull};
+use crate::building::{BASE_RESIDENTIAL_DEMAND, CityStats, happiness_pull, residential_tax_pull};
 use crate::citizens::HappinessParts;
 use crate::citizens::{Activity, MAX_HOUSEHOLD_SIZE, ScheduleState, WORKING_AGES, draw_household};
 use crate::clock::TICKS_PER_DAY;
@@ -41,14 +41,16 @@ pub const MIGRANTS_PER_DEMAND: u64 = 4;
 pub const MIGRANTS_PER_VACANCY: u64 = 8;
 
 /// 世帯の住民の幸福度の平均がこれより低いと、世帯は街を出ていくことがある。
-pub const LEAVE_BELOW: u8 = 45;
+/// 標準の税率（10%）で暮らす住民の幸福度の平均（84 前後）より十分低い値にしてあり、標準の街の住民はほとんど出ていかない。
+/// 税率を上げて幸福度が下がるか、職を失って暮らし向きが下がると、下がったぶんに応じて出ていく世帯が増える。
+pub const LEAVE_BELOW: u8 = 52;
 
 /// 世帯の幸福度の平均が [`LEAVE_BELOW`] を 1 点下回るごとに、1 時間あたりに出ていく確率に足す値（‰）。
-pub const LEAVE_PERMILLE_PER_POINT: u32 = 5;
+pub const LEAVE_PERMILLE_PER_POINT: u32 = 2;
 
 /// 越してきた人の見込みの幸福度が [`LEAVE_BELOW`] をこの点数だけ上回れば、移住の数を減らさない。
 /// 上回る点数がこれより少なければ、その割合まで減らす。
-pub const APPEAL_FULL_MARGIN: u64 = 40;
+pub const APPEAL_FULL_MARGIN: u64 = 36;
 
 /// 家のない世帯が街を出ていくまでの時間（tick）。ゲーム内の 1 日である。
 pub const HOMELESS_LEAVE_TICKS: u64 = TICKS_PER_DAY;
@@ -149,6 +151,8 @@ impl World {
             households,
             homes: households + vacant,
             workplaces: cap.workplaces,
+            job_slots: self.buildings.job_slots(self.tax_permille),
+            tax_permille: self.tax_permille,
             ..CityStats::default()
         };
         for zone in ZoneKind::ALL {
@@ -470,11 +474,12 @@ impl World {
     fn arrivals_per_interval(&self, free: u64) -> u64 {
         // 住宅の需要の式から空き家の項を除いた、住みたい人がいるかどうか。
         let s = self.city_stats();
-        let jobs: u64 = s.workplaces.iter().sum();
+        let jobs: u64 = s.job_slots.iter().sum();
         let filled: u64 = s.filled.iter().sum();
         let jobless = s.working_age.saturating_sub(s.employed);
         let want = BASE_RESIDENTIAL_DEMAND
             + happiness_pull(s.happiness)
+            + residential_tax_pull(s.tax_permille[ZoneKind::Residential.index()])
             + i64::try_from(jobs.saturating_sub(filled)).expect("職場の数があふれた")
             - i64::try_from(jobless / 4).expect("住民の数があふれた");
         if want <= 0 {
@@ -515,7 +520,7 @@ impl World {
 
     /// 職場を割り当て直し、職場の変わった住民の予定を立て直す。
     fn update_jobs(&mut self) {
-        for (id, workplace) in assign_jobs(&self.population, &self.buildings) {
+        for (id, workplace) in assign_jobs(&self.population, &self.buildings, self.tax_permille) {
             self.population.set_workplace(id, workplace);
             let schedule = match workplace {
                 Some(w) => ScheduleState {
@@ -1007,6 +1012,99 @@ pub(crate) mod tests {
             falling += usize::from(drop * 10 > pair[0]);
         }
         assert!(falling >= 3, "{counts:?}");
+    }
+
+    /// 標準の税率で 6 日育てた街の、全部の区画の税率を `permille` にして `days` 日進めたあとの、
+    /// (人口, 1 日あたりの収支の見込み, 雇える職場の数) を返す。
+    fn run_with_taxes(permille: u16, days: u64) -> (u64, i64, u64) {
+        use ZoneKind::*;
+        let mut w = served_city(&[Residential, Commercial, Industrial, Office]);
+        run_days(&mut w, 6);
+        for zone in ZoneKind::ALL {
+            apply(&mut w, Command::SetTaxRate { zone, permille });
+        }
+        run_days(&mut w, days);
+        let s = w.city_stats();
+        (s.citizens, w.finances().net().0, s.job_slots.iter().sum())
+    }
+
+    /// 税率を上げると、短いあいだは収入が増える。上げすぎると雇える職場が減り、人が出ていって、
+    /// 日がたつほど収入は標準の税率を下回る。
+    #[test]
+    fn a_high_tax_pays_at_first_but_stunts_the_city() {
+        let standard = run_with_taxes(crate::world::INITIAL_TAX_PERMILLE, 8);
+        let (pop, net, _) = standard;
+        // 標準の税率の街は、ここで落ち着いている。
+        let later = run_with_taxes(crate::world::INITIAL_TAX_PERMILLE, 12);
+        assert!(later.0 * 20 >= pop * 19, "{standard:?} → {later:?}");
+        // 上げた直後は、まだ人も職も残っていて（職の割り当て直しは 5 分ごとで、1 日たつと収支は逆転している）、収入は標準より多い。
+        let (base, soon) = (
+            run_with_taxes(crate::world::INITIAL_TAX_PERMILLE, 0),
+            run_with_taxes(150, 0),
+        );
+        assert!(soon.1 > base.1, "上げた直後 {soon:?}、標準 {base:?}");
+        // 日がたつと、人口も職場も標準より大きく減り、収入は標準を下回る。
+        // 上げるほど人口は大きく減る。15% で 2 割、20% で半分以上、30% でほとんどいなくなる。
+        for (permille, percent) in [(150, 85), (200, 60), (300, 30)] {
+            let high = run_with_taxes(permille, 8);
+            assert!(
+                high.0 * 100 < pop * percent,
+                "{permille}‰：{high:?}、標準 {standard:?}"
+            );
+            assert!(
+                high.2 < standard.2,
+                "{permille}‰：{high:?}、標準 {standard:?}"
+            );
+            assert!(high.1 < net, "{permille}‰：{high:?}、標準 {standard:?}");
+        }
+    }
+
+    /// 高い税で職場の大半を雇えない街では、建物の段階が上がらない。
+    #[test]
+    fn a_high_tax_stops_buildings_from_growing() {
+        let mut w = served_city(&[
+            ZoneKind::Residential,
+            ZoneKind::Commercial,
+            ZoneKind::Industrial,
+        ]);
+        for zone in ZoneKind::ALL {
+            apply(
+                &mut w,
+                Command::SetTaxRate {
+                    zone,
+                    permille: 300,
+                },
+            );
+        }
+        run_days(&mut w, 5);
+        assert!(!w.buildings().is_empty());
+        for (_, b) in w.buildings().iter() {
+            assert!(b.level == 1, "{b:?}");
+        }
+        // 標準の税率の同じ街は、段階が上がる。
+        let mut base = served_city(&[
+            ZoneKind::Residential,
+            ZoneKind::Commercial,
+            ZoneKind::Industrial,
+        ]);
+        run_days(&mut base, 5);
+        assert!(base.buildings().iter().any(|(_, b)| b.level > 1));
+    }
+
+    /// 標準の税率より少し高いところで、長い目で見た収入が最も大きい。低すぎても高すぎても下がる。
+    #[test]
+    fn the_standard_tax_is_close_to_the_best_in_the_long_run() {
+        let nets: Vec<(u16, i64)> = [50, 80, 100, 110, 130, 160, 200, 300]
+            .into_iter()
+            .map(|p| (p, run_with_taxes(p, 8).1))
+            .collect();
+        let best = nets.iter().max_by_key(|(_, n)| *n).unwrap();
+        assert!((90..=120).contains(&best.0), "{nets:?}");
+        let at = |p: u16| nets.iter().find(|(q, _)| *q == p).unwrap().1;
+        assert!(at(100) > at(80) && at(100) > at(50), "{nets:?}");
+        assert!(at(100) > at(160) && at(160) > at(200), "{nets:?}");
+        // 200‰ からは職場も住民もほとんど残らず、どれだけ上げても同じである。
+        assert!(at(200) >= at(300), "{nets:?}");
     }
 
     /// 出ていくかは、組ごとの更新で書いた古い点数ではなく、いまの状態から決める。

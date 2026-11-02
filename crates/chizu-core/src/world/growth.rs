@@ -314,7 +314,7 @@ impl World {
         if !tick.0.is_multiple_of(GROWTH_INTERVAL) {
             return;
         }
-        // 電気と水道が届き、住む世帯か働く住民で埋まり、その区画に需要があり、網に余りのある建物だけが、段階を上げる。
+        // 電気と水道が届き、住む世帯か働く住民で埋まり（職場は税で雇えない分も埋まる必要があるので、高い税では育たない）、その区画に需要があり、網に余りのある建物だけが、段階を上げる。
         let occupants = self.occupants();
         let mut stats = self.city_stats();
         let ids: Vec<BuildingId> = self.buildings.iter().map(|(id, _)| id).collect();

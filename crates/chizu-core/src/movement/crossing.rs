@@ -144,7 +144,11 @@ impl Corners {
                         arms.push(s);
                     }
                 }
-                at = if forward { (at + 1) % m } else { (at + m - 1) % m };
+                at = if forward {
+                    (at + 1) % m
+                } else {
+                    (at + m - 1) % m
+                };
             }
             (highways, arms)
         };
@@ -257,7 +261,8 @@ impl Gate {
 /// いま区間の途中を横切っている人の、車のリンクごとの衝突区間の真ん中の位置。tick の途中で車を置くときに使う。
 pub(super) fn jay_zones(net: &Network, rows: &[Option<super::Trip>]) -> BTreeMap<LinkId, Vec<u32>> {
     let occs = rows.iter().flatten().filter_map(|t| {
-        let crossing = t.mode == crate::network::LaneMode::Sidewalk && t.walk.jay.is_some_and(|p| p > 0);
+        let crossing =
+            t.mode == crate::network::LaneMode::Sidewalk && t.walk.jay.is_some_and(|p| p > 0);
         crossing.then(|| Occ::Jay(t.link(), t.offset().0))
     });
     Occupied::of(net, occs).jay

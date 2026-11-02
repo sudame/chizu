@@ -328,10 +328,17 @@ fn assert_apart(t: &Town, walker: TripId) {
             continue;
         }
         let len = w.link_len.0;
-        let zone = if c.link().dir == w.link().dir { z } else { len - z };
+        let zone = if c.link().dir == w.link().dir {
+            z
+        } else {
+            len - z
+        };
         let front = c.offset().0;
         let apart = front + JAY_HALF_MM <= zone || front >= zone + JAY_HALF_MM + CAR_LENGTH;
-        assert!(apart, "横切っている人に車が重なった（人 {zone}、車の前 {front}）");
+        assert!(
+            apart,
+            "横切っている人に車が重なった（人 {zone}、車の前 {front}）"
+        );
     }
 }
 
@@ -372,7 +379,12 @@ fn a_car_arriving_while_a_walker_already_crosses_near_the_node_waits_at_the_node
     let (mut t, walker) = crossing_near_the_node(4_000, 1_389);
     let node = t.net.node_at(TilePos::new(20, 0)).unwrap();
     let car = t.drive(at(19, 0, (1, 0), 4_000), at(55, 0, (1, 0), 0));
-    let vmax = crate::routing::speed_limit(t.net.segment(t.trips.get(car).unwrap().link().segment).unwrap().kind);
+    let vmax = crate::routing::speed_limit(
+        t.net
+            .segment(t.trips.get(car).unwrap().link().segment)
+            .unwrap()
+            .kind,
+    );
     t.trips.rows[car.slot()].as_mut().unwrap().speed = vmax;
     for _ in 0..200 {
         t.step(node);

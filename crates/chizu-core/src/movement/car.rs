@@ -371,7 +371,12 @@ fn jay_line(z: u32) -> u32 {
 }
 
 /// 車線 `lane` で、位置 `at` から後ろへ下げていき、ほかの車とも、衝突区間 `zones` とも重ならない最初の位置。
-fn room_clear_of(ix: &LaneIndex, lane: LaneId, at: LaneOffset, zones: &[u32]) -> Option<LaneOffset> {
+fn room_clear_of(
+    ix: &LaneIndex,
+    lane: LaneId,
+    at: LaneOffset,
+    zones: &[u32],
+) -> Option<LaneOffset> {
     let mut p = ix.room_behind(lane, at)?;
     // 下げるたびに前の衝突区間より手前へ移るので、衝突区間の数より多くは回らない。
     for _ in 0..=zones.len() {
@@ -441,12 +446,10 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
             let next = t.route.links[t.leg as usize + 1];
             if jay_segments.contains(&next.segment) {
                 let behind = i64::from(t.offset.0) - i64::from(t.link_len.0);
-                g.cars.entry(next.segment).or_default().push((
-                    next.dir,
-                    behind,
-                    t.speed.0,
-                    t.stalled,
-                ));
+                g.cars
+                    .entry(next.segment)
+                    .or_default()
+                    .push((next.dir, behind, t.speed.0, t.stalled));
             }
         }
         if t.leg > 0 && t.offset.0 < JUNCTION_CLEAR {
