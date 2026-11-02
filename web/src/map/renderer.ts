@@ -20,7 +20,6 @@ import {
   UNOWNED_HATCH_COLOR,
   UNOWNED_SHORE_COLOR,
   UNOWNED_WATER_COLOR,
-  UNOWNED_WATER_HATCH_COLOR,
   WATER_COLOR,
   ZONABLE_COLOR,
   ZONABLE_MIX,
@@ -112,7 +111,7 @@ void main() {
       c = ${vec3(UNOWNED_WATER_COLOR)};
       highp float sw = u_hatch + (v_uv.x + v_uv.y) * u_size;
       if (mod(sw, ${HATCH_PERIOD}) < ${HATCH_WIDTH}) {
-        c = ${vec3(UNOWNED_WATER_HATCH_COLOR)};
+        c = ${vec3(UNOWNED_SHORE_COLOR)};
       }
     }
     // 水と陸の境目のマスの辺に、1 ピクセルの岸の線を引く（チャンクの端は陸があるかを調べない）
