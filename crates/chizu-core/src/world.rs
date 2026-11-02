@@ -571,7 +571,7 @@ impl World {
         &self.population
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn network_mut(&mut self) -> &mut Network {
         &mut self.network
     }

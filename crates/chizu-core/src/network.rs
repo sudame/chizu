@@ -448,7 +448,7 @@ impl Network {
     }
 
     /// 網の整合を崩すテストのために、区間から指されたままのノードを消す。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-util"))]
     pub(crate) fn remove_node_unchecked(&mut self, id: NodeId) {
         self.nodes.remove(id);
     }

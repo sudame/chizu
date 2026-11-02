@@ -1,7 +1,8 @@
 use super::*;
 use crate::command::RoadKind;
-use crate::network::{Dir, Line};
+use crate::network::{Dir, Line, TILE_MM};
 use crate::tile::{TilePos, TileRect};
+use crate::units::{Mm, WorldPos};
 use proptest::prelude::*;
 
 fn road(n: &mut Network, from: (i64, i64), to: (i64, i64), kind: RoadKind) {
@@ -541,6 +542,41 @@ fn broken_network_is_rejected_without_panic() {
             segment: s2,
         },
     );
+}
+
+#[test]
+fn node_pointing_at_a_missing_segment_is_rejected_without_panic() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (4, 0), RoadKind::Small);
+    // 別の網にだけある区間の ID は、この網にはない。
+    let mut other = Network::new();
+    road(&mut other, (0, 0), (4, 0), RoadKind::Small);
+    road(&mut other, (4, 0), (4, 4), RoadKind::Small);
+    let missing = link(&other, (4, 0), (4, 4), LaneMode::Car).segment;
+    assert!(n.segment(missing).is_none());
+    let start = n.node_at(TilePos::new(0, 0)).unwrap();
+    n.node_mut(start).unwrap().segments.push(missing);
+    assert_rejected(&n, &GraphError::MissingSegment(missing));
+}
+
+#[test]
+fn overflowing_length_is_rejected_without_panic() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (4, 0), RoadKind::Small);
+    let s = link(&n, (0, 0), (4, 0), LaneMode::Car).segment;
+    let (a, b) = {
+        let seg = n.segment(s).unwrap();
+        (seg.a, seg.b)
+    };
+    // 区間の長さが i64 の mm に収まらない。
+    let far = 1_000_000_000_000_000;
+    let at = |x: i64| WorldPos::new(Mm(x * TILE_MM), Mm(0));
+    n.node_mut(a).unwrap().pos = at(-far);
+    n.node_mut(b).unwrap().pos = at(far);
+    for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+        assert_eq!(Graph::try_build(&n, mode), Err(GraphError::Overflow));
+    }
+    assert_eq!(AstarRouter::try_new(&n).err(), Some(GraphError::Overflow));
 }
 
 #[test]

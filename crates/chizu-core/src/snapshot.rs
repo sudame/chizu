@@ -128,6 +128,19 @@ impl World {
     }
 }
 
+#[cfg(any(test, feature = "test-util"))]
+impl World {
+    /// 検査の値は通るが、区間から指されたノードがない道路網を持つ状態を書き出す。
+    /// 読み戻すと [`SnapshotError::Network`] で断られる。他の crate のテストが、
+    /// 崩れた状態を読ませるために使う。状態と、その状態ハッシュを返す。
+    pub fn to_snapshot_with_broken_network(&self) -> (Vec<u8>, u64) {
+        let mut world = self.clone();
+        let (node, _) = world.network().nodes().next().expect("ノードがない");
+        world.network_mut().remove_node_unchecked(node);
+        (world.to_snapshot(), world.state_hash())
+    }
+}
+
 /// 長さを型で決めた配列を、要素を順に並べた列として書く。serde は長い配列をそのままでは扱えない。
 pub(crate) mod big_array {
     use serde::de::{Deserialize, Deserializer, Error, SeqAccess, Visitor};
