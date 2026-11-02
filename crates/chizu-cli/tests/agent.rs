@@ -105,6 +105,7 @@ fn make_feedback(name: &str, unrecorded_ops: u32) -> PathBuf {
     map.insert("unrecordedOps".into(), unrecorded_ops.into());
     std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
     std::fs::remove_file(dir.join("session.lock")).unwrap();
+    std::fs::remove_file(dir.join("replay-cache.bin")).unwrap();
     std::fs::remove_file(dir.join("c.json")).unwrap();
     dir
 }
@@ -279,6 +280,61 @@ fn reports_invalid_commands_without_recording() {
     let rec = std::fs::read(dir.join("commands.rec")).unwrap();
     let log = chizu_core::CommandLog::decode(&rec).unwrap();
     assert!(log.is_empty());
+}
+
+/// 再生の途中のキャッシュが壊れているか、ほかのセッションのものなら、捨てて記録の先頭から作り直す。
+#[test]
+fn discards_broken_or_foreign_caches() {
+    const CACHE: &str = "replay-cache.bin";
+    let replayed = |dir: &Path, tick: &str| {
+        let rec = dir.join("commands.rec");
+        // small_town は種 42 で作る。
+        cli(&[rec.to_str().unwrap(), "42", tick]).trim().to_string()
+    };
+    let dir = small_town("agent-cache-broken");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "advance", d, "400"]);
+    assert!(dir.join(CACHE).exists(), "キャッシュを書いていない");
+
+    // 中ほどの 1 バイトを壊す。
+    let mut bytes = std::fs::read(dir.join(CACHE)).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0x55;
+    std::fs::write(dir.join(CACHE), &bytes).unwrap();
+    let seen = json(&cli(&["agent", "observe", d]));
+    assert_eq!(seen["stateHash"].as_str().unwrap(), replayed(&dir, "400"));
+    assert_ne!(
+        std::fs::read(dir.join(CACHE)).unwrap(),
+        bytes,
+        "壊れたキャッシュを書き直していない"
+    );
+
+    // 同じ種で、最初の道路の違う街のキャッシュを持ってくる。
+    let other = session("agent-cache-foreign");
+    let o = other.to_str().unwrap();
+    cli(&["agent", "new", o, "42"]);
+    let cmds = write(
+        &other.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[30,0],"kind":"Small"},
+            {"type":"PaintZone","area":[[0,1],[24,6]],"zone":"Residential"}]"#,
+    );
+    cli(&["agent", "act", o, &cmds]);
+    cli(&["agent", "advance", o, "400"]);
+    std::fs::copy(dir.join(CACHE), other.join(CACHE)).unwrap();
+    let seen = json(&cli(&["agent", "observe", o]));
+    assert_eq!(seen["stateHash"].as_str().unwrap(), replayed(&other, "400"));
+    assert_ne!(
+        seen["stateHash"],
+        json(&cli(&["agent", "observe", d]))["stateHash"]
+    );
+    // act と advance も、ハッシュの突き合わせを通って書き込める。
+    std::fs::copy(dir.join(CACHE), other.join(CACHE)).unwrap();
+    cli(&["agent", "advance", o, "15"]);
+    let state = json(&std::fs::read_to_string(other.join("state.json")).unwrap());
+    assert_eq!(
+        state["stateHash"].as_str().unwrap(),
+        replayed(&other, "415")
+    );
 }
 
 /// 道路と区画を置いた小さな街。道路は y=0 の x=0〜20 を Medium で引き、区画は x=0〜24、y=1〜6 の住宅である。

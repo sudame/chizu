@@ -101,7 +101,8 @@ cargo run -p chizu-cli -- feedback/<日時>-<番号>/commands.rec <seed> <tick>
 
 `chizu-cli agent` を使うと、AI が Bash から 1 回ずつコマンドを打って、画面なしで街を作れる。
 セッションはディレクトリで持ち、中身はフィードバックと同じ `state.json` と `commands.rec` である。
-呼び出しのあいだに状態は持たず、毎回、種から作った街に記録を再生して作り直す。
+毎回、種から作った街に記録を再生して作り直す。再生が長くならないよう、セッションには途中の街を `replay-cache.bin` に置き、そこから続きを再生する。
+このキャッシュは chizu-cli だけが使い、chizu-cli を作り直したときや、記録の先頭と合わないときは捨てて先頭から再生する。正しい記録は `state.json` と `commands.rec` のままである。
 
 - 人間のフィードバックは書き換えない。続きを遊ぶときは `agent new <dir> --from <フィードバックのディレクトリ>` で種、tick、記録を写す。写すときに再生したハッシュが元と一致したかを出力に入れる。
 - act と advance が書くのは、`agent new` で作った（`state.json` に `agentSession` がある）ディレクトリだけである。

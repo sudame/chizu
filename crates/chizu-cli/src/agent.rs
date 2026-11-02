@@ -2,8 +2,10 @@
 //!
 //! 遊んでいる街はセッションのディレクトリに、種と tick を書いた `state.json` と、
 //! 操作の記録の `commands.rec` で持つ。フィードバックの `feedback/<日時>-<番号>/` と同じ形である。
-//! 呼び出しのあいだに状態は持たず、毎回、種から作った街に記録を再生していまの tick の街を作り直す。
+//! 呼び出しのたびに、記録を再生していまの tick の街を作り直す。`agent new` で作ったセッションでは、
+//! 再生の途中の街を [`cache`] に置き、次の呼び出しはそこから続きを再生する。
 
+mod cache;
 mod command_json;
 mod export;
 mod map;
@@ -11,6 +13,7 @@ mod map;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use cache::Cache;
 use chizu_core::building::{Building, CityStats, demand, jobs_kept_permille, residential_tax_pull};
 use chizu_core::service::supply_balance;
 use chizu_core::world::economy::Finances;
@@ -37,6 +40,9 @@ pub const USAGE: &str = r#"使い方:
 <dir> は state.json と commands.rec を置くディレクトリである。act と advance は agent new で作ったディレクトリにだけ書く。
 feedback/<日時>-<番号>/ は observe ではそのまま見られ、続きを遊ぶときは new --from で写してから遊ぶ。
 act と advance は、記録を再生したハッシュが state.json の stateHash と食い違うときは何も書かずに止まる。
+agent new で作ったセッションには、再生の途中の街を replay-cache.bin に置き、次の呼び出しはそこから続きを再生する。
+正しい記録は state.json と commands.rec で、キャッシュは消してもよい。chizu-cli を作り直したときや、
+記録の先頭と合わないとき、壊れているときは、捨てて種から再生し直す。
 <commands.json> に - を渡すと標準入力から読む。中身はコマンドの配列か、コマンド 1 つである。
 map と export のほかのサブコマンドは、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
 
@@ -217,6 +223,10 @@ struct Session {
     seed: u64,
     tick: u64,
     log: CommandLog,
+    /// 再生の途中の街を置くキャッシュ。実行ファイルを読めなければ `None`。
+    cache: Option<Cache>,
+    /// [`Session::save`] でキャッシュに書くバイト列。
+    checkpoint: Option<Vec<u8>>,
     /// ロックを外さないよう、書き終えるまで持つ。
     _lock: Option<File>,
 }
@@ -268,27 +278,52 @@ fn read_saved(dir: &Path) -> Result<Saved, String> {
     })
 }
 
+/// tick `tick` の街を作るときに、止まっている車の見本とキャッシュに置く街を取る tick。
+fn mark_of(tick: u64, window: u64) -> u64 {
+    tick - window.min(tick)
+}
+
+/// 作り直した街。
+struct Rebuilt {
+    world: World,
+    /// 止まっている車を見分けるための、[`STOPPED_TICKS`] tick 前の車の位置。
+    before: CarSample,
+    /// 次の呼び出しのために書くキャッシュ。書かなくてよいときは `None`。
+    checkpoint: Option<Vec<u8>>,
+}
+
 impl Saved {
-    /// 種から作った街に記録を再生して、いまの tick の街を作る。
-    fn world(&self) -> World {
-        let mut world = World::new(self.seed);
-        replay(&mut world, &self.log, self.tick);
-        world
+    /// いまの tick の街を作る。`read` のキャッシュが使えればそこから、使えなければ種から作った街に記録を再生する。
+    /// `keep` を渡すと、[`STOPPED_TICKS`] tick 前の街をそのキャッシュに書くバイト列にして返す。
+    fn rebuild(&self, read: Option<&Cache>, keep: Option<&Cache>) -> Rebuilt {
+        self.rebuild_over(STOPPED_TICKS, read, keep)
     }
 
-    /// `world` に加えて、止まっている車を見分けるための、[`STOPPED_TICKS`] tick 前の車の位置を返す。
-    /// 続きを回すだけなので、街は `world` と同じになる。
-    fn world_sampled(&self) -> (World, CarSample) {
-        self.world_sampled_over(STOPPED_TICKS)
-    }
-
-    fn world_sampled_over(&self, window: u64) -> (World, CarSample) {
-        let mut world = World::new(self.seed);
-        let window = window.min(self.tick);
-        replay(&mut world, &self.log, self.tick - window);
+    fn rebuild_over(&self, window: u64, read: Option<&Cache>, keep: Option<&Cache>) -> Rebuilt {
+        let mark = mark_of(self.tick, window);
+        let loaded = read.and_then(|c| c.load(self.seed, &self.log, mark));
+        let from_cache = loaded.as_ref().map(|w| (w.tick(), w.next_seq()));
+        let mut world = loaded.unwrap_or_else(|| World::new(self.seed));
+        let start = world.tick().0;
+        replay(&mut world, &self.log, mark - start);
         let before = world.car_sample();
-        replay(&mut world, &self.log, window);
-        (world, before)
+        // 読んだキャッシュと同じ街を、同じファイルに書き直すことはしない。
+        let unchanged = from_cache == Some((world.tick(), world.next_seq()))
+            && read.zip(keep).is_some_and(|(r, k)| r.path() == k.path());
+        let checkpoint = keep
+            .filter(|_| !unchanged)
+            .map(|c| c.encode(&world, &self.log));
+        replay(&mut world, &self.log, self.tick - mark);
+        Rebuilt {
+            world,
+            before,
+            checkpoint,
+        }
+    }
+
+    /// `agent new` で作ったセッションか。ロックのファイルがあるかは `locked` で受け取る。
+    fn is_session(&self, locked: bool) -> bool {
+        locked && self.state.contains_key(SESSION_KEY)
     }
 
     fn saved_hash(&self) -> Option<&str> {
@@ -328,7 +363,7 @@ fn tmp_path(path: &Path) -> PathBuf {
 
 impl Session {
     /// 空のディレクトリに、新しいセッションを作る。
-    fn create(dir: &Path, saved: Saved) -> Result<Session, String> {
+    fn create(dir: &Path, saved: Saved, checkpoint: Option<Vec<u8>>) -> Result<Session, String> {
         let taken = || {
             if dir.join(STATE_FILE).exists() || dir.join(RECORD_FILE).exists() {
                 Err(format!("{} にはもうセッションがある", dir.display()))
@@ -352,6 +387,8 @@ impl Session {
             seed: saved.seed,
             tick: saved.tick,
             log: saved.log,
+            cache: Cache::here(dir),
+            checkpoint,
             _lock: lock,
         })
     }
@@ -369,7 +406,10 @@ impl Session {
                 dir.display()
             ));
         }
-        let world = saved.world();
+        let cache = Cache::here(dir);
+        let Rebuilt {
+            world, checkpoint, ..
+        } = saved.rebuild(cache.as_ref(), cache.as_ref());
         let hash = hash_text(&world);
         if saved.saved_hash() != Some(hash.as_str()) {
             return Err(format!(
@@ -389,6 +429,8 @@ impl Session {
             seed: saved.seed,
             tick: saved.tick,
             log: saved.log,
+            cache,
+            checkpoint,
             _lock: lock,
         };
         Ok((session, world))
@@ -419,6 +461,10 @@ impl Session {
         for (path, _) in &files {
             std::fs::rename(tmp_path(path), path)
                 .map_err(|e| format!("{} に書けない: {e}", path.display()))?;
+        }
+        // キャッシュは記録の先頭と突き合わせて使うので、記録より先に書いても後に書いてもよい。
+        if let (Some(cache), Some(bytes)) = (&self.cache, self.checkpoint.take()) {
+            cache.store(&bytes);
         }
         Ok(())
     }
@@ -1087,8 +1133,19 @@ fn print(value: &Value) -> String {
 }
 
 /// 新しいセッションを作り、街の様子を返す。`from` があれば、そのディレクトリの種、tick、記録を写す。
-fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, String> {
-    let (world, before) = from.world_sampled();
+/// `from_cache` は写し元のキャッシュで、写し元がセッションのときだけ渡す。
+fn new_session(
+    dir: &str,
+    from: Saved,
+    from_dir: Option<&str>,
+    from_cache: Option<Cache>,
+) -> Result<Value, String> {
+    let keep = Cache::here(Path::new(dir));
+    let Rebuilt {
+        world,
+        before,
+        checkpoint,
+    } = from.rebuild(from_cache.as_ref(), keep.as_ref());
     let copied = from_dir.map(|d| {
         let hash = hash_text(&world);
         let recorded = from.saved_hash().map(str::to_string);
@@ -1110,7 +1167,7 @@ fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, 
         }
         c
     });
-    let mut s = Session::create(Path::new(dir), from)?;
+    let mut s = Session::create(Path::new(dir), from, checkpoint)?;
     s.save(&world)?;
     let mut out = observe(&world, &before);
     // new が見せた街を、次の observe の増減の起点にする。
@@ -1124,14 +1181,24 @@ fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, 
 /// 読むだけで開く。人間のフィードバックも見られるよう、セッションでなくても読む。ロックは返り値が持つ。
 /// 最後の欄は、`agent new` で作ったセッションかどうか。
 /// `exclusive` はロックを排他にする（observe が増減の記録を書くため）。
+/// セッションならキャッシュから作り直し、排他のロックを取ったときだけキャッシュを書き直す。
 fn open_for_read(
     dir: &Path,
     exclusive: bool,
 ) -> Result<(Option<File>, World, CarSample, bool), String> {
     let lock = lock(dir, exclusive, false)?;
     let saved = read_saved(dir)?;
-    let is_session = lock.is_some() && saved.state.contains_key(SESSION_KEY);
-    let (world, before) = saved.world_sampled();
+    let is_session = saved.is_session(lock.is_some());
+    let cache = Cache::here(dir).filter(|_| is_session);
+    let keep = cache.as_ref().filter(|_| exclusive);
+    let Rebuilt {
+        world,
+        before,
+        checkpoint,
+    } = saved.rebuild(cache.as_ref(), keep);
+    if let (Some(c), Some(bytes)) = (keep, checkpoint) {
+        c.store(&bytes);
+    }
     let hash = hash_text(&world);
     if let Some(recorded) = saved.saved_hash()
         && recorded != hash
@@ -1145,9 +1212,10 @@ fn open_for_read(
 
 /// 再現の手順を markdown にする。何も書かない。
 fn export_markdown(dir: &Path) -> Result<String, String> {
-    let _lock = lock(dir, false, false)?;
+    let lock = lock(dir, false, false)?;
     let saved = read_saved(dir)?;
-    let world = saved.world();
+    let cache = Cache::here(dir).filter(|_| saved.is_session(lock.is_some()));
+    let world = saved.rebuild(cache.as_ref(), None).world;
     let hash = hash_text(&world);
     let record = saved.log.encode();
     let state_json = export::repro_state(
@@ -1174,9 +1242,11 @@ pub fn run(args: &[String]) -> Result<String, String> {
         [] | ["help" | "--help" | "-h"] => Ok(USAGE.trim_end().to_string()),
         ["new", dir, "--from", from] => {
             // 写し元がセッションなら、observe と同じく共有ロックを取ってから読む。
-            let _from_lock = lock(Path::new(from), false, false)?;
+            let from_lock = lock(Path::new(from), false, false)?;
             let saved = read_saved(Path::new(from))?;
-            Ok(print(&new_session(dir, saved, Some(from))?))
+            let cache =
+                Cache::here(Path::new(from)).filter(|_| saved.is_session(from_lock.is_some()));
+            Ok(print(&new_session(dir, saved, Some(from), cache)?))
         }
         ["new", dir, seed] => {
             let saved = Saved {
@@ -1185,7 +1255,7 @@ pub fn run(args: &[String]) -> Result<String, String> {
                 tick: 0,
                 log: CommandLog::new(),
             };
-            Ok(print(&new_session(dir, saved, None)?))
+            Ok(print(&new_session(dir, saved, None, None)?))
         }
         ["act", dir, commands, rest @ ..] => {
             let verbose = match rest {
@@ -1211,8 +1281,15 @@ pub fn run(args: &[String]) -> Result<String, String> {
                 .tick
                 .checked_add(ticks)
                 .ok_or_else(|| "tick があふれる".to_string())?;
-            // 読み込んだときに tick まで適用してあるので、続きを回す。
-            replay(&mut world, &s.log, ticks);
+            // 読み込んだときに tick まで適用してあるので、続きを回す。キャッシュは進めた先の手前で取り直す。
+            let mark = mark_of(s.tick, STOPPED_TICKS);
+            let start = world.tick().0;
+            if mark > start {
+                replay(&mut world, &s.log, mark - start);
+                s.checkpoint = s.cache.as_ref().map(|c| c.encode(&world, &s.log));
+            }
+            let now = world.tick().0;
+            replay(&mut world, &s.log, s.tick - now);
             s.save(&world)?;
             Ok(print(&json!({
                 "tick": s.tick,
@@ -1351,14 +1428,11 @@ mod tests {
         }
     }
 
-    /// 止まっている車を見分ける見本は、いまでなく `window` tick 前の車の位置である。
-    #[test]
-    fn sample_is_taken_a_window_before_now() {
-        let seed = 42;
+    /// 家と職場を車で行くほど（500m）離して置いた、長い 1 本道の街を、車が走っている朝のどこかまで進める。
+    fn commuting_town(seed: u64) -> (World, CommandLog) {
         let line = chizu_core::world::highway_line(seed);
         let (x, y) = (line.start.x, line.start.y);
         let inward = -line.step.0 as i64;
-        // 家と職場を車で行くほど（500m）離して置いた、長い 1 本道。
         let at = |d: i64| x + inward * d;
         let mut log = CommandLog::new();
         let mut world = World::new(seed);
@@ -1371,26 +1445,77 @@ mod tests {
         ]))
         .unwrap();
         act(&mut world, &mut log, &cmds, false);
-        // 車が走っている朝のどこかまで進める。
-        let (mut found, mut tick) = (None, 0);
-        while tick < 5 * TICKS_PER_DAY_FOR_TEST && found.is_none() {
+        let mut tick = 0;
+        while tick < 5 * TICKS_PER_DAY_FOR_TEST {
             replay(&mut world, &log, 25);
             tick += 25;
             let day_tick = tick % TICKS_PER_DAY_FOR_TEST;
-            let moving = world.car_sample();
-            if tick > 3 * TICKS_PER_DAY_FOR_TEST && day_tick > 2000 && !moving.is_empty() {
-                found = Some(tick);
+            if tick > 3 * TICKS_PER_DAY_FOR_TEST
+                && day_tick > 2000
+                && !world.car_sample().is_empty()
+            {
+                return (world, log);
             }
         }
-        let tick = found.expect("車が走らなかった");
-        let saved = Saved {
+        panic!("車が走らなかった");
+    }
+
+    fn saved_at(seed: u64, tick: u64, log: &CommandLog) -> Saved {
+        Saved {
             state: Map::new(),
             seed,
-            tick: world.tick().0,
+            tick,
             log: log.clone(),
-        };
-        assert_eq!(tick, saved.tick);
-        let (replayed, before) = saved.world_sampled_over(50);
+        }
+    }
+
+    /// キャッシュから作り直した街と車の見本は、種から再生したものと同じになる。
+    /// キャッシュを書いたあとにコマンドを足し、時間を進めても同じである。
+    #[test]
+    fn rebuild_from_cache_matches_full_replay() {
+        let seed = 42;
+        let dir = std::env::temp_dir().join(format!("chizu-agent-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache::new(&dir, 1);
+        let (mut world, mut log) = commuting_town(seed);
+        let first = world.tick().0;
+        let built = saved_at(seed, first, &log).rebuild(None, Some(&cache));
+        assert_eq!(built.world, world);
+        cache.store(&built.checkpoint.expect("キャッシュに書くものがない"));
+        let cached = saved_at(seed, first, &log).rebuild(Some(&cache), Some(&cache));
+        assert_eq!(cached.world, world);
+        assert_eq!(cached.before, built.before);
+        assert!(!built.before.is_empty(), "車が走っていない");
+        // 書いたキャッシュと同じ街なら、書き直すものはない。
+        assert!(cached.checkpoint.is_none());
+
+        // キャッシュを書いた tick より後に、コマンドを足して進める。
+        let more = [json!({"type":"SetTaxRate","zone":"Residential","permille":130})];
+        act(&mut world, &mut log, &more, false);
+        replay(&mut world, &log, 200 - STOPPED_TICKS);
+        let before = world.car_sample();
+        replay(&mut world, &log, STOPPED_TICKS);
+        let second = world.tick().0;
+        let cached = saved_at(seed, second, &log).rebuild(Some(&cache), Some(&cache));
+        assert_eq!(cached.world, world);
+        assert_eq!(cached.world.state_hash(), world.state_hash());
+        assert_eq!(cached.before, before);
+        assert!(cached.checkpoint.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 止まっている車を見分ける見本は、いまでなく `window` tick 前の車の位置である。
+    #[test]
+    fn sample_is_taken_a_window_before_now() {
+        let seed = 42;
+        let (world, log) = commuting_town(seed);
+        let tick = world.tick().0;
+        let saved = saved_at(seed, tick, &log);
+        let Rebuilt {
+            world: replayed,
+            before,
+            ..
+        } = saved.rebuild_over(50, None, None);
         assert_eq!(replayed.state_hash(), world.state_hash());
         // 見本は 50 tick 前の車の位置で、別に 50 tick 手前まで再生した街の位置と一致する。
         let mut earlier = World::new(seed);
