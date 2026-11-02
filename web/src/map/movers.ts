@@ -1,10 +1,11 @@
-// 三重バッファの移動体の枠を読み、WebGL2 で描く。歩く人は小さな点、車は向きに沿った小さな長方形にする。
+// 三重バッファの移動体の枠を読み、WebGL2 で描く。歩く人は赤紫の丸、車は向きに沿った小さな長方形にする。
 // 移動体の座標は枠の基準のチャンクの原点からのマスの数なので、カメラからの相対は基準の原点だけを
 // CPU で求めて渡す。遠くの座標でも f32 の桁が足りるようにするためで、道路の描き方と同じである。
 
 import { CHUNK_SIDE, type MoverArea } from "../protocol/messages.ts";
 import { layout, type SnapshotHeader } from "../protocol/snapshot.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
+import { CAR_COLORS, WALKER_COLOR } from "./mover-colors.ts";
 import { MoverInterpolator } from "./mover-interpolation.ts";
 
 /** 種類の番号。chizu-wasm の movers::KIND_WALK などと同じ。 */
@@ -18,47 +19,74 @@ export function showsMovers(zoom: number): boolean {
   return zoom >= MIN_MOVER_ZOOM;
 }
 
+const glslVec3 = ([r, g, b]: readonly number[]) => `vec3(${r}, ${g}, ${b})`;
+
 const VERTEX = `#version 300 es
 in vec2 a_corner;
 in vec2 a_pos;
 in uint a_heading_kind;
+in uint a_id;
 uniform vec2 u_offset;
 uniform float u_zoom;
 uniform vec2 u_viewport;
 out vec2 v_corner;
+out vec2 v_half_px;
 flat out uint v_kind;
+flat out vec3 v_color;
+const vec3 CAR[${CAR_COLORS.length}] = vec3[${CAR_COLORS.length}](
+  ${CAR_COLORS.map(glslVec3).join(",\n  ")}
+);
 void main() {
   uint kind = a_heading_kind >> 16u;
   float angle = float(a_heading_kind & 0xffffu) * (6.2831853 / 65536.0);
   vec2 along = vec2(cos(angle), sin(angle));
   vec2 across = vec2(-along.y, along.x);
-  // 半分の大きさ（マス）。1 マスは 8m で、車は 4.8m 長さで、いちばん狭い車線（大きい道路の 1.1m）に収まる幅にする。
-  // 人は歩道（0.64m）に収まる大きさにする。縮小しても消えないよう下限を置く
+  // 半分の大きさ（マス）。1 マスは 8m。車はいちばん狭い車線（大きい道路の 1.1m）に収まる幅にし、
+  // 長さは幅の 3 倍ほどにして、車線の線と見分けられる形にする。人は丸にする。
+  // 縮小しても形が分かるよう、画面のピクセルの下限を置く
   vec2 half_px = kind == ${KIND_CAR}u
-    ? max(vec2(0.3, 0.06) * u_zoom, vec2(2.0, 1.0))
-    : vec2(max(0.035 * u_zoom, 1.5));
+    ? max(vec2(0.2, 0.065) * u_zoom, vec2(2.0, 1.0))
+    : vec2(max(0.07 * u_zoom, 1.5));
   vec2 p = a_pos * u_zoom + u_offset + along * a_corner.x * half_px.x + across * a_corner.y * half_px.y;
   p /= u_viewport * 0.5;
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
   v_corner = a_corner;
+  v_half_px = half_px;
   v_kind = kind;
+  // mover-colors.ts の carColorIndex と同じ計算で、ID から車の色を選ぶ
+  uint h = a_id * 0x9e3779b1u;
+  h = (h ^ (h >> 16u)) * 0x85ebca6bu;
+  h ^= h >> 13u;
+  v_color = kind == ${KIND_CAR}u ? CAR[h % ${CAR_COLORS.length}u] : ${glslVec3(WALKER_COLOR)};
 }`;
 
-// 色は CS2 の情報表示のように、地図の上で目立ちすぎない明るい灰色に寄せる
+// 車は暗い縁と、前（進む向き）の窓を描き、向きが分かるようにする。人は暗い縁の丸にする。
+// 縁と窓は、画面で描ける大きさのときだけ描く
 const FRAGMENT = `#version 300 es
 precision mediump float;
 in vec2 v_corner;
+in vec2 v_half_px;
 flat in uint v_kind;
+flat in vec3 v_color;
 out vec4 color;
 void main() {
   if (v_kind == ${KIND_CAR}u) {
-    color = vec4(0.82, 0.84, 0.9, 0.95);
+    vec2 d = (1.0 - abs(v_corner)) * v_half_px;
+    vec3 c = v_color;
+    if (v_half_px.y >= 2.0 && min(d.x, d.y) < 0.75) {
+      c *= 0.4;
+    } else if (v_half_px.x >= 4.0 && v_corner.x > 0.25 && v_corner.x < 0.6) {
+      c = mix(c, vec3(0.12, 0.15, 0.2), 0.75);
+    }
+    color = vec4(c, 1.0);
     return;
   }
-  if (dot(v_corner, v_corner) > 1.0) {
+  float r = length(v_corner);
+  if (r > 1.0) {
     discard;
   }
-  color = vec4(0.96, 0.92, 0.78, 0.95);
+  bool rim = v_half_px.x >= 2.0 && (1.0 - r) * v_half_px.x < 0.75;
+  color = vec4(rim ? v_color * 0.35 : v_color, 1.0);
 }`;
 
 export class MoverLayer {
@@ -108,6 +136,10 @@ export class MoverLayer {
     gl.enableVertexAttribArray(headingKind);
     gl.vertexAttribIPointer(headingKind, 1, gl.UNSIGNED_INT, stride, layout.mover.headingKind * 4);
     gl.vertexAttribDivisor(headingKind, 1);
+    const id = gl.getAttribLocation(program, "a_id");
+    gl.enableVertexAttribArray(id);
+    gl.vertexAttribIPointer(id, 1, gl.UNSIGNED_INT, stride, layout.mover.id * 4);
+    gl.vertexAttribDivisor(id, 1);
     gl.bindVertexArray(null);
   }
 
