@@ -197,7 +197,10 @@ fn actuate(order: &[u8], phase: usize, fixed: Light, d: &[AxisDemand; 4]) -> (u8
     // 渡していた軸に止まりきれない車がいれば、抜けるまで黄にする。段階の軸にも止まりきれない車が
     // いれば、段階の軸を青のままにする。
     if !at(own).committed
-        && let Some(b) = order.iter().copied().find(|a| *a != own && at(*a).committed)
+        && let Some(b) = order
+            .iter()
+            .copied()
+            .find(|a| *a != own && at(*a).committed)
     {
         return (b, Light::Yellow);
     }

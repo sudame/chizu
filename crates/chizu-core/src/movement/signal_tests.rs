@@ -37,7 +37,11 @@ fn quiet() -> Demand {
 fn green_start(n: &Network, node: NodeId, axis: u8) -> u64 {
     (1..1_000)
         .find(|t| {
-            let light = |t| signal::state(n, node, Tick(t), &quiet()).unwrap().light_for(axis);
+            let light = |t| {
+                signal::state(n, node, Tick(t), &quiet())
+                    .unwrap()
+                    .light_for(axis)
+            };
             light(*t) == Light::Green && light(*t - 1) != Light::Green
         })
         .unwrap()
@@ -168,7 +172,10 @@ fn a_car_stops_on_red_while_the_green_axis_has_traffic() {
 fn a_lone_car_gets_the_green_without_waiting_for_the_cycle() {
     // 青の向きに車が来ていなければ、赤の向きに来た車へ青を渡す。骨組みの青が終わるのを待たない。
     let (crossed, _, start) = eastbound_against(0);
-    assert!(crossed.0 < start + GREEN, "空いた向きの青を待った {crossed:?}");
+    assert!(
+        crossed.0 < start + GREEN,
+        "空いた向きの青を待った {crossed:?}"
+    );
 }
 
 #[test]
@@ -365,7 +372,13 @@ fn a_car_stuck_inside_a_signalled_junction_is_passed_before_the_rescue() {
 }
 
 /// 十字路の tick `t` の灯火を、軸ごとの様子 `x` と `y`（x の向きと y の向き）から決める。
-fn lit(n: &Network, node: NodeId, t: u64, x: signal::AxisDemand, y: signal::AxisDemand) -> [Light; 2] {
+fn lit(
+    n: &Network,
+    node: NodeId,
+    t: u64,
+    x: signal::AxisDemand,
+    y: signal::AxisDemand,
+) -> [Light; 2] {
     let mut d = Demand::default();
     d.note(node, 0, |a| *a = x);
     d.note(node, 2, |a| *a = y);
@@ -377,10 +390,7 @@ fn lit(n: &Network, node: NodeId, t: u64, x: signal::AxisDemand, y: signal::Axis
 fn the_green_goes_where_the_cars_are() {
     let (n, node) = crossroads(true);
     let none = signal::AxisDemand::default();
-    let cars = signal::AxisDemand {
-        cars: true,
-        ..none
-    };
+    let cars = signal::AxisDemand { cars: true, ..none };
     let committed = signal::AxisDemand {
         cars: true,
         committed: true,
