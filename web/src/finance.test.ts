@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  balanceNote,
   deficitNote,
   financeRows,
   formatMoney,
@@ -71,6 +72,10 @@ describe("文言と数字の整形", () => {
     const deficit = parseFinance([300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0]);
     expect(summaryText(deficit)).toBe("収支 -1,380 / 日（赤字）");
     expect(deficitNote(deficit)).toBe("赤字 -1,380 / 日");
+    // 上の帯には、黒字でも 1 日あたりの収支を出す
+    expect(balanceNote(surplus)).toBe("+320 / 日");
+    expect(balanceNote(deficit)).toBe("赤字 -1,380 / 日");
+    expect(balanceNote(null)).toBe("");
   });
 
   it("税収と維持費と差し引きの行を作る", () => {

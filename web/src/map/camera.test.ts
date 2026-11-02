@@ -35,6 +35,8 @@ describe("Camera", () => {
     const camera = new Camera(0, 0, 8);
     const under = camera.screenToWorld(100, 500, viewport);
     camera.zoomAt(100, 500, 1000, viewport);
+    // 上限では 1 マス（8m）が 128 ピクセルになり、1 ピクセルは 6.25cm
+    expect(MAX_ZOOM).toBe(128);
     expect(camera.zoom).toBe(MAX_ZOOM);
     expect(camera.screenToWorld(100, 500, viewport).x).toBeCloseTo(under.x);
     camera.zoomAt(100, 500, 1e-6, viewport);

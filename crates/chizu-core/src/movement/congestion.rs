@@ -1,6 +1,7 @@
 //! 道路の区間ごとの混み具合。画面のデータレイヤーと `chizu-cli agent map --layer traffic` が使う。
 //!
-//! 読み取りのための値で、状態は変えず、状態ハッシュにも入れない。
+//! 混み具合の段階は読み取りのための値で、状態は変えず、状態ハッシュにも入れない。
+//! 経路の費用に足す遅れ（[`Trips::queue_delays`]）も、車線に並んでいる車を数えて求める。
 //! 区間の向きごとに、車線に出ている車の台数から、その向きに並べる台数に対する割合（占有率）を求め、
 //! 止まっている車の割合と合わせて段階にする。車の台数を数えるだけなので、費用は走っている車の数に比例する。
 //! 車のいない区間は表に載せず、空いているものとして扱う。
@@ -9,6 +10,7 @@ use std::collections::BTreeMap;
 
 use super::{CAR_LENGTH, MIN_GAP, Trips};
 use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId};
+use crate::routing::Delays;
 
 /// 車 1 台が車線の上でふさぐ長さ（mm）。車の長さと、止まったときの最小の車間である。
 const SPACING_MM: u64 = (CAR_LENGTH + MIN_GAP) as u64;
@@ -79,7 +81,40 @@ pub(super) fn capacity_cars(net: &Network, link: LinkId) -> u64 {
         .max(1)
 }
 
+/// この速さ（mm/tick）より遅い車を、車線に並んでいる車とみなす。時速 7.2km である。
+pub(super) const QUEUED_BELOW: i32 = 2_000;
+
+/// 並んでいる車 1 台が、1 車線のリンクを抜けるまでに足す遅れ（ms）。
+/// 交差する流れのある交差点や信号では、車線の先頭から 4 tick に 1 台ほど抜けるので、その見積もりにする。
+pub(super) const QUEUE_MS_PER_CAR: u64 = 4_000;
+
 impl Trips {
+    /// 車のリンクごとの、並んでいる車から見積もった遅れ。並んでいる台数 × [`QUEUE_MS_PER_CAR`] を、
+    /// リンクの車線の数で割る。建物の前から出発を待つ車はまだ車線にいないので数えないが、道路の種類が
+    /// 変わって車線に戻るのを待つ車は、区間の途中で止まっているので数える。
+    pub fn queue_delays(&self, net: &Network) -> Delays {
+        let mut queued = BTreeMap::<LinkId, u64>::new();
+        for t in self.rows.iter().flatten() {
+            let parked = t.waiting && !t.rejoining;
+            if t.mode != LaneMode::Car || parked || t.speed.0 >= QUEUED_BELOW {
+                continue;
+            }
+            let Some(lane) = net.lane(t.lane) else {
+                continue;
+            };
+            let link = LinkId {
+                segment: lane.segment,
+                dir: lane.dir,
+                mode: LaneMode::Car,
+            };
+            *queued.entry(link).or_insert(0) += 1;
+        }
+        Delays::from_sorted(queued.into_iter().map(|(link, n)| {
+            let lanes = net.link_lanes(link).count().max(1) as u64;
+            (link, n * QUEUE_MS_PER_CAR / lanes)
+        }))
+    }
+
     /// 車のいる区間の混み具合。区間の 2 つの向きのうち、混んでいるほうの段階を取る。
     /// 空いている区間は載せない。
     pub fn congestion(&self, net: &Network) -> BTreeMap<SegmentId, Congestion> {
@@ -178,5 +213,37 @@ mod tests {
         assert_eq!(capacity_cars(&n, link), 1);
         let link = link_of(&mut n, (0, 70), (1, 71), RoadKind::Small);
         assert_eq!(capacity_cars(&n, link), 1);
+    }
+
+    #[test]
+    fn queued_cars_add_delay_per_lane_and_moving_cars_do_not() {
+        use crate::SidewalkPos;
+        use crate::routing::AstarRouter;
+        use crate::units::{LaneOffset, MmPerTick, Tick};
+        let mut n = Network::new();
+        let small = link_of(&mut n, (0, 0), (20, 0), RoadKind::Small);
+        let medium = link_of(&mut n, (0, 10), (20, 10), RoadKind::Medium);
+        let mut router = AstarRouter::new(&n);
+        let at = |y: i64, x: i64| SidewalkPos {
+            tile: TilePos::new(x, y),
+            step: (1, 0),
+            along: LaneOffset(1),
+        };
+        let mut trips = Trips::default();
+        // 出発したばかりの車は止まっている。小さい道路に 3 台、中くらいの道路（2 車線）に 4 台置く。
+        let drives: Vec<_> = (0..3)
+            .map(|i| (at(0, 18 - i), at(0, 19)))
+            .chain((0..4).map(|i| (at(10, 18 - i), at(10, 19))))
+            .collect();
+        let ids = trips.spawn_drives(&n, &mut router, &drives, Tick::ZERO);
+        assert!(ids.iter().all(Option::is_some));
+        let d = trips.queue_delays(&n);
+        assert_eq!(d.get(small), 3 * QUEUE_MS_PER_CAR);
+        assert_eq!(d.get(medium), 4 * QUEUE_MS_PER_CAR / 2);
+        // 走っている車は並んでいるとみなさない。
+        for t in trips.rows.iter_mut().flatten() {
+            t.speed = MmPerTick(QUEUED_BELOW);
+        }
+        assert!(trips.queue_delays(&n).is_empty());
     }
 }

@@ -14,9 +14,10 @@ use std::path::PathBuf;
 use chizu_core::movement::signal;
 
 use chizu_core::{
-    Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, LaneMode, LaneOffset, Money,
-    RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind, SidewalkPos, SimSpeed,
-    StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind, replay, rng,
+    Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, Heading, LaneMode,
+    LaneOffset, Money, RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind,
+    SidewalkPos, SimSpeed, StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind,
+    replay, rng,
 };
 
 /// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
@@ -116,6 +117,13 @@ fn scenarios() -> Vec<Scenario> {
             seed: 42,
             ticks: COMMUTE_TICKS,
             log: signals(),
+            money: None,
+        },
+        Scenario {
+            name: "crosswalks",
+            seed: 42,
+            ticks: COMMUTE_TICKS,
+            log: crosswalks(),
             money: None,
         },
         Scenario {
@@ -445,6 +453,69 @@ fn signals() -> CommandLog {
     log
 }
 
+/// 横断歩道のシナリオで、外した横断歩道を朝の通勤のさなかに戻す tick。
+const CROSSWALK_BACK_TICK: u64 = 2_100;
+
+/// 通勤のシナリオの街に、信号のシナリオと同じ南北の道路を足し、できた 2 つの十字路の横断歩道を外す記録。
+/// 南の十字路は北と南の腕、北の十字路は東の腕を外し、朝の通勤のさなかに南の十字路の南の腕を戻す。
+fn crosswalks() -> CommandLog {
+    let mut log = commute();
+    log.record(
+        Tick(4),
+        Command::BuildRoad {
+            from: TilePos::new(40, -10),
+            to: TilePos::new(40, 30),
+            kind: RoadKind::Small,
+        },
+    )
+    .unwrap();
+    let mut world = World::new(42);
+    replay(&mut world, &log, 5);
+    let node = |y| world.network().node_at(TilePos::new(40, y)).unwrap();
+    let (south, north) = (node(0), node(20));
+    for (node, arm) in [
+        (south, Heading::N),
+        (south, Heading::S),
+        (north, Heading::E),
+    ] {
+        log.record(
+            Tick(5),
+            Command::SetCrosswalk {
+                node,
+                arm,
+                on: false,
+            },
+        )
+        .unwrap();
+    }
+    log.record(
+        Tick(CROSSWALK_BACK_TICK),
+        Command::SetCrosswalk {
+            node: south,
+            arm: Heading::S,
+            on: true,
+        },
+    )
+    .unwrap();
+    log
+}
+
+/// 横断歩道のシナリオで、外すのと戻すのがどれも適用され、戻さなかった腕は外したまま残る。
+#[test]
+fn crosswalks_scenario_removes_and_restores() {
+    let log = crosswalks();
+    let mut world = World::new(42);
+    let stats = replay(&mut world, &log, CROSSWALK_BACK_TICK + 1);
+    assert_eq!(stats.denied, 0);
+    let net = world.network();
+    let mask = |y| {
+        let n = net.node_at(TilePos::new(40, y)).unwrap();
+        net.node(n).unwrap().no_crosswalk
+    };
+    assert_eq!(mask(0), 1 << Heading::N as u8);
+    assert_eq!(mask(20), 1 << Heading::E as u8);
+}
+
 /// 信号のシナリオで、信号が 2 つとも置けていて、車が赤の信号の手前で止まることを確かめる。
 #[test]
 fn signals_scenario_stops_cars_on_red() {
@@ -488,11 +559,15 @@ fn signals_scenario_stops_cars_on_red() {
             }
             entered += 1;
             let axis = signal::axis(net.segment_line(link.segment).unwrap().step);
-            let light = signal::state(net, end_of(net, link), now)
+            let light = world
+                .trips()
+                .lights()
+                .state(net, end_of(net, link))
                 .unwrap()
                 .light_for(axis);
             assert_ne!(light, signal::Light::Red, "赤で入った {now:?} {link:?}");
         }
+        assert_eq!(world.trips().lights().now, now, "控えた灯火の tick が違う");
         for (_, t) in world.trips().iter() {
             if t.mode() != LaneMode::Car || t.speed().0 != 0 {
                 continue;
@@ -509,7 +584,10 @@ fn signals_scenario_stops_cars_on_red() {
             let at_line = i64::from(t.offset().0) + 7_000 >= line.length().0;
             let red = at_line
                 && lit.contains(&end)
-                && signal::state(net, end, world.tick())
+                && world
+                    .trips()
+                    .lights()
+                    .state(net, end)
                     .is_some_and(|st| st.light_for(axis) != signal::Light::Green);
             waited += usize::from(red);
         }

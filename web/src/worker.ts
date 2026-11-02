@@ -9,7 +9,7 @@ import init, {
   ticks_per_second,
 } from "../wasm/chizu_wasm.js";
 import { ChunkSync } from "./map/chunk-sync.ts";
-import { LayerSender } from "./map/layer-sync.ts";
+import { LayerSender, TrafficSender } from "./map/layer-sync.ts";
 import type {
   ChunkData,
   CommandMessage,
@@ -36,6 +36,7 @@ function reply(message: WorkerToMain, transfer: Transferable[] = []): void {
 
 const chunkSync = new ChunkSync();
 const layerSender = new LayerSender();
+const trafficSender = new TrafficSender();
 
 // 画面の手元と版の違うチャンクを送る。マスの配列は移譲するので、送ったあとの Worker の側には残らない
 function sendChunks(sim: Simulation): void {
@@ -159,6 +160,7 @@ function sendOverview(sim: Simulation, now: number, paused: boolean, force = fal
     kind: "overview",
     overview: all.slice(0, OVERVIEW_LENGTH),
     stalls: all.slice(OVERVIEW_LENGTH),
+    isolated: [...sim.isolated_facilities()],
   });
 }
 
@@ -188,6 +190,7 @@ function run(sim: Simulation): {
     sendOverview(sim, now, paused);
     sendChunks(sim);
     layerSender.send(sim, reply, CHUNKS_PER_FRAME, now);
+    trafficSender.send(sim, reply, now);
   }, FRAME_MS);
   return {
     setPaused: (p) => {
@@ -227,6 +230,7 @@ const ready = (async () => {
     sum: parallel_sum(SUM_N),
     roadCosts: [...road_cost_table()],
     serviceTable: [...service_table()],
+    seed: (JSON.parse(sim.save_meta()) as { seed: string }).seed,
   });
   return { sim, setPaused, setPace };
 })();
@@ -248,12 +252,14 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         sendFinance(sim, performance.now(), true);
         sendOverview(sim, performance.now(), false, true);
         layerSender.send(sim, reply, CHUNKS_PER_FRAME);
+        trafficSender.send(sim, reply);
         break;
       case "pace":
         setPace(message.pace);
         break;
       case "layers":
         layerSender.setActive(message.active);
+        trafficSender.setActive(message.active);
         break;
       case "pause":
         setPaused(message.paused);

@@ -11,8 +11,28 @@ export type FeedbackDeps = {
   requestState: () => Promise<{ state: string; commands: ArrayBuffer }>;
   /** 地図の canvas。描画の結果は preserveDrawingBuffer で残っている。 */
   map: HTMLCanvasElement;
+  /** 地図の上に重ねて描いた canvas（ラベルなど）。スクリーンショットに重ねる。 */
+  overlays: HTMLCanvasElement[];
   camera: () => { x: number; y: number; zoom: number };
 };
+
+/** 地図の canvas に、上に重ねた canvas を重ねた絵を PNG の base64 にする。 */
+function screenshotOf(map: HTMLCanvasElement, overlays: HTMLCanvasElement[]): string {
+  const out = document.createElement("canvas");
+  out.width = map.width;
+  out.height = map.height;
+  const ctx = out.getContext("2d");
+  if (ctx === null) {
+    return map.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
+  }
+  ctx.drawImage(map, 0, 0);
+  for (const overlay of overlays) {
+    if (overlay.width > 0 && overlay.height > 0) {
+      ctx.drawImage(overlay, 0, 0, out.width, out.height);
+    }
+  }
+  return out.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
+}
 
 function toBase64(bytes: Uint8Array): string {
   let text = "";
@@ -72,7 +92,7 @@ export function setupFeedback(deps: FeedbackDeps): void {
     sendButton.disabled = true;
     try {
       const { state, commands } = await requestState();
-      const screenshot = deps.map.toDataURL("image/png").replace(/^data:image\/png;base64,/, "");
+      const screenshot = screenshotOf(deps.map, deps.overlays);
       const response = await fetch("/__feedback", {
         method: "POST",
         headers: { "Content-Type": "application/json" },

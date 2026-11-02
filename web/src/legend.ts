@@ -1,18 +1,17 @@
-// 地図の色と印の凡例。色と形は描画で使う定数（map/roads.ts）から取る。
+// 地図の色と印の凡例。色と形は描画で使う定数（map/roads.ts）から取る。主題図の凡例は map/themes.ts が作る。
 
 import { HIGHWAY_CODE } from "./map/lanes.ts";
-import { TRAFFIC_LEVELS } from "./map/layers.ts";
 import { CAR_COLORS, WALKER_COLOR } from "./map/mover-colors.ts";
 import {
   BOLT_SHAPE,
   buildingColor,
+  buildingEdgeColor,
   DROP_SHAPE,
   FACILITY_COLOR,
   NO_POWER_COLOR,
   NO_WATER_COLOR,
   roadStyle,
   type Triangle,
-  zoneEdgeColor,
   zoneGroundColor,
 } from "./map/roads.ts";
 
@@ -46,23 +45,22 @@ const ROADS: [number, string][] = [
   [HIGHWAY_CODE, "高速道路"],
 ];
 
-export const LEVELS = [1, 2, 3, 4, 5] as const;
-
 export function legendSections(): LegendSection[] {
   return [
     {
-      title: "区画（薄い地面と濃い枠）",
+      title: "区画（地面の色）",
       items: ZONES.map(([zone, label]) => ({
         label,
         color: cssColor(zoneGroundColor(zone)),
-        border: cssColor(zoneEdgeColor(zone)),
+        border: cssColor(buildingEdgeColor(zone)),
       })),
     },
     {
-      title: "建物（濃いほど段階が低い）",
-      items: LEVELS.map((level) => ({
-        label: `段階 ${level}`,
-        color: cssColor(buildingColor(1, level)),
+      title: "建物（区画と同じ系統の色）",
+      items: ZONES.map(([zone, label]) => ({
+        label,
+        color: cssColor(buildingColor(zone)),
+        border: cssColor(buildingEdgeColor(zone)),
       })),
     },
     {
@@ -81,10 +79,6 @@ export function legendSections(): LegendSection[] {
       ],
     },
     {
-      title: "交通（データレイヤー、道路の色）",
-      items: TRAFFIC_LEVELS.map((l) => ({ label: l.label, color: cssColor(l.color) })),
-    },
-    {
       title: "公共施設",
       items: [
         { label: "発電所", color: cssColor(FACILITY_COLOR[1] ?? [0.6, 0.6, 0.6, 1]) },
@@ -92,7 +86,7 @@ export function legendSections(): LegendSection[] {
       ],
     },
     {
-      title: "道路（広いほど車道が太く濃い）",
+      title: "道路（広いほど車道が太い。高速道路は橙、大きい道路は黄）",
       items: ROADS.map(([kind, label]) => {
         const style = roadStyle(kind);
         return { label, color: cssColor(style.asphalt), border: cssColor(style.edge) };

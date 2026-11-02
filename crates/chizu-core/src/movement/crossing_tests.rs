@@ -1,7 +1,9 @@
 use super::crossing::{self, JAY_HALF_MM, PED_PATIENCE};
 use super::*;
-use crate::command::{NodeId, RoadKind};
+use crate::command::{Heading, NodeId, RoadKind};
 use crate::network::{Line, SegmentId};
+use crate::tile::TileRect;
+use crate::world::DenyReason;
 
 fn road(n: &mut Network, from: (i64, i64), to: (i64, i64)) {
     let line = Line::between(TilePos::new(from.0, from.1), TilePos::new(to.0, to.1)).unwrap();
@@ -39,19 +41,20 @@ fn walkers_cross_the_arms_on_the_shorter_way_round() {
     let seg = |a, b| side(a, b).segment;
     let (w, e, north, s) = ((9, 10), (11, 10), (10, 9), (10, 11));
     // 西から東へまっすぐ。進む向きの右（南の側）を歩くので、南の腕を渡る。
-    let (far, arms) = crossing::depart(&n, node, (side(w, c), false), side(c, e), None);
+    let (far, arms) = crossing::depart(&n, node, (side(w, c), false), side(c, e), None, None);
     assert_eq!((far, arms.as_slice()), (false, &[seg(c, s)][..]));
     // 左の側（北の側）を歩いてきたなら、北の腕を渡って北の側のまま進む。
-    let (far, arms) = crossing::depart(&n, node, (side(w, c), true), side(c, e), None);
+    let (far, arms) = crossing::depart(&n, node, (side(w, c), true), side(c, e), None, None);
     assert_eq!((far, arms.as_slice()), (true, &[seg(c, north)][..]));
     // 南の側を歩いてきて南へ曲がるなら、どの腕も渡らない。
-    let (far, arms) = crossing::depart(&n, node, (side(w, c), false), side(c, s), None);
+    let (far, arms) = crossing::depart(&n, node, (side(w, c), false), side(c, s), None, None);
     assert_eq!((far, arms.len()), (false, 0));
     // 南へ曲がって東の側に出るなら、南の腕を渡る。南へ進む向きの左は東である。
-    let (far, arms) = crossing::depart(&n, node, (side(w, c), false), side(c, s), Some(true));
+    let (far, arms) = crossing::depart(&n, node, (side(w, c), false), side(c, s), Some(true), None);
     assert_eq!((far, arms.as_slice()), (true, &[seg(c, s)][..]));
     // 折り返して反対の側へ出るなら、来た腕を渡る。
-    let (far, arms) = crossing::depart(&n, node, (side(w, c), false), side(c, w), Some(false));
+    let (far, arms) =
+        crossing::depart(&n, node, (side(w, c), false), side(c, w), Some(false), None);
     assert_eq!((far, arms.as_slice()), (false, &[seg(w, c)][..]));
 }
 
@@ -69,6 +72,7 @@ fn no_crosswalks_where_fewer_than_three_roads_meet() {
             (side((9, 0), (10, 0)), false),
             side((10, 0), (10, 1)),
             need,
+            None,
         );
         assert!(arms.is_empty());
     }
@@ -233,7 +237,8 @@ fn walkers_obey_the_signal() {
         let now = t.now;
         t.step(node);
         // この tick に渡り始めた横断歩道は、渡ってよい灯火だった。
-        let st = signal::state(&t.net, node, now).unwrap();
+        assert_eq!(t.trips.lights().now, now);
+        let st = t.trips.lights().state(&t.net, node).unwrap();
         for (_, arm) in t.occupied().into_iter().filter(|o| !before.contains(o)) {
             let axis = signal::axis(t.net.segment_line(arm).unwrap().step);
             assert!(st.walk(axis), "渡ってはいけない灯火で渡り始めた {now:?}");
@@ -435,12 +440,13 @@ fn walkers_go_round_highway_arms_instead_of_crossing_them() {
     let (w, c, e) = ((9, 10), (10, 10), (11, 10));
     for from_far in [false, true] {
         for need in [None, Some(false), Some(true)] {
-            let (_, arms) = crossing::depart(&n, node, (side(w, c), from_far), side(c, e), need);
+            let (_, arms) =
+                crossing::depart(&n, node, (side(w, c), from_far), side(c, e), need, None);
             assert!(!arms.contains(&highway), "{from_far} {need:?} {arms:?}");
         }
     }
     // 北の側（東へ歩く人の左）から北の側へ行くなら、高速道路の腕を越えずに、南へ回って西と東の腕を渡る。
-    let (far, arms) = crossing::depart(&n, node, (side(w, c), true), side(c, e), Some(true));
+    let (far, arms) = crossing::depart(&n, node, (side(w, c), true), side(c, e), Some(true), None);
     assert!(far);
     assert_eq!(arms.as_slice(), &[side(w, c).segment, side(c, e).segment]);
 }
@@ -644,4 +650,314 @@ fn walkers_waiting_behind_a_car_stuck_in_the_junction_do_not_hold_other_cars() {
     assert!(t.trips.get(walker).is_none(), "人が渡れない");
     assert!(t.trips.is_empty(), "残った {}", t.trips.len());
     assert_eq!(t.trips.rescues(), Default::default(), "救済が働いた");
+}
+
+#[test]
+fn crosswalks_can_be_removed_and_restored_per_arm() {
+    let (mut n, node) = crossroads();
+    let south = n.arm_segment(node, Heading::S).unwrap();
+    assert!(n.has_crosswalk(node, south));
+    let v = n.version();
+    // 戻すものはない。斜めには腕がない。
+    assert_eq!(
+        n.set_crosswalk(node, Heading::S, true),
+        Err(DenyReason::CrosswalkUnchanged)
+    );
+    assert_eq!(
+        n.set_crosswalk(node, Heading::SE, false),
+        Err(DenyReason::NoCrosswalkArm)
+    );
+    assert_eq!(n.version(), v);
+    n.set_crosswalk(node, Heading::S, false).unwrap();
+    assert!(!n.has_crosswalk(node, south));
+    assert!(n.version() > v, "経路の費用が変わるので網の版を上げる");
+    assert_eq!(
+        n.set_crosswalk(node, Heading::S, false),
+        Err(DenyReason::CrosswalkUnchanged)
+    );
+    // 3 本より少ない区間のノードには横断歩道がない。
+    let end = n.node_at(TilePos::new(10, 20)).unwrap();
+    assert_eq!(
+        n.set_crosswalk(end, Heading::N, false),
+        Err(DenyReason::NotJunction)
+    );
+    // 腕を分けても、種類を変えても、外したまま残る。
+    road(&mut n, (5, 15), (15, 15));
+    let line = Line::between(TilePos::new(10, 10), TilePos::new(10, 15)).unwrap();
+    let change = n.plan_road_kind(&line, RoadKind::Large).unwrap();
+    n.change_road_kind(&change);
+    let south = n.arm_segment(node, Heading::S).unwrap();
+    assert_ne!(south, change.segments[0]);
+    assert!(!n.has_crosswalk(node, south));
+    // 戻すと元どおりになる。
+    n.set_crosswalk(node, Heading::S, true).unwrap();
+    assert!(n.has_crosswalk(node, south));
+    assert_eq!(n.node(node).unwrap().no_crosswalk, 0);
+}
+
+#[test]
+fn highway_arms_have_no_crosswalk_to_remove() {
+    let mut n = Network::new();
+    n.add_highway(TilePos::new(10, 10), TilePos::new(10, -20));
+    road(&mut n, (0, 10), (20, 10));
+    let node = n.node_at(TilePos::new(10, 10)).unwrap();
+    assert_eq!(
+        n.set_crosswalk(node, Heading::N, false),
+        Err(DenyReason::NoCrosswalkArm)
+    );
+    n.set_crosswalk(node, Heading::E, false).unwrap();
+}
+
+#[test]
+fn bulldozing_an_arm_forgets_its_removed_crosswalk() {
+    let (mut n, node) = crossroads();
+    n.set_crosswalk(node, Heading::S, false).unwrap();
+    n.set_crosswalk(node, Heading::E, false).unwrap();
+    // 南の腕を取り壊すと、その印は消え、東の腕の印は残る。
+    let rect = |a: (i64, i64), b: (i64, i64)| {
+        TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1))
+    };
+    n.bulldoze(rect((10, 11), (10, 20))).unwrap();
+    assert_eq!(n.node(node).unwrap().no_crosswalk, 1 << Heading::E as u8);
+    // 南へ引き直した腕には横断歩道がある。
+    road(&mut n, (10, 10), (10, 20));
+    let south = n.arm_segment(node, Heading::S).unwrap();
+    assert!(n.has_crosswalk(node, south));
+    // 交差点でなくなれば、印はすべて消える。
+    n.bulldoze(rect((11, 10), (20, 10))).unwrap();
+    n.bulldoze(rect((10, 11), (10, 20))).unwrap();
+    assert_eq!(n.node(node).unwrap().no_crosswalk, 0);
+}
+
+#[test]
+fn walkers_go_round_a_removed_crosswalk() {
+    let (mut n, node) = crossroads();
+    n.set_crosswalk(node, Heading::S, false).unwrap();
+    let c = (10, 10);
+    let side = |a, b| link(&n, a, b, LaneMode::Sidewalk);
+    let seg = |a, b| side(a, b).segment;
+    let (w, e, north) = ((9, 10), (11, 10), (10, 9));
+    // 西から東へ、南の側を歩いてきた人は、南の腕を渡らずに、西と北の腕を渡って北の側へ出る。
+    let (far, arms) = crossing::depart(&n, node, (side(w, c), false), side(c, e), None, None);
+    assert_eq!(
+        (far, arms.as_slice()),
+        (true, &[seg(w, c), seg(c, north)][..])
+    );
+    // 南の側へ出なければならないなら、南の腕を越えずに東の腕まで回る。
+    let (far, arms) =
+        crossing::depart(&n, node, (side(w, c), false), side(c, e), Some(false), None);
+    assert_eq!(
+        (far, arms.as_slice()),
+        (false, &[seg(w, c), seg(c, north), seg(c, e)][..])
+    );
+}
+
+#[test]
+fn walkers_move_early_to_the_side_that_avoids_a_removed_crosswalk_ahead() {
+    // 東西の道路に、(10, 10) と (20, 10) で南北の道路が交わる。東の交差点の、西と南の腕の横断歩道を外す。
+    // 東の交差点を東へ抜けるには、西の腕の北の側から来て、北の腕と東の腕を渡るしかない。
+    let mut n = Network::new();
+    road(&mut n, (0, 10), (30, 10));
+    road(&mut n, (10, 0), (10, 20));
+    road(&mut n, (20, 0), (20, 20));
+    let west = n.node_at(TilePos::new(10, 10)).unwrap();
+    let east = n.node_at(TilePos::new(20, 10)).unwrap();
+    n.set_crosswalk(east, Heading::W, false).unwrap();
+    n.set_crosswalk(east, Heading::S, false).unwrap();
+    let side = |a, b| link(&n, a, b, LaneMode::Sidewalk);
+    let (into, out) = (side((19, 10), (20, 10)), side((20, 10), (21, 10)));
+    let removed = |far| crossing::removed_crossings(&n, east, into.segment, Some(far), out.segment);
+    assert_eq!((removed(false), removed(true)), (1, 0));
+    // 先を見なければ、西の交差点を南の側のまま抜ける。
+    let from = (side((9, 10), (10, 10)), false);
+    let next = side((10, 10), (11, 10));
+    let (far, _) = crossing::depart(&n, west, from, next, None, None);
+    assert!(!far);
+    // 先を見れば、西の交差点で北の側へ移っておく。
+    let (far, _) = crossing::depart(&n, west, from, next, None, Some((out, None)));
+    assert!(far);
+}
+
+#[test]
+fn routes_pay_for_crossing_a_removed_crosswalk() {
+    let (mut n, node) = crossroads();
+    let edge_cost = |n: &Network, from: LinkId, to: LinkId| {
+        let g = crate::routing::Graph::build(n, LaneMode::Sidewalk);
+        let v = g.vertex(from).unwrap();
+        let to = g.vertex(to).unwrap();
+        g.edges(v).iter().find(|e| e.to == to).unwrap().cost
+    };
+    let side = |n: &Network, a, b| link(n, a, b, LaneMode::Sidewalk);
+    let (w, c, e, s) = ((9, 10), (10, 10), (11, 10), (10, 11));
+    assert_eq!(edge_cost(&n, side(&n, w, c), side(&n, c, e)), 0);
+    // 1 本だけ外しても、反対に回れるので費用はかからない。
+    n.set_crosswalk(node, Heading::S, false).unwrap();
+    assert_eq!(edge_cost(&n, side(&n, w, c), side(&n, c, e)), 0);
+    // 南と北を外すと、西から東へは、どちらかを越えるしかない。南へ曲がるなら角を回るだけで済む。
+    n.set_crosswalk(node, Heading::N, false).unwrap();
+    assert!(edge_cost(&n, side(&n, w, c), side(&n, c, e)) > 0);
+    assert_eq!(edge_cost(&n, side(&n, w, c), side(&n, c, s)), 0);
+}
+
+#[test]
+fn walkers_avoid_a_removed_crosswalk_and_turning_cars_do_not_stop_there() {
+    // 西の腕の南の歩道から東へ歩く人の列と、東から来て南へ曲がる車。人は (15, 10) の交差点の先まで歩く。
+    // 横断歩道があれば、人は南の腕を渡り、車はその前で譲る。外せば、人は南の腕を渡らずに西と北の腕を
+    // 渡って北の側へ移り、南へ曲がる車は譲らない。
+    let run = |removed: bool| {
+        let (mut n, node) = crossroads();
+        road(&mut n, (15, 0), (15, 20));
+        if removed {
+            n.set_crosswalk(node, Heading::S, false).unwrap();
+        }
+        let south = n.arm_segment(node, Heading::S).unwrap();
+        let mut t = Town::new(n);
+        let (mut on_south, mut yielded, mut cars) = (0, 0, Vec::new());
+        for k in 0..400_u64 {
+            if k < 300 {
+                for along in [0, 4_000] {
+                    t.walk(at(9, 10, (1, 0), along), at(18, 10, (1, 0), 0));
+                }
+            }
+            if k % 20 == 0 && k < 300 {
+                cars.push(t.drive(at(14, 10, (-1, 0), 0), at(10, 18, (0, 1), 0)));
+            }
+            t.step(node);
+            on_south += t.occupied().iter().filter(|o| **o == (node, south)).count();
+            yielded += cars
+                .iter()
+                .filter_map(|c| t.trips.get(*c))
+                .filter(|c| c.yielded > 0)
+                .count();
+        }
+        for _ in 0..1_500 {
+            t.step(node);
+        }
+        assert!(t.trips.is_empty(), "残った {}", t.trips.len());
+        (on_south, yielded)
+    };
+    let (on_south, yielded) = run(false);
+    assert!(on_south > 0 && yielded > 0, "{on_south} {yielded}");
+    assert_eq!(run(true), (0, 0));
+}
+
+#[test]
+fn walkers_still_get_through_a_junction_with_every_crosswalk_removed() {
+    // どの腕の横断歩道も外すと、西から東へ抜ける人はどこかの腕を越えるしかない。そのときは、横断歩道が
+    // あるときと同じく、車を止めて渡る。人も車も残らず着く。
+    let (mut n, node) = crossroads();
+    for h in [Heading::E, Heading::S, Heading::W, Heading::N] {
+        n.set_crosswalk(node, h, false).unwrap();
+    }
+    let mut t = Town::new(n);
+    let mut crossed = std::collections::BTreeSet::new();
+    for k in 0..30_u32 {
+        let along = (k * 1_700) % 8_000;
+        t.walk(at(4, 10, (1, 0), along), at(16, 10, (1, 0), along));
+        if k % 5 == 0 {
+            t.drive(at(10, 1, (0, 1), 0), at(10, 19, (0, 1), 0));
+        }
+        for _ in 0..3 {
+            t.step(node);
+            crossed.extend(t.occupied());
+        }
+    }
+    for _ in 0..1_500 {
+        t.step(node);
+        crossed.extend(t.occupied());
+    }
+    assert!(t.trips.is_empty(), "残った {}", t.trips.len());
+    assert_eq!(crossed.len(), 1, "越えるのは 1 本だけ {crossed:?}");
+}
+
+#[test]
+fn walkers_take_a_removed_crosswalk_rather_than_crossing_a_highway_unguarded() {
+    // 高速道路の内側の T 字路で東の腕の横断歩道を外す。西の腕の北の側から東の腕の北の側へ出る人は、
+    // 高速道路の腕を車を止めずに越えるのではなく、南へ回って西の腕と、外した東の腕を渡る。
+    let mut n = Network::new();
+    n.add_highway(TilePos::new(10, 10), TilePos::new(10, -20));
+    road(&mut n, (0, 10), (20, 10));
+    let node = n.node_at(TilePos::new(10, 10)).unwrap();
+    n.set_crosswalk(node, Heading::E, false).unwrap();
+    let side = |a, b| link(&n, a, b, LaneMode::Sidewalk);
+    let (w, c, e) = ((9, 10), (10, 10), (11, 10));
+    let (far, arms) = crossing::depart(&n, node, (side(w, c), true), side(c, e), Some(true), None);
+    assert!(far);
+    assert_eq!(arms.as_slice(), &[side(w, c).segment, side(c, e).segment]);
+}
+
+/// `t` を、歩く人 `walker` が交差点の車道を渡っている途中になるまで進める。
+fn until_crossing(t: &mut Town, node: NodeId, walker: TripId) {
+    for _ in 0..200 {
+        let inside = t
+            .trips
+            .get(walker)
+            .is_some_and(|w| !w.last_leg() && w.offset > w.link_len);
+        if inside {
+            return;
+        }
+        t.step(node);
+    }
+    panic!("渡り始めない");
+}
+
+/// 渡っている途中の `walker` の道のりが、網を `change` で変えても渡り終えるまで変わらないことを確かめる。
+fn crossing_keeps_its_way(
+    mut t: Town,
+    node: NodeId,
+    walker: TripId,
+    change: impl Fn(&mut Network),
+) {
+    until_crossing(&mut t, node, walker);
+    let way = t.trips.get(walker).unwrap().departure(&t.net);
+    let leg = t.trips.get(walker).unwrap().leg;
+    change(&mut t.net);
+    loop {
+        t.step(node);
+        let Some(w) = t.trips.get(walker).filter(|w| w.leg == leg) else {
+            break;
+        };
+        assert_eq!(w.departure(&t.net), way, "渡っている途中で道のりが変わった");
+    }
+    for _ in 0..1_500 {
+        t.step(node);
+    }
+    assert!(t.trips.is_empty(), "残った {}", t.trips.len());
+}
+
+#[test]
+fn walkers_keep_their_way_when_crosswalks_change_while_they_cross() {
+    // 西の腕の南の側から東へ、南の腕を渡っている人がいるあいだに、北と東の腕を外し、南の腕も外す。
+    // 人は渡りかけた南の腕を渡りきり、そのあいだ車はその前で止まる（`Town::step` が確かめる）。
+    for arms in [vec![Heading::N, Heading::E], vec![Heading::S]] {
+        let (n, node) = crossroads();
+        let mut t = Town::new(n);
+        let walker = t.walk(at(9, 10, (1, 0), 6_000), at(18, 10, (1, 0), 0));
+        for k in 0..6 {
+            t.drive(at(10, 1 + k, (0, 1), 0), at(10, 19, (0, 1), 0));
+        }
+        crossing_keeps_its_way(t, node, walker, |n| {
+            for h in &arms {
+                n.set_crosswalk(node, *h, false).unwrap();
+            }
+        });
+    }
+}
+
+#[test]
+fn walkers_keep_their_way_when_the_next_junction_changes_while_they_cross() {
+    // 西の交差点を渡っている人がいるあいだに、東の交差点の西と南の腕を外す。外すと、西の交差点で
+    // 先に移っておく側が変わるが、渡りかけた人の道のりは変えない。
+    let mut n = Network::new();
+    road(&mut n, (0, 10), (30, 10));
+    road(&mut n, (10, 0), (10, 20));
+    road(&mut n, (20, 0), (20, 20));
+    let west = n.node_at(TilePos::new(10, 10)).unwrap();
+    let east = n.node_at(TilePos::new(20, 10)).unwrap();
+    let mut t = Town::new(n);
+    let walker = t.walk(at(9, 10, (1, 0), 6_000), at(28, 10, (1, 0), 0));
+    crossing_keeps_its_way(t, west, walker, |n| {
+        n.set_crosswalk(east, Heading::W, false).unwrap();
+        n.set_crosswalk(east, Heading::S, false).unwrap();
+    });
 }

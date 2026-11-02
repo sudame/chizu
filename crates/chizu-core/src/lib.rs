@@ -29,7 +29,7 @@ pub use citizens::{
     Activity, CitizenChange, CitizenRow, HappinessParts, Population, ScheduleState,
 };
 pub use clock::{GameTime, TICKS_PER_DAY};
-pub use command::{Command, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
+pub use command::{Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
 pub use id::{BuildingId, CitizenId, HouseholdId, TripId};
 pub use movement::{Congestion, Mover, Noted, SidewalkPos, Trip, Trips};
 pub use network::{

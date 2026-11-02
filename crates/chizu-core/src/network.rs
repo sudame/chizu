@@ -17,7 +17,7 @@ use std::marker::PhantomData;
 use smallvec::SmallVec;
 
 use crate::chunk::Layer;
-use crate::command::{InvalidCommand, NodeId, RoadKind};
+use crate::command::{Heading, InvalidCommand, NodeId, RoadKind};
 use crate::round;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect};
@@ -181,7 +181,7 @@ pub enum LaneMode {
 pub enum NodeControl {
     #[default]
     None = 0,
-    /// 固定周期の信号。どの段階にいるかは tick から決まるので、状態は持たない（`movement::signal`）。
+    /// 感応式の信号。灯火は tick と交差点のまわりの車と歩く人から決まるので、状態は持たない（`movement::signal`）。
     Signal = 1,
 }
 
@@ -237,6 +237,9 @@ pub struct Node {
     pub pos: WorldPos,
     pub layer: Layer,
     pub control: NodeControl,
+    /// 横断歩道を外した腕の向き。[`Heading`] の値のビットを立てる。腕の向きで持つので、区間を分けたり
+    /// 種類を変えたりして区間の ID が変わっても残る。
+    pub no_crosswalk: u8,
     /// 「外の世界」につながるノードか。
     pub outside: bool,
     /// このノードを端に持つ区間。ID の順に並べる。
@@ -249,6 +252,11 @@ impl Node {
             round::div_floor(self.pos.x.0, TILE_MM),
             round::div_floor(self.pos.y.0, TILE_MM),
         )
+    }
+
+    /// 向き `arm` の腕の横断歩道を外してあるか。
+    pub fn crosswalk_removed(&self, arm: Heading) -> bool {
+        self.no_crosswalk & (1 << arm as u8) != 0
     }
 }
 
@@ -578,6 +586,7 @@ impl Network {
             pos: tile_center(t),
             layer: Layer::Ground,
             control: NodeControl::None,
+            no_crosswalk: 0,
             outside,
             segments: Vec::new(),
         })
@@ -828,6 +837,64 @@ impl Network {
         Ok(())
     }
 
+    /// ノード `node` から区間 `segment` へ出ていく腕の向き。
+    pub fn arm_heading(&self, node: NodeId, segment: SegmentId) -> Option<Heading> {
+        let s = self.segment(segment)?;
+        let other = if s.a == node { s.b } else { s.a };
+        let (p, q) = (self.node(node)?.tile(), self.node(other)?.tile());
+        Heading::of_step(((q.x - p.x).signum(), (q.y - p.y).signum()))
+    }
+
+    /// ノード `node` の、向き `arm` の腕の区間。
+    pub fn arm_segment(&self, node: NodeId, arm: Heading) -> Option<SegmentId> {
+        let n = self.node(node)?;
+        n.segments
+            .iter()
+            .copied()
+            .find(|s| self.arm_heading(node, *s) == Some(arm))
+    }
+
+    /// 交差点 `node` の腕 `segment` に横断歩道があるか。3 本以上の区間が集まるノードの、
+    /// 高速道路でない腕のうち、外していないものにある。
+    pub fn has_crosswalk(&self, node: NodeId, segment: SegmentId) -> bool {
+        let Some(n) = self.node(node).filter(|n| n.segments.len() >= 3) else {
+            return false;
+        };
+        self.segment(segment)
+            .is_some_and(|s| s.kind.has_sidewalks())
+            && self
+                .arm_heading(node, segment)
+                .is_some_and(|h| !n.crosswalk_removed(h))
+    }
+
+    /// 交差点 `node` の向き `arm` の腕の横断歩道を、戻す（`on` が `true`）か外す。3 本以上の区間が集まる
+    /// ノードの、高速道路でない腕でなければ変えられない。横断歩道は歩く人の経路の費用に効くので、網の版を上げる。
+    pub fn set_crosswalk(
+        &mut self,
+        node: NodeId,
+        arm: Heading,
+        on: bool,
+    ) -> Result<(), DenyReason> {
+        let n = self.nodes.get(node).ok_or(DenyReason::NotJunction)?;
+        if n.segments.len() < 3 {
+            return Err(DenyReason::NotJunction);
+        }
+        let road = self
+            .arm_segment(node, arm)
+            .and_then(|s| self.segment(s))
+            .is_some_and(|s| s.kind.has_sidewalks());
+        if !road {
+            return Err(DenyReason::NoCrosswalkArm);
+        }
+        let n = &mut self.nodes[node];
+        if n.crosswalk_removed(arm) != on {
+            return Err(DenyReason::CrosswalkUnchanged);
+        }
+        n.no_crosswalk ^= 1 << arm as u8;
+        self.bump_version();
+        Ok(())
+    }
+
     /// 長方形にかかる道路の区間を消し、つながりのなくなったノードも消す。消した区間の直線を返す。
     /// 高速道路は消さない。消すものがなければ網を変えずにエラーを返す。
     pub fn bulldoze(&mut self, area: TileRect) -> Result<Vec<Line>, DenyReason> {
@@ -850,13 +917,20 @@ impl Network {
         let mut removed = Vec::new();
         for s in &targets {
             removed.push(self.segment_line(*s).expect("区間がない"));
+            let (a, b) = (self.segments[*s].a, self.segments[*s].b);
+            let arms = [a, b].map(|n| self.arm_heading(n, *s).expect("区間の腕の向きがない"));
             let seg = self.remove_segment(*s);
-            for n in [seg.a, seg.b] {
+            for (n, arm) in [seg.a, seg.b].into_iter().zip(arms) {
                 if self.nodes.get(n).is_some_and(|n| n.segments.is_empty()) {
                     self.nodes.remove(n);
-                } else if let Some(n) = self.nodes.get_mut(n).filter(|n| n.segments.len() < 3) {
-                    // 交差点でなくなったノードの信号は外す。
-                    n.control = NodeControl::None;
+                } else if let Some(n) = self.nodes.get_mut(n) {
+                    // なくなった腕の横断歩道の印は消す。あとでその向きに引いた腕には横断歩道がある。
+                    n.no_crosswalk &= !(1 << arm as u8);
+                    if n.segments.len() < 3 {
+                        // 交差点でなくなったノードの信号と、横断歩道の印は外す。
+                        n.control = NodeControl::None;
+                        n.no_crosswalk = 0;
+                    }
                 }
             }
         }
@@ -916,6 +990,7 @@ impl StateHash for Node {
         h.write(&self.pos);
         h.write(&(self.layer as u8));
         h.write(&(self.control as u8));
+        h.write(&self.no_crosswalk);
         h.write(&self.outside);
         h.write(&self.segments);
     }

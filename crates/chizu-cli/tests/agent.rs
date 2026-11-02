@@ -514,7 +514,10 @@ fn observe_gives_people_and_traffic_counts() {
     assert_eq!(sum, n(&o["population"]["citizens"]));
     assert!(sum > 0, "誰も住んでいない");
     let cars = &o["traffic"]["cars"];
-    assert_eq!(n(&cars["total"]), n(&cars["moving"]) + n(&cars["stopped"]));
+    assert_eq!(
+        n(&cars["total"]),
+        n(&cars["moving"]) + n(&cars["stopped"]) + n(&cars["waitingAtCurb"])
+    );
     assert_eq!(n(&cars["stoppedAfterTicks"]), 100);
     let trips = &o["traffic"]["trips"];
     let yesterday = &trips["yesterday"];
@@ -537,10 +540,14 @@ fn observe_points_at_the_short_network() {
     cli(&["agent", "new", d, "42"]);
     let fresh = json(&cli(&["agent", "observe", d]));
     let power = &fresh["utilities"]["power"];
-    assert_eq!(power["headroom"], 0);
-    assert!(power["headroomPermille"].is_null());
-    assert_eq!(power["lowHeadroom"], false);
+    assert!(power["main"].is_null(), "{power}");
+    assert_eq!(power["others"]["headroom"], 0);
+    assert!(
+        power.get("headroom").is_none(),
+        "合計の余りを出している: {power}"
+    );
     assert_eq!(power["shortAt"], serde_json::json!([]));
+    assert_eq!(power["isolatedFacilities"], serde_json::json!([]));
     let [x, y] = [
         fresh["highway"]["end"][0].as_i64().unwrap(),
         fresh["highway"]["end"][1].as_i64().unwrap(),
@@ -561,10 +568,56 @@ fn observe_points_at_the_short_network() {
     let power = &o["utilities"]["power"];
     assert_eq!(power["capacity"], 0);
     assert!(power["demand"].as_u64().unwrap() > 0);
-    assert!(power["headroom"].as_i64().unwrap() < 0);
+    assert!(power["main"]["headroom"].as_i64().unwrap() < 0);
+    assert_eq!(power["main"]["at"], power["shortAt"][0]["at"]);
     assert_eq!(power["shortNetworks"], 1);
     let at = &power["shortAt"][0]["at"];
     assert!(at[0].is_i64() && at[1].is_i64(), "{power}");
+}
+
+/// Issue #139 の街（発電所 2 基が主の網から切れた道路の脇にある）では、孤立した発電所が出て、
+/// つながっていない分の余りが主の網の余りに混ざらない。
+/// 記録は当時のもので、いまの中核で再生するとハッシュは食い違うが、置いた施設の位置は変わらない。
+#[test]
+fn observe_shows_power_plants_cut_off_from_the_main_network() {
+    let dir = session("agent-isolated-facilities");
+    let repro = dir.join("repro");
+    std::fs::create_dir_all(&repro).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/issue-139.rec");
+    std::fs::copy(fixture, repro.join("commands.rec")).unwrap();
+    write(
+        &repro.join("state.json"),
+        r#"{"money":"284512","seed":"202","stateHash":"082ad631a6fde5fa","tick":89550}"#,
+    );
+    let play = dir.join("play");
+    let d = play.to_str().unwrap();
+    cli(&["agent", "new", d, "--from", repro.to_str().unwrap()]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let power = &o["utilities"]["power"];
+    assert_eq!(
+        power["isolatedFacilities"],
+        serde_json::json!([{"at":[10,-59]},{"at":[14,-59]}]),
+        "{power}"
+    );
+    assert_eq!(
+        o["utilities"]["water"]["isolatedFacilities"],
+        serde_json::json!([])
+    );
+    // 孤立した発電所の分は others にあり、主の網には入らない。
+    let others = &power["others"];
+    assert_eq!(others["demand"], 0, "{power}");
+    assert!(others["headroom"].as_i64().unwrap() > 0, "{power}");
+    let main = &power["main"];
+    // 主の網は足りない。合計では余って見えるが、孤立した発電所の分は主の網に届かない。
+    assert!(main["headroom"].as_i64().unwrap() < 0, "{power}");
+    assert!(power["capacity"].as_i64().unwrap() > power["demand"].as_i64().unwrap());
+    assert_eq!(
+        main["headroom"].as_i64().unwrap(),
+        main["capacity"].as_i64().unwrap() - main["demand"].as_i64().unwrap()
+    );
+    assert!(power.get("headroom").is_none(), "{power}");
+    // 孤立した施設は、置いた道路ごとにもうひとつの網として others に数えられる。
+    assert!(others["networks"].as_u64().unwrap() >= 1, "{power}");
 }
 
 /// 施設のない道路網に建つ分は電気と水道の余裕で止まり、observe の growth と networksWithoutFacility に出る。
@@ -982,9 +1035,98 @@ fn map_marks_junctions_with_crosswalks_and_observe_counts_crossing_walkers() {
     cli(&["agent", "act", d, &cmds]);
     let map = cli(&["agent", "map", d, "4", "4", "6", "6"]);
     assert_eq!(grid_rows(&map, 3, 3), [".1.", "1Z1", ".1."], "{map}");
-    assert!(map.contains("Z        信号のない交差点"), "{map}");
+    assert!(map.contains("Z Y      信号のない交差点"), "{map}");
     let seen = json(&cli(&["agent", "observe", d]));
     let walkers = &seen["traffic"]["walkers"];
     assert_eq!(walkers["atCrosswalks"], 0, "{seen}");
     assert_eq!(walkers["midblock"], 0, "{seen}");
+    assert_eq!(seen["removedCrosswalks"], serde_json::json!([]), "{seen}");
+}
+
+#[test]
+fn act_removes_and_restores_a_crosswalk_by_tile_and_observe_and_map_show_it() {
+    let dir = session("agent-crosswalk-toggle");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,5],"to":[10,5],"kind":"Small"},
+            {"type":"BuildRoad","from":[5,0],"to":[5,10],"kind":"Small"},
+            {"type":"SetCrosswalk","at":[5,5],"arm":"S","on":false},
+            {"type":"SetCrosswalk","at":[5,5],"arm":"N","on":false},
+            {"type":"SetCrosswalk","at":[5,5],"arm":"S","on":false},
+            {"type":"SetCrosswalk","at":[5,5],"arm":"SE","on":false},
+            {"type":"SetCrosswalk","at":[0,5],"arm":"E","on":false},
+            {"type":"SetCrosswalk","at":[3,3],"arm":"E","on":false},
+            {"type":"SetCrosswalk","at":[5,5],"arm":"N","on":true}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds, "--verbose"]));
+    let results = acted["results"].as_array().unwrap();
+    let outcomes: Vec<(&str, Option<&str>)> = results
+        .iter()
+        .map(|r| (r["outcome"].as_str().unwrap(), r["reason"].as_str()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("Applied", None),
+            ("Applied", None),
+            ("Applied", None),
+            ("Applied", None),
+            ("Denied", Some("CrosswalkUnchanged")),
+            ("Denied", Some("NoCrosswalkArm")),
+            ("Denied", Some("NotJunction")),
+            ("Invalid", None),
+            ("Applied", None),
+        ],
+        "{acted}"
+    );
+    // 記録に入るのはノードの ID の形である。
+    assert!(results[2]["command"]["node"]["index"].is_u64(), "{acted}");
+    assert_eq!(results[2]["command"]["arm"], "S");
+    let seen = json(&cli(&["agent", "observe", d]));
+    let removed = seen["removedCrosswalks"].as_array().unwrap();
+    assert_eq!(removed.len(), 1, "{seen}");
+    assert_eq!(removed[0]["at"], serde_json::json!([5, 5]));
+    assert_eq!(removed[0]["arms"], serde_json::json!(["S"]));
+    let map = cli(&["agent", "map", d, "4", "4", "6", "6"]);
+    assert_eq!(grid_rows(&map, 3, 3), [".1.", "1Y1", ".1."], "{map}");
+    // 戻すと Z に戻る。
+    let back = write(
+        &dir.join("back.json"),
+        r#"{"type":"SetCrosswalk","at":[5,5],"arm":"S","on":true}"#,
+    );
+    cli(&["agent", "act", d, &back]);
+    let map = cli(&["agent", "map", d, "4", "4", "6", "6"]);
+    assert_eq!(grid_rows(&map, 3, 3), [".1.", "1Z1", ".1."], "{map}");
+    let seen = json(&cli(&["agent", "observe", d]));
+    assert_eq!(seen["removedCrosswalks"], serde_json::json!([]), "{seen}");
+}
+
+#[test]
+fn map_marks_a_signal_with_removed_crosswalks_only_from_the_same_junction() {
+    let dir = session("agent-crosswalk-scale");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    // (5, 5) の信号のある交差点と、(7, 5) の横断歩道を外した交差点を、6×6 マスの 1 文字にまとめる。
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,5],"to":[10,5],"kind":"Small"},
+            {"type":"BuildRoad","from":[5,0],"to":[5,10],"kind":"Small"},
+            {"type":"BuildRoad","from":[7,0],"to":[7,10],"kind":"Small"},
+            {"type":"SetSignal","at":[5,5],"on":true},
+            {"type":"SetCrosswalk","at":[7,5],"arm":"N","on":false}]"#,
+    );
+    cli(&["agent", "act", d, &cmds]);
+    let cell = || {
+        let map = cli(&["agent", "map", d, "3", "3", "8", "8", "--scale", "6"]);
+        grid_rows(&map, 1, 1)[0].clone()
+    };
+    assert_eq!(cell(), "S");
+    let more = write(
+        &dir.join("more.json"),
+        r#"{"type":"SetCrosswalk","at":[5,5],"arm":"N","on":false}"#,
+    );
+    cli(&["agent", "act", d, &more]);
+    assert_eq!(cell(), "s");
 }

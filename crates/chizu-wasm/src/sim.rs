@@ -4,7 +4,6 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chizu_core::building::demand;
-use chizu_core::movement::signal;
 use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
 use chizu_core::world::economy::{chunk_slots, milestone_population};
@@ -144,6 +143,9 @@ impl Sim {
             if road {
                 *tile |= TILE_ROAD;
             }
+            if layer.occupancy[i] == TileUse::Building {
+                *tile |= TILE_BUILDING;
+            }
             if let Some(zone) = layer.zone[i] {
                 *tile |= (zone as u8) << TILE_ZONE_SHIFT;
             }
@@ -251,16 +253,17 @@ impl Sim {
 
     /// 信号の腕を、1 本につき `[ノードの x, ノードの y, 腕の向きの x, 腕の向きの y, 灯火]` の 5 つの数で返す。
     /// 腕の向きはノードから出ていく 1 歩で、灯火は `Light` の値（0 が青、1 が黄、2 が赤）である。
-    /// 灯火は、次に進める tick の段階を表す。ノードの ID、区間の ID の順に並べる。
+    /// 灯火は、直前に進めた tick に効いた段階を表す。ノードの ID、区間の ID の順に並べる。
     pub fn signal_lights(&self) -> Vec<f64> {
-        let (net, now) = (self.world.network(), self.world.tick());
+        let net = self.world.network();
+        let lights = self.world.trips().lights();
         let mut out = Vec::new();
         for (id, node) in net.nodes() {
             if node.control != NodeControl::Signal {
                 continue;
             }
             let t = node.tile();
-            for ((dx, dy), light) in signal::arm_lights(net, id, now) {
+            for ((dx, dy), light) in lights.arm_lights(net, id) {
                 out.extend([t.x, t.y, dx, dy].map(|v| v as f64));
                 out.push(f64::from(light as u8));
             }
@@ -268,7 +271,8 @@ impl Sim {
         out
     }
 
-    /// ノードを、1 つにつき `[x, y, つながる区間の数, 外の世界か（0 か 1）]` の 4 つの数で返す。
+    /// ノードを、1 つにつき `[x, y, つながる区間の数, 外の世界か（0 か 1）, 横断歩道を外した腕]` の 5 つの数で返す。
+    /// 横断歩道を外した腕は、腕の向き（`Heading` の値）のビットを立てた数である。
     pub fn road_nodes(&self) -> Vec<f64> {
         let mut out = Vec::new();
         for (_, node) in self.world.network().nodes() {
@@ -278,6 +282,7 @@ impl Sim {
                 t.y as f64,
                 node.segments.len() as f64,
                 f64::from(u8::from(node.outside)),
+                f64::from(node.no_crosswalk),
             ]);
         }
         out
@@ -398,11 +403,13 @@ impl Sim {
         out
     }
 
-    /// 街の数字を次の 16 個の数で返す。建物の数、世帯の上限、雇える職場の数（税率が高いと建物の上限より少ない）、
+    /// 街の数字を次の 21 個の数で返す。建物の数、世帯の上限、雇える職場の数（税率が高いと建物の上限より少ない）、
     /// 住宅・商業・工業・オフィスの需要、電気の供給量、水道の供給量、電気と水道の需要、
     /// 電気と水道のそれぞれで供給量が需要に足りない網の数、
-    /// 電気と水道のそれぞれで施設のない網の数、電気と水道のそれぞれの不足量。
-    /// 供給量は道路網につながった施設の合計である。
+    /// 電気と水道のそれぞれで施設のない網の数、電気と水道のそれぞれの不足量、
+    /// 主の網（需要がいちばん大きい網）の電気の供給量、水道の供給量、需要、
+    /// 主の網以外で施設か建物のある網の数（電気、水道の順）。
+    /// 供給量は道路網につながった施設の合計である。余りは網をまたいで足さず、主の網で見る。
     pub fn city_stats(&self) -> Vec<f64> {
         let buildings = self.world.buildings();
         let capacity = buildings.capacity();
@@ -419,6 +426,18 @@ impl Sim {
         let need: u64 = buildings.iter().map(|(_, b)| building_demand(b)).sum();
         out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
         out.extend(crate::layers::utility_gaps(&self.world).map(|v| v as f64));
+        out.extend(crate::layers::utility_main(&self.world).map(|v| v as f64));
+        out
+    }
+
+    /// 孤立した施設（街の道路網につながっていない施設。定義は `chizu_core::service::isolated_facilities`）を、
+    /// 施設ごとに `[道路に面したマスの x, y, 種類]` で並べる。種類は `ServiceKind` の値である。
+    /// 余りの数や建たない理由とは別の読み取りで、状態は変えない。
+    pub fn isolated_facilities(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for f in self.world.isolated_facilities() {
+            out.extend([f.front.x as f64, f.front.y as f64, f64::from(f.kind as u8)]);
+        }
         out
     }
 
@@ -522,6 +541,10 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::SignalUnchanged => "信号はもうその状態になっている",
         DenyReason::NoRoadToChange => "種類を変えられる道路がない（高速道路は変えない）",
         DenyReason::RoadKindUnchanged => "道路はもうその種類になっている",
+        DenyReason::NoCrosswalkArm => {
+            "その向きに、横断歩道を置ける道路の腕がない（高速道路には置かない）"
+        }
+        DenyReason::CrosswalkUnchanged => "横断歩道はもうその状態になっている",
     }
 }
 
@@ -537,6 +560,10 @@ pub const TILE_ROAD: u8 = 1 << 1;
 pub const TILE_ZONABLE: u8 = 1 << 2;
 /// 区画の種類（`ZoneKind` の値、なければ 0）を置くビットの位置。3 ビットを使う。
 pub const TILE_ZONE_SHIFT: u8 = 3;
+/// 区画の種類を取り出すマスク（`TILE_ZONE_SHIFT` だけずらしたあとに掛ける）。
+pub const TILE_ZONE_MASK: u8 = 0b111;
+/// 区画に建った建物があるマスのビット。施設のマスには立てない。
+pub const TILE_BUILDING: u8 = 1 << 6;
 
 fn encode_terrain(terrain: &TerrainTiles) -> Vec<u8> {
     let mut tiles = vec![0; CHUNK_AREA];
@@ -685,6 +712,18 @@ mod tests {
         assert_eq!(buildings[4], f64::from(ZoneKind::Residential as u8));
         assert_eq!(buildings[5], 1.0);
         assert_eq!(buildings[6], 0.0, "施設がないので電気も水道も届かない");
+        // 建物のマスにだけ、建物のビットが立つ
+        let tiles = sim.chunk_tiles(ChunkCoord::new(0, 0));
+        let side = CHUNK_SIDE as i64;
+        for (i, t) in tiles.iter().enumerate() {
+            let at = TilePos::new(i as i64 % side, i as i64 / side);
+            let built = sim
+                .world()
+                .buildings()
+                .iter()
+                .any(|(_, b)| rect_contains(b.area, at));
+            assert_eq!(t & TILE_BUILDING != 0, built, "{at:?}");
+        }
         // 道路の下側に発電所と浄水場を置くと、どちらも届き、版が変わる
         let before = sim.buildings_version();
         for (kind, x) in [(ServiceKind::PowerPlant, 16), (ServiceKind::WaterPump, 20)] {
@@ -778,6 +817,54 @@ mod tests {
             "{s:?}"
         );
         assert_eq!(s[2], 3.0, "{s:?}");
+    }
+
+    /// つながっていない通りの発電所は、孤立した施設として出る。余りは主の網だけで数え、ほかの網に分ける。
+    #[test]
+    fn isolated_facilities_and_main_network_numbers_are_reported_apart() {
+        let mut sim = Sim::new(0);
+        assert!(sim.isolated_facilities().is_empty());
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        // 主の網には浄水場だけを置くので、電気が足りない
+        sim.submit(Command::PlaceBuilding {
+            kind: ServiceKind::WaterPump,
+            at: TilePos::new(24, 9),
+            rotation: 2,
+        })
+        .unwrap();
+        // 離れた通りに、建物のない発電所を置く
+        sim.submit(road((10, 40), (30, 40))).unwrap();
+        sim.submit(Command::PlaceBuilding {
+            kind: ServiceKind::PowerPlant,
+            at: TilePos::new(20, 39),
+            rotation: 2,
+        })
+        .unwrap();
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 * 3);
+        let stats = sim.city_stats();
+        assert!(stats[9] > 0.0, "{stats:?}");
+        let power = ServiceKind::PowerPlant.capacity() as f64;
+        // 主の網の電気は 0、合計は 1 基ぶん。ほかの網は電気だけが 1 つある。
+        assert_eq!(stats[7], power, "{stats:?}");
+        assert_eq!(
+            stats[16..21],
+            [
+                0.0,
+                ServiceKind::WaterPump.capacity() as f64,
+                stats[9],
+                1.0,
+                0.0
+            ]
+        );
+        let isolated = sim.isolated_facilities();
+        assert_eq!(isolated.len(), 3, "{isolated:?}");
+        assert_eq!(isolated[2], f64::from(ServiceKind::PowerPlant as u8));
+        assert!((10.0..=30.0).contains(&isolated[0]) && isolated[1] >= 39.0 && isolated[1] <= 41.0);
     }
 
     #[test]
@@ -946,7 +1033,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            tile(&sim, 13, 12) >> TILE_ZONE_SHIFT,
+            (tile(&sim, 13, 12) >> TILE_ZONE_SHIFT) & TILE_ZONE_MASK,
             ZoneKind::Commercial as u8
         );
         assert_ne!(sim.chunk_tiles_version(origin), before);
@@ -1120,8 +1207,8 @@ mod tests {
         assert_eq!(segments[segments.len() - 5..], [0.0, 0.0, 4.0, 0.0, 1.0]);
         let nodes = sim.road_nodes();
         assert_eq!(
-            nodes[nodes.len() - 8..],
-            [0.0, 0.0, 1.0, 0.0, 4.0, 0.0, 1.0, 0.0]
+            nodes[nodes.len() - 10..],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 4.0, 0.0, 1.0, 0.0, 0.0]
         );
 
         let far = (CHUNK_SIDE as i64) * 3;

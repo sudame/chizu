@@ -4,7 +4,7 @@ export type RoadKindName = "Small" | "Medium" | "Large";
 /** 施設の種類。 */
 export type ServiceName = "PowerPlant" | "WaterPump";
 /** chizu-wasm の city_stats の数の個数。 */
-export const CITY_STATS_LENGTH = 16;
+export const CITY_STATS_LENGTH = 21;
 /** chizu-wasm の finance の数の個数。 */
 export const FINANCE_LENGTH = 12;
 
@@ -47,7 +47,12 @@ export type CommandMessage =
   | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear">; permille: number }
   | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number }
   /** マス (x, y) の交差点に信号を置くか（on が true）、外す。chizu-wasm がマスのノードを引く。 */
-  | { kind: "SetSignal"; x: number; y: number; on: boolean };
+  | { kind: "SetSignal"; x: number; y: number; on: boolean }
+  /**
+   * マス (x, y) の交差点の、(dx, dy) の向きの腕の横断歩道を戻すか（on が true）、外す。
+   * 向きは交差点から出ていく 1 歩で、chizu-wasm がマスのノードと腕の向きを引く。
+   */
+  | { kind: "SetCrosswalk"; x: number; y: number; dx: number; dy: number; on: boolean };
 
 /** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
 export type Outcome = "Applied" | "Denied" | "Rejected" | "NotImplemented";
@@ -62,7 +67,7 @@ export const SUPPLY_WATER = 2;
 /** 施設 1 つの数の個数。chizu-wasm の facilities と同じ。 */
 export const FACILITY_STRIDE = 5;
 /** ノード 1 つの数の個数。chizu-wasm の road_nodes と同じ。 */
-export const NODE_STRIDE = 4;
+export const NODE_STRIDE = 5;
 /** 信号の腕 1 本の数の個数。chizu-wasm の signal_lights と同じ。 */
 export const SIGNAL_STRIDE = 5;
 
@@ -76,8 +81,10 @@ export const TILE_WATER = 1;
 export const TILE_ROAD = 1 << 1;
 /** 区画を塗れる。 */
 export const TILE_ZONABLE = 1 << 2;
-/** 区画の種類（1 住宅、2 商業、3 工業、4 オフィス、なければ 0）を置くビットの位置。 */
+/** 区画の種類（1 住宅、2 商業、3 工業、4 オフィス、なければ 0）を置くビットの位置。3 ビットを使う。 */
 export const TILE_ZONE_SHIFT = 3;
+/** 区画に建った建物がある。施設のマスには立たない。 */
+export const TILE_BUILDING = 1 << 6;
 
 export type ChunkCoordMessage = { cx: number; cy: number };
 export type TileMessage = { x: number; y: number };
@@ -164,10 +171,17 @@ export type WorkerToMain =
       roadCosts: number[];
       /** chizu-wasm の service_table。 */
       serviceTable: number[];
+      /** 街の種（10 進の文字列）。地図の名前を作るのに使う。 */
+      seed: string;
     }
   | { kind: "chunks"; chunks: ChunkData[] }
   /** データレイヤーの値。版が変わったチャンクだけを送る。 */
   | { kind: "layer-chunks"; layer: LayerCode; chunks: LayerChunkData[] }
+  /**
+   * 交通の、区間ごとの値（chizu-wasm の traffic_segments）。並びは revision の道路網の road_segments と同じ。
+   * 値か道路網が変わったときだけ送る。
+   */
+  | { kind: "traffic"; revision: number; values: ArrayBuffer }
   /** state は chizu-wasm の feedback_state の JSON、commands は記録を encode したもの。 */
   | { kind: "feedback"; state: string; commands: ArrayBuffer }
   /** probe-service の答え。results は向き 0〜3 の順に、置けるなら null、置けないなら理由の文。 */
@@ -197,8 +211,9 @@ export type WorkerToMain =
   /**
    * 人口と幸福度とマイルストーン。overview は chizu-wasm の overview で、数の並びは overview.ts にある。
    * stalls は chizu-wasm の growth_stalls で、新築が止まっている道路網ごとに [x, y, 足りない資源] が並ぶ。
+   * isolated は chizu-wasm の isolated_facilities で、街の道路網につながっていない施設ごとに [x, y, 種類] が並ぶ。
    */
-  | { kind: "overview"; overview: number[]; stalls: number[] }
+  | { kind: "overview"; overview: number[]; stalls: number[]; isolated: number[] }
   /**
    * id は画面が振ったコマンドの番号、seq は記録の通し番号。
    * 記録する前に受け付けなかったコマンドには seq がない。
@@ -245,10 +260,13 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         typeof v.n === "number" &&
         typeof v.sum === "bigint" &&
         Array.isArray(v.roadCosts) &&
-        Array.isArray(v.serviceTable)
+        Array.isArray(v.serviceTable) &&
+        typeof v.seed === "string"
       );
     case "chunks":
       return Array.isArray(v.chunks) && v.chunks.every(isChunkData);
+    case "traffic":
+      return typeof v.revision === "number" && v.values instanceof ArrayBuffer;
     case "layer-chunks":
       return (
         Number.isInteger(v.layer) &&
@@ -288,7 +306,10 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.overview.every((x) => typeof x === "number") &&
         Array.isArray(v.stalls) &&
         v.stalls.length % 3 === 0 &&
-        v.stalls.every((x) => typeof x === "number")
+        v.stalls.every((x) => typeof x === "number") &&
+        Array.isArray(v.isolated) &&
+        v.isolated.length % 3 === 0 &&
+        v.isolated.every((x) => typeof x === "number")
       );
     case "outcome":
       return (

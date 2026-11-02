@@ -4,7 +4,8 @@
 //! 中核にコマンドの種類や欄を足したとき、ここがコンパイルで止まって直し忘れに気づけるようにするためである。
 
 use chizu_core::{
-    ChunkCoord, Command, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, ZoneKind,
+    ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect,
+    ZoneKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -55,6 +56,19 @@ mirror_enum!(
     }
 );
 mirror_enum!(
+    HeadingJson,
+    Heading {
+        E,
+        SE,
+        S,
+        SW,
+        W,
+        NW,
+        N,
+        NE
+    }
+);
+mirror_enum!(
     ServiceJson,
     ServiceKind {
         PowerPlant,
@@ -95,6 +109,11 @@ enum CommandJson {
         node: NodeJson,
         on: bool,
     },
+    SetCrosswalk {
+        node: NodeJson,
+        arm: HeadingJson,
+        on: bool,
+    },
     BuyChunk {
         chunk: [i32; 2],
     },
@@ -112,19 +131,19 @@ enum CommandJson {
     },
 }
 
-/// `SetSignal` をマス `at` で書いたものを、そのマスのノードの ID で書いた形に直す。ほかのコマンドはそのまま返す。
-/// マスで指せるのは act の入力だけで、記録と出力はノードの ID の形にそろえる。
-pub fn resolve_signal_at(
+/// `SetSignal` と `SetCrosswalk` をマス `at` で書いたものを、そのマスのノードの ID で書いた形に直す。
+/// ほかのコマンドはそのまま返す。マスで指せるのは act の入力だけで、記録と出力はノードの ID の形にそろえる。
+pub fn resolve_node_at(
     value: &Value,
     node_at: impl Fn(TilePos) -> Option<NodeId>,
 ) -> Result<Value, String> {
-    let (Some("SetSignal"), Some(at)) =
+    let (Some(kind @ ("SetSignal" | "SetCrosswalk")), Some(at)) =
         (value.get("type").and_then(Value::as_str), value.get("at"))
     else {
         return Ok(value.clone());
     };
     if value.get("node").is_some() {
-        return Err("SetSignal には at と node のどちらか一方だけを書く".into());
+        return Err(format!("{kind} には at と node のどちらか一方だけを書く"));
     }
     let at: [i64; 2] = serde_json::from_value(at.clone()).map_err(|e| format!("at: {e}"))?;
     let node = node_at(tile(at)).ok_or_else(|| format!("マス {at:?} にノードがない"))?;
@@ -184,6 +203,15 @@ impl From<Command> for CommandJson {
                 node: NodeJson { index, generation },
                 on,
             },
+            Command::SetCrosswalk {
+                node: NodeId { index, generation },
+                arm,
+                on,
+            } => CommandJson::SetCrosswalk {
+                node: NodeJson { index, generation },
+                arm: arm.into(),
+                on,
+            },
             Command::BuyChunk {
                 coord: ChunkCoord { cx, cy },
             } => CommandJson::BuyChunk { chunk: [cx, cy] },
@@ -227,6 +255,15 @@ impl CommandJson {
                 on,
             } => Command::SetSignal {
                 node: NodeId { index, generation },
+                on,
+            },
+            CommandJson::SetCrosswalk {
+                node: NodeJson { index, generation },
+                arm,
+                on,
+            } => Command::SetCrosswalk {
+                node: NodeId { index, generation },
+                arm: arm.into(),
                 on,
             },
             CommandJson::BuyChunk { chunk: [cx, cy] } => Command::BuyChunk {
@@ -285,6 +322,7 @@ mod tests {
             json!({"type":"SetTaxRate","zone":"Commercial","permille":120}),
             json!({"type":"SetSimSpeed","speed":4}),
             json!({"type":"UpgradeRoad","from":[0,1],"to":[5,1],"kind":"Large"}),
+            json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"SW","on":false}),
         ];
         for c in &cases {
             assert!(parse(c).is_ok(), "{c}");
@@ -306,21 +344,29 @@ mod tests {
             })
         };
         let at = json!({"type":"SetSignal","at":[4,-2],"on":true});
-        let resolved = resolve_signal_at(&at, node_at).unwrap();
+        let resolved = resolve_node_at(&at, node_at).unwrap();
         assert_eq!(
             resolved,
             json!({"type":"SetSignal","node":{"index":5,"generation":1},"on":true})
         );
         assert!(parse(&resolved).is_ok());
         assert!(
-            resolve_signal_at(&json!({"type":"SetSignal","at":[0,0],"on":true}), node_at).is_err()
+            resolve_node_at(&json!({"type":"SetSignal","at":[0,0],"on":true}), node_at).is_err()
         );
         let both =
             json!({"type":"SetSignal","at":[4,-2],"node":{"index":5,"generation":1},"on":true});
-        assert!(resolve_signal_at(&both, node_at).is_err());
+        assert!(resolve_node_at(&both, node_at).is_err());
         // ほかのコマンドと、ノードで書いた信号はそのまま通す。
         let road = json!({"type":"BuildRoad","from":[0,1],"to":[5,1],"kind":"Medium"});
-        assert_eq!(resolve_signal_at(&road, node_at).unwrap(), road);
+        assert_eq!(resolve_node_at(&road, node_at).unwrap(), road);
+        // 横断歩道もマスで指せる。
+        let cw = json!({"type":"SetCrosswalk","at":[4,-2],"arm":"N","on":false});
+        let resolved = resolve_node_at(&cw, node_at).unwrap();
+        assert_eq!(
+            resolved,
+            json!({"type":"SetCrosswalk","node":{"index":5,"generation":1},"arm":"N","on":false})
+        );
+        assert!(parse(&resolved).is_ok());
     }
 
     /// すべての種類を JSON にして読み戻すと元に戻る。種類を足したら、ここにも 1 つ足す。
@@ -367,6 +413,14 @@ mod tests {
                 to: t(5, 1),
                 kind: RoadKind::Medium,
             },
+            Command::SetCrosswalk {
+                node: NodeId {
+                    index: 4,
+                    generation: 0,
+                },
+                arm: Heading::NW,
+                on: false,
+            },
         ];
         // 種類ごとに 1 つはあることを、ワイルドカードなしの match で確かめる。
         #[deny(clippy::wildcard_enum_match_arm)]
@@ -381,9 +435,10 @@ mod tests {
                 Command::SetTaxRate { .. } => 6,
                 Command::SetSimSpeed { .. } => 7,
                 Command::UpgradeRoad { .. } => 8,
+                Command::SetCrosswalk { .. } => 9,
             }
         }
-        let mut seen = [false; 9];
+        let mut seen = [false; 10];
         for c in commands {
             seen[kind(&c)] = true;
             let json = to_json(c);
@@ -399,6 +454,9 @@ mod tests {
         for r in [RoadKind::Small, RoadKind::Medium, RoadKind::Large] {
             assert_eq!(RoadKind::from(RoadKindJson::from(r)), r);
         }
+        for h in Heading::ALL {
+            assert_eq!(Heading::from(HeadingJson::from(h)), h);
+        }
     }
 
     #[test]
@@ -410,6 +468,7 @@ mod tests {
             json!({"type":"PaintZone","area":[[0,0],[2,2]]}),
             json!({"type":"SetSimSpeed","speed":0}),
             json!({"type":"SetTaxRate","zone":"Commercial","permille":-1}),
+            json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"Up","on":false}),
         ];
         for c in &cases {
             assert!(parse(c).is_err(), "{c}");

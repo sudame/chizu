@@ -12,17 +12,20 @@ describe("isWorkerToMain", () => {
     sum: 6n,
     roadCosts: [250, 450, 750, 8000, 11314],
     serviceTable: [60000, 4, 4, 25000, 2, 2],
+    seed: "0",
   };
   const roads = {
     kind: "roads",
     revision: 1,
     segments: new Float64Array([0, 0, 4, 0, 1]),
-    nodes: new Float64Array([0, 0, 1, 0, 4, 0, 1, 0]),
+    nodes: new Float64Array([0, 0, 1, 0, 0, 4, 0, 1, 0, 0]),
   };
   const chunk = { cx: -1, cy: 2, version: 3, owned: true, tiles: new ArrayBuffer(CHUNK_AREA) };
 
   test("正しい形のメッセージを受け入れる", () => {
     expect(isWorkerToMain(ready)).toBe(true);
+    const { seed: _, ...noSeed } = ready;
+    expect(isWorkerToMain(noSeed)).toBe(false);
     expect(isWorkerToMain({ kind: "error", message: "失敗" })).toBe(true);
     expect(isWorkerToMain({ kind: "chunks", chunks: [chunk] })).toBe(true);
     expect(isWorkerToMain({ kind: "chunks", chunks: [] })).toBe(true);
@@ -45,7 +48,7 @@ describe("isWorkerToMain", () => {
       kind: "buildings",
       buildings: new Float64Array(7),
       facilities: new Float64Array(5),
-      stats: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+      stats: Array.from({ length: 21 }, (_, i) => i),
     };
     expect(isWorkerToMain({ ...buildings, facilities: new Float64Array(4) })).toBe(false);
     expect(isWorkerToMain(buildings)).toBe(true);
@@ -55,11 +58,15 @@ describe("isWorkerToMain", () => {
       kind: "overview",
       overview: Array.from({ length: 21 }, (_, i) => i),
       stalls: [40, 12, 3],
+      isolated: [10, -59, 1],
     };
     expect(isWorkerToMain(overview)).toBe(true);
     expect(isWorkerToMain({ ...overview, stalls: [] })).toBe(true);
     expect(isWorkerToMain({ ...overview, stalls: [1, 2] })).toBe(false);
     expect(isWorkerToMain({ ...overview, stalls: undefined })).toBe(false);
+    expect(isWorkerToMain({ ...overview, isolated: [] })).toBe(true);
+    expect(isWorkerToMain({ ...overview, isolated: [1, 2] })).toBe(false);
+    expect(isWorkerToMain({ ...overview, isolated: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, overview: [1, 2] })).toBe(false);
     expect(
       isWorkerToMain({
@@ -92,7 +99,7 @@ describe("isWorkerToMain", () => {
     ).toBe(false);
     expect(isWorkerToMain({ kind: "chunks", chunks: [{ ...chunk, cx: 0.5 }] })).toBe(false);
     expect(isWorkerToMain({ ...roads, segments: new Float64Array(4) })).toBe(false);
-    expect(isWorkerToMain({ ...roads, nodes: [0, 0, 1, 0] })).toBe(false);
+    expect(isWorkerToMain({ ...roads, nodes: [0, 0, 1, 0, 0] })).toBe(false);
     expect(isWorkerToMain({ kind: "outcome", outcome: "Applied" })).toBe(false);
     expect(isWorkerToMain({ kind: "outcome", id: 1, seq: "1", outcome: "Applied" })).toBe(false);
     expect(isWorkerToMain({ type: "wasm_bindgen_worker_ready" })).toBe(false);

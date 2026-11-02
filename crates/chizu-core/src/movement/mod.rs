@@ -81,6 +81,9 @@ pub struct Trip {
     speed: MmPerTick,
     /// 出発の位置の車線に空きがなく、車線の上に出るのを待っている車か。
     waiting: bool,
+    /// `waiting` の車のうち、道路の種類が変わって走っていた車線がなくなり、区間の途中で車線に戻るのを
+    /// 待っている車か。建物の前から出発を待つ車とは分けて数える。
+    rejoining: bool,
     /// 車なら、交差点の手前で、ほかの車や横断歩道の人に譲って待った tick 数。ノードを抜けたら 0 に戻す。
     /// 歩く人なら、車道を渡り始めるのを続けて待った tick 数。歩き出したら 0 に戻す。
     waited: u32,
@@ -104,6 +107,9 @@ pub struct Trip {
     then: parking::Then,
     /// 歩道の側と、区間の途中の横切り。歩くときだけ使う。
     walk: crossing::Walk,
+    /// 交差点で車道を渡り始めた人の、次のリンクでの側と渡る腕。渡り終えるまで変えない。渡っている途中で
+    /// 横断歩道を外したり戻したりしても、いまの位置が別の腕の上へ移らないようにするためである。
+    across: Option<(bool, crossing::Arms)>,
     departed: Tick,
     /// 車線や歩道が変わった直後の、描くずれの移り変わり。描画のためだけの値で、状態ハッシュには入れない。
     blend: Option<lane_shift::Blend>,
@@ -120,6 +126,11 @@ impl Trip {
 
     pub fn lane(&self) -> LaneId {
         self.lane
+    }
+
+    /// 路肩で、車線に出る順番を待っている車か。
+    pub fn waiting_to_depart(&self) -> bool {
+        self.mode == LaneMode::Car && self.waiting && !self.rejoining
     }
 
     pub fn speed(&self) -> MmPerTick {
@@ -250,6 +261,7 @@ impl Trip {
                 return (false, None);
             }
             let (far, arms) = self.departure(net);
+            let fixed = (far, arms.clone());
             // 渡る所を、リンクの上の位置の区間 [始まり, 終わり) で並べる。
             let node = car::end_node(net, self.link());
             let mut spans: SmallVec<[(u32, u32, crossing::Occ); 4]> = SmallVec::new();
@@ -271,6 +283,9 @@ impl Trip {
             }
             if p1 < at {
                 self.offset = LaneOffset(p1);
+                if p1 > end {
+                    self.across = Some(fixed);
+                }
                 let occ = spans
                     .iter()
                     .find(|(s, e, _)| *s < p1 && p1 < *e)
@@ -278,6 +293,7 @@ impl Trip {
                 return (false, occ);
             }
             let rest = p1 - at;
+            self.across = None;
             self.leg += 1;
             self.enter(net, LaneOffset(rest), None);
             self.walk.far = far;
@@ -286,17 +302,27 @@ impl Trip {
     }
 
     /// 歩く人が、いまのリンクの終わりのノードから次のリンクへ移るときの、次のリンクでの歩道の側と、
-    /// 渡る腕。次のリンクが経路の最後なら、行き先の建物の側へ出る。
+    /// 渡る腕。次のリンクが経路の最後なら、行き先の建物の側へ出る。そうでなければ、その次の交差点で
+    /// 横断歩道を外した腕を越えずに済む側を選ぶ。
     fn departure(&self, net: &Network) -> (bool, crossing::Arms) {
+        if let Some((far, arms)) = &self.across {
+            return (*far, arms.clone());
+        }
         let link = self.link();
         let next = self.route.links[self.leg as usize + 1];
-        let need = (self.leg as usize + 2 == self.route.links.len()).then_some(self.walk.far_end);
+        let len = self.route.links.len();
+        let need = (self.leg as usize + 2 == len).then_some(self.walk.far_end);
+        let then = self.route.links.get(self.leg as usize + 2).map(|l| {
+            let need = (self.leg as usize + 3 == len).then_some(self.walk.far_end);
+            (*l, need)
+        });
         crossing::depart(
             net,
             car::end_node(net, link),
             (link, self.walk.far),
             next,
             need,
+            then,
         )
     }
 
@@ -327,6 +353,8 @@ pub struct Trips {
     rescues: junction::Rescues,
     /// 直前の `step` と `reroute` で消えた移動の結果。状態ハッシュには入れない。
     finished: BTreeMap<TripId, Finished>,
+    /// 直前の `step` の信号を決めた様子。画面に灯火を出すために控える。状態ハッシュには入れない。
+    lights: signal::Lights,
 }
 
 /// 網を変える前に控えた、主体ごとのリンクの中の車線の番号と描いていたずれ。[`Trips::note_before_change`] で作る。
@@ -428,17 +456,7 @@ fn plan(
 ) -> Vec<Option<(Arc<Route>, Ends, crossing::Walk)>> {
     let candidates: Vec<Vec<Ends>> = ends
         .iter()
-        .map(|(a, b)| {
-            let starts = [Some(*a), flip(net, *a).filter(|_| !fixed_start)];
-            let goals = [Some(*b), flip(net, *b)];
-            let all: Vec<Ends> = starts
-                .iter()
-                .flatten()
-                .flat_map(|s| goals.iter().flatten().map(|g| (*s, *g)))
-                .collect();
-            let ahead: Vec<Ends> = all.iter().filter(|e| !behind(e)).copied().collect();
-            if ahead.is_empty() { all } else { ahead }
-        })
+        .map(|e| candidates(net, *e, fixed_start))
         .collect();
     let flat: Vec<Ends> = candidates.iter().flatten().copied().collect();
     let mut found = plan_exact(router, mode, &flat).into_iter();
@@ -475,6 +493,19 @@ fn plan(
                 .map(|(_, r, e, jay)| (r, e, jay))
         })
         .collect()
+}
+
+/// [`plan`] が試す、出発と行き先の向きの組。同じリンクの手前へ戻る組は、ほかの組があれば除く。
+fn candidates(net: &Network, (a, b): Ends, fixed_start: bool) -> Vec<Ends> {
+    let starts = [Some(a), flip(net, a).filter(|_| !fixed_start)];
+    let goals = [Some(b), flip(net, b)];
+    let all: Vec<Ends> = starts
+        .iter()
+        .flatten()
+        .flat_map(|s| goals.iter().flatten().map(|g| (*s, *g)))
+        .collect();
+    let ahead: Vec<Ends> = all.iter().filter(|e| !behind(e)).copied().collect();
+    if ahead.is_empty() { all } else { ahead }
 }
 
 /// 行き先が出発と同じリンクの、出発より手前にあるか。
@@ -531,6 +562,11 @@ impl Trips {
     #[cfg(test)]
     pub(crate) fn rescues(&self) -> junction::Rescues {
         self.rescues
+    }
+
+    /// 直前の `step` で信号の灯火を決めた tick と様子。画面とテストは、ここから効いた灯火を求める。
+    pub fn lights(&self) -> &signal::Lights {
+        &self.lights
     }
 
     /// 直前の `step` と `reroute` で消えた移動 `id` の結果。
@@ -675,8 +711,8 @@ impl Trips {
 
     /// 歩く人と車を 1 tick 進め、区切りの終わりに着いた行を番号の順に返す。
     fn advance(&mut self, net: &Network, connectors: &[Connector], now: Tick) -> Vec<usize> {
-        // 歩く人が渡り始めてよいかは、前の tick の車の様子だけから決める。
-        let gate = car::gate(&self.rows, net, now);
+        // 信号の灯火と、歩く人が渡り始めてよいかは、前の tick の車と歩く人の様子だけから決める。
+        let gate = car::gate(&self.rows, net, now, car::signal_demand(&self.rows, net));
         let advance = |(i, t): (usize, &mut Option<Trip>)| {
             let t = t.as_mut().filter(|t| t.mode == LaneMode::Sidewalk)?;
             let (arrived, occ) = t.advance(net, &gate);
@@ -708,7 +744,12 @@ impl Trips {
             &mut self.rescues,
             now,
             &occupied,
+            &gate.signals,
         ));
+        self.lights = signal::Lights {
+            now,
+            demand: gate.signals,
+        };
         arrived.sort_unstable();
         arrived
     }
@@ -776,10 +817,11 @@ impl Trips {
                     continue;
                 };
                 let old = self.get(id).expect("探し直す主体がない");
-                let (departed, speed, waiting, waited, yielded, stalled, then) = (
+                let (departed, speed, waiting, rejoining, waited, yielded, stalled, then) = (
                     old.departed,
                     old.speed,
                     old.waiting,
+                    old.rejoining,
                     old.waited,
                     old.yielded,
                     old.stalled,
@@ -799,8 +841,15 @@ impl Trips {
                 };
                 let old_far = old.walk.far;
                 let mut t = make_trip(net, route, ends, dest, departed, jay);
-                (t.speed, t.waiting, t.waited, t.yielded, t.stalled, t.then) =
-                    (speed, waiting, waited, yielded, stalled, then);
+                (
+                    t.speed,
+                    t.waiting,
+                    t.rejoining,
+                    t.waited,
+                    t.yielded,
+                    t.stalled,
+                    t.then,
+                ) = (speed, waiting, rejoining, waited, yielded, stalled, then);
                 // いまの位置は、いまのリンクと同じ向きのリンクで表してあるので、そのリンクから
                 // 向きを変えたなら、側も入れ替わる。
                 t.walk.far ^= old_far;
@@ -873,6 +922,7 @@ fn make_trip(
         lane: net.link_lanes(first).next().expect("リンクに車線がない"),
         speed: MmPerTick::ZERO,
         waiting: false,
+        rejoining: false,
         waited: 0,
         yielded: 0,
         stalled: 0,
@@ -886,6 +936,7 @@ fn make_trip(
         dest_offset: to,
         then: parking::Then::Arrive,
         walk,
+        across: None,
         departed: now,
         blend: None,
     };
@@ -899,6 +950,7 @@ impl StateHash for Trip {
         h.write(&self.lane);
         h.write(&self.speed);
         h.write(&self.waiting);
+        h.write(&self.rejoining);
         h.write(&self.waited);
         h.write(&self.yielded);
         h.write(&self.stalled);
@@ -921,6 +973,14 @@ impl StateHash for Trip {
         h.write(&self.walk.jay);
         h.write(&self.walk.far_end);
         h.write(&self.walk.hold);
+        h.write(&self.across.is_some());
+        if let Some((far, arms)) = &self.across {
+            h.write(far);
+            h.write_len(arms.len());
+            for s in arms {
+                h.write(s);
+            }
+        }
         h.write(&self.departed);
     }
 }

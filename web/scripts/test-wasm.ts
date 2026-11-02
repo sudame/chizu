@@ -15,6 +15,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright-core";
 import { preview } from "vite";
+import { stageWeights } from "../src/map/stages.ts";
+import { chooseLayer, pickSpeed, pickTool, zoomInTo } from "./ui.ts";
 
 const TIMEOUT_MS = 30_000;
 const MIN_THREADS = 2;
@@ -25,8 +27,24 @@ const TICKS_PER_DAY = 7_200;
 const GAME_SECONDS_PER_TICK = 12;
 const INITIAL_MONEY = 500_000;
 // web/src/map/camera.ts の値
+// 買った土地の地面の色（docs/map-style.md の色の表）
+const GROUND_HEX = "#f4f2ec";
+
+/** 色の表の 2 つの値（`#rrggbb`）を、b を t の割合で重ねた色にする。 */
+function mixHex(a: string, b: string, t: number): string {
+  const ch = (code: string, at: number) => Number.parseInt(code.slice(at, at + 2), 16);
+  return `#${[1, 3, 5]
+    .map((at) =>
+      Math.round(ch(a, at) * (1 - t) + ch(b, at) * t)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
+}
+// 地面に買える土地の仮の表示（#1a73e8 の 10%）が重なった色
+const GROUND_ON_HINT_HEX = "#dee5ec";
 const MIN_ZOOM = 1;
-const MAX_ZOOM = 32;
+const MAX_ZOOM = 128;
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -64,20 +82,48 @@ const url = givenUrl ?? server?.resolvedUrls?.local[0];
 if (url === undefined) {
   throw new Error("preview の URL が分からない");
 }
-// 左上の帯：日時、お金、速度はたたんでも見え、たためる欄は閉じて始まり、開閉が覚えられる。
-// 幅 1280 と 500 で、帯と欄が地図の広い範囲を覆わないことも見る
+// 上の帯：日時、お金と収支、人口、速度はたたんでも見え、たためる欄は閉じて始まり、開閉が覚えられる。
+// 収支の欄はお金を押して開く。幅 1280 と 500 で、帯と欄が地図の広い範囲を覆わないことも見る
 async function checkHudPanel(page: Page, at: string): Promise<void> {
   await page.goto(at);
   await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
   const hud = page.locator("#hud");
   await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  // 選んだ主題図はブラウザに覚えさせ、読み直しても同じ主題図になる
+  const activeTheme = () => page.locator("#layers").getAttribute("data-active");
+  check((await activeTheme()) === "traffic", "初めて開いたときは、主題図に交通を選んでいる");
+  for (const theme of ["water", "demand", "none", "traffic"]) {
+    await chooseLayer(page, theme);
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+    check(
+      (await activeTheme()) === theme &&
+        (await page
+          .locator(`#layers button[data-layer="${theme}"]`)
+          .getAttribute("aria-pressed")) === "true" &&
+        (await page.locator("#theme-legend").isVisible()) === (theme !== "none"),
+      `主題図に ${theme} を選ぶと覚えられ、読み直しても ${theme} のまま（${await activeTheme()}）`,
+    );
+  }
   const details = page.locator("#hud-details");
   const toggle = page.locator("#hud-toggle");
+  const finance = page.locator("#finance");
+  const financeToggle = page.locator("#finance-toggle");
   check(
     (await hud.isVisible()) &&
       (await page.locator("#pause").isVisible()) &&
-      !(await details.isVisible()),
-    "日時、お金、速度の帯は見え、たためる欄は閉じて始まる",
+      (await page.locator("#hud-population").isVisible()) &&
+      !(await details.isVisible()) &&
+      !(await finance.isVisible()),
+    "日時、お金、人口、速度の帯は見え、たためる欄と収支の欄は閉じて始まる",
+  );
+  const speedLabels = await page.locator("#speeds button[data-speed]").allTextContents();
+  check(
+    speedLabels.join(",") === "1 倍,4 倍,16 倍" &&
+      (await page.locator('#speeds button[data-speed="1"]').getAttribute("aria-pressed")) ===
+        "true",
+    `帯の速度は 1、4、16 倍で、いまの速度が押した状態で出る（${speedLabels.join(",")}）`,
   );
   const covered = async () =>
     page.evaluate(() => {
@@ -90,8 +136,10 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
     (await details.isVisible()) &&
       (await page.locator("#city-numbers").isVisible()) &&
       (await page.locator("#demand").isVisible()) &&
-      (await page.locator("#overview").isVisible()),
-    "「詳細」を押すと、建物、電気と水道、需要、人口と幸福度が出る",
+      (await page.locator("#overview").isVisible()) &&
+      (await page.locator('#controls button[data-speed="48"]').isVisible()) &&
+      (await page.locator("#save-open").isVisible()),
+    "「⋯」を押すと、建物、電気と水道、需要、人口と幸福度、ほかの速度と保存が出る",
   );
   await page.reload();
   await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
@@ -103,57 +151,206 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   const size = page.viewportSize() ?? { width: 1280, height: 720 };
   const share = closedArea / (size.width * size.height);
   check(share < 0.06, `たたんだ帯が覆う広さは画面の 6% に満たない（${(share * 100).toFixed(1)}%）`);
-  // どの幅でも、帯のボタンは覆われず、帯と欄、知らせ、右上の部品が重ならない
-  await toggle.click();
-  for (const width of [1280, 1000, 900, 500]) {
-    await page.setViewportSize({ width, height: 800 });
-    await page.waitForTimeout(300);
-    const layout = await page.evaluate(() => {
-      const notice = document.querySelector<HTMLElement>("#save-notice");
-      if (notice !== null) {
-        notice.textContent = "確かめ用の知らせ";
-        notice.hidden = false;
+
+  // お金を押すと収支の欄が開き、もう一度押すか、欄の外を押すか、Esc で閉じる
+  await financeToggle.click();
+  check(
+    (await finance.isVisible()) &&
+      (await financeToggle.getAttribute("aria-expanded")) === "true" &&
+      (await page.locator("#finance .finance-net").isVisible()),
+    "お金を押すと収支の欄が開く",
+  );
+  await financeToggle.click();
+  check(!(await finance.isVisible()), "お金をもう一度押すと収支の欄が閉じる");
+  await financeToggle.click();
+  await page.mouse.click(size.width / 2, size.height / 2);
+  check(!(await finance.isVisible()), "欄の外（地図）を押すと収支の欄が閉じる");
+  await financeToggle.click();
+  await page.keyboard.press("Escape");
+  check(!(await finance.isVisible()), "Esc で収支の欄が閉じる");
+
+  // どの幅でも、帯と地図の部品のボタンは覆われず、帯と欄、知らせ、右上と四隅の部品が重ならない。
+  // 欄は、詳細を開いたときと、収支を開いたときに分けて見る
+  const showInspector = (visible: boolean) =>
+    page.evaluate((on) => {
+      const el = document.querySelector<HTMLElement>("#inspector");
+      if (el === null) {
+        return;
       }
-      const box = (sel: string) => {
-        const el = document.querySelector(sel);
-        const r = el?.getBoundingClientRect();
-        // hidden の部品は大きさが 0 なので、重なりの確かめから外す
-        return r === undefined || r.width === 0 || r.height === 0 ? null : r;
-      };
-      const covered = [...document.querySelectorAll<HTMLElement>("#hudbar button")]
-        .filter((b) => {
-          const r = b.getBoundingClientRect();
-          const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-          return hit !== b && !b.contains(hit);
-        })
-        .map((b) => b.textContent);
-      const overlaps = (a: DOMRect, b: DOMRect) =>
-        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
-      const bar = box("#hudbar");
-      const others = ["#hud-details", "#notices", "#feedback-open", "#dev-tools", "#toolbar"];
-      const hits = others.filter((sel) => {
-        const o = box(sel);
-        return bar !== null && o !== null && overlaps(bar, o);
+      el.hidden = !on;
+      const title = el.querySelector("[data-inspector-title]");
+      const rows = el.querySelector("[data-inspector-rows]");
+      if (on && title !== null && rows !== null) {
+        title.textContent = "確かめ用の建物";
+        rows.innerHTML = "<dt>人口</dt><dd>4</dd><dt>電気</dt><dd>届いている</dd>";
+      }
+    }, visible);
+  const roadToggle = page.locator('button[data-menu="road"]');
+  const zoneToggle = page.locator('button[data-menu="zone"]');
+  const layerToggle = page.locator("#layers-open");
+  const states: { open: () => Promise<void>; close: () => Promise<void> }[] = [
+    { open: () => toggle.click(), close: () => toggle.click() },
+    { open: () => financeToggle.click(), close: () => financeToggle.click() },
+    // 道具の 2 段目とレイヤーのパネルは、開いているあいだ隅の部品と重ならない
+    { open: () => roadToggle.click(), close: () => page.keyboard.press("Escape") },
+    { open: () => zoneToggle.click(), close: () => page.keyboard.press("Escape") },
+    // 信号の 2 段目には、横断歩道を外す、戻す道具も入るので、いちばん幅が広い
+    {
+      open: () => page.locator('button[data-menu="signal"]').click(),
+      close: () => page.keyboard.press("Escape"),
+    },
+    { open: () => layerToggle.click(), close: () => page.keyboard.press("Escape") },
+    // 建物の情報は、詳細や収支を開いたときも含めて、ほかの欄と重ならない
+    { open: () => showInspector(true), close: () => showInspector(false) },
+    {
+      open: async () => {
+        await toggle.click();
+        await showInspector(true);
+      },
+      close: async () => {
+        await showInspector(false);
+        await toggle.click();
+      },
+    },
+    {
+      open: async () => {
+        await financeToggle.click();
+        await showInspector(true);
+      },
+      close: async () => {
+        await showInspector(false);
+        await financeToggle.click();
+      },
+    },
+  ];
+  for (const [index, { open, close }] of states.entries()) {
+    await open();
+    for (const width of [1280, 1000, 900, 860, 780, 640, 500, 390]) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.waitForTimeout(300);
+      const layout = await page.evaluate(() => {
+        const notice = document.querySelector<HTMLElement>("#save-notice");
+        if (notice !== null) {
+          notice.textContent = "確かめ用の知らせ";
+          notice.hidden = false;
+        }
+        const box = (sel: string) => {
+          const el = document.querySelector(sel);
+          const r = el?.getBoundingClientRect();
+          // hidden の部品は大きさが 0 なので、重なりの確かめから外す
+          return r === undefined ||
+            r.width === 0 ||
+            r.height === 0 ||
+            (el !== null && getComputedStyle(el).visibility === "hidden")
+            ? null
+            : r;
+        };
+        const covered = [
+          ...document.querySelectorAll<HTMLElement>(
+            "#hudbar button, #toolbar button, #map-controls button, #feedback-open, .tool-menu button, #layer-panel button",
+          ),
+        ]
+          .filter((b) => {
+            const r = b.getBoundingClientRect();
+            // 隠した部品は、押せない代わりに覆いも起こさない
+            if (r.width === 0 || getComputedStyle(b).visibility === "hidden") {
+              return false;
+            }
+            const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return hit !== b && !b.contains(hit);
+          })
+          .map((b) => b.id || b.dataset.tool || b.dataset.menu || b.textContent);
+        const overlaps = (a: DOMRect, b: DOMRect) =>
+          a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+        const parts = [
+          "#hudbar",
+          "#hud-details",
+          "#finance",
+          "#inspector",
+          "#layer-panel",
+          "#theme-legend",
+          "#notices",
+          "#feedback-open",
+          "#toolstack",
+          "#map-controls",
+          "#map-meta",
+        ];
+        const pairs: string[] = [];
+        for (const [i, x] of parts.entries()) {
+          for (const y of parts.slice(i + 1)) {
+            const rx = box(x);
+            const ry = box(y);
+            if (rx !== null && ry !== null && overlaps(rx, ry)) {
+              pairs.push(`${x}と${y}`);
+            }
+          }
+        }
+        const bar = box("#hudbar");
+        return { covered, pairs, right: bar?.right ?? 0, bottom: box("#toolstack")?.bottom ?? 0 };
       });
-      const pairs = [
-        ["#hud-details", "#notices"],
-        ["#hud-details", "#feedback-open"],
-        ["#hud-details", "#dev-tools"],
-        ["#notices", "#feedback-open"],
-        ["#notices", "#dev-tools"],
-      ].filter(([x, y]) => {
-        const rx = box(x ?? "");
-        const ry = box(y ?? "");
-        return rx !== null && ry !== null && overlaps(rx, ry);
-      });
-      return { covered, hits, pairs, right: bar?.right ?? 0 };
-    });
-    check(
-      layout.covered.length === 0 && layout.hits.length === 0 && layout.pairs.length === 0,
-      `幅 ${width} で、帯のボタンは覆われず、帯と欄、知らせ、右上の部品が重ならない（覆われた ${layout.covered.join(",")}、帯と重なる ${layout.hits.join(",")}、ほかの重なり ${layout.pairs.join(",")}）`,
-    );
-    check(layout.right <= width, `幅 ${width} で帯は画面に収まる（右 ${layout.right}）`);
+      check(
+        layout.covered.length === 0 && layout.pairs.length === 0,
+        `幅 ${width}（状態 ${index}）で、帯と部品のボタンは覆われず、部品どうしが重ならない（覆われた ${layout.covered.join(",")}、重なり ${layout.pairs.join(",")}）`,
+      );
+      check(layout.right <= width, `幅 ${width} で帯は画面に収まる（右 ${layout.right}）`);
+      check(layout.bottom <= 800, `幅 ${width} で道具の帯は画面に収まる（下 ${layout.bottom}）`);
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await close();
   }
+  await page.close();
+}
+
+// 地図のラベル。起動した直後の画面には高速道路が入らないので、引きの段（倍率 4 未満で、戻る側は 3.5 未満）
+// まで引いてから、高速道路の名前が、地図の上に重ねたラベルの canvas に緑の盾で出ることを確かめる
+async function checkLabels(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  const labels = page.locator("#labels");
+  const zoom = async () => Number(await page.locator("#map").getAttribute("data-zoom"));
+  for (let i = 0; i < 10 && (await zoom()) >= 3; i++) {
+    const before = await zoom();
+    await page.locator("#zoom-out").click();
+    await page.waitForFunction(
+      (z) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) < z,
+      before,
+    );
+  }
+  await labels.and(page.locator("[data-label-stage='0']")).waitFor({
+    state: "attached",
+    timeout: TIMEOUT_MS,
+  });
+  check(true, `引きの段まで引く（倍率 ${(await zoom()).toFixed(2)}）`);
+  // 高速道路は開始地点から下へ延び、画面の下の道具の帯に隠れるので、地図を上へ引きずって画面の真ん中に出す
+  await page.mouse.move(640, 560);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(640, 160, { steps: 8 });
+  await page.mouse.up({ button: "middle" });
+  await page.waitForFunction(
+    () =>
+      (document.querySelector<HTMLElement>("#labels")?.dataset.labels ?? "").includes("自動車道"),
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  // ラベルは 200ms かけて現れる
+  await page.waitForTimeout(400);
+  // 盾の緑（#1e7b4a）の画素を数える
+  const shield = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#labels");
+    const ctx = canvas?.getContext("2d");
+    if (canvas === null || canvas === undefined || ctx === null || ctx === undefined) return 0;
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const near = (i: number, v: number) => Math.abs((data[i] ?? 0) - v) <= 6;
+    let n = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] === 255 && near(i, 0x1e) && near(i + 1, 0x7b) && near(i + 2, 0x4a)) n++;
+    }
+    return n;
+  });
+  check(
+    shield > 20,
+    `高速道路の名前が緑の盾で描かれる（${await labels.getAttribute("data-labels")}、緑の画素 ${shield}）`,
+  );
   await page.close();
 }
 
@@ -175,7 +372,7 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
       { timeout: TIMEOUT_MS },
     );
   const setSpeed = async (speed: number) => {
-    await page.locator(`button[data-speed="${speed}"]`).click();
+    await pickSpeed(page, speed);
     await hud.and(page.locator(`[data-speed="${speed}"]`)).waitFor({ timeout: TIMEOUT_MS });
   };
   const pause = async (paused: boolean) => {
@@ -184,6 +381,8 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   };
   // 外部接続の高速道路が届いてから、引く前の区間の数を読む
   await waitMap("roadSegments", "0", "gt");
+  // 歩く人は寄りの段でだけ描くので、濃さがそろう倍率まで寄ってから引く
+  await zoomInTo(page, 16);
   const size = page.viewportSize() ?? { width: 1280, height: 720 };
   const d0 = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
   const zoom = Number(d0.zoom);
@@ -205,7 +404,7 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   await setSpeed(1);
   await pause(true);
   const segments = d0.roadSegments ?? "0";
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
   const [from, to] = [tileCenter(12, 32), tileCenter(52, 32)];
   await page.mouse.click(from.x, from.y);
   await page.mouse.click(to.x, to.y);
@@ -236,7 +435,9 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   check(true, `時間を進めると移動体の位置が変わる（${spawned.firstMover} → ${moved}）`);
   // 補間そのものは Vitest（mover-interpolation.test.ts）で確かめる。ここでは、画面に補間が効いていることだけを見る。
   // tick が変わらない続きの 2 枠のあいだで位置が変わっていれば、tick に頼らず補間で動いている。
-  // 枠の回数や間隔には頼らず、見つかるまで待つ。CI が重くても、いずれ同じ tick の枠が続く
+  // 枠の回数や間隔には頼らず、見つかるまで待つ。寄りの段は描画が重く、CI では 1 枠のあいだに tick が
+  // 進みきって同じ tick の枠が続かないことがあるので、0.25 倍に落として 1 tick を長くしてから見る
+  await setSpeed(0.25);
   const interpolated = await page.evaluate(
     (timeoutMs) =>
       new Promise<boolean>((resolve) => {
@@ -319,6 +520,19 @@ try {
 
   const hud = page.locator("#hud");
   await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  check(
+    (await page.locator("#layers").getAttribute("data-active")) === "traffic" &&
+      (await page.locator("#theme-legend").isVisible()) &&
+      (await page.locator("#theme-legend").getAttribute("data-theme")) === "traffic",
+    "主題図は初めに「交通」を選び、レイヤーのボタンの左に交通の凡例が出る",
+  );
+  // 地図の色の確かめは主題図を重ねずに行う。交通の主題図はあとで確かめる
+  await chooseLayer(page, "none");
+  await page.keyboard.press("Escape");
+  check(
+    !(await page.locator("#theme-legend").isVisible()),
+    "「なし」を選ぶと、主題図の凡例は消える",
+  );
   const tick = async () => Number(await hud.getAttribute("data-tick"));
   const ticksIn = async (ms: number) => {
     const before = await tick();
@@ -332,7 +546,7 @@ try {
     `等速で 2 秒待つと時計が 60 tick ほど進む（${normal} tick）`,
   );
 
-  await page.locator('button[data-speed="0.5"]').click();
+  await pickSpeed(page, 0.5);
   await hud.and(page.locator('[data-speed="0.5"]')).waitFor({ timeout: TIMEOUT_MS });
   const half = await ticksIn(2_000);
   check(
@@ -340,7 +554,7 @@ try {
     `0.5 倍にすると等速の半分ほど進む（${half} tick、等速は ${normal} tick）`,
   );
 
-  await page.locator('button[data-speed="0.25"]').click();
+  await pickSpeed(page, 0.25);
   await hud.and(page.locator('[data-speed="0.25"]')).waitFor({ timeout: TIMEOUT_MS });
   const quarter = await ticksIn(2_000);
   check(
@@ -348,7 +562,7 @@ try {
     `0.25 倍にすると等速の 4 分の 1 ほど進む（${quarter} tick、等速は ${normal} tick）`,
   );
 
-  await page.locator(`button[data-speed="${FAST_SPEED}"]`).click();
+  await pickSpeed(page, FAST_SPEED);
   await hud.and(page.locator(`[data-speed="${FAST_SPEED}"]`)).waitFor({ timeout: TIMEOUT_MS });
   const fast = await ticksIn(2_000);
   check(fast >= normal * 10, `${FAST_SPEED} 倍にすると等速より速く進む（${fast} tick）`);
@@ -420,7 +634,13 @@ try {
       },
       { x, y },
     );
-  const brightness = (c: number[]) => (c[0] ?? 0) + (c[1] ?? 0) + (c[2] ?? 0);
+  // 画素の色（0〜255）が、色の表の値（`#rrggbb`）に近いか。キャンバスのアルファが 1 を切ると、
+  // ページの背景と混ざって白く飛ぶので、アルファが 255 のままであることも確かめる
+  const near = (c: number[], code: string, tolerance = 6) =>
+    c[3] === 255 &&
+    [1, 3, 5].every(
+      (at, i) => Math.abs((c[i] ?? 0) - Number.parseInt(code.slice(at, at + 2), 16)) <= tolerance,
+    );
 
   await waitAllDrawn();
   const first = await mapState();
@@ -431,10 +651,8 @@ try {
   // 画面の中心は開始地点の買ってある土地で、水辺はない
   const owned = await pixel(cx, cy);
   check(
-    (owned[1] ?? 0) > (owned[0] ?? 0) &&
-      (owned[1] ?? 0) > (owned[2] ?? 0) &&
-      brightness(owned) > 300,
-    `画面の中心に買ってある陸が描かれる（${owned.join(", ")}）`,
+    near(owned, GROUND_HEX),
+    `画面の中心に買ってある陸が淡い地面の色で描かれる（${owned.join(", ")}）`,
   );
 
   const initialSegments = Number(await map.getAttribute("data-road-segments"));
@@ -442,7 +660,6 @@ try {
     initialSegments > 0,
     `起動すると、外部接続の高速道路のある道路網が届く（${initialSegments} 本）`,
   );
-
   // 道路を引く道具で、画面の中心の行に横の道路を引く
   const message = page.locator("#tool-message");
   const outcomeCount = async () => Number((await message.getAttribute("data-count")) ?? 0);
@@ -484,7 +701,7 @@ try {
       { expected, since, upkeepPerHour },
       { timeout: TIMEOUT_MS },
     );
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
   const tickBefore = await tick();
   const moneyBefore = await moneyNow();
   const built = await drawRoad();
@@ -519,10 +736,11 @@ try {
   // カーソルのある道路には始点の印が重なるので、道路から離れたところへ動かしてから色を読む
   await page.mouse.move(cx, cy - 120, { steps: 2 });
   await page.waitForTimeout(100);
-  // 道路とノードは灰色、地面は緑が強い
-  const isRoad = (c: number[]) =>
-    Math.abs((c[1] ?? 0) - (c[0] ?? 0)) < 20 && Math.abs((c[2] ?? 0) - (c[1] ?? 0)) < 20;
-  const isGround = (c: number[]) => (c[1] ?? 0) > (c[0] ?? 0) + 30;
+  // 小さい道路は白の塗り、地面は淡い地面の色（#f4f2ec）で、白とは青の強さで見分けられる。
+  // 引きの段では、小さい道路の色を地面の色に寄せて薄くする（stages.ts）。区間の途中もノードも同じ色になる
+  const minorRoadHex = mixHex(GROUND_HEX, "#ffffff", stageWeights(zoom).minorRoad);
+  const isRoad = (c: number[]) => near(c, minorRoadHex, 3);
+  const isGround = (c: number[]) => near(c, GROUND_HEX, 4);
   const colorAt = async (x: number, y: number) => {
     const p = tileCenter(x, y);
     return pixel(p.x, p.y);
@@ -585,7 +803,7 @@ try {
       { timeout: TIMEOUT_MS },
     );
   const junction = tileCenter(30, 32);
-  await page.locator('button[data-tool="signal-on"]').click();
+  await pickTool(page, "signal-on");
   const beforeSignal = await outcomeCount();
   await page.mouse.click(junction.x, junction.y);
   const signalled = await nextOutcome(beforeSignal);
@@ -603,14 +821,48 @@ try {
     refused.outcome === "Rejected" && (refused.text ?? "").includes("交差点がない"),
     `交差点のないマスには置けない（${refused.text}）`,
   );
-  await page.locator('button[data-tool="signal-off"]').click();
+  await pickTool(page, "signal-off");
   const beforeOff = await outcomeCount();
   await page.mouse.click(junction.x, junction.y);
   const removed = await nextOutcome(beforeOff);
   check(removed.outcome === "Applied", `信号を外せる（${removed.text}）`);
   await waitSignalArms(0);
   check(true, "外した信号は描かれなくなる");
-  await page.locator('button[data-tool="road-Small"]').click();
+
+  // 横断歩道の道具。T 字路 (30, 32) の北の腕の縞の上を押して外し、外した腕が道路網に載って縞が描かれなくなるのを見る。
+  // 縞の真ん中は、交差点のマスの中心から北へ約 0.38 マス（小さい道路の半分の幅と縞の長さの半分）にある
+  const waitRemovedCrosswalks = (n: number) =>
+    page.waitForFunction(
+      (expected) =>
+        Number(document.querySelector<HTMLElement>("#map")?.dataset.removedCrosswalks ?? -1) ===
+        expected,
+      n,
+      { timeout: TIMEOUT_MS },
+    );
+  const above = tileCenter(30, 31);
+  const zebraAt = {
+    x: junction.x + (above.x - junction.x) * 0.38,
+    y: junction.y + (above.y - junction.y) * 0.38,
+  };
+  await pickTool(page, "crosswalk-off");
+  await page.mouse.move(zebraAt.x, zebraAt.y, { steps: 2 });
+  const beforeCrosswalk = await outcomeCount();
+  await page.mouse.click(zebraAt.x, zebraAt.y);
+  const crosswalkOff = await nextOutcome(beforeCrosswalk);
+  check(
+    crosswalkOff.command === "SetCrosswalk" && crosswalkOff.outcome === "Applied",
+    `交差点の腕の横断歩道を外せる（${crosswalkOff.text}）`,
+  );
+  await waitRemovedCrosswalks(1);
+  check(true, "外した腕は道路網に載り、縞が描かれなくなる");
+  await pickTool(page, "crosswalk-on");
+  const beforeBack = await outcomeCount();
+  await page.mouse.click(zebraAt.x, zebraAt.y);
+  const crosswalkOn = await nextOutcome(beforeBack);
+  check(crosswalkOn.outcome === "Applied", `外した横断歩道を戻せる（${crosswalkOn.text}）`);
+  await waitRemovedCrosswalks(0);
+  check(true, "戻した腕には縞がまた描かれる");
+  await pickTool(page, "road-Small");
 
   const again = await drawRoad();
   check(
@@ -635,7 +887,7 @@ try {
   // CS2 と同じく、一時停止したままでも建てられる
   await page.locator("#pause").click();
   await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
   const pausedAt = await tick();
   const pausedBuild = await drawRoad();
   await waitSegments(initialSegments + 1);
@@ -683,7 +935,20 @@ try {
     return nextOutcome(before);
   };
   const east = chunkPoint(2, 0);
-  const eastBefore = await pixel(east.x, east.y);
+  // 水辺のマスは買っても色が変わらないので、チャンクの真ん中のまわりの 7×7 点のうち、
+  // 買った土地の地面の色（#f4f2ec）の点を数える。買っていない土地は #e6e3db と斜線の #d9d5ca で塗る。
+  // 買う道具のカーソルが載っていれば、買える土地の仮の表示（青の 10%）が重なって #dee5ec になる
+  const ownedPixels = async () => {
+    let n = 0;
+    for (let i = -3; i <= 3; i++) {
+      for (let j = -3; j <= 3; j++) {
+        const c = await pixel(east.x + i * 0.1 * 64 * view.zoom, east.y + j * 0.1 * 64 * view.zoom);
+        n += near(c, GROUND_HEX, 2) || near(c, GROUND_ON_HINT_HEX, 2) ? 1 : 0;
+      }
+    }
+    return n;
+  };
+  const eastBefore = await ownedPixels();
   const tickBeforeBuy = await tick();
   const moneyBeforeBuy = await moneyNow();
   const bought = await buy(2, 0);
@@ -693,33 +958,15 @@ try {
   );
   await waitMoney(moneyBeforeBuy - 50_000, tickBeforeBuy);
   check(true, `所持金が値段の分だけ減る（${moneyBeforeBuy} → ${await moneyNow()}）`);
-  await page.waitForFunction(
-    ({ x, y, before }) => {
-      const canvas = document.querySelector<HTMLCanvasElement>("#map");
-      const gl = canvas?.getContext("webgl2");
-      if (canvas === null || canvas === undefined || gl === null || gl === undefined) {
-        return false;
-      }
-      const out = new Uint8Array(4);
-      const dpr = window.devicePixelRatio;
-      gl.readPixels(
-        Math.floor(x * dpr),
-        canvas.height - 1 - Math.floor(y * dpr),
-        1,
-        1,
-        gl.RGBA,
-        gl.UNSIGNED_BYTE,
-        out,
-      );
-      return (out[0] ?? 0) + (out[1] ?? 0) + (out[2] ?? 0) > before * 1.5;
-    },
-    { x: east.x, y: east.y, before: brightness(eastBefore) },
-    { timeout: TIMEOUT_MS },
-  );
-  const eastAfter = await pixel(east.x, east.y);
+  const untilOwned = Date.now() + TIMEOUT_MS;
+  let eastAfter = await ownedPixels();
+  while (eastAfter === 0 && Date.now() < untilOwned) {
+    await page.waitForTimeout(100);
+    eastAfter = await ownedPixels();
+  }
   check(
-    brightness(eastAfter) > brightness(eastBefore) * 1.5,
-    `買ったチャンクが明るく描き直される（${eastBefore.join(", ")} → ${eastAfter.join(", ")}）`,
+    eastBefore === 0 && eastAfter > 0,
+    `買ったチャンクが買った土地の色に描き直される（地面の色の点 ${eastBefore} → ${eastAfter}）`,
   );
   const far = await buy(3, 1);
   check(
@@ -741,7 +988,7 @@ try {
   );
 
   // 区画の道具。(12, 32) から (52, 32) の道路の下側に商業の区画を塗る
-  await page.locator('button[data-tool="zone-Commercial"]').click();
+  await pickTool(page, "zone-Commercial");
   const tilePoint = (x: number, y: number) => ({
     x: cx + (x + 0.5 - view.x) * view.zoom,
     y: cy + (y + 0.5 - view.y) * view.zoom,
@@ -753,9 +1000,12 @@ try {
   await page.waitForTimeout(100);
   const zonable = await colorOfTile(45, 37);
   const tooFar = await colorOfTile(45, 45);
+  // 塗れるマスは、地面に青（#1a73e8）を 10% 重ねる。赤が下がり、青の強さが赤を上回る
   check(
-    brightness(zonable) > brightness(tooFar) + 30,
-    `区画の道具を選ぶと、道路から 6 マス以内のマスが明るく示される（${zonable.join(", ")} と ${tooFar.join(", ")}）`,
+    near(tooFar, GROUND_HEX, 2) &&
+      (tooFar[0] ?? 0) - (zonable[0] ?? 0) > 12 &&
+      (zonable[2] ?? 0) > (zonable[0] ?? 0) + 8,
+    `区画の道具を選ぶと、道路から 6 マス以内のマスが青みがかって示される（${zonable.join(", ")} と ${tooFar.join(", ")}）`,
   );
   const beforeZone = await outcomeCount();
   const z0 = tilePoint(40, 33);
@@ -786,16 +1036,50 @@ try {
         gl.UNSIGNED_BYTE,
         out,
       );
-      return (out[2] ?? 0) > (out[0] ?? 0) + 50;
+      // 商業の区画の地面（#eaf0f8）は、買った土地の地面（#f4f2ec）と違って青が赤を上回る
+      return (out[2] ?? 0) > (out[0] ?? 0) + 8;
     },
     tilePoint(45, 34),
     { timeout: TIMEOUT_MS },
   );
   const commercial = await colorOfTile(45, 34);
+  // 引きと標準のあいだでは、区画の地面に街区の面（空き）を重ねる
+  const blocks = stageWeights(view.zoom).blocks;
   check(
-    (commercial[2] ?? 0) > (commercial[0] ?? 0) + 50 && (commercial[2] ?? 0) > (commercial[1] ?? 0),
-    `塗ったマスが商業の青で描かれる（${commercial.join(", ")}）`,
+    near(commercial, mixHex("#eaf0f8", "#dde6f3", blocks), 4),
+    `塗ったマスが商業の淡い青の地面で描かれる（${commercial.join(", ")}）`,
   );
+  // 需要の主題図では、建物のない区画を、その種類の需要の高さで、白から区画の縁の色へ寄せて濃く塗る
+  {
+    const away = tilePoint(45, 45);
+    await page.mouse.move(away.x, away.y);
+    await chooseLayer(page, "demand");
+    // 区画の道具を選んだままにするので、Esc ではなくボタンでパネルを閉じる
+    await page.locator("#layers-open").click();
+    const expected = async () => {
+      const raw = Number(await page.locator("#demand .bar").nth(1).getAttribute("data-demand"));
+      const level = Math.min(Math.max(raw / 100, 0), 1);
+      return mixHex("#ffffff", "#91a9d4", 0.15 + 0.85 * level);
+    };
+    let painted = await colorOfTile(45, 34);
+    let want = await expected();
+    for (let i = 0; i < 50 && !near(painted, want, 3); i++) {
+      await page.waitForTimeout(100);
+      painted = await colorOfTile(45, 34);
+      want = await expected();
+    }
+    // 塗る前の区画の地面とは見分けられる
+    const differs = Math.abs((painted[0] ?? 0) - (commercial[0] ?? 0)) > 4;
+    check(
+      near(painted, want, 3) &&
+        differs &&
+        (await page.locator("#theme-legend").getAttribute("data-theme")) === "demand" &&
+        (await page.locator("#theme-legend li").count()) === 4,
+      `需要の主題図では、建物のない商業の区画を需要の高さの濃さで塗り、凡例に 4 種類の棒が並ぶ（${painted.join(", ")}、期待 ${want}、塗る前 ${commercial.join(", ")}）`,
+    );
+    await chooseLayer(page, "none");
+    await page.locator("#layers-open").click();
+  }
   const farZone = await (async () => {
     const before = await outcomeCount();
     const a = tilePoint(45, 45);
@@ -811,7 +1095,7 @@ try {
   );
 
   // 道路の上側に住宅の区画を塗り、時間を進めて建物が建つのを待つ
-  await page.locator('button[data-tool="zone-Residential"]').click();
+  await pickTool(page, "zone-Residential");
   const r0 = tilePoint(14, 26);
   const r1 = tilePoint(30, 31);
   await page.mouse.move(r0.x, r0.y);
@@ -847,9 +1131,15 @@ try {
     cx + (bx + 0.5 - view.x) * view.zoom,
     cy + (by + 0.8 - view.y) * view.zoom,
   );
+  // 引きと標準のあいだでは、街区の面（建物）の上に、建物のまとまりを薄く重ねる
+  const houseHex = mixHex(
+    mixHex("#eef4e6", "#cde0b9", stageWeights(view.zoom).blocks),
+    "#d3e3c0",
+    stageWeights(view.zoom).clusters,
+  );
   check(
-    (house[1] ?? 0) > (house[0] ?? 0) + 50 && brightness(house) < 250,
-    `建物が住宅の濃い緑で描かれる（マス (${bx}, ${by})、${house.join(", ")}）`,
+    near(house, houseHex, 4),
+    `建物が住宅の緑の色で描かれる（マス (${bx}, ${by})、${house.join(", ")}）`,
   );
   const residentialDemand = await page.locator("#demand .bar").first().getAttribute("data-demand");
   check(residentialDemand !== null, `住宅の需要の棒が出る（${residentialDemand}）`);
@@ -960,15 +1250,14 @@ try {
     Math.abs(restored.x - homeCamera.x) < 0.2 && Math.abs(restored.y - homeCamera.y) < 0.2,
     `カメラを元の位置へ戻した（${restored.x.toFixed(2)}, ${restored.y.toFixed(2)}）`,
   );
-  check(
-    (await page.locator("#legend-body li").count()) >= 10,
-    "凡例に区画・建物の段階・印・施設が並ぶ",
-  );
+  check((await page.locator("#legend-body li").count()) >= 10, "凡例に区画・建物・印・施設が並ぶ");
   // 電気のデータレイヤーに切り替えると、建物が届いているかどうかの色で塗られる
   const layerPixel = () =>
     pixel(cx + (bx + 0.5 - view.x) * view.zoom, cy + (by + 0.8 - view.y) * view.zoom);
-  const isRed = (c: number[]) => (c[0] ?? 0) > 180 && (c[1] ?? 0) < 100 && (c[2] ?? 0) < 100;
-  const isGreen = (c: number[]) => (c[1] ?? 0) > (c[0] ?? 0) + 80 && (c[1] ?? 0) > 150;
+  // 主題図の色（docs/map-style.md の色の表）。値のあるマスは不透明に塗るので、色はほぼそのまま出る。
+  // 届いていない建物は #f28b82 に #d93025 の斜線
+  const isRed = (c: number[]) => near(c, "#f28b82", 12) || near(c, "#d93025", 12);
+  const isGreen = (c: number[]) => near(c, "#81c995", 12);
   const waitColor = async (test: (c: number[]) => boolean) => {
     const until = Date.now() + TIMEOUT_MS;
     let c = await layerPixel();
@@ -978,14 +1267,14 @@ try {
     }
     return c;
   };
-  await page.locator('#layers button[data-layer="1"]').click();
+  await chooseLayer(page, "power");
   const layerOff = await waitColor(isRed);
   check(
-    isRed(layerOff) && (await page.locator("#layers").getAttribute("data-active")) === "1",
+    isRed(layerOff) && (await page.locator("#layers").getAttribute("data-active")) === "power",
     `電気のレイヤーでは、届いていない建物が赤で塗られる（${layerOff.join(", ")}）`,
   );
   // 道路を (52, 32) から (60, 32) へ延ばし、その下に発電所と浄水場を置く
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
   for (const [x, y] of [
     [52, 32],
     [60, 32],
@@ -996,7 +1285,7 @@ try {
   await page.keyboard.press("Escape");
   // カーソルのマスで中核に置けるかを問い合わせ、答えが届くまで待つ
   const hoverService = async (service: string, x: number, y: number) => {
-    await page.locator(`button[data-tool="service-${service}"]`).click();
+    await pickTool(page, `service-${service}`);
     const p = tilePoint(x, y);
     await page.mouse.move(p.x - 8, p.y);
     await page.mouse.move(p.x, p.y);
@@ -1049,46 +1338,216 @@ try {
     !(await growth.isVisible()),
     `施設を置いて余裕が戻ると、建たない理由の知らせが消える（${await growth.textContent()}）`,
   );
+  // 道路を消して入口を失った浄水場は、孤立した施設として知らせが出る。押すとそこへ移る。
+  // 区画が止まっているかは街の育ち方しだいなので、時計を止めてから確かめる
+  await pickTool(page, "road-Small");
+  for (const [x, y] of [
+    [52, 12],
+    [60, 12],
+  ] as const) {
+    const p = tilePoint(x, y);
+    await page.mouse.click(p.x, p.y);
+  }
+  await page.keyboard.press("Escape");
+  // 所持金が残り少ないので、安いほうの浄水場を置く
+  const cutOff = await place("WaterPump", 53, 13);
+  check(cutOff.outcome === "Applied", `つながっていない道路に浄水場を置ける（${cutOff.text}）`);
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
+  await page.locator('button[data-tool="bulldoze"]').click();
+  const beforeRoadCut = await outcomeCount();
+  const roadCutFrom = tilePoint(52, 12);
+  const roadCutTo = tilePoint(60, 12);
+  await page.mouse.move(roadCutFrom.x, roadCutFrom.y);
+  await page.mouse.down();
+  await page.mouse.move(roadCutTo.x, roadCutTo.y, { steps: 4 });
+  await page.mouse.up();
+  const roadCut = await nextOutcome(beforeRoadCut);
+  check(roadCut.outcome === "Applied", `浄水場の前の道路を消せる（${roadCut.text}）`);
+  await page.keyboard.press("Escape");
+  await page
+    .waitForFunction(
+      () =>
+        document
+          .querySelector<HTMLElement>("#growth-notice")
+          ?.textContent?.includes("つながっていない"),
+      undefined,
+      { timeout: TIMEOUT_MS },
+    )
+    .catch(() => undefined);
+  check(
+    (await growth.isVisible()) &&
+      /施設はあるが、街の道路網につながっていない（浄水場 1）/.test(
+        (await growth.textContent()) ?? "",
+      ),
+    `つながっていない浄水場の知らせが出る（${await growth.textContent()}）`,
+  );
+  // 止まっている区画があれば、行き先に先に入る。押すたびに次へ移るので、孤立した施設に着くまで押す
+  const beforeCutOff = await mapState();
+  await stallButton.focus();
+  let atCutOff = beforeCutOff;
+  for (let i = 0; i < 8; i++) {
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    atCutOff = await mapState();
+    if (Math.abs(atCutOff.x - 53.5) < 8 && Math.abs(atCutOff.y - 13.5) < 8) {
+      break;
+    }
+  }
+  check(
+    Math.abs(atCutOff.x - 53.5) < 8 && Math.abs(atCutOff.y - 13.5) < 8,
+    `知らせを押すと、つながっていない浄水場へカメラが動く（カメラ ${atCutOff.x.toFixed(1)}, ${atCutOff.y.toFixed(1)}）`,
+  );
+  await panCameraBy(beforeCutOff.x - atCutOff.x, beforeCutOff.y - atCutOff.y);
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
-  // 水道のレイヤーも重ねると、各マスの左半分が電気、右半分が水道になる。発電所は電気のレイヤーだけで黄に塗る
-  await page.locator('#layers button[data-layer="2"]').click();
-  const halfOf = (x: number, y: number, dx: number) => {
-    const p = tilePoint(x, y);
-    return pixel(p.x + (dx - 0.5) * view.zoom, p.y);
+  // 電気の主題図では地図を白で薄めるが、発電所は薄めずにそのまま（橙）出す。
+  // 水道を選ぶと電気は外れ（一度に 1 つだけ）、発電所は白で薄まる
+  const plantPixel = () => {
+    const p = tilePoint(54, 34);
+    return pixel(p.x, p.y);
   };
-  let plantLeft = await halfOf(54, 34, 0.25);
-  let plantRight = await halfOf(54, 34, 0.75);
-  for (let i = 0; i < 100 && (!isYellow(plantLeft) || isYellow(plantRight)); i++) {
+  const isPlainPlant = (c: number[]) =>
+    (c[0] ?? 0) > 200 && (c[1] ?? 0) > 100 && (c[1] ?? 0) < 160 && (c[2] ?? 0) < 60;
+  // 白の 50% で薄めた発電所。青が 255 の半分ほどまで上がる
+  const isWashedPlant = (c: number[]) =>
+    (c[0] ?? 0) > 230 && (c[1] ?? 0) > 170 && (c[2] ?? 0) > 120 && (c[2] ?? 0) < 160;
+  let plantElectric = await plantPixel();
+  for (let i = 0; i < 100 && !isPlainPlant(plantElectric); i++) {
     await page.waitForTimeout(100);
-    plantLeft = await halfOf(54, 34, 0.25);
-    plantRight = await halfOf(54, 34, 0.75);
+    plantElectric = await plantPixel();
   }
   check(
-    isYellow(plantLeft) && !isYellow(plantRight),
-    `電気と水道を重ねると、マスの左右に分けて塗る（左 ${plantLeft.join(", ")}、右 ${plantRight.join(", ")}）`,
+    isPlainPlant(plantElectric),
+    `電気の主題図では、発電所を薄めずにそのまま出す（${plantElectric.join(", ")}）`,
   );
-  // 交通のレイヤーをオンにすると、車のいない道路は「空いている」の緑に塗られる
-  await page.locator('#layers button[data-layer="none"]').click();
-  const roadPoint = tilePoint(56, 32);
-  const roadPixel = () => pixel(roadPoint.x, roadPoint.y);
+  // 主題図と関係のない地面は白の 50% で薄める
+  const groundPoint = tilePoint(45, 45);
+  const washedGround = await pixel(groundPoint.x, groundPoint.y);
+  check(
+    (washedGround[0] ?? 0) >= 245 && (washedGround[1] ?? 0) >= 245 && (washedGround[2] ?? 0) >= 240,
+    `電気の主題図では、下の地図を白で薄める（${washedGround.join(", ")}）`,
+  );
+  check(
+    (await page.locator("#theme-legend").getAttribute("data-theme")) === "power" &&
+      (await page.locator("#theme-legend li").count()) === 5,
+    "電気の主題図の凡例に、建物の届き方と道路の網の釣り合いの 5 つが並ぶ",
+  );
+  await chooseLayer(page, "water");
+  let plantWater = await plantPixel();
+  for (let i = 0; i < 100 && !isWashedPlant(plantWater); i++) {
+    await page.waitForTimeout(100);
+    plantWater = await plantPixel();
+  }
+  check(
+    isWashedPlant(plantWater) &&
+      (await page.locator("#layers").getAttribute("data-active")) === "water" &&
+      (await page.locator("#theme-legend").getAttribute("data-theme")) === "water" &&
+      (await page.locator('#layers button[data-layer="power"]').getAttribute("aria-pressed")) ===
+        "false",
+    `水道を選ぶと電気は外れ、一度に 1 つだけ出る。発電所は白で薄まる（発電所 ${plantWater.join(", ")}）`,
+  );
+  // 交通の主題図。(52, 32)〜(60, 32) の小の道路を画面の真ん中に寄せ、段ごとの見せ方を確かめる。
+  // 画面の真ん中を中心に拡大縮小するので、カメラの位置は動かない
+  await chooseLayer(page, "none");
+  const roadX = 56.5;
+  const roadY = 32.5;
+  const panned = { x: roadX - view.x, y: roadY - view.y };
+  await panCameraBy(panned.x, panned.y);
+  const roadAt = async (across: number) => {
+    const s = await mapState();
+    return pixel(cx + (roadX - s.x) * s.zoom, cy + (roadY + across - s.y) * s.zoom);
+  };
   // 電気のレイヤーの青い道路と見分けるため、青が弱い緑だけを数える
   const isTrafficGreen = (c: number[]) =>
-    isGreen(c) && (c[1] ?? 0) > (c[0] ?? 0) + 100 && (c[1] ?? 0) > (c[2] ?? 0) + 60;
-  await page.locator('#layers button[data-layer="3"]').click();
+    (c[1] ?? 0) > 150 && (c[1] ?? 0) > (c[0] ?? 0) + 100 && (c[1] ?? 0) > (c[2] ?? 0) + 60;
+  const clickZoom = async (button: string, times: number) => {
+    for (let i = 0; i < times; i++) {
+      const before = Number(await map.getAttribute("data-zoom"));
+      await page.locator(button).click();
+      await page.waitForFunction(
+        (z) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) !== z,
+        before,
+      );
+    }
+    await page.waitForTimeout(600);
+    return Number(await map.getAttribute("data-zoom"));
+  };
+  // 標準の段（倍率 6 から「空いている」の緑が濃さをそろえる）。空いている道路も緑の線で、道路の中に重ねる
+  const hyojunZoom = await clickZoom("#zoom-in", 2);
+  await chooseLayer(page, "traffic");
+  await page.keyboard.press("Escape");
   const untilRoad = Date.now() + TIMEOUT_MS;
-  let roadColor = await roadPixel();
+  let roadColor = await roadAt(0);
   while (!isTrafficGreen(roadColor) && Date.now() < untilRoad) {
     await page.waitForTimeout(100);
-    roadColor = await roadPixel();
+    roadColor = await roadAt(0);
   }
+  // 道路の線の外寄り（中心から 0.3 マス）は、マスいっぱいに塗らないので道路の色のまま
+  const besideLine = await roadAt(0.3);
   check(
-    isTrafficGreen(roadColor) &&
-      (await page.locator("#layers").getAttribute("data-active")) === "3",
-    `交通のレイヤーでは、道路が混み具合の色（空いていれば緑）で塗られる（${roadColor.join(", ")}）`,
+    hyojunZoom >= 6 &&
+      hyojunZoom < 10 &&
+      isTrafficGreen(roadColor) &&
+      !isTrafficGreen(besideLine) &&
+      (await page.locator("#layers").getAttribute("data-active")) === "traffic",
+    `交通の主題図では、標準の段（倍率 ${hyojunZoom.toFixed(2)}）で空いている道路の中に緑の線を重ねる（中心 ${roadColor.join(", ")}、線の外 ${besideLine.join(", ")}）`,
   );
-  await page.locator('#layers button[data-layer="none"]').click();
+  // 線は、交通の値が変わったときだけ作り直し、毎フレームは作らない
+  const builds = async () => Number(await map.getAttribute("data-traffic-builds"));
+  const buildsBefore = await builds();
+  const startedAt = await page.evaluate(() => performance.now());
+  await page.waitForTimeout(2_000);
+  const buildsAfter = await builds();
+  const elapsed = (await page.evaluate(() => performance.now())) - startedAt;
+  const perSecond = ((buildsAfter - buildsBefore) * 1000) / elapsed;
+  check(
+    buildsAfter > 0 && perSecond <= 4,
+    `交通の線は毎フレームではなく、値が変わったときだけ作り直す（${perSecond.toFixed(1)} 回/秒、これまでに ${buildsAfter} 回）`,
+  );
+  // 引きの段では「空いている」を描かない。凡例からも外す
+  const hikiZoom = await clickZoom("#zoom-out", 4);
+  const hiki = await roadAt(0);
+  const hikiLegend = await page.locator("#theme-legend li").allTextContents();
+  check(
+    hikiZoom < 4 && !isTrafficGreen(hiki) && !hikiLegend.join().includes("空いている"),
+    `引きの段（倍率 ${hikiZoom.toFixed(2)}）では、空いている道路に緑の線を描かず、凡例にも出さない（${hiki.join(", ")}、凡例 ${hikiLegend.join("・")}）`,
+  );
+  // 寄りの段では、道路の中の線をやめ、車道の両端の縁石の内側に帯を引く
+  const yoriZoom = await clickZoom("#zoom-in", 6);
+  await page.waitForTimeout(500);
+  // 小の道路の車道の半分の幅は 0.22 マスで、帯の真ん中はその 0.03 マス内側
+  const bandPixels = [await roadAt(-0.19), await roadAt(0.19)];
+  const isBandGreen = (c: number[]) =>
+    (c[1] ?? 0) > (c[0] ?? 0) + 50 && (c[1] ?? 0) > (c[2] ?? 0) + 50;
+  const yori = await roadAt(0);
+  check(
+    yoriZoom >= 14 && bandPixels.every(isBandGreen) && !isTrafficGreen(yori),
+    `寄りの段（倍率 ${yoriZoom.toFixed(2)}）では、車道の両端に緑の帯を引き、道路の中の線は描かない（帯 ${bandPixels.map((c) => c.join(",")).join(" ")}、中心 ${yori.join(", ")}）`,
+  );
+  const restoredZoom = await clickZoom("#zoom-out", 4);
+  await panCameraBy(-panned.x, -panned.y);
+  const back = await mapState();
+  check(
+    Math.abs(restoredZoom - view.zoom) < 1e-6 &&
+      Math.abs(back.x - view.x) < 0.2 &&
+      Math.abs(back.y - view.y) < 0.2,
+    `倍率とカメラを元に戻した（倍率 ${restoredZoom}、カメラ ${back.x.toFixed(2)}, ${back.y.toFixed(2)}）`,
+  );
+  // 交通から離すと、線は消える
+  await chooseLayer(page, "none");
+  await page.keyboard.press("Escape");
   await page.waitForTimeout(100);
+  const offRoad = await (async () => {
+    const p = tilePoint(56, 32);
+    return pixel(p.x, p.y);
+  })();
+  check(
+    !isTrafficGreen(offRoad),
+    `主題図を「なし」に戻すと、交通の線は消える（${offRoad.join(", ")}）`,
+  );
   const markAfter = await markPixels();
   const plantColor = await colorOfTile(54, 34);
   check(
@@ -1138,6 +1597,46 @@ try {
   );
   await page.locator('button[data-tool="none"]').click();
 
+  // 細部の段（倍率 32 から上）に入るまでは、細部の頂点を作らない。上限の 128 まで寄ると、住宅に寄棟の屋根の線を描き足す
+  check(
+    (await map.getAttribute("data-detail-builds")) === null,
+    "細部の段より引いているあいだは、細部の頂点を作らない",
+  );
+  // 本体の右下の角（マスの縁から 0.2 マス）から 45 度に隅棟が延びる。角から 0.15 マス先の、隅棟の上と脇を比べる。
+  // 左上のマスには電気と水道の印が重なることがあるので、右下のマスに寄って見る
+  const [, , bx1 = bx, by1 = by] = firstBuilding;
+  const corner = tilePoint(bx1, by1);
+  await page.mouse.move(corner.x, corner.y);
+  for (let i = 0; i < 20; i++) {
+    await page.mouse.wheel(0, -400);
+  }
+  await page.waitForFunction(
+    (max) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) === max,
+    MAX_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  await page.waitForTimeout(300);
+  const fine = await mapState();
+  const at = (wx: number, wy: number) => ({
+    x: cx + (wx - fine.x) * fine.zoom,
+    y: cy + (wy - fine.y) * fine.zoom,
+  });
+  const ridgeAt = at(bx1 + 0.65, by1 + 0.65);
+  const ridgeArea: number[][] = [];
+  for (const dx of [-1, 0, 1]) {
+    for (const dy of [-1, 0, 1]) {
+      ridgeArea.push(await pixel(ridgeAt.x + dx, ridgeAt.y + dy));
+    }
+  }
+  const besideRidge = at(bx1 + 0.62, by1 + 0.76);
+  const roofSide = await pixel(besideRidge.x, besideRidge.y);
+  check(
+    Number(await map.getAttribute("data-detail-roofs")) > 0 &&
+      ridgeArea.some((c) => near(c, "#a7c18e", 8)) &&
+      near(roofSide, "#d3e3c0", 8),
+    `上限の倍率 ${fine.zoom} まで寄れ、住宅に屋根の線を描き足す（線 ${ridgeArea.map((c) => c.join(",")).join(" ")}、脇 ${roofSide.join(", ")}）`,
+  );
+
   await page.mouse.move(cx, cy);
   for (let i = 0; i < 20; i++) {
     await page.mouse.wheel(0, 400);
@@ -1150,15 +1649,26 @@ try {
   await waitAllDrawn();
   const out = await mapState();
   check(out.zoom === MIN_ZOOM, `縮小は下限 ${MIN_ZOOM} で止まる（${out.zoom}）`);
+  // 倍率 1 では 1 ピクセルが 8m なので、140px に収まる 1、2、5 の長さは 1 km になる
+  const scale = page.locator("#scale");
+  check(
+    (await scale.getAttribute("data-meters")) === "1000" &&
+      (await scale.getAttribute("data-px")) === "125" &&
+      ((await scale.locator("[data-scale-label]").textContent()) ?? "") === "1 km" &&
+      (await page.locator("#zoom-out").isDisabled()) &&
+      !(await page.locator("#zoom-in").isDisabled()),
+    "下限では、縮尺の物差しが 1 km（125px）を示し、縮小のボタンだけが押せない",
+  );
   check(
     out.drawn > first.drawn,
     `縮小すると、まわりのチャンクも届いて描かれる（${first.drawn} 枚から ${out.drawn} 枚）`,
   );
   // 中心から 300 マス右は、買っていない土地
   const unowned = await pixel(cx + 300, cy);
+  // 買っていない土地は、#e6e3db の地に #d9d5ca の斜線を引く。斜線の上でも地の上でも、買った土地の色とは違う
   check(
-    brightness(unowned) < brightness(owned) * 0.6,
-    `買っていない土地は暗く描かれる（${unowned.join(", ")}）`,
+    (near(unowned, "#e6e3db", 2) || near(unowned, "#d9d5ca", 2)) && !near(unowned, GROUND_HEX, 2),
+    `買っていない土地は斜線のある別の色で描かれる（${unowned.join(", ")}）`,
   );
 
   const anchor = { x: cx + 200, y: cy + 100 };
@@ -1206,12 +1716,55 @@ try {
     { timeout: TIMEOUT_MS },
   );
   check((await mapState()).zoom === MAX_ZOOM, `拡大は上限 ${MAX_ZOOM} で止まる`);
+  // 拡大縮小のボタンは、画面の真ん中を動かさずに 1.5 倍ずつ変え、物差しも追う
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "5",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const atMax = await mapState();
+  check(
+    (await page.locator("#zoom-in").isDisabled()) &&
+      !(await page.locator("#zoom-out").isDisabled()) &&
+      (await scale.getAttribute("data-px")) === "80",
+    "上限では、拡大のボタンだけが押せず、物差しは 5 m（80px）を示す",
+  );
+  await page.locator("#zoom-out").click();
+  await page.waitForFunction(
+    (max) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) < max,
+    MAX_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  const smaller = await mapState();
+  check(
+    Math.abs(smaller.zoom - MAX_ZOOM / 1.5) < 0.01 &&
+      Math.abs(smaller.x - atMax.x) < 0.01 &&
+      Math.abs(smaller.y - atMax.y) < 0.01,
+    `縮小のボタンで画面の真ん中を動かさずに 1.5 分の 1 になる（${smaller.zoom.toFixed(2)}）`,
+  );
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "10",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(
+    (await scale.getAttribute("data-px")) === "107" &&
+      ((await scale.locator("[data-scale-label]").textContent()) ?? "") === "10 m",
+    "倍率が下がると、物差しは 10 m（107px）に変わる",
+  );
+  await page.locator("#zoom-in").click();
+  await page.waitForFunction(
+    (max) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) === max,
+    MAX_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, "拡大のボタンで上限まで戻る");
 
   // 収支のパネルは閉じていて、開くと税率を変えられる。変えた税率は記録に入り、下の再生でも同じ状態になる
   const finance = page.locator("#finance");
   await finance.and(page.locator("[data-net]")).waitFor({ state: "attached", timeout: TIMEOUT_MS });
-  check((await finance.getAttribute("open")) === null, "収支のパネルは閉じて始まる");
-  await finance.locator("summary").click();
+  check(!(await finance.isVisible()), "収支のパネルは閉じて始まる");
+  await page.locator("#finance-toggle").click();
   const resRow = finance.locator('[data-zone="Residential"]');
   check((await resRow.getAttribute("data-permille")) === "100", "住宅の税率は 10% で始まる");
   const netBefore = Number(await finance.getAttribute("data-net"));
@@ -1244,6 +1797,59 @@ try {
     { timeout: TIMEOUT_MS },
   );
   check(true, "税率を下げると 11% に戻る");
+
+  // 道具の帯は 7 つのボタンで、道路などの種類は押すと開く 2 段目で選ぶ
+  const toolLabels = await page.locator("#toolbar .tool").allTextContents();
+  check(
+    toolLabels.join(",") === "見る,道路,区画,施設,信号,土地,取り壊す",
+    `道具の帯は 7 つのボタンが並ぶ（${toolLabels.join(",")}）`,
+  );
+  const roadMenu = page.locator("#menu-road");
+  check(!(await roadMenu.isVisible()), "道路の 2 段目は閉じて始まる");
+  await page.locator('button[data-menu="road"]').click();
+  check(
+    (await roadMenu.isVisible()) &&
+      (await page.locator('button[data-menu="road"]').getAttribute("aria-expanded")) === "true" &&
+      (await page.locator('#menu-road button[data-tool^="road-"]').count()) === 3 &&
+      (await page.locator('#menu-road button[data-tool^="upgrade-"]').count()) === 3,
+    "「道路」を押すと、道路の種類と、種類を変える道具の 2 段目が開く",
+  );
+  await page.locator('button[data-tool="upgrade-Large"]').click();
+  check(
+    (await map.getAttribute("data-tool")) === "upgrade-Large" &&
+      (await page.locator('button[data-menu="road"]').getAttribute("aria-pressed")) === "true" &&
+      (await page.locator('button[data-tool="none"]').getAttribute("aria-pressed")) === "false",
+    "2 段目で選ぶと、帯の「道路」が押した状態になる",
+  );
+  await page.keyboard.press("Escape");
+  check(!(await roadMenu.isVisible()), "Esc で 2 段目が閉じる");
+  await page.locator('button[data-tool="none"]').click();
+  check(
+    (await page.locator('button[data-menu="road"]').getAttribute("aria-pressed")) === "false",
+    "「見る」に戻すと、帯の「道路」の押した状態が外れる",
+  );
+  // キーボードで開くと、フォーカスが 2 段目の中へ動き、Esc で入口のボタンへ戻る
+  await page.locator('button[data-menu="zone"]').focus();
+  await page.keyboard.press("Enter");
+  check(
+    await page.evaluate(() => document.activeElement?.closest("#menu-zone") !== null),
+    "キーボードで 2 段目を開くと、フォーカスが中のボタンへ動く",
+  );
+  await page.keyboard.press("Escape");
+  check(
+    (await page.evaluate(() => document.activeElement?.getAttribute("data-menu"))) === "zone",
+    "Esc で閉じると、フォーカスが入口のボタンへ戻る",
+  );
+  // レイヤーのパネルも、ボタンで開いて Esc か外を押して閉じる
+  await page.locator("#layers-open").click();
+  check(
+    (await page.locator("#layer-panel").isVisible()) &&
+      (await page.locator("#layers button").count()) === 5 &&
+      (await page.locator("#layer-panel #legend").count()) === 1,
+    "レイヤーのボタンで、なし、交通、電気、水道、需要を選ぶパネルが開き、凡例も中にある",
+  );
+  await page.mouse.click(cx, cy);
+  check(!(await page.locator("#layer-panel").isVisible()), "パネルの外（地図）を押すと閉じる");
 
   // フィードバックを送り、保存した記録を chizu-cli で再生する
   await page.locator("#feedback-open").click();
@@ -1306,6 +1912,7 @@ try {
   await page.close();
   await checkHudPanel(await browser.newPage(), url);
   await checkDevWalks(await browser.newPage(), url);
+  await checkLabels(await browser.newPage(), url);
 } finally {
   await browser.close();
   await server?.close();

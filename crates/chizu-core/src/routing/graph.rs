@@ -3,9 +3,12 @@
 use core::fmt;
 
 use crate::command::{NodeId, RoadKind};
+use crate::movement::crossing::{self, JAYWALK_DETOUR_MM};
 use crate::network::{Dir, LaneId, LaneMode, Line, LinkId, Network, SegmentId, SegmentKind};
 use crate::tile::TilePos;
 use crate::units::MmPerTick;
+
+use super::Delays;
 
 /// 歩く速さ（時速 5km）。
 pub const WALK_SPEED: MmPerTick = MmPerTick(1_389);
@@ -115,7 +118,7 @@ pub struct Connector {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Edge {
     pub to: u32,
-    /// 曲がるのにかかる費用（ms）。右折禁止や信号の待ちを入れるまでは 0 である。
+    /// 曲がるのにかかる費用（ms）。歩道で横断歩道を外した腕を越えるときのほかは 0 である（[`turn_cost`]）。
     pub cost: u64,
 }
 
@@ -124,8 +127,14 @@ pub(crate) struct Edge {
 pub struct Graph {
     mode: LaneMode,
     links: Vec<LinkId>,
-    /// リンクを端から端まで通る費用（ms）。
+    /// リンクを端から端まで通る費用（ms）。自由に走れたときの所要時間に、混み具合の遅れを足したもの。
     cost: Vec<u64>,
+    /// 自由に走れたときの、リンクを端から端まで通る所要時間（ms）。
+    free: Vec<u64>,
+    /// 頂点ごとの、強く連結な成分の番号。
+    component: Vec<u32>,
+    /// 成分ごとの頂点の数。
+    component_len: Vec<u32>,
     /// リンクの終わりのノードのマス。ヒューリスティックに使う。
     end_tile: Vec<TilePos>,
     /// 頂点 `v` から出る辺は `edges[edge_start[v]..edge_start[v + 1]]` で、行き先の番号の順に並ぶ。
@@ -170,6 +179,20 @@ fn departures(net: &Network, n: NodeId, mode: LaneMode) -> Result<Vec<LinkId>, G
         }
     }
     Ok(out)
+}
+
+/// ノード `n` で、`from` から `to` へ曲がる費用（ms）。歩道では、横断歩道を外した腕を、ほかに回れずに越える
+/// 1 本ごとに、[`JAYWALK_DETOUR_MM`] を歩く時間を足す（`movement::crossing`）。車は 0 である。
+fn turn_cost(net: &Network, n: NodeId, from: LinkId, to: LinkId) -> Result<u64, GraphError> {
+    if from.mode != LaneMode::Sidewalk {
+        return Ok(0);
+    }
+    let count = crossing::removed_crossings(net, n, from.segment, None, to.segment);
+    let per = travel_ms(JAYWALK_DETOUR_MM, WALK_SPEED).ok_or(GraphError::Overflow)?;
+    u64::try_from(count)
+        .ok()
+        .and_then(|c| c.checked_mul(per))
+        .ok_or(GraphError::Overflow)
 }
 
 /// ノード `n` で、`from` から曲がり先 `to` に進めるか。車は行き止まりでだけ折り返せる。
@@ -225,21 +248,26 @@ impl Graph {
             let out = departures(net, node, mode)?;
             for to in &out {
                 if may_turn(net, node, *l, *to, out.len())? {
+                    let cost = turn_cost(net, node, *l, *to)?;
                     let to = links
                         .binary_search(to)
                         .map_err(|_| GraphError::MissingSegment(to.segment))?;
                     edges.push(Edge {
                         to: to_u32(to)?,
-                        cost: 0,
+                        cost,
                     });
                 }
             }
             edge_start.push(to_u32(edges.len())?);
         }
         let (rev_start, rev_edges) = reverse(&edge_start, &edges);
+        let (component, component_len) = components(&edge_start, &edges);
         Ok(Graph {
+            component,
+            component_len,
             mode,
             links,
+            free: cost.clone(),
             cost,
             end_tile,
             edge_start,
@@ -265,6 +293,29 @@ impl Graph {
 
     pub(crate) fn link(&self, v: u32) -> LinkId {
         self.links[v as usize]
+    }
+
+    /// リンクの費用を、自由に走れたときの所要時間に `delays` の遅れを足したものにする。
+    /// グラフにないリンクの遅れは捨てる。費用は下がらないので、ヒューリスティックは下限のままである。
+    pub(crate) fn set_delays(&mut self, delays: &Delays) {
+        self.cost.clone_from(&self.free);
+        for (link, ms) in delays.iter() {
+            if let Some(v) = self.vertex(link) {
+                let v = v as usize;
+                self.cost[v] = self.free[v].saturating_add(ms);
+            }
+        }
+    }
+
+    /// リンク `from` の終わりからリンク `to` へ、必ず経路があると言えるか。同じ強く連結な成分にあれば
+    /// 経路がある。`from` と `to` が同じなら、出て戻ってくる輪があるときだけ `true` を返す。
+    /// `false` は「ない」ではなく「ここでは分からない」で、探して確かめる。
+    pub(crate) fn surely_connected(&self, from: LinkId, to: LinkId) -> bool {
+        let (Some(a), Some(b)) = (self.vertex(from), self.vertex(to)) else {
+            return false;
+        };
+        let c = self.component[a as usize];
+        c == self.component[b as usize] && (a != b || self.component_len[c as usize] > 1)
     }
 
     /// リンクを端から端まで通る費用（ms）。
@@ -373,4 +424,68 @@ pub fn try_connectors(net: &Network) -> Result<Vec<Connector>, GraphError> {
     }
     out.sort();
     Ok(out)
+}
+
+/// 強く連結な成分を、Tarjan の方法で求める。再帰を使わず、頂点の番号の順に始める。
+/// 頂点ごとの成分の番号と、成分ごとの頂点の数を返す。
+fn components(edge_start: &[u32], edges: &[Edge]) -> (Vec<u32>, Vec<u32>) {
+    let n = edge_start.len() - 1;
+    const NONE: u32 = u32::MAX;
+    let mut index = vec![NONE; n];
+    let mut low = vec![0_u32; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<u32> = Vec::new();
+    let mut component = vec![NONE; n];
+    let mut lens: Vec<u32> = Vec::new();
+    let mut next = 0_u32;
+    // (頂点, 次に見る辺の位置)
+    let mut work: Vec<(u32, u32)> = Vec::new();
+    for root in 0..n {
+        if index[root] != NONE {
+            continue;
+        }
+        work.push((root as u32, edge_start[root]));
+        index[root] = next;
+        low[root] = next;
+        next += 1;
+        stack.push(root as u32);
+        on_stack[root] = true;
+        while let Some(&mut (v, ref mut e)) = work.last_mut() {
+            let vu = v as usize;
+            if *e < edge_start[vu + 1] {
+                let w = edges[*e as usize].to as usize;
+                *e += 1;
+                if index[w] == NONE {
+                    index[w] = next;
+                    low[w] = next;
+                    next += 1;
+                    stack.push(w as u32);
+                    on_stack[w] = true;
+                    work.push((w as u32, edge_start[w]));
+                } else if on_stack[w] {
+                    low[vu] = low[vu].min(index[w]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(p, _)) = work.last() {
+                low[p as usize] = low[p as usize].min(low[vu]);
+            }
+            if low[vu] == index[vu] {
+                let id = u32::try_from(lens.len()).expect("成分の数が u32 に収まらない");
+                let mut len = 0_u32;
+                loop {
+                    let w = stack.pop().expect("成分の頂点がない") as usize;
+                    on_stack[w] = false;
+                    component[w] = id;
+                    len += 1;
+                    if w == vu {
+                        break;
+                    }
+                }
+                lens.push(len);
+            }
+        }
+    }
+    (component, lens)
 }

@@ -202,6 +202,7 @@ pub(super) fn holds(
     mut inside: Vec<Inside>,
     now: Tick,
     walks: &BTreeSet<(NodeId, SegmentId)>,
+    signals: &signal::Demand,
 ) -> Held {
     let mut passed = 0_u64;
     cands.sort_unstable_by_key(|c| (c.node, c.id));
@@ -219,7 +220,7 @@ pub(super) fn holds(
         group.clear();
         group.extend(same.iter().map(|c| (*c, Move::new(net, c.from, c.to))));
         let mut patience = PATIENCE;
-        if let Some(st) = signal::state(net, node, now) {
+        if let Some(st) = signal::state(net, node, now, signals) {
             patience = patience.saturating_add(st.red_ticks);
             // 青でない腕の候補は、止まりきれるかぎり停止線で止め、動きも置かない。
             group.retain(|(c, mv)| {
