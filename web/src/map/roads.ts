@@ -631,12 +631,13 @@ const MARKING_COLOR: Record<"center" | "divider", Color> = {
 };
 
 /**
- * 拡大したときに車道の上に描く路面の線。中央線と車線の区切りである。
- * 3 本以上が集まる交差点では、線を交差点の手前で止める。2 本だけがつながる角では、線を折れ曲がりに沿ってつなぐ。
+ * 拡大したときに車道の上に描く路面の線。中央線と車線の区切りと、交差点の横断歩道の縞である。
+ * 3 本以上が集まる交差点では、線を交差点の手前（横断歩道の始まり）で止める。2 本だけがつながる角では、
+ * 線を折れ曲がりに沿ってつなぐ。
  */
 export function roadMarkingGeometry(segments: Float64Array, nodes: Float64Array): Geometry {
   const geometry = new Geometry({ x: nodes[0] ?? 0, y: nodes[1] ?? 0 });
-  const { ends, each } = roadNet(segments, nodes);
+  const { ends, nodeList, each } = roadNet(segments, nodes);
   const trimOf = trimmer(segments, ends);
   each((a, b, kind, n) => {
     for (const strip of crossSection(kind)) {
@@ -649,7 +650,60 @@ export function roadMarkingGeometry(segments: Float64Array, nodes: Float64Array)
       geometry.strip(a, b, strip.offset, strip.half, color, THIN_PX, trimA, trimB);
     }
   });
+  // 交差点の腕ごとに、交差点の手前の車道を横切る横断歩道の縞を描く。高速道路の腕には横断歩道がない
+  for (const { x, y, node } of nodeList) {
+    if (node.arms.length < 3) {
+      continue;
+    }
+    for (const arm of node.arms) {
+      const kind = segments[arm.segment * SEGMENT_STRIDE + 4] ?? 0;
+      if (kind !== HIGHWAY_CODE) {
+        zebra(geometry, { x, y }, arm, node.half, carriagewayHalfWidth(kind));
+      }
+    }
+  }
   return geometry;
+}
+
+const ZEBRA_COLOR: Color = [0.95, 0.95, 0.95, 0.9];
+// 縞の、腕の向きの長さと、横の間隔と太さの半分（マス）
+const ZEBRA_LENGTH = 0.16;
+const ZEBRA_SPACING = 0.14;
+const ZEBRA_HALF = 0.035;
+
+/**
+ * 交差点 `at` の腕 `arm` の横断歩道。道路の端（歩道を含む、交差点から `half`）から腕の向きへ
+ * `ZEBRA_LENGTH` の長さで、車道の幅（中心線から両側へ `carriage`）に縞を並べる。
+ * 交差点の角には歩道が残るので、縞は角の歩道のあいだの車道を渡る。
+ */
+export function zebra(
+  geometry: Geometry,
+  at: Tile,
+  arm: { dx: number; dy: number },
+  half: number,
+  carriage: number,
+): void {
+  const diagonal = arm.dx !== 0 && arm.dy !== 0;
+  const sx = Math.sign(arm.dx);
+  const sy = Math.sign(arm.dy);
+  const next = { x: at.x + sx, y: at.y + sy };
+  const len = Math.hypot(sx, sy);
+  const start = diagonal ? half * Math.SQRT2 : half;
+  const count = Math.max(1, Math.floor((2 * carriage) / ZEBRA_SPACING));
+  const first = -((count - 1) * ZEBRA_SPACING) / 2;
+  for (let k = 0; k < count; k++) {
+    const offset = first + k * ZEBRA_SPACING;
+    geometry.strip(
+      at,
+      next,
+      offset,
+      ZEBRA_HALF,
+      ZEBRA_COLOR,
+      THIN_PX,
+      start,
+      len - start - ZEBRA_LENGTH,
+    );
+  }
 }
 
 // 信号の灯火の色。値は chizu-core の Light の値（0 青、1 黄、2 赤）である

@@ -166,10 +166,11 @@ fn walkers_cross_to_the_opposite_sidewalk_at_a_node() {
     ];
     want.sort();
     assert_eq!(next, want);
-    // 行き先を北向きの歩道の位置で表しても、交差点で曲がって南向きに歩いて着く。
+    // 行き先を北向きの歩道の位置で表しても、交差点で曲がって南向きに歩いて着く。南の側を東へ
+    // 歩いてきて、行き先は南の道路の東の側にあるので、交差点で南の腕の横断歩道を渡る。
     let mut w = Walkers::new(n);
     let id = w.spawn(at(8, 0, (1, 0), 0), at(10, 3, (0, -1), 0)).unwrap();
-    assert_eq!(w.ticks_to_arrive(id), walk_ticks(5 * 8_000));
+    assert_eq!(w.ticks_to_arrive(id), walk_ticks(5 * 8_000 + 6_000));
 }
 
 #[test]
@@ -198,9 +199,15 @@ fn splitting_the_road_keeps_the_walk_and_its_timing() {
         road(n, (12, -3), (12, 3));
     });
     assert!(lost.is_empty());
-    // 30 tick で 41.67m 進み、(2, 0) の分かれ目は過ぎている。
+    // 30 tick で 41.67m 進み、(2, 0) の分かれ目は過ぎている。(12, 0) の交差点では、南の腕の
+    // 横断歩道（小さい道路の 2 車線ぶん）を渡るぶんだけ遅れる。
     assert_eq!(w.trips.get(id).unwrap().route().links.len(), 2);
-    assert_eq!(30 + w.ticks_to_arrive(id), walk_ticks(19 * 8_000));
+    let cross = u64::from(crossing::width(
+        &w.net,
+        w.trips.get(id).unwrap().link().segment,
+    ));
+    assert_eq!(cross, 6_000);
+    assert_eq!(30 + w.ticks_to_arrive(id), walk_ticks(19 * 8_000 + cross));
 }
 
 #[test]
@@ -552,7 +559,8 @@ fn world_walkers_keep_walking_across_a_split_and_arrive_on_time() {
             assert_eq!(w.apply(&c), crate::world::ApplyOutcome::Applied);
         }
     });
-    assert_eq!(split, plain);
+    // 先の (20, 0) にできた交差点では、南の腕の横断歩道を渡るぶんだけ遅れる。
+    assert_eq!(split, walk_ticks(29 * 8_000 + 6_000));
 }
 
 #[test]

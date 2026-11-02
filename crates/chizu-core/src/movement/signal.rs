@@ -26,6 +26,10 @@ pub const ALL_RED: u64 = 2;
 /// 1 つの軸の段階の長さ。
 pub const PHASE: u64 = GREEN + YELLOW + ALL_RED;
 
+/// 歩く人は、渡る腕と交わる軸の青が終わるこの tick 数前からは、新しく渡り始めない。渡っている人が
+/// 黄と全方向の赤のうちに渡り終えるようにする。
+pub const WALK_CLEAR: u64 = 8;
+
 /// 腕から交差点に入る車への灯火。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -66,6 +70,8 @@ pub struct SignalState {
     pub light: Light,
     /// 1 つの腕が 1 周期のうちに青でない tick 数。
     pub red_ticks: u32,
+    /// いまの軸の段階に入ってからの tick 数。
+    pub elapsed: u64,
 }
 
 impl SignalState {
@@ -76,6 +82,12 @@ impl SignalState {
         } else {
             Light::Red
         }
+    }
+
+    /// 軸 `axis` の腕の横断歩道を、歩く人が渡り始めてよいか。その腕の車が赤で、ほかの軸が青に
+    /// なってから、青が終わる [`WALK_CLEAR`] tick 前までである。
+    pub fn walk(&self, axis: u8) -> bool {
+        axis != self.axis && self.light == Light::Green && self.elapsed + WALK_CLEAR < GREEN
     }
 }
 
@@ -115,6 +127,7 @@ pub fn state(net: &Network, node: NodeId, now: Tick) -> Option<SignalState> {
         axis: order[phase],
         light,
         red_ticks: u32::try_from(cycle - GREEN).expect("赤の長さが u32 に収まらない"),
+        elapsed: within,
     })
 }
 

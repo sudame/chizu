@@ -326,7 +326,17 @@ impl Trips {
                 continue;
             };
             t.then = Then::Arrive;
-            let (from, departed) = (t.position(), t.departed);
+            // 車の位置は車の経路の最初のリンクの向きで表してある。建物と反対の向きの車線から出る車なら、
+            // 建物の側の歩道のリンクで表し直す。
+            let spot = t.position().resolve(net);
+            let from = if t.walk.far {
+                spot.and_then(|s| super::flip(net, s))
+            } else {
+                spot
+            }
+            .and_then(|(l, o)| SidewalkPos::on_link(net, l, o))
+            .unwrap_or_else(|| t.position());
+            let departed = t.departed;
             self.parking.release(lot);
             let ends = from
                 .resolve_on(net, LaneMode::Sidewalk)
@@ -334,8 +344,8 @@ impl Trips {
             let found =
                 ends.and_then(|e| plan(router, net, LaneMode::Sidewalk, &[e], false).remove(0));
             match found {
-                Some((route, e)) => {
-                    self.rows[i] = Some(make_trip(net, route, e, to, departed));
+                Some((route, e, jay)) => {
+                    self.rows[i] = Some(make_trip(net, route, e, to, departed, jay));
                     self.rescues.walked_instead = self.rescues.walked_instead.saturating_add(1);
                 }
                 None => ended.push(i),
@@ -382,9 +392,14 @@ impl Trips {
             let mut routes = plan(router, net, mode, &ends, false).into_iter();
             // 置き直す行はまだ歩いているので、車線の上の車には入らない。
             let mut ix = (mode == LaneMode::Car).then(|| car::LaneIndex::of(&self.rows, None));
+            let zones = if mode == LaneMode::Car && !legs.is_empty() {
+                super::crossing::jay_zones(net, &self.rows)
+            } else {
+                Default::default()
+            };
             for ((i, _, to, then), e) in legs.into_iter().zip(resolved) {
                 let found = e.and_then(|_| routes.next().expect("探した経路の数が合わない"));
-                let Some((route, e)) = found else {
+                let Some((route, e, jay)) = found else {
                     ended.push(i);
                     continue;
                 };
@@ -393,12 +408,12 @@ impl Trips {
                 // 歩道から車線へ、車線から歩道へ移るときも、それまで描いていたずれから少しずつ移す。
                 // 車は道路のどちらの側の車線からも出るので、移る幅は道路の幅ほどになりうる。
                 let shown = old.shift_on_leg(net, old.leg as usize);
-                let mut t: Trip = make_trip(net, route, e, to, departed);
+                let mut t: Trip = make_trip(net, route, e, to, departed, jay);
                 t.then = then;
                 self.rows[i] = Some(t);
                 // 出発と同じく、空いた車線に置き、前の車と重なるなら下げ、空きがなければ待たせる。
                 if let Some(ix) = ix.as_mut() {
-                    car::place(&mut self.rows, net, ix, i);
+                    car::place(&mut self.rows, net, ix, i, &zones);
                 }
                 let t = self.rows[i].as_mut().expect("置いた主体がない");
                 t.blend = Some(lane_shift::Blend {
