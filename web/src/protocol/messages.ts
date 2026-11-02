@@ -109,6 +109,8 @@ export type MainToWorker =
   /** id は画面が振る番号で、結果の通知で返ってくる。 */
   | { kind: "command"; id: number; command: CommandMessage }
   | { kind: "pause"; paused: boolean }
+  /** 1 倍より遅く進めるときの倍率（0 より大きく 1 以下）。中核の速度は変えず、tick を進める頻度だけを落とす。 */
+  | { kind: "pace"; pace: number }
   /** 施設を間口のマス (x, y) に置けるかを、向きごとに中核に問い合わせる。 */
   | { kind: "probe-service"; service: ServiceName; x: number; y: number }
   /** マス (x, y) にある建物か施設の様子を中核に問い合わせる。 */
@@ -179,6 +181,8 @@ export type WorkerToMain =
   | { kind: "outcome"; id: number; seq?: number; outcome: Outcome; reason?: string }
   /** dev-spawn-walks で出せた人数。 */
   | { kind: "dev-spawned"; count: number }
+  /** Worker が受け取って使っている倍率。画面の表示はこの値を使う。 */
+  | { kind: "pace"; pace: number }
   | { kind: "error"; message: string };
 
 function isChunkData(value: unknown): value is ChunkData {
@@ -262,6 +266,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       return typeof v.state === "string" && v.commands instanceof ArrayBuffer;
     case "dev-spawned":
       return Number.isInteger(v.count);
+    case "pace":
+      return typeof v.pace === "number" && v.pace > 0 && v.pace <= 1;
     case "service-probe":
       return (
         typeof v.service === "string" &&
