@@ -36,6 +36,13 @@ export const TRAFFIC_BAND_WIDTH = 0.06;
 export const TRAFFIC_BAND_ALPHA = 0.7;
 /** 帯の、半分の太さの下限（画面のピクセル）。寄りの段の始めでも 2px の帯にする。 */
 export const TRAFFIC_BAND_MIN_PX = 1;
+/**
+ * 細部の段の帯の幅（マス）と不透明度。寄りの帯より細く薄くし、待っている車の列を主役にする。
+ * 半分の太さの下限は 0.5px（帯の太さで 1px）にする。
+ */
+export const TRAFFIC_FINE_BAND_WIDTH = 0.04;
+export const TRAFFIC_FINE_BAND_ALPHA = 0.5;
+export const TRAFFIC_FINE_BAND_MIN_PX = 0.5;
 // 高速道路の破線の周期（画面のピクセル）
 const LINE_DASH_PX = 8;
 const BAND_DASH_PX = 6;
@@ -105,9 +112,15 @@ export class TrafficMesh implements MeshSource {
 
 /**
  * 交通の主題図の頂点。`free` は「空いている」の線（引きでは描かない）、`busy` はやや混んでいる以上の線と
- * 高速道路の破線、`bands` は寄りの段の、車道の両端の帯である。
+ * 高速道路の破線、`bands` は寄りの段の、車道の両端の帯である。`fineBands` は細部の段の細く薄い帯で、
+ * 細部の段に入っていないときは作らずに null にする。
  */
-export type TrafficMeshes = { free: TrafficMesh; busy: TrafficMesh; bands: TrafficMesh };
+export type TrafficMeshes = {
+  free: TrafficMesh;
+  busy: TrafficMesh;
+  bands: TrafficMesh;
+  fineBands: TrafficMesh | null;
+};
 
 /** 区間の上の帯 1 本の形。位置は基準のマスからの相対で、`a` から `b` への帯の中心線である。 */
 type Strip = {
@@ -128,6 +141,8 @@ type SegmentShape = {
   lineMin: number;
   /** 車道の両端の帯（左と右）。 */
   bands: [Strip, Strip];
+  /** 細部の段の、車道の両端の細い帯（左と右）。 */
+  fineBands: [Strip, Strip];
 };
 
 /** 2 本の区間だけがつながる角。腕の線をつなぐために、両方の値が同じなら線の色の正方形を置く。 */
@@ -213,16 +228,15 @@ export class TrafficNet {
     const origin = this.origin;
     const { ends, nodeList, each } = roadNet(segments, nodes);
     const trimOf = trimmer(segments, ends);
-    const bandHalf = TRAFFIC_BAND_WIDTH / 2;
     this.#shapes = [];
     each((a, b, kind, n) => {
       if (a.x === b.x && a.y === b.y) {
         this.#shapes.push(null);
         return;
       }
-      const bandOffset = drawnAsphaltHalf(kind, a, b) - bandHalf;
-      const band = (side: number): Strip => {
-        const offset = side * bandOffset;
+      // 帯は、外側の縁を縁石にそろえる
+      const band = (side: number, width: number): Strip => {
+        const offset = side * (drawnAsphaltHalf(kind, a, b) - width / 2);
         const trimA = trimOf(n, false, offset, (node) => node.asphalt);
         const trimB = trimOf(n, true, offset, (node) => node.asphalt);
         return strip(origin, a, b, offset, trimA, trimB);
@@ -232,7 +246,8 @@ export class TrafficNet {
         line: strip(origin, a, b, 0, 0, 0),
         lineHalf: TRAFFIC_LINE_SHARE * lineHalfWidth(kind, a, b),
         lineMin: Math.max(TRAFFIC_LINE_MIN_PX, TRAFFIC_LINE_SHARE * roadStyle(kind).minPx),
-        bands: [band(-1), band(1)],
+        bands: [band(-1, TRAFFIC_BAND_WIDTH), band(1, TRAFFIC_BAND_WIDTH)],
+        fineBands: [band(-1, TRAFFIC_FINE_BAND_WIDTH), band(1, TRAFFIC_FINE_BAND_WIDTH)],
       });
     });
     // 2 本だけがつながる角では、線の端どうしのあいだに切れ目が出るので、正方形でふさぐ。
@@ -265,8 +280,11 @@ export class TrafficNet {
     return this.#shapes.length;
   }
 
-  /** 区間ごとの値 `values`（Worker の traffic_segments）で色を付けた頂点を作る。 */
-  meshes(values: Uint8Array): TrafficMeshes {
+  /**
+   * 区間ごとの値 `values`（Worker の traffic_segments）で色を付けた頂点を作る。
+   * `fine` が false なら、細部の段の帯は作らない。
+   */
+  meshes(values: Uint8Array, fine = false): TrafficMeshes {
     let free = 0;
     let busy = 0;
     let bands = 0;
@@ -292,10 +310,19 @@ export class TrafficNet {
       free: new TrafficMesh(this.origin, (free + corners) * QUAD_VERTICES),
       busy: new TrafficMesh(this.origin, (busy + corners) * QUAD_VERTICES),
       bands: new TrafficMesh(this.origin, bands * QUAD_VERTICES),
+      fineBands: fine ? new TrafficMesh(this.origin, bands * QUAD_VERTICES) : null,
     };
     const uncounted = TRAFFIC_UNCOUNTED_COLOR;
     const uncountedBand: Color = [uncounted[0], uncounted[1], uncounted[2], TRAFFIC_BAND_ALPHA];
+    const uncountedFine: Color = [
+      uncounted[0],
+      uncounted[1],
+      uncounted[2],
+      TRAFFIC_FINE_BAND_ALPHA,
+    ];
     const bandHalf = TRAFFIC_BAND_WIDTH / 2;
+    const fineHalf = TRAFFIC_FINE_BAND_WIDTH / 2;
+    const fineMesh = out.fineBands;
     for (const [i, shape] of this.#shapes.entries()) {
       if (shape === null) {
         continue;
@@ -314,6 +341,19 @@ export class TrafficNet {
             BAND_DASH_PX,
           );
         }
+        if (fineMesh !== null) {
+          for (const band of shape.fineBands) {
+            writeStrip(
+              fineMesh,
+              band,
+              fineHalf,
+              TRAFFIC_FINE_BAND_MIN_PX,
+              uncountedFine,
+              0,
+              BAND_DASH_PX,
+            );
+          }
+        }
         continue;
       }
       const value = values[i] ?? 0;
@@ -327,6 +367,14 @@ export class TrafficNet {
       for (const band of shape.bands) {
         if (band.length > 0) {
           writeStrip(out.bands, band, bandHalf, TRAFFIC_BAND_MIN_PX, banded, 0, 0);
+        }
+      }
+      const fineColor = trafficColor(value, TRAFFIC_FINE_BAND_ALPHA);
+      if (fineMesh !== null && fineColor !== undefined) {
+        for (const band of shape.fineBands) {
+          if (band.length > 0) {
+            writeStrip(fineMesh, band, fineHalf, TRAFFIC_FINE_BAND_MIN_PX, fineColor, 0, 0);
+          }
         }
       }
     }
@@ -354,6 +402,7 @@ export class TrafficLines {
   #values: Uint8Array | null = null;
   #valuesRevision = Number.NaN;
   #changed = false;
+  #fine = false;
 
   /** 道路網が変わった。形は、次に描くときに作り直す（交通を出していないあいだは作らない）。 */
   setRoads(revision: number, segments: Float64Array, nodes: Float64Array): void {
@@ -388,8 +437,13 @@ export class TrafficLines {
 
   /**
    * 前に呼んでから変わっていれば、新しい頂点を返す。描くものがなければ null、変わっていなければ undefined を返す。
+   * `fine` は細部の段の帯を作るかで、細部の段に入ったときは、値が変わっていなくても帯を足して作り直す。
    */
-  take(): TrafficMeshes | null | undefined {
+  take(fine = false): TrafficMeshes | null | undefined {
+    if (fine !== this.#fine) {
+      this.#fine = fine;
+      this.#changed ||= fine;
+    }
     if (!this.#changed) {
       return undefined;
     }
@@ -402,6 +456,6 @@ export class TrafficLines {
     if (values.length !== this.#net.segmentCount) {
       return null;
     }
-    return this.#net.meshes(values);
+    return this.#net.meshes(values, fine);
   }
 }
