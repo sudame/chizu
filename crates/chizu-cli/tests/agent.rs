@@ -393,7 +393,7 @@ fn observe_shows_the_tax_effect() {
     );
     cli(&["agent", "act", d, &cmds]);
     let seen = json(&cli(&["agent", "observe", d]));
-    assert_eq!(seen["jobs"]["keptPermille"]["Commercial"], 650);
+    assert_eq!(seen["jobs"]["keptPermille"]["Commercial"], 629);
     assert_eq!(seen["jobs"]["keptPermille"]["Industrial"], 1000);
     assert_eq!(seen["taxEffect"]["residentialDemandShift"], -25);
 }

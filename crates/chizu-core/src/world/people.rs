@@ -41,16 +41,16 @@ pub const MIGRANTS_PER_DEMAND: u64 = 4;
 pub const MIGRANTS_PER_VACANCY: u64 = 8;
 
 /// 世帯の住民の幸福度の平均がこれより低いと、世帯は街を出ていくことがある。
-/// 標準の税率（10%）で暮らす住民の幸福度の平均よりわずかに低い値にしてあり、税率を上げて幸福度が下がると、
-/// 下がったぶんに応じて出ていく世帯が増える。
-pub const LEAVE_BELOW: u8 = 80;
+/// 標準の税率（10%）で暮らす住民の幸福度の平均（84 前後）より十分低い値にしてあり、標準の街の住民はほとんど出ていかない。
+/// 税率を上げて幸福度が下がるか、職を失って暮らし向きが下がると、下がったぶんに応じて出ていく世帯が増える。
+pub const LEAVE_BELOW: u8 = 52;
 
 /// 世帯の幸福度の平均が [`LEAVE_BELOW`] を 1 点下回るごとに、1 時間あたりに出ていく確率に足す値（‰）。
-pub const LEAVE_PERMILLE_PER_POINT: u32 = 1;
+pub const LEAVE_PERMILLE_PER_POINT: u32 = 2;
 
 /// 越してきた人の見込みの幸福度が [`LEAVE_BELOW`] をこの点数だけ上回れば、移住の数を減らさない。
 /// 上回る点数がこれより少なければ、その割合まで減らす。
-pub const APPEAL_FULL_MARGIN: u64 = 8;
+pub const APPEAL_FULL_MARGIN: u64 = 36;
 
 /// 家のない世帯が街を出ていくまでの時間（tick）。ゲーム内の 1 日である。
 pub const HOMELESS_LEAVE_TICKS: u64 = TICKS_PER_DAY;
@@ -1045,10 +1045,11 @@ pub(crate) mod tests {
         );
         assert!(soon.1 > base.1, "上げた直後 {soon:?}、標準 {base:?}");
         // 日がたつと、人口も職場も標準より大きく減り、収入は標準を下回る。
-        for permille in [150, 200, 300] {
+        // 上げるほど人口は大きく減る。15% で 2 割、20% で半分以上、30% でほとんどいなくなる。
+        for (permille, percent) in [(150, 85), (200, 60), (300, 30)] {
             let high = run_with_taxes(permille, 8);
             assert!(
-                high.0 * 4 < pop * 3,
+                high.0 * 100 < pop * percent,
                 "{permille}‰：{high:?}、標準 {standard:?}"
             );
             assert!(

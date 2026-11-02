@@ -237,17 +237,18 @@ pub fn happiness_pull(happiness: u8) -> i64 {
     crate::round::div_floor(i64::from(happiness) - neutral, HAPPINESS_DEMAND_DIVISOR)
 }
 
-/// 税率が基準（[`REFERENCE_TAX_PERMILLE`]）を 1‰ 上回るごとに、雇える職場の割合を減らす値（‰）。
+/// 雇える職場の割合の下がり方を決める値（‰）。基準を超えた分がこれと等しいとき、割合は半分になる。
 /// 高い税率では企業が人を雇えなくなり、職のない住民が増えて、幸福度と税収が下がる。
-const JOBS_LOST_PERMILLE_PER_TAX_PERMILLE: u64 = 7;
+const JOBS_HALF_TAX_PERMILLE: u64 = 85;
 
 /// 住宅の需要に、税率の基準との差を効かせる強さ。基準より 2‰ 高いごとに 1 引き、2‰ 低いごとに 1 足す。
 const TAX_DEMAND_DIVISOR: i64 = 2;
 
-/// 税率 `tax_permille` のもとで、職場のうち雇える割合（‰）。基準までは 1000 で、それより高いと下がり、0 で止まる。
+/// 税率 `tax_permille` のもとで、職場のうち雇える割合（‰）。基準までは 1000 で、それより高いと
+/// `1000 × K / (K + 基準を超えた分)`（K は [`JOBS_HALF_TAX_PERMILLE`]）に従って、なだらかに 0 へ近づく。
 pub fn jobs_kept_permille(tax_permille: u16) -> u64 {
     let over = u64::from(tax_permille).saturating_sub(REFERENCE_TAX_PERMILLE as u64);
-    1_000u64.saturating_sub(over * JOBS_LOST_PERMILLE_PER_TAX_PERMILLE)
+    1_000 * JOBS_HALF_TAX_PERMILLE / (JOBS_HALF_TAX_PERMILLE + over)
 }
 
 /// 住宅の需要のうち、住宅の税率から来る分。基準より高ければ負、低ければ正である。
@@ -400,8 +401,12 @@ mod tests {
     fn a_high_tax_cuts_jobs_and_demand() {
         assert_eq!(jobs_kept_permille(0), 1_000);
         assert_eq!(jobs_kept_permille(100), 1_000);
-        assert_eq!(jobs_kept_permille(150), 650);
-        assert_eq!(jobs_kept_permille(300), 0);
+        assert_eq!(jobs_kept_permille(150), 629);
+        assert_eq!(jobs_kept_permille(190), 485);
+        // 税率が上がるほど減るが、どこにも崖はない。
+        let kept: Vec<u64> = (100..=300).map(jobs_kept_permille).collect();
+        assert!(kept.windows(2).all(|p| p[0] >= p[1] && p[0] - p[1] <= 12));
+        assert!(kept[200] > 200);
         assert_eq!(residential_tax_pull(100), 0);
         assert_eq!(residential_tax_pull(150), -25);
         assert_eq!(residential_tax_pull(80), 10);
@@ -409,11 +414,11 @@ mod tests {
         taxed.tax_permille = [150; 4];
         let base = demand(&stats([true; 4]));
         let high = demand(&taxed);
-        // 住宅は税率の分だけ下がる。職場は、必要な数が 65% に減る。
+        // 住宅は税率の分だけ下がる。職場は、必要な数が 62.9% に減る。
         assert_eq!(high[0], base[0] - 25);
         assert_eq!(
             high[1..],
-            [250 * 65 / 100, (10 + 210) * 65 / 100, 140 * 65 / 100]
+            [250 * 629 / 1000, (10 + 210) * 629 / 1000, 140 * 629 / 1000]
         );
         // 基準以下の税率では、職場の需要は変わらない。
         taxed.tax_permille = [50; 4];
