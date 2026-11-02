@@ -15,7 +15,7 @@ use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
 use crate::rng::{RngPurpose, mix_words};
-use crate::routing::AstarRouter;
+use crate::routing::{AstarRouter, GraphError};
 use crate::schedule::bucket_at;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, WORLD_LIMIT, local_index};
@@ -598,6 +598,11 @@ impl World {
         &self.population
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn network_mut(&mut self) -> &mut Network {
+        &mut self.network
+    }
+
     #[cfg(test)]
     pub(crate) fn population_mut(&mut self) -> &mut Population {
         &mut self.population
@@ -732,9 +737,11 @@ impl World {
     }
 
     /// 読み戻した街の経路探索を、網から作り直す。グラフを作ったときの網の版は書き出したときのままにする。
-    pub(crate) fn rebuild_router(&mut self) {
+    /// 網の中身が食い違っていたら、経路探索を変えずに `Err` を返す。
+    pub(crate) fn rebuild_router(&mut self) -> Result<(), GraphError> {
         let version = self.router.router.version();
-        self.router.router = AstarRouter::new(&self.network).with_version(version);
+        self.router.router = AstarRouter::try_new(&self.network)?.with_version(version);
+        Ok(())
     }
 
     /// 状態ハッシュ。表は決まった順番で書き出す。
