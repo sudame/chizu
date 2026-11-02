@@ -37,10 +37,16 @@ export const OUTSIDE_COLOR = UNOWNED_COLOR;
 // 選択と仮の表示
 const BLUE = "#1a73e8";
 const RED = "#d93025";
-/** 置ける仮の表示。 */
+/** 置ける仮の表示の目印（始点のマスなど）。 */
 export const PREVIEW_OK_COLOR = hex(BLUE, 0.55);
-/** 置けない仮の表示。 */
-export const PREVIEW_BAD_COLOR = hex(RED, 0.45);
+/** 置ける仮の表示の縁。 */
+export const PREVIEW_OK_EDGE_COLOR = hex(BLUE);
+/** 置けない仮の表示の塗り。 */
+export const PREVIEW_BAD_COLOR = hex(RED, 0.35);
+/** 置けない仮の表示の縁（破線）。 */
+export const PREVIEW_BAD_EDGE_COLOR = hex(RED);
+/** 道路を引くときの仮の表示の塗りの濃さ（選んだ種類の塗りに掛ける）。 */
+export const PREVIEW_ROAD_FILL_ALPHA = 0.7;
 /** 種類を変える道具でなぞった直線。変わる区間より薄くする。 */
 export const PREVIEW_LINE_COLOR = hex(BLUE, 0.18);
 /** 取り壊す範囲の塗り。 */

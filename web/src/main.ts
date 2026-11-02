@@ -23,8 +23,11 @@ import {
   HINT_EDGE_COLOR,
   HINT_FILL_COLOR,
   PREVIEW_BAD_COLOR,
+  PREVIEW_BAD_EDGE_COLOR,
   PREVIEW_LINE_COLOR,
   PREVIEW_OK_COLOR,
+  PREVIEW_OK_EDGE_COLOR,
+  PREVIEW_ROAD_FILL_ALPHA,
 } from "./map/palette.ts";
 import { MapRenderer } from "./map/renderer.ts";
 import {
@@ -32,12 +35,14 @@ import {
   buildingGeometry,
   type Color,
   FACILITY_COLOR,
+  footprintOutline,
   Geometry,
   MIN_PX,
   ROAD_VISUAL_HALF,
   type RoadMeshes,
   roadFootprint,
   roadMeshes,
+  roadStyle,
   signalGeometry,
   unsuppliedCount,
   zoneBlockColor,
@@ -335,9 +340,29 @@ const zoneArea = (zone: ZoneName): { fill: Color; edge: Color } => {
     ? { fill: CLEAR_ZONE_COLOR, edge: CLEAR_ZONE_COLOR }
     : { fill: zoneBlockColor(code), edge: buildingEdgeColor(code) };
 };
-// 縁の太さ（画面のピクセル）
+// 縁の太さと、破線の周期（画面のピクセル）
 const AREA_EDGE_PX = 1.5;
 const BUY_EDGE_PX = 2;
+const DASH_PX = 8;
+
+const ROAD_CODE: Record<RoadKindName, number> = { Small: 1, Medium: 2, Large: 3 };
+
+/**
+ * 道路を引くときの仮の表示。置けるときは、選んだ種類の塗りの 70% に青の縁、
+ * 置けないときは、赤の 35% の塗りに赤の破線の縁にする。
+ */
+function roadPreview(geometry: Geometry, from: Tile, to: Tile, road: RoadKindName, ok: boolean) {
+  const [r, g, b] = roadStyle(ROAD_CODE[road]).asphalt;
+  roadFootprint(geometry, from, to, ok ? [r, g, b, PREVIEW_ROAD_FILL_ALPHA] : PREVIEW_BAD_COLOR, 0);
+  footprintOutline(
+    geometry,
+    from,
+    to,
+    ok ? PREVIEW_OK_EDGE_COLOR : PREVIEW_BAD_EDGE_COLOR,
+    AREA_EDGE_PX,
+    ok ? 0 : DASH_PX,
+  );
+}
 
 let tool: Tool = { kind: "none" };
 let roadCosts: RoadCostTable | null = null;
@@ -391,10 +416,10 @@ function updatePreview(): void {
       // 変わるのは直線が通る区間の全体なので、区間ごと塗る
       const plan = upgradePlan(roadSegments, roadCosts, tool.road, from, to);
       const short = plan.cost > 0 && plan.cost > money;
-      const color = short || plan.segments.length === 0 ? PREVIEW_BAD_COLOR : PREVIEW_OK_COLOR;
       roadFootprint(geometry, from, to, PREVIEW_LINE_COLOR, MIN_PX);
+      const ok = !(short || plan.segments.length === 0);
       for (const s of plan.segments) {
-        roadFootprint(geometry, s.from, s.to, color, MIN_PX);
+        roadPreview(geometry, s.from, s.to, tool.road, ok);
       }
       info =
         plan.roads === 0
@@ -413,8 +438,7 @@ function updatePreview(): void {
     if (roadStart !== null && roadCosts !== null) {
       const cost = roadCost(roadCosts, tool.road, from, to);
       const length = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y));
-      const color = cost > money ? PREVIEW_BAD_COLOR : PREVIEW_OK_COLOR;
-      roadFootprint(geometry, from, to, color, MIN_PX);
+      roadPreview(geometry, from, to, tool.road, cost <= money);
       info = `長さ ${length} マス・費用 ${cost.toLocaleString("ja-JP")}`;
       if (isDisconnected(roadIndex, from, to)) {
         info += `・${DISCONNECTED_NOTICE}`;
@@ -471,6 +495,7 @@ function updatePreview(): void {
         min.y + CHUNK_SIDE,
         HINT_EDGE_COLOR,
         BUY_EDGE_PX,
+        DASH_PX,
       );
       info = `チャンク (${c.cx}, ${c.cy})`;
     }

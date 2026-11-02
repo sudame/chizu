@@ -32,7 +32,9 @@ export const MIN_PX = 1.5;
 /** 車線の区切りなど細い線の、半分の太さの下限（画面のピクセル）。 */
 export const THIN_PX = 0.5;
 
-// 半分の太さは、世界の単位の a_half を画面に直した値と、画面のピクセルの下限 a_min の大きいほうにする。
+// 半分の太さは、世界の単位の a_half を画面に直した値と、画面のピクセルの下限 a_min の大きいほうに、
+// 画面のピクセルの a_extra を足した値にする。a_dash が正なら、a_along（世界の距離）に沿って、
+// 画面で a_dash ピクセルの周期の破線にする。
 // u_alpha は、拡大したときだけ描く路面の線を、縮尺に合わせて薄くするのに使う
 const VERTEX = `#version 300 es
 in vec2 a_pos;
@@ -40,28 +42,39 @@ in vec2 a_normal;
 in float a_half;
 in float a_min;
 in vec4 a_color;
+in float a_extra;
+in float a_along;
+in float a_dash;
 uniform vec2 u_offset;
 uniform float u_zoom;
 uniform vec2 u_viewport;
 uniform float u_alpha;
 out vec4 v_color;
+out float v_distance;
+flat out float v_dash;
 void main() {
-  float half_px = max(a_half * u_zoom, a_min);
+  float half_px = max(a_half * u_zoom, a_min) + a_extra;
   vec2 p = (a_pos * u_zoom + u_offset + a_normal * half_px) / (u_viewport * 0.5);
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
   v_color = vec4(a_color.rgb, a_color.a * u_alpha);
+  v_distance = a_along * u_zoom;
+  v_dash = a_dash;
 }`;
 
 const FRAGMENT = `#version 300 es
 precision mediump float;
 in vec4 v_color;
+in float v_distance;
+flat in float v_dash;
 out vec4 color;
 void main() {
-  color = v_color;
+  // 破線は、discard せずに不透明度で抜く（実線は v_dash が 0）
+  float on = v_dash > 0.0 ? step(mod(v_distance, v_dash), v_dash * 0.5) : 1.0;
+  color = vec4(v_color.rgb, v_color.a * on);
 }`;
 
-/** 頂点 1 つの数の個数。位置 2、法線 2、半分の太さ 1、半分の太さの下限 1、色 4。 */
-export const VERTEX_FLOATS = 10;
+/** 頂点 1 つの数の個数。位置 2、法線 2、半分の太さ 1、半分の太さの下限 1、色 4、足す太さ 1、破線の位置 1、破線の周期 1。 */
+export const VERTEX_FLOATS = 13;
 
 /** 図形の三角形。頂点は [-1, 1] の範囲の (x, y) で、y は下向きが正である。 */
 export type Triangle = readonly [
@@ -119,8 +132,18 @@ export const SIDEWALK_EDGE_COLOR = hex("#cfc8ba");
 export const PLANTING_COLOR = hex("#e4eedb");
 // 高速道路の車道の半分の幅。車線 2 本の外側（0.45〜0.5 マス）を、縁の色の路肩にする。外側の車線の車は 0.44 マスまでに収まる
 const HIGHWAY_ASPHALT_HALF = 0.45;
-// 縮小したとき、縁の帯を車道より片側でこのピクセル数だけ広く残す
-const EDGE_EXTRA_PX = 1;
+// 縮小したとき、縁の帯を塗りの帯より片側でこのピクセル数だけ広く残す
+export const EDGE_EXTRA_PX = 1;
+
+// 縮小したときの線の、世界の幅の半分（マス）。決まりの表の幅（小 0.62、中 0.80、大 0.96、高速 1.00）の半分である。
+// 画面での太さは `max(下限, 世界の幅 × 倍率)` で、下限は RoadStyle の minPx（表の下限の半分）にする
+const LINE_HALF: Record<number, number> = { 1: 0.31, 2: 0.4, 3: 0.48, [HIGHWAY_CODE]: 0.5 };
+
+/** 縮小したときの線の、世界の半分の幅（マス）。斜めの区間は脇のマスの建物にかからない幅に抑える。 */
+export function lineHalfWidth(kindCode: number, a: Tile, b: Tile): number {
+  const half = LINE_HALF[kindCode] ?? 0.31;
+  return isDiagonal(a, b) ? Math.min(half, DIAGONAL_ASPHALT_HALF) : half;
+}
 
 export const ROAD_STYLES: Record<number, RoadStyle> = {
   1: { asphalt: hex("#ffffff"), edge: hex("#c8c2b6"), minPx: 0.9 },
@@ -184,6 +207,35 @@ export const MARKING_COLORS: Record<number, { center: Color; divider: Color } | 
   [HIGHWAY_CODE]: { center: hex("#ffffff"), divider: hex("#fde3c4") },
 };
 
+/**
+ * 線 a〜b が通るマスの縁。縦横の線は 1 つの長方形の縁にし、斜めの線と 1 マスは、通るマスごとの縁にする。
+ * `dashPx` が正なら、画面でその周期の破線にする。
+ */
+export function footprintOutline(
+  geometry: Geometry,
+  a: Tile,
+  b: Tile,
+  color: Color,
+  px: number,
+  dashPx = 0,
+): void {
+  if (isDiagonal(a, b)) {
+    for (const t of tilesOnLine(a, b)) {
+      geometry.outline(t.x, t.y, t.x + 1, t.y + 1, color, px, dashPx);
+    }
+    return;
+  }
+  geometry.outline(
+    Math.min(a.x, b.x),
+    Math.min(a.y, b.y),
+    Math.max(a.x, b.x) + 1,
+    Math.max(a.y, b.y) + 1,
+    color,
+    px,
+    dashPx,
+  );
+}
+
 /** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
 export class Geometry {
   readonly #data: number[] = [];
@@ -205,12 +257,26 @@ export class Geometry {
     half: number,
     min: number,
     color: Color,
+    extra = 0,
+    along = 0,
+    dash = 0,
   ): void {
-    this.#data.push(x - this.origin.x, y - this.origin.y, nx, ny, half, min, ...color);
+    this.#data.push(
+      x - this.origin.x,
+      y - this.origin.y,
+      nx,
+      ny,
+      half,
+      min,
+      ...color,
+      extra,
+      along,
+      dash,
+    );
   }
 
   /** マス a の中心からマス b の中心への線。半分の太さは画面で `min` ピクセルを下回らない。 */
-  segment(a: Tile, b: Tile, half: number, color: Color, min = MIN_PX): void {
+  segment(a: Tile, b: Tile, half: number, color: Color, min = MIN_PX, extra = 0): void {
     const ax = a.x + 0.5;
     const ay = a.y + 0.5;
     const bx = b.x + 0.5;
@@ -222,7 +288,7 @@ export class Geometry {
     const nx = -(by - ay) / len;
     const ny = (bx - ax) / len;
     const v = (x: number, y: number, s: number) =>
-      this.#vertex(x, y, nx * s, ny * s, half, min, color);
+      this.#vertex(x, y, nx * s, ny * s, half, min, color, extra);
     v(ax, ay, 1);
     v(ax, ay, -1);
     v(bx, by, 1);
@@ -269,13 +335,13 @@ export class Geometry {
   }
 
   /** マスの中心に置く正方形。 */
-  square(t: Tile, half: number, color: Color, min = MIN_PX): void {
-    this.dot(t.x + 0.5, t.y + 0.5, half, color, min);
+  square(t: Tile, half: number, color: Color, min = MIN_PX, extra = 0): void {
+    this.dot(t.x + 0.5, t.y + 0.5, half, color, min, extra);
   }
 
   /** ワールド座標 (x, y)（マスの単位）を中心にした正方形。 */
-  dot(x: number, y: number, half: number, color: Color, min = MIN_PX): void {
-    const v = (sx: number, sy: number) => this.#vertex(x, y, sx, sy, half, min, color);
+  dot(x: number, y: number, half: number, color: Color, min = MIN_PX, extra = 0): void {
+    const v = (sx: number, sy: number) => this.#vertex(x, y, sx, sy, half, min, color, extra);
     v(-1, -1);
     v(1, -1);
     v(-1, 1);
@@ -301,9 +367,13 @@ export class Geometry {
     this.box(min.x + inset, min.y + inset, max.x + 1 - inset, max.y + 1 - inset, color);
   }
 
-  /** ワールド座標の (x0, y0) から (x1, y1) までの長方形。 */
-  box(x0: number, y0: number, x1: number, y1: number, color: Color): void {
-    const v = (x: number, y: number) => this.#vertex(x, y, 0, 0, 0, 0, color);
+  /**
+   * ワールド座標の (x0, y0) から (x1, y1) までの長方形。`shiftPx` があれば、右下へ画面でそのピクセル数だけ
+   * ずらす（縮尺によらない）。
+   */
+  box(x0: number, y0: number, x1: number, y1: number, color: Color, shiftPx = 0): void {
+    const n = shiftPx === 0 ? 0 : 1;
+    const v = (x: number, y: number) => this.#vertex(x, y, n, n, 0, shiftPx, color);
     v(x0, y0);
     v(x1, y0);
     v(x0, y1);
@@ -316,10 +386,18 @@ export class Geometry {
    * ワールド座標の (x0, y0) から (x1, y1) までの長方形の縁。太さは画面で `px` ピクセルで、縮尺によらない。
    * 辺の真ん中に線を引くので、半分は長方形の外にはみ出す。
    */
-  outline(x0: number, y0: number, x1: number, y1: number, color: Color, px: number): void {
+  outline(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    color: Color,
+    px: number,
+    dashPx = 0,
+  ): void {
     const h = px / 2;
-    const v = (x: number, y: number, nx: number, ny: number) =>
-      this.#vertex(x, y, nx, ny, 0, h, color);
+    const v = (x: number, y: number, nx: number, ny: number, along: number) =>
+      this.#vertex(x, y, nx, ny, 0, h, color, 0, along, dashPx);
     // 辺ごとに、外側と内側の 2 点ずつを両端に置く。角では隣の辺と重なって、角まで塗る
     const edges: [number, number, number, number, number, number][] = [
       [x0, y0, x1, y0, 0, -1],
@@ -332,7 +410,7 @@ export class Geometry {
       const dx = Math.sign(bx - ax);
       const dy = Math.sign(by - ay);
       const corner = (x: number, y: number, along: number, side: number) =>
-        v(x, y, dx * along + nx * side, dy * along + ny * side);
+        v(x, y, dx * along + nx * side, dy * along + ny * side, dx !== 0 ? x : y);
       corner(ax, ay, -1, 1);
       corner(ax, ay, -1, -1);
       corner(bx, by, 1, 1);
@@ -419,10 +497,10 @@ export function buildingEdgeColor(zone: number): Color {
 }
 
 // 建物の縁の幅は BUILDING_EDGE（マス）にする。
-// 影は右下へ BUILDING_SHADOW（マス）ずらした `#3c4043` の 18% で、建物の大きさを見やすくする
+// 影は右下へ画面で BUILDING_SHADOW_PX ずらした `#3c4043` の 18% で、建物の大きさを見やすくする
 const BUILDING_EDGE = 0.05;
 const BUILDING_EDGE_SHADE = 0.68;
-const BUILDING_SHADOW = 0.08;
+const BUILDING_SHADOW_PX = 2;
 const SHADOW_COLOR = hex("#3c4043", 0.18);
 
 // 施設の色。発電所は橙、浄水場は青緑。値は ServiceKind の値である
@@ -484,8 +562,7 @@ export function buildingGeometry(buildings: Float64Array, facilities: Float64Arr
     marks.push([x0, y0, supply]);
   }
   for (const { x0, y0, x1, y1 } of boxes) {
-    const d = BUILDING_SHADOW;
-    geometry.box(x0 + d, y0 + d, x1 + d, y1 + d, SHADOW_COLOR);
+    geometry.box(x0, y0, x1, y1, SHADOW_COLOR, BUILDING_SHADOW_PX);
   }
   for (const { x0, y0, x1, y1, color, edge } of boxes) {
     const e = BUILDING_EDGE;
@@ -530,6 +607,8 @@ type RoadNode = {
   asphalt: number;
   asphaltColor: Color;
   edgeColor: Color;
+  /** つなぐ区間の、縮小したときの線の世界の半分の幅のいちばん大きい値。 */
+  line: number;
   minPx: number;
   sidewalk: boolean;
   arms: Arm[];
@@ -549,6 +628,7 @@ function roadNodes(segments: Float64Array): RoadNodes {
       asphalt: 0,
       asphaltColor: style.asphalt,
       edgeColor: style.edge,
+      line: 0,
       minPx: 0,
       sidewalk: false,
       arms: [],
@@ -559,6 +639,7 @@ function roadNodes(segments: Float64Array): RoadNodes {
       node.asphaltColor = style.asphalt;
       node.edgeColor = style.edge;
     }
+    node.line = Math.max(node.line, LINE_HALF[kind] ?? 0.31);
     node.minPx = Math.max(node.minPx, style.minPx);
     node.sidewalk ||= hasSidewalks(kind);
     const len = Math.hypot(other.x - x, other.y - y);
@@ -613,19 +694,20 @@ function roadNet(segments: Float64Array, nodes: Float64Array): RoadNet {
 export function roadGeometry(segments: Float64Array, nodes: Float64Array): Geometry {
   const geometry = new Geometry({ x: nodes[0] ?? 0, y: nodes[1] ?? 0 });
   const { nodeList, each } = roadNet(segments, nodes);
+  // 縁の帯は、塗りの帯と同じ幅（世界と画面の下限）に、画面で両側に 1px ずつ足す
   each((a, b, kind) => {
     const style = roadStyle(kind);
-    geometry.segment(a, b, drawnAsphaltHalf(kind, a, b), style.edge, style.minPx + EDGE_EXTRA_PX);
+    geometry.segment(a, b, lineHalfWidth(kind, a, b), style.edge, style.minPx, EDGE_EXTRA_PX);
   });
   for (const { x, y, node } of nodeList) {
-    geometry.square({ x, y }, node.asphalt, node.edgeColor, node.minPx + EDGE_EXTRA_PX);
+    geometry.square({ x, y }, node.line, node.edgeColor, node.minPx, EDGE_EXTRA_PX);
   }
   each((a, b, kind) => {
     const style = roadStyle(kind);
-    geometry.segment(a, b, drawnAsphaltHalf(kind, a, b), style.asphalt, style.minPx);
+    geometry.segment(a, b, lineHalfWidth(kind, a, b), style.asphalt, style.minPx);
   });
   for (const { x, y, node } of nodeList) {
-    geometry.square({ x, y }, node.asphalt, node.asphaltColor, node.minPx);
+    geometry.square({ x, y }, node.line, node.asphaltColor, node.minPx);
   }
   return geometry;
 }
@@ -909,7 +991,7 @@ export const SIGNAL_COLOR: Record<number, Color> = {
   1: hex("#fbbc04"),
   2: hex("#ea4335"),
 };
-const SIGNAL_BASE_COLOR = hex("#3c4043");
+export const SIGNAL_BASE_COLOR = hex("#3c4043");
 const SIGNAL_BASE_HALF = 0.16;
 const SIGNAL_LAMP_HALF = 0.1;
 // 灯火を置く位置。交差点の中心から腕の向きへ ALONG、入ってくる車線の側へ SIDE（マス）だけずらす
@@ -999,6 +1081,9 @@ export class RoadLayer {
       ["a_half", 1, 4],
       ["a_min", 1, 5],
       ["a_color", 4, 6],
+      ["a_extra", 1, 10],
+      ["a_along", 1, 11],
+      ["a_dash", 1, 12],
     ];
     for (const [name, size, offset] of attributes) {
       const location = gl.getAttribLocation(this.#program, name);

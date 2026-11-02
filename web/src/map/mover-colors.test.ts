@@ -20,6 +20,8 @@ import {
   ROAD_STYLES,
   SIDEWALK_COLOR,
   SIDEWALK_EDGE_COLOR,
+  SIGNAL_BASE_COLOR,
+  SIGNAL_COLOR,
   ZEBRA_COLOR,
   ZONE_COLORS,
 } from "./roads.ts";
@@ -42,6 +44,8 @@ function roadSurfaces(): number[][] {
     SIDEWALK_COLOR,
     SIDEWALK_EDGE_COLOR,
     PLANTING_COLOR,
+    SIGNAL_BASE_COLOR,
+    ...Object.values(SIGNAL_COLOR),
   ]) {
     out.push(to255(c));
   }
@@ -106,8 +110,7 @@ describe("移動体の色", () => {
   test("歩く人の色は、どの車の色とも違う", () => {
     for (const c of CAR_COLORS) {
       const d = c.reduce((sum, v, i) => sum + Math.abs(v - (WALKER_COLOR[i] ?? 0)), 0);
-      // 表の色のうち、いちばん近い車（#c9473d）でも 0.31 離れている。形（丸と長方形）と白い縁でも見分けられる
-      expect(d).toBeGreaterThan(0.3);
+      expect(d).toBeGreaterThan(0.4);
     }
   });
 });

@@ -16,16 +16,26 @@ import {
   ZONABLE_COLOR,
   ZONABLE_MIX,
 } from "./palette.ts";
-import { RoadLayer, zoneGroundColor } from "./roads.ts";
+import { RoadLayer, ZONE_COLORS, zoneGroundColor } from "./roads.ts";
 
 const vec3 = ([r, g, b]: readonly number[]) => `vec3(${r}, ${g}, ${b})`;
 
 // 区画の地面の色は roads.ts と共有する（1〜4 の順）
 const ZONE_GROUND = [1, 2, 3, 4].map((zone) => vec3(zoneGroundColor(zone)));
 
-// 買っていない土地の斜線の間隔と太さ（CSS ピクセル）
-const HATCH_SPACING = 10;
-const HATCH_WIDTH = 1.4;
+// 区画のマスの枠は、建物の縁の色を地面の色に半分混ぜた淡い色で、細く引く。
+// 枠を描き始める倍率と、濃さがそろう倍率（1 マスのピクセル数）
+const ZONE_EDGE = [1, 2, 3, 4].map((zone) => {
+  const [g, e] = [ZONE_COLORS[zone]?.ground ?? [0, 0, 0], ZONE_COLORS[zone]?.edge ?? [0, 0, 0]];
+  return vec3([0, 1, 2].map((i) => ((g[i] ?? 0) + (e[i] ?? 0)) / 2));
+});
+const ZONE_EDGE_ZOOM = 4;
+const ZONE_EDGE_FULL_ZOOM = 8;
+
+// 買っていない土地の斜線。画面で、線と線の間隔が 10px、線の太さが 1px の 45 度の線にする。
+// x + y の方向では、間隔が 10 × √2、太さが √2 になる
+const HATCH_PERIOD = 10 * Math.SQRT2;
+const HATCH_WIDTH = Math.SQRT2;
 
 const VERTEX = `#version 300 es
 in vec2 a_corner;
@@ -45,12 +55,15 @@ uniform mediump usampler2D u_tiles;
 uniform bool u_owned;
 uniform bool u_zonable;
 uniform highp float u_size;
-uniform highp float u_dpr;
+uniform highp float u_hatch;
 in highp vec2 v_uv;
 out vec4 color;
 // 区画の地面は淡い色で塗る。色は CS2 にならう（住宅は緑、商業は青、工業は黄、オフィスは水色）
 const vec3 ZONE_GROUND[4] = vec3[4](
   ${ZONE_GROUND.join(",\n  ")}
+);
+const vec3 ZONE_EDGE[4] = vec3[4](
+  ${ZONE_EDGE.join(",\n  ")}
 );
 bool isWater(ivec2 t) {
   if (t.x < 0 || t.y < 0 || t.x >= ${CHUNK_SIDE} || t.y >= ${CHUNK_SIDE}) {
@@ -64,6 +77,10 @@ void main() {
   vec3 c;
   if ((tile & ${TILE_WATER}u) != 0u) {
     c = ${vec3(WATER_COLOR)};
+    // 買っていない水は、買った水と見分けられるよう暗くする
+    if (!u_owned) {
+      c *= 0.55;
+    }
     // 水と陸の境目のマスの辺に、1 ピクセルの岸の線を引く（チャンクの端は陸があるかを調べない）
     float px = u_size / ${CHUNK_SIDE}.0;
     highp vec2 f = fract(v_uv * ${CHUNK_SIDE}.0) * px;
@@ -73,20 +90,27 @@ void main() {
       || (f.y < 1.0 && !isWater(t + ivec2(0, -1)))
       || (g.y < 1.0 && !isWater(t + ivec2(0, 1)));
     if (shore) {
-      c = ${vec3(SHORE_COLOR)};
+      c = ${vec3(SHORE_COLOR)} * (u_owned ? 1.0 : 0.55);
     }
   } else if (!u_owned) {
     // 買っていない土地は、色の差がなくても分かるよう斜線を引く
     c = ${vec3(UNOWNED_COLOR)};
-    highp vec2 s = gl_FragCoord.xy / u_dpr;
-    if (mod(s.x + s.y, ${HATCH_SPACING}.0) < ${HATCH_WIDTH}) {
+    // 斜線は世界の座標に付ける。u_hatch は、チャンクの左上の世界の位置（画面のピクセル）を周期で割った余りである
+    highp float s = u_hatch + (v_uv.x + v_uv.y) * u_size;
+    if (mod(s, ${HATCH_PERIOD}) < ${HATCH_WIDTH}) {
       c = ${vec3(UNOWNED_HATCH_COLOR)};
     }
   } else {
     c = ${vec3(GROUND_COLOR)};
     uint zone = (tile >> ${TILE_ZONE_SHIFT}u) & 7u;
     if (zone >= 1u && zone <= 4u) {
-      c = ZONE_GROUND[zone - 1u];
+      // マスの縁からの距離（画面のピクセル）。隣のマスと合わせて 1 ピクセルほどの枠になる
+      float px = u_size / ${CHUNK_SIDE}.0;
+      highp vec2 f = fract(v_uv * ${CHUNK_SIDE}.0);
+      float e = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)) * px;
+      float edge = (e < 0.6 ? 1.0 : 0.0)
+        * clamp((px - ${ZONE_EDGE_ZOOM}.0) / ${ZONE_EDGE_FULL_ZOOM - ZONE_EDGE_ZOOM}.0, 0.0, 1.0);
+      c = mix(ZONE_GROUND[zone - 1u], ZONE_EDGE[zone - 1u], edge);
     } else if (u_zonable && (tile & ${TILE_ZONABLE}u) != 0u) {
       c = mix(c, ${vec3(ZONABLE_COLOR)}, ${ZONABLE_MIX});
     }
@@ -141,7 +165,7 @@ export class MapRenderer {
   readonly movers: MoverLayer;
   readonly #textures = new Map<string, Texture>();
   readonly #u: Record<
-    "offset" | "size" | "viewport" | "tiles" | "owned" | "zonable" | "dpr",
+    "offset" | "size" | "viewport" | "tiles" | "owned" | "zonable" | "hatch",
     WebGLUniformLocation
   >;
   /** 区画を塗れるマスを明るく示すか。区画の道具を選んでいるあいだだけ true にする。 */
@@ -165,7 +189,7 @@ export class MapRenderer {
       tiles: uniform(gl, program, "u_tiles"),
       owned: uniform(gl, program, "u_owned"),
       zonable: uniform(gl, program, "u_zonable"),
-      dpr: uniform(gl, program, "u_dpr"),
+      hatch: uniform(gl, program, "u_hatch"),
     };
     gl.uniform1i(this.#u.tiles, 0);
 
@@ -241,7 +265,6 @@ export class MapRenderer {
     gl.useProgram(this.#program);
     gl.bindVertexArray(this.#vao);
     gl.uniform1i(this.#u.zonable, this.showZonable ? 1 : 0);
-    gl.uniform1f(this.#u.dpr, dpr);
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     const size = CHUNK_SIDE * camera.zoom;
     gl.uniform1f(this.#u.size, size);
@@ -258,6 +281,7 @@ export class MapRenderer {
           (cy * CHUNK_SIDE - camera.y) * camera.zoom,
         );
         gl.uniform1i(this.#u.owned, entry.owned ? 1 : 0);
+        gl.uniform1f(this.#u.hatch, ((cx + cy) * CHUNK_SIDE * camera.zoom) % HATCH_PERIOD);
         gl.bindTexture(gl.TEXTURE_2D, entry.texture);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
         drawn++;

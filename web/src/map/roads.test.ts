@@ -6,6 +6,7 @@ import {
   buildingEdgeColor,
   buildingGeometry,
   FACILITY_COLOR,
+  footprintOutline,
   Geometry,
   MARKING_COLORS,
   MARKING_FULL_ZOOM,
@@ -64,8 +65,9 @@ describe("建物", () => {
     );
     expect(g.vertexCount).toBe(2 * 3 * 6);
     const data = g.build();
-    // 影が先に 2 つ並び、右下にずれる
-    expect(data[0]).toBeCloseTo(0.15 + 0.08);
+    // 影が先に 2 つ並び、本体と同じ位置から、右下へ画面で 2px ずれる（縮尺によらない）
+    expect(data[0]).toBeCloseTo(0.15);
+    expect([data[2], data[3], data[5]]).toEqual([1, 1, 2]);
     // 1 つめの建物の縁は、影 2 つのあと
     expect(data[12 * VERTEX_FLOATS]).toBeCloseTo(0.15);
     expect(data[13 * VERTEX_FLOATS]).toBeCloseTo(3 - 0.15);
@@ -136,11 +138,35 @@ describe("Geometry", () => {
     // 縁の帯 1、ノードの縁の四角 2、車道の帯 1、ノードの車道の四角 2
     expect(g.vertexCount).toBe(6 * 6);
     const data = g.build();
-    // 縁の帯は、車道と同じ世界の幅で、画面の下限が 1px だけ広い
-    expect(data[4]).toBeCloseTo(asphaltHalfWidth(1));
-    expect((data[5] ?? 0) - (data[18 * VERTEX_FLOATS + 5] ?? 0)).toBeCloseTo(1);
-    expect(data[18 * VERTEX_FLOATS + 4]).toBeCloseTo(asphaltHalfWidth(1));
+    // 縁の帯は、塗りの帯と同じ世界の幅（小は 0.62 マスの半分）と下限で、画面で 1px を足す
+    expect(data[4]).toBeCloseTo(0.31);
+    expect(data[10]).toBe(1);
+    expect(data[18 * VERTEX_FLOATS + 4]).toBeCloseTo(0.31);
+    expect(data[18 * VERTEX_FLOATS + 10]).toBe(0);
     expect(roadGeometry(new Float64Array(), new Float64Array()).vertexCount).toBe(0);
+  });
+
+  test("縮小したときは、どの倍率でも、縁が塗りの両側に 1px 以上出る", () => {
+    // 頂点シェーダーと同じ式で、半分の太さ（画面のピクセル）を求める
+    const halfPx = (data: Float32Array, vertex: number, zoom: number) =>
+      Math.max(
+        (data[vertex * VERTEX_FLOATS + 4] ?? 0) * zoom,
+        data[vertex * VERTEX_FLOATS + 5] ?? 0,
+      ) + (data[vertex * VERTEX_FLOATS + 10] ?? 0);
+    for (const kind of [1, 2, 3, HIGHWAY_CODE]) {
+      const data = roadGeometry(
+        new Float64Array([0, 0, 4, 0, kind]),
+        new Float64Array([0, 0, 1, 0, 4, 0, 1, 0]),
+      ).build();
+      for (const zoom of [1, 2, 3, 4, 5, 5.9, 6]) {
+        const [edge, fill] = [halfPx(data, 0, zoom), halfPx(data, 18, zoom)];
+        expect(edge - fill).toBeGreaterThanOrEqual(1 - 1e-6);
+        // 塗りは、決まりの表の幅と下限（2 倍の値）に従う
+        const width = [0, 0.62, 0.8, 0.96, 1][kind] ?? 0;
+        const lower = [0, 1.8, 2.2, 3.2, 4][kind] ?? 0;
+        expect(fill * 2).toBeCloseTo(Math.max(lower, width * zoom));
+      }
+    }
   });
 
   test("縮小したときも、広い道路ほど車道の帯を太く残す", () => {
@@ -448,5 +474,31 @@ describe("斜めの道路", () => {
     expect(xs).toContain("0,0");
     expect(xs).toContain("3,3");
     expect(xs).not.toContain("2,0");
+  });
+});
+
+describe("縁", () => {
+  test("長方形の縁は 4 辺で、破線の周期は頂点に入り、辺に沿った位置が付く", () => {
+    const g = new Geometry({ x: 0, y: 0 });
+    g.outline(1, 2, 4, 3, [1, 0, 0, 1], 1.5, 8);
+    expect(g.vertexCount).toBe(4 * 6);
+    const data = g.build();
+    // 上の辺は横なので、辺に沿った位置は x
+    expect(data[11]).toBe(1);
+    expect(data[12]).toBe(8);
+    // 太さは画面のピクセルで決まる（半分の太さの下限が 0.75）
+    expect(data[5]).toBeCloseTo(0.75);
+    const solid = new Geometry({ x: 0, y: 0 });
+    solid.outline(0, 0, 1, 1, [1, 0, 0, 1], 2);
+    expect(solid.build()[12]).toBe(0);
+  });
+
+  test("縦横の線の縁は 1 つの長方形、斜めの線の縁は通るマスごとになる", () => {
+    const straight = new Geometry({ x: 0, y: 0 });
+    footprintOutline(straight, { x: 0, y: 0 }, { x: 5, y: 0 }, [0, 0, 1, 1], 1.5);
+    expect(straight.vertexCount).toBe(24);
+    const diagonal = new Geometry({ x: 0, y: 0 });
+    footprintOutline(diagonal, { x: 0, y: 0 }, { x: 2, y: 2 }, [0, 0, 1, 1], 1.5);
+    expect(diagonal.vertexCount).toBe(3 * 24);
   });
 });
