@@ -123,6 +123,10 @@ impl DenyReason {
     }
 }
 
+/// 時間帯の中で、車の経路の遅れを見積もり直す tick。住民の職場の割り当てなど、重い処理の重なる
+/// 300 の倍数の tick を避け、時間帯の真ん中にする。
+const DELAY_PHASE: u64 = BAND_TICKS / 2;
+
 /// 街全体の状態の入れ物。
 ///
 /// 状態を変えるのは [`World::apply`] と [`World::step`] だけである。
@@ -157,7 +161,7 @@ pub struct World {
     /// 適用済みの記録の次の番号。記録から続きを回すときは、この番号から適用する。
     next_seq: u64,
     trips: Trips,
-    /// 車の経路の費用に足す、混み具合から見積もった遅れ。時間帯の初めに見積もり直す。
+    /// 車の経路の費用に足す、混み具合から見積もった遅れ。時間帯ごとに 1 回見積もり直す。
     delays: Delays,
     errands: errand::Errands,
     /// 通勤の移動の結果の集計。読み取り用で、状態ハッシュには入れない。
@@ -737,7 +741,7 @@ impl World {
                 };
                 update(&ctx, id, row)
             });
-        if tick.0 % BAND_TICKS == 0 {
+        if tick.0 % BAND_TICKS == DELAY_PHASE {
             self.estimate_delays();
         }
         self.update_people();
