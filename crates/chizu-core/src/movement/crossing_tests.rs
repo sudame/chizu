@@ -475,8 +475,8 @@ fn cars_and_walkers(every: u64, ticks: u64) -> ([usize; 2], [u64; 2]) {
 
 #[test]
 fn a_walker_gets_across_a_steady_stream_of_cars() {
-    // 車が 2 tick ごとに途切れずに来て、止まりきれない車か交差点の中の車がいつもいる。それでも、歩く人は
-    // 待ちすぎた所で車を止めて渡る。
+    // 車が 2 tick ごとに来て、交差点の手前まで来た車が途切れない。待ちすぎていない人は車を先に通すので、
+    // 人が渡れるのは、待ちすぎた所で止まりきれる車を止め、止まりきれない車が抜けたときだけである。
     let (n, node) = crossroads();
     let mut t = Town::new(n);
     let mut walker = None;
@@ -598,4 +598,50 @@ fn a_walker_crossing_midblock_gets_through_a_creeping_queue() {
     // 横切るのに 5 tick かかる。待つのは、待ちすぎるまでと、前にいた車が過ぎるまでである。
     let gone = gone.expect("歩く人が横切れない");
     assert!(gone < 60 + crossing::PED_WAIT + 30, "待ちすぎた {gone}");
+}
+
+#[test]
+fn walkers_waiting_behind_a_car_stuck_in_the_junction_do_not_hold_other_cars() {
+    // 北から来た車 I が、交差点を抜けきらずに南の腕の上で止まっている。I が動けるのは、南から北へ交差点を
+    // 抜ける車 H が抜けたあととする（先の詰まりが街区をひと回りして H につながる輪の代わり）。
+    // 南の腕の横断歩道を渡る人は、I が抜けるまで渡れない。待ちすぎても H を止めないので、輪は解ける。
+    let (n, node) = crossroads();
+    let mut t = Town::new(n);
+    let stuck = t.drive(at(10, 5, (0, 1), 0), at(10, 19, (0, 1), 0));
+    let south = link(&t.net, (10, 10), (10, 11), LaneMode::Car);
+    let pin = |t: &mut Town| {
+        let net = &t.net;
+        let c = t.trips.rows[stuck.slot()].as_mut().unwrap();
+        let leg = c.route.links.iter().position(|l| *l == south).unwrap();
+        c.leg = u32::try_from(leg).unwrap();
+        let lane = net.link_lanes(south).next().unwrap();
+        c.enter(net, LaneOffset(3_000), Some(lane));
+        (c.speed, c.stalled) = (MmPerTick::ZERO, 0);
+    };
+    pin(&mut t);
+    let walker = t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0));
+    let mut other = None;
+    let mut passed = None;
+    for k in 0..250_u64 {
+        if k == 60 {
+            other = Some(t.drive(at(10, 17, (0, -1), 0), at(10, 2, (0, -1), 0)));
+        }
+        t.step(node);
+        let through = other.is_some_and(|h| {
+            t.trips
+                .get(h)
+                .is_none_or(|c| c.link().segment != south.segment)
+        });
+        if through && passed.is_none() {
+            passed = Some(k);
+        }
+        if passed.is_none() {
+            pin(&mut t);
+        }
+    }
+    let passed = passed.expect("H が交差点を抜けない");
+    assert!(passed < 60 + 30, "H が止められた {passed}");
+    assert!(t.trips.get(walker).is_none(), "人が渡れない");
+    assert!(t.trips.is_empty(), "残った {}", t.trips.len());
+    assert_eq!(t.trips.rescues(), Default::default(), "救済が働いた");
 }

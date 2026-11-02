@@ -81,6 +81,8 @@ pub struct Walk {
     pub jay: Option<u32>,
     /// 行き先の建物が、経路の最後のリンクの進む向きの左にあるか。
     pub far_end: bool,
+    /// 区間の途中で横切るのを待ちながら、車に横切る所の前を空けさせているか（[`Jaywalk::Hold`]）。
+    pub hold: bool,
 }
 
 /// 1 歩の向きの角度。x の正の向きを 0 とし、y の正の向きへ 45 度ごとに 1 ずつ増える。
@@ -213,9 +215,10 @@ pub fn depart(
 pub(super) enum Occ {
     /// 交差点 `node` の、区間の腕の横断歩道。
     Crosswalk(NodeId, SegmentId),
-    /// 歩道のリンクの上の位置から、区間の途中で横切っている。`false` なら、まだ横切り始めていないが、
-    /// [`PED_WAIT`] tick より長く待ったので、車にその前を空けさせている。
-    Jay(LinkId, u32, bool),
+    /// 歩道のリンクの上の位置から、区間の途中で横切っている。
+    Jay(LinkId, u32),
+    /// 歩道のリンクの上の位置から横切るのを待ちながら、車にその前を空けさせている（[`Jaywalk::Hold`]）。
+    Hold(LinkId, u32),
 }
 
 /// 歩く人がこの tick に渡り始めてよいかを決めるための、前の tick の車と歩く人の様子。
@@ -229,14 +232,28 @@ pub(super) struct Gate {
     pub near: BTreeMap<(NodeId, SegmentId), u32>,
     /// [`PED_WAIT`] tick より長く待った人がいて、止まりきれる車を止めて渡らせる横断歩道。
     pub claimed: BTreeSet<(NodeId, SegmentId)>,
+    /// 交差点の中で止まった車が通っている横断歩道。その車が抜けるまで人は渡れないので、待った人がいても
+    /// 手前の車を止めない。止めると、その車が抜けるのを待つ車まで止まり、先の詰まりと輪になりうる。
+    pub stuck: BTreeSet<(NodeId, SegmentId)>,
     /// 区間の途中で横切る人がいる区間の車（向き、前の端の位置、速さ、止まった tick 数、車線に出ているか）。
     /// 隣のリンクからノードを越えて入ってくる車は、前の端の位置を負の値で表す。出発を待つ車は、
     /// 出発の位置に止まった、車線に出ていない車として入れ、車線に出るのを待った tick 数を添える。
     pub cars: BTreeMap<SegmentId, Vec<JayCar>>,
 }
 
-/// 区間の途中で横切る人から見た車。向き、前の端の位置、速さ、止まった tick 数、車線に出ているか。
-pub(super) type JayCar = (Dir, i64, i32, u32, bool);
+/// 区間の途中で横切る人から見た車。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct JayCar {
+    /// 走る向き。
+    pub dir: Dir,
+    /// 前の端の、車のリンクの始まりからの位置。
+    pub front: i64,
+    pub speed: i32,
+    /// 位置が変わらないまま過ぎた tick 数。出発を待つ車なら、車線に出るのを待った tick 数。
+    pub stalled: u32,
+    /// 車線に出ているか。出発を待つ車は `false` である。
+    pub on_road: bool,
+}
 
 impl Gate {
     /// 交差点 `node` の、区間 `segment` の腕の横断歩道を渡り始めてよいか。
@@ -262,7 +279,11 @@ impl Gate {
     /// 横断歩道 `at` の前で、いちばん長く待った人が `waited` tick 待ったとき、止まりきれる車を止めて渡らせるかを決め、
     /// 渡らせるなら [`Gate::claimed`] に入れる。譲って待った車がいれば、その車より長く待った人だけが渡らせる。
     /// 待った長さを比べるので、人と車のどちらも、相手を待たせ続けることはない。
+    /// 交差点の中で止まった車がいるあいだは渡らせない（[`Gate::stuck`]）。
     pub fn claim(&mut self, net: &Network, at: (NodeId, SegmentId), waited: u32) {
+        if self.stuck.contains(&at) {
+            return;
+        }
         let c = self.near.get(&at).copied().unwrap_or(0);
         if waited > c && walk_light(net, at.0, at.1, self.now) {
             self.claimed.insert(at);
@@ -284,7 +305,14 @@ impl Gate {
         let len = super::pos::link_geometry(net, link).map_or(0, |g| g.2.0);
         let patient = waited >= PED_WAIT;
         let (mut over, mut blocked) = (false, false);
-        for &(dir, front, v, stalled, on_road) in cars {
+        for &JayCar {
+            dir,
+            front,
+            speed: v,
+            stalled,
+            on_road,
+        } in cars
+        {
             // 出発を待つ車は、横切る人の衝突区間を避けて置かれる。その車より長く待った人は、その車を待たない。
             if patient && !on_road && waited > stalled {
                 continue;
@@ -335,14 +363,21 @@ fn walk_light(net: &Network, node: NodeId, segment: SegmentId, now: Tick) -> boo
     }
 }
 
-/// いま区間の途中を横切っている人の、車のリンクごとの衝突区間の真ん中の位置。tick の途中で車を置くときに使う。
+/// いま区間の途中を横切っている人と、前を空けさせている人の、車のリンクごとの衝突区間の真ん中の位置
+/// （[`Occupied::zones`]）。tick の途中で車を置くときに使う。
 pub(super) fn jay_zones(net: &Network, rows: &[Option<super::Trip>]) -> BTreeMap<LinkId, Vec<u32>> {
     let occs = rows.iter().flatten().filter_map(|t| {
-        let crossing =
-            t.mode == crate::network::LaneMode::Sidewalk && t.walk.jay.is_some_and(|p| p > 0);
-        crossing.then(|| Occ::Jay(t.link(), t.offset().0, true))
+        if t.mode != crate::network::LaneMode::Sidewalk {
+            return None;
+        }
+        let (link, at) = (t.link(), t.offset().0);
+        match t.walk.jay {
+            Some(p) if p > 0 => Some(Occ::Jay(link, at)),
+            Some(_) if t.walk.hold => Some(Occ::Hold(link, at)),
+            _ => None,
+        }
     });
-    Occupied::of(net, occs).jay
+    Occupied::of(net, occs).zones
 }
 
 /// 歩く人がいま渡っている所から作った、車の側から見た衝突区間。
@@ -365,7 +400,8 @@ impl Occupied {
                 Occ::Crosswalk(n, s) => {
                     o.crosswalks.insert((n, s));
                 }
-                Occ::Jay(link, at, crossing) => {
+                Occ::Jay(link, at) | Occ::Hold(link, at) => {
+                    let crossing = matches!(occ, Occ::Jay(..));
                     let len = super::pos::link_geometry(net, link).map_or(0, |g| g.2.0);
                     for dir in [Dir::Forward, Dir::Backward] {
                         let z = if dir == link.dir {

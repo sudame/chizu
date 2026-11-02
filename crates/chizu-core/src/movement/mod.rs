@@ -215,11 +215,12 @@ impl Trip {
                 self.waited = waited.saturating_add(1);
                 0
             };
+            self.walk.hold = start == crossing::Jaywalk::Hold;
             if next < w {
                 self.walk.jay = Some(next);
                 let occ = match start {
-                    crossing::Jaywalk::Cross => Some(crossing::Occ::Jay(spot.0, spot.1, true)),
-                    crossing::Jaywalk::Hold => Some(crossing::Occ::Jay(spot.0, spot.1, false)),
+                    crossing::Jaywalk::Cross => Some(crossing::Occ::Jay(spot.0, spot.1)),
+                    crossing::Jaywalk::Hold => Some(crossing::Occ::Hold(spot.0, spot.1)),
                     crossing::Jaywalk::Wait => None,
                 };
                 return (false, occ);
@@ -454,6 +455,7 @@ fn plan(
                         far,
                         jay: jay.then_some(0),
                         far_end,
+                        hold: false,
                     };
                     let key = match mode {
                         LaneMode::Car => driven_ms(net, g, &r, *e)?,
@@ -767,6 +769,7 @@ impl Trips {
                     // 渡りかけていた横切りは、歩道の端からやり直す。
                     let mismatch = t.route.links.len() == 1 && t.walk.far != t.walk.far_end;
                     t.walk.jay = mismatch.then_some(0);
+                    t.walk.hold = false;
                 }
                 self.rows[id.slot()] = Some(t);
                 if mode == LaneMode::Car && !waiting {
@@ -878,6 +881,7 @@ impl StateHash for Trip {
         h.write(&self.walk.far);
         h.write(&self.walk.jay);
         h.write(&self.walk.far_end);
+        h.write(&self.walk.hold);
         h.write(&self.departed);
     }
 }

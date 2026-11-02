@@ -17,8 +17,9 @@ use std::collections::BTreeMap;
 use rayon::prelude::*;
 
 use super::Trip;
+use super::crossing::{self, JayCar};
 use super::junction::{self, Approach, Inside};
-use super::{crossing, signal};
+use super::signal;
 use crate::command::NodeId;
 use crate::network::{Dir, LaneId, LaneMode, LinkId, Network};
 use crate::routing::{Connector, speed_limit};
@@ -431,35 +432,38 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
     for t in waiting {
         let link = t.link();
         if jay_segments.contains(&link.segment) {
-            g.cars.entry(link.segment).or_default().push((
-                link.dir,
-                i64::from(t.offset.0),
-                0,
-                t.stalled,
-                false,
-            ));
+            g.cars.entry(link.segment).or_default().push(JayCar {
+                dir: link.dir,
+                front: i64::from(t.offset.0),
+                speed: 0,
+                stalled: t.stalled,
+                on_road: false,
+            });
         }
     }
     for t in cars {
         let link = t.link();
         if jay_segments.contains(&link.segment) {
-            g.cars.entry(link.segment).or_default().push((
-                link.dir,
-                i64::from(t.offset.0),
-                t.speed.0,
-                t.stalled,
-                true,
-            ));
+            g.cars.entry(link.segment).or_default().push(JayCar {
+                dir: link.dir,
+                front: i64::from(t.offset.0),
+                speed: t.speed.0,
+                stalled: t.stalled,
+                on_road: true,
+            });
         }
         // ノードを越えて横切る区間へ入ってくる車は、次のリンクの始まりより手前にいるものとして数える。
         if !t.last_leg() && near_end(net, t) {
             let next = t.route.links[t.leg as usize + 1];
             if jay_segments.contains(&next.segment) {
                 let behind = i64::from(t.offset.0) - i64::from(t.link_len.0);
-                g.cars
-                    .entry(next.segment)
-                    .or_default()
-                    .push((next.dir, behind, t.speed.0, t.stalled, true));
+                g.cars.entry(next.segment).or_default().push(JayCar {
+                    dir: next.dir,
+                    front: behind,
+                    speed: t.speed.0,
+                    stalled: t.stalled,
+                    on_road: true,
+                });
             }
         }
         if t.leg > 0 && t.offset.0 < JUNCTION_CLEAR {
@@ -467,8 +471,12 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
             if net.segment(prev.segment).is_some() {
                 let node = end_node(net, prev);
                 if junction::is_junction(net, node) {
-                    g.busy.insert((node, prev.segment));
-                    g.busy.insert((node, link.segment));
+                    for s in [prev.segment, link.segment] {
+                        g.busy.insert((node, s));
+                        if t.speed == MmPerTick::ZERO {
+                            g.stuck.insert((node, s));
+                        }
+                    }
                 }
             }
         }
@@ -749,9 +757,13 @@ pub(super) fn step(
         if held {
             t.waited = t.waited.saturating_add(1);
         }
-        if yielded[k] {
-            t.yielded = t.yielded.saturating_add(1);
-        }
+        // いま横断歩道の人のために止まっているのでなければ数え直す。ほかの車や先の車線の空きを待つ車は、
+        // 人を止めない。
+        t.yielded = if yielded[k] {
+            t.yielded.saturating_add(1)
+        } else {
+            0
+        };
         if t.last_leg() {
             if at >= t.dest_offset {
                 arrived.push(i);
