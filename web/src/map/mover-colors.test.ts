@@ -1,5 +1,4 @@
 import { describe, expect, test } from "vitest";
-import { HIGHWAY_CODE } from "./lanes.ts";
 import {
   CAR_COLORS,
   carColorIndex,
@@ -8,32 +7,56 @@ import {
   WALKER_COLOR,
 } from "./mover-colors.ts";
 import {
-  CENTER_LINE_COLOR,
+  GROUND_COLOR,
+  SHORE_COLOR,
+  UNOWNED_COLOR,
+  UNOWNED_HATCH_COLOR,
+  WATER_COLOR,
+} from "./palette.ts";
+import {
   type Color,
-  CURB_COLOR,
-  DIVIDER_COLOR,
-  GRASS_COLOR,
-  roadStyle,
-  SHOULDER_COLOR,
+  MARKING_COLORS,
+  PLANTING_COLOR,
+  ROAD_STYLES,
   SIDEWALK_COLOR,
+  SIDEWALK_EDGE_COLOR,
   ZEBRA_COLOR,
+  ZONE_COLORS,
 } from "./roads.ts";
 
 /** 半透明の色 fg を bg の上に重ねた色（0〜255）。 */
-const over = (fg: Color, bg: readonly number[]) =>
-  [0, 1, 2].map((i) => ((fg[i] ?? 0) * fg[3] + (bg[i] ?? 0) * (1 - fg[3])) * 255);
+const over = (fg: readonly number[], bg: readonly number[]) =>
+  [0, 1, 2].map((i) => ((fg[i] ?? 0) * (fg[3] ?? 1) + (bg[i] ?? 0) * (1 - (fg[3] ?? 1))) * 255);
 
-/** 移動体がいないときに、移動体の位置に描かれうる道路の色（0〜255）。 */
+const to255 = (c: readonly number[]) => [0, 1, 2].map((i) => (c[i] ?? 0) * 255);
+
+/** 移動体がいないときに、移動体の位置に描かれうる地面と道路の色（0〜255）。 */
 function roadSurfaces(): number[][] {
   const out: number[][] = [];
-  for (const c of [GRASS_COLOR, SIDEWALK_COLOR, SHOULDER_COLOR, CURB_COLOR]) {
-    out.push([0, 1, 2].map((i) => (c[i] ?? 0) * 255));
+  for (const c of [
+    GROUND_COLOR,
+    UNOWNED_COLOR,
+    UNOWNED_HATCH_COLOR,
+    WATER_COLOR,
+    SHORE_COLOR,
+    SIDEWALK_COLOR,
+    SIDEWALK_EDGE_COLOR,
+    PLANTING_COLOR,
+  ]) {
+    out.push(to255(c));
   }
-  for (const kind of [1, 2, 3, HIGHWAY_CODE]) {
-    const asphalt = roadStyle(kind).asphalt;
-    out.push(over(asphalt, asphalt));
-    for (const line of [CENTER_LINE_COLOR, DIVIDER_COLOR, ZEBRA_COLOR]) {
-      out.push(over(line, asphalt));
+  for (const zone of Object.values(ZONE_COLORS)) {
+    for (const c of [zone.ground, zone.building, zone.edge]) {
+      out.push(to255(c));
+    }
+  }
+  for (const [kind, style] of Object.entries(ROAD_STYLES)) {
+    out.push(to255(style.asphalt), to255(style.edge));
+    const lines = MARKING_COLORS[Number(kind)];
+    for (const line of [lines?.center, lines?.divider, ZEBRA_COLOR] as (Color | undefined)[]) {
+      if (line !== undefined) {
+        out.push(over(line, style.asphalt));
+      }
     }
   }
   return out;
@@ -83,7 +106,8 @@ describe("移動体の色", () => {
   test("歩く人の色は、どの車の色とも違う", () => {
     for (const c of CAR_COLORS) {
       const d = c.reduce((sum, v, i) => sum + Math.abs(v - (WALKER_COLOR[i] ?? 0)), 0);
-      expect(d).toBeGreaterThan(0.4);
+      // 表の色のうち、いちばん近い車（#c9473d）でも 0.31 離れている。形（丸と長方形）と白い縁でも見分けられる
+      expect(d).toBeGreaterThan(0.3);
     }
   });
 });

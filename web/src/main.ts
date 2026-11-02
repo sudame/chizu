@@ -16,8 +16,19 @@ import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { setupLayerPanel } from "./map/layers.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
+import {
+  BULLDOZE_EDGE_COLOR,
+  BULLDOZE_FILL_COLOR,
+  CLEAR_ZONE_COLOR,
+  HINT_EDGE_COLOR,
+  HINT_FILL_COLOR,
+  PREVIEW_BAD_COLOR,
+  PREVIEW_LINE_COLOR,
+  PREVIEW_OK_COLOR,
+} from "./map/palette.ts";
 import { MapRenderer } from "./map/renderer.ts";
 import {
+  buildingEdgeColor,
   buildingGeometry,
   type Color,
   FACILITY_COLOR,
@@ -29,6 +40,7 @@ import {
   roadMeshes,
   signalGeometry,
   unsuppliedCount,
+  zoneBlockColor,
 } from "./map/roads.ts";
 import {
   buildRoadIndex,
@@ -310,20 +322,22 @@ function startDrawing(reader: SnapshotReader): void {
 
 // 左のボタンは、この距離（CSS ピクセル）より動かしたら地図を引きずる操作とみなす。中のボタンはいつも引きずる
 const CLICK_SLOP_PX = 4;
-const PREVIEW_OK: Color = [0.3, 0.6, 1, 0.7];
-const PREVIEW_BAD: Color = [1, 0.3, 0.3, 0.7];
-// 種類を変える道具でなぞった直線。変わる区間の色より薄くする
-const PREVIEW_LINE: Color = [1, 1, 1, 0.3];
-const BULLDOZE_AREA: Color = [1, 0.3, 0.3, 0.35];
-// 区画を塗る長方形の色。renderer.ts の区画の色に合わせる
-const ZONE_AREA: Record<ZoneName, Color> = {
-  Residential: [0.15, 0.95, 0.15, 0.35],
-  Commercial: [0.25, 0.45, 0.95, 0.35],
-  Industrial: [0.95, 0.8, 0.2, 0.35],
-  Office: [0.3, 0.85, 0.95, 0.35],
-  Clear: [1, 1, 1, 0.35],
+// 区画を塗る長方形の色。街区の面・建物の色の 70% に、建物の縁の色の縁を付ける
+const ZONE_CODE: Partial<Record<ZoneName, number>> = {
+  Residential: 1,
+  Commercial: 2,
+  Industrial: 3,
+  Office: 4,
 };
-const BUY_AREA: Color = [1, 1, 1, 0.2];
+const zoneArea = (zone: ZoneName): { fill: Color; edge: Color } => {
+  const code = ZONE_CODE[zone];
+  return code === undefined
+    ? { fill: CLEAR_ZONE_COLOR, edge: CLEAR_ZONE_COLOR }
+    : { fill: zoneBlockColor(code), edge: buildingEdgeColor(code) };
+};
+// 縁の太さ（画面のピクセル）
+const AREA_EDGE_PX = 1.5;
+const BUY_EDGE_PX = 2;
 
 let tool: Tool = { kind: "none" };
 let roadCosts: RoadCostTable | null = null;
@@ -377,8 +391,8 @@ function updatePreview(): void {
       // 変わるのは直線が通る区間の全体なので、区間ごと塗る
       const plan = upgradePlan(roadSegments, roadCosts, tool.road, from, to);
       const short = plan.cost > 0 && plan.cost > money;
-      const color = short || plan.segments.length === 0 ? PREVIEW_BAD : PREVIEW_OK;
-      roadFootprint(geometry, from, to, PREVIEW_LINE, MIN_PX);
+      const color = short || plan.segments.length === 0 ? PREVIEW_BAD_COLOR : PREVIEW_OK_COLOR;
+      roadFootprint(geometry, from, to, PREVIEW_LINE_COLOR, MIN_PX);
       for (const s of plan.segments) {
         roadFootprint(geometry, s.from, s.to, color, MIN_PX);
       }
@@ -390,7 +404,7 @@ function updatePreview(): void {
             : `区間 ${plan.segments.length} 本・費用 ${plan.cost.toLocaleString("ja-JP")}`;
       mapCanvas.dataset.previewCost = String(plan.cost);
     }
-    geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK, MIN_PX);
+    geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK_COLOR, MIN_PX);
   } else if (tool.kind === "road" && cursor !== null) {
     const { from, to } = roadEndpoints(roadIndex, roadStart, cursor, noSnap);
     shownRoad = { start: roadStart, cursor, noSnap, from, to };
@@ -399,7 +413,7 @@ function updatePreview(): void {
     if (roadStart !== null && roadCosts !== null) {
       const cost = roadCost(roadCosts, tool.road, from, to);
       const length = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y));
-      const color = cost > money ? PREVIEW_BAD : PREVIEW_OK;
+      const color = cost > money ? PREVIEW_BAD_COLOR : PREVIEW_OK_COLOR;
       roadFootprint(geometry, from, to, color, MIN_PX);
       info = `長さ ${length} マス・費用 ${cost.toLocaleString("ja-JP")}`;
       if (isDisconnected(roadIndex, from, to)) {
@@ -407,16 +421,22 @@ function updatePreview(): void {
       }
       mapCanvas.dataset.previewCost = String(cost);
     }
-    geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK, MIN_PX);
+    geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK_COLOR, MIN_PX);
   } else if ((tool.kind === "bulldoze" || tool.kind === "zone") && cursor !== null) {
     const start = pointer?.mode === "area" ? pointer.start : cursor;
     const end = tool.kind === "zone" ? clampArea(start, cursor, MAX_ZONE_SIDE) : cursor;
     geometry = new Geometry(start);
-    const color = tool.kind === "zone" ? ZONE_AREA[tool.zone] : BULLDOZE_AREA;
-    geometry.rect(
-      { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y) },
-      { x: Math.max(start.x, end.x), y: Math.max(start.y, end.y) },
-      color,
+    const area = tool.kind === "zone" ? zoneArea(tool.zone) : null;
+    const min = { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y) };
+    const max = { x: Math.max(start.x, end.x), y: Math.max(start.y, end.y) };
+    geometry.rect(min, max, area?.fill ?? BULLDOZE_FILL_COLOR);
+    geometry.outline(
+      min.x,
+      min.y,
+      max.x + 1,
+      max.y + 1,
+      area?.edge ?? BULLDOZE_EDGE_COLOR,
+      AREA_EDGE_PX,
     );
   } else if (tool.kind === "service" && cursor !== null && services !== null) {
     const info = services[tool.service];
@@ -424,8 +444,8 @@ function updatePreview(): void {
     const choice = serviceChoice(tool.service, cursor);
     const { min, max } = serviceFootprint(cursor, choice.rotation, info.width, info.depth);
     geometry = new Geometry(min);
-    const base = FACILITY_COLOR[tool.service === "PowerPlant" ? 1 : 2] ?? PREVIEW_OK;
-    const color: Color = choice.placeable ? [base[0], base[1], base[2], 0.6] : PREVIEW_BAD;
+    const base = FACILITY_COLOR[tool.service === "PowerPlant" ? 1 : 2] ?? PREVIEW_OK_COLOR;
+    const color: Color = choice.placeable ? [base[0], base[1], base[2], 0.6] : PREVIEW_BAD_COLOR;
     geometry.rect(min, max, color);
     const cost = `費用 ${info.cost.toLocaleString("ja-JP")}・R で回す`;
     infoText = choice.placeable ? cost : `置けない：${choice.reason}・${cost}`;
@@ -434,7 +454,7 @@ function updatePreview(): void {
     mapCanvas.dataset.servicePlaceable = String(choice.placeable);
   } else if (tool.kind === "signal" && cursor !== null) {
     geometry = new Geometry(cursor);
-    geometry.rect(cursor, cursor, BUY_AREA);
+    geometry.rect(cursor, cursor, HINT_FILL_COLOR);
     info = tool.on
       ? "3 本以上の道路が集まる交差点を押して信号を置く"
       : "信号のある交差点を押して外す";
@@ -443,7 +463,15 @@ function updatePreview(): void {
     if (c.kind === "BuyChunk") {
       const min = { x: c.cx * CHUNK_SIDE, y: c.cy * CHUNK_SIDE };
       geometry = new Geometry(min);
-      geometry.rect(min, { x: min.x + CHUNK_SIDE - 1, y: min.y + CHUNK_SIDE - 1 }, BUY_AREA);
+      geometry.rect(min, { x: min.x + CHUNK_SIDE - 1, y: min.y + CHUNK_SIDE - 1 }, HINT_FILL_COLOR);
+      geometry.outline(
+        min.x,
+        min.y,
+        min.x + CHUNK_SIDE,
+        min.y + CHUNK_SIDE,
+        HINT_EDGE_COLOR,
+        BUY_EDGE_PX,
+      );
       info = `チャンク (${c.cx}, ${c.cy})`;
     }
   }
