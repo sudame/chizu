@@ -58,8 +58,8 @@ impl ServiceKind {
     /// 供給量。建物の需要と同じ単位である。
     pub fn capacity(self) -> u64 {
         match self {
-            ServiceKind::PowerPlant => 1_200,
-            ServiceKind::WaterPump => 1_000,
+            ServiceKind::PowerPlant => 3_600,
+            ServiceKind::WaterPump => 3_000,
         }
     }
 }
@@ -170,6 +170,9 @@ pub struct SupplyBalance {
     pub components: Vec<[Balance; 2]>,
     /// 区間ごとの、`components` の添え字。区間の ID の順に並ぶ。
     pub segments: Vec<(SegmentId, usize)>,
+    /// 成分ごとの代表のマス。成分の中で需要が最も大きい建物の、道路に面したマスである
+    /// （需要が同じなら ID の小さい建物）。建物のない成分は `None`。
+    pub spots: Vec<Option<TilePos>>,
 }
 
 /// 成分ごとに施設の供給量と建物の需要を足したもの。
@@ -409,6 +412,20 @@ impl Headroom {
         }
     }
 
+    /// 出入口が `link` の網に建てられる建物の需要の上限。電気と水道の少ないほうで、余裕がなければ `None`。
+    pub(crate) fn room(&mut self, network: &Network, link: LinkId) -> Option<u64> {
+        let c = self.comps.of_link(network, link)?;
+        u64::try_from(self.left[c].into_iter().min()?)
+            .ok()
+            .filter(|r| *r > 0)
+    }
+
+    /// 出入口が `link` の網に、需要 1 の建物を建てる余地が `[電気, 水道]` のそれぞれにないか。区間が消えていれば `None`。
+    pub(crate) fn lacks(&mut self, network: &Network, link: LinkId) -> Option<[bool; 2]> {
+        let c = self.comps.of_link(network, link)?;
+        Some(self.left[c].map(|r| r < 1))
+    }
+
     /// 出入口が `link` の、需要 `demand` の建物を建てる余地が電気にも水道にもあれば、その分を差し引いて真を返す。
     pub(crate) fn take(&mut self, network: &Network, link: LinkId, demand: u64) -> bool {
         let Some(c) = self.comps.of_link(network, link) else {
@@ -444,7 +461,22 @@ pub fn supply_balance(
         .enumerate()
         .map(|(i, r)| (r, i))
         .collect();
+    let mut spots: Vec<Option<(u64, TilePos)>> = vec![None; order.len()];
+    for (id, root) in &t.placed {
+        let (Some(root), Some(b)) = (root, buildings.get(*id)) else {
+            continue;
+        };
+        let Some(&slot) = order.get(root) else {
+            continue;
+        };
+        let d = building_demand(b);
+        // 建物は ID の順に来るので、需要が等しいときは先に来た小さい ID を残す。
+        if spots[slot].is_none_or(|(best, _)| d > best) {
+            spots[slot] = Some((d, b.front));
+        }
+    }
     SupplyBalance {
+        spots: spots.into_iter().map(|s| s.map(|(_, p)| p)).collect(),
         components: order.keys().map(|r| t.balance[*r]).collect(),
         segments: roots.into_iter().map(|(id, r)| (id, order[&r])).collect(),
     }

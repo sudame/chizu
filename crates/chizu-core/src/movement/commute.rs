@@ -1,8 +1,9 @@
 //! 住民の通勤の移動。
 //!
 //! 出発の時刻が来た住民ごとに、出発の建物の出入口から行き先の建物の出入口へ向かう移動を作る。
-//! 手段は、2 つの建物の正面のマスの直線の距離で決める。[`DRIVE_MIN_MM`] 以上なら
-//! 歩く → 車 → 歩く で向かい、それより近いか、車で行けなければ歩く。
+//! 手段は、2 つの建物の正面のマスの直線の距離で決める。車を持つ世帯の住民は [`OWNER_DRIVE_MIN_MM`]、
+//! 持たない世帯の住民は [`DRIVE_MIN_MM`] 以上なら歩く → 車 → 歩く で向かい、
+//! それより近いか、車で行けなければ歩く。
 //! 移動の主体ごとに、誰がどこへ向かっているかを覚えておき、移動が終わったら返す。
 //! 住民ごとに自分の車を停めた駐車場も覚え、次に車で出るときはそこから車を出す。満車で別の建物に
 //! 停めた車も、持ち主が乗って出るので、停めてある台数は住民の数を超えて増えない。
@@ -18,8 +19,12 @@ use crate::routing::AstarRouter;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::units::Tick;
 
-/// 車で向かう、建物どうしの直線の距離の下限（mm）。500m である。
+/// 車を持たない世帯の住民が車で向かう、建物どうしの直線の距離の下限（mm）。500m である。
 pub const DRIVE_MIN_MM: i64 = 500_000;
+
+/// 車を持つ世帯の住民が車で向かう、建物どうしの直線の距離の下限（mm）。150m である。
+/// これより近ければ歩いて行ける。
+pub const OWNER_DRIVE_MIN_MM: i64 = 150_000;
 
 /// 移動している住民と、その行き先。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,10 +70,12 @@ pub struct CommuteRequest {
     pub who: Commuter,
     pub from: BuildingId,
     pub to: BuildingId,
+    /// 住民の世帯が車を持つか。
+    pub owns_car: bool,
 }
 
 /// 建物 `a` と `b` の正面のマスが、車で向かうほど離れているか。
-fn far_enough(buildings: &Buildings, a: BuildingId, b: BuildingId) -> bool {
+fn far_enough(buildings: &Buildings, a: BuildingId, b: BuildingId, owns_car: bool) -> bool {
     let (Some(a), Some(b)) = (buildings.get(a), buildings.get(b)) else {
         return false;
     };
@@ -76,7 +83,11 @@ fn far_enough(buildings: &Buildings, a: BuildingId, b: BuildingId) -> bool {
         let d = i128::from(p.checked_sub(q)?).checked_mul(i128::from(TILE_MM))?;
         d.checked_mul(d)
     };
-    let min = i128::from(DRIVE_MIN_MM);
+    let min = i128::from(if owns_car {
+        OWNER_DRIVE_MIN_MM
+    } else {
+        DRIVE_MIN_MM
+    });
     let dist = sq(a.front.x, b.front.x)
         .zip(sq(a.front.y, b.front.y))
         .and_then(|(x, y)| x.checked_add(y))
@@ -98,7 +109,7 @@ impl Trips {
         let mut out: Vec<Option<TripId>> = requests
             .iter()
             .map(|r| {
-                if !far_enough(buildings, r.from, r.to) {
+                if !far_enough(buildings, r.from, r.to, r.owns_car) {
                     return None;
                 }
                 // 住民の車が停めてあれば、その駐車場から出す。なければ車は出発の建物から現れる。

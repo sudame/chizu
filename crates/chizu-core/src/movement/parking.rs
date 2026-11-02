@@ -309,6 +309,39 @@ impl Trips {
         }
     }
 
+    /// 車線に出られないまま待ち続けた車 `rows` の車での移動をやめ、出発の建物から行き先まで歩く移動に
+    /// 切り替える。押さえていた駐車場の空きは返す。歩く経路がなければ `ended` に足す。
+    pub(super) fn walk_instead(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        rows: Vec<usize>,
+        ended: &mut Vec<usize>,
+    ) {
+        for i in rows {
+            let t = self.rows[i].as_mut().expect("待つ主体がない");
+            let Then::Walk { lot, to } = t.then else {
+                ended.push(i);
+                continue;
+            };
+            t.then = Then::Arrive;
+            let (from, departed) = (t.position(), t.departed);
+            self.parking.release(lot);
+            let ends = from
+                .resolve_on(net, LaneMode::Sidewalk)
+                .zip(to.resolve_on(net, LaneMode::Sidewalk));
+            let found =
+                ends.and_then(|e| plan(router, net, LaneMode::Sidewalk, &[e], false).remove(0));
+            match found {
+                Some((route, e)) => {
+                    self.rows[i] = Some(make_trip(net, route, e, to, departed));
+                    self.rescues.walked_instead = self.rescues.walked_instead.saturating_add(1);
+                }
+                None => ended.push(i),
+            }
+        }
+    }
+
     /// 区切りの終わりに着いた行 `done` を、次の区切りへ進める。移動を終える行と、次の区切りの経路が
     /// なくなっていた行を返す。
     pub(super) fn next_legs(

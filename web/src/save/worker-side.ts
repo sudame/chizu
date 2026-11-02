@@ -22,7 +22,16 @@ function post(message: SaveFromWorker, transfer: Transferable[] = []): void {
   self.postMessage(message, transfer);
 }
 
-const yieldToEvents = () => new Promise((resolve) => setTimeout(resolve, 0));
+// setTimeout(0) は入れ子が 5 段を超えると 4 ミリ秒以上待たされ、再生の区切りごとに待ちが積もる。
+// MessageChannel のメッセージなら待たされずに、たまったメッセージを先に片づけてから戻ってこられる。
+const yieldChannel = new MessageChannel();
+const yieldWaiters: (() => void)[] = [];
+yieldChannel.port1.onmessage = () => yieldWaiters.shift()?.();
+const yieldToEvents = () =>
+  new Promise<void>((resolve) => {
+    yieldWaiters.push(resolve);
+    yieldChannel.port2.postMessage(null);
+  });
 
 /** 作り直した街と、状態ハッシュが保存したときと違うか（シミュレーションの規則が変わったか）。 */
 async function restore(save: {

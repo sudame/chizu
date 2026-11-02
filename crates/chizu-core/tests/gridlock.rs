@@ -43,5 +43,5 @@ fn no_car_stays_on_the_road_for_a_day_in_a_jammed_city() {
         );
     }
     // 混雑が起きる街であることも確かめておく。
-    assert!(busiest >= 500, "混雑が起きなかった {busiest}");
+    assert!(busiest >= 400, "混雑が起きなかった {busiest}");
 }

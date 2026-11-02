@@ -175,6 +175,41 @@
         background: #555;
         border-radius: 2px;
       }
+      #overview {
+        font-size: 13px;
+      }
+      #overview summary {
+        cursor: pointer;
+      }
+      #overview p {
+        margin: 2px 0 0;
+      }
+      #overview-parts {
+        margin-top: 2px;
+      }
+      #milestone-notice {
+        position: fixed;
+        bottom: 64px;
+        left: 50%;
+        transform: translateX(-50%);
+        max-width: 24em;
+        padding: 8px 16px;
+        font-size: 14px;
+        color: #0b4a1c;
+        background: #c9f2d3;
+        border: 1px solid #2c9a4a;
+        border-radius: 4px;
+      }
+      #milestone-notice[hidden] {
+        display: none;
+      }
+      @media (max-width: 900px) {
+        /* 足りない知らせ（下から 104px）の上に積む */
+        #milestone-notice {
+          bottom: 240px;
+          max-width: calc(100vw - 32px);
+        }
+      }
       #demand {
         display: flex;
         gap: 4px;
@@ -217,8 +252,15 @@
           <div><div class="slot"><div class="bar" style="background: #4dd9f2"></div></div><div class="label">オ</div></div>
         </div>
       </div>
+      <details id="overview">
+        <summary><span id="overview-population">人口 0</span>・<span id="overview-happiness">幸福度 0 / 100</span>・<span id="overview-remaining">次の段階まで</span></summary>
+        <p id="overview-next"></p>
+        <div id="overview-parts"></div>
+      </details>
       <div id="controls">
         <button type="button" id="pause">一時停止</button>
+        <button type="button" data-speed="0.25">0.25 倍</button>
+        <button type="button" data-speed="0.5">0.5 倍</button>
         <button type="button" data-speed="1">1 倍</button>
         <button type="button" data-speed="4">4 倍</button>
         <button type="button" data-speed="16">16 倍</button>
@@ -227,6 +269,7 @@
       <div id="layers" title="データレイヤー"></div>
     </div>
     <div id="city-shortage" role="status" hidden></div>
+    <div id="milestone-notice" role="status" hidden></div>
     <div id="toolbar">
       <button type="button" data-tool="none" aria-pressed="true">見る</button>
       <button type="button" data-tool="road-Small" aria-pressed="false">道路 小</button>
@@ -247,6 +290,67 @@
     <details id="legend">
       <summary>凡例</summary>
       <div id="legend-body"></div>
+    </details>
+    <style>
+      /* 左下に置く。左上の #overlay は縦に伸ばすと地図のクリックを隠すので、広げたときも下から上へ伸びる場所にする */
+      #finance {
+        position: fixed;
+        left: 8px;
+        bottom: 56px;
+        width: 17em;
+        max-height: 50vh;
+        padding: 4px 8px;
+        overflow-y: auto;
+        font-size: 13px;
+        background: rgb(255 255 255 / 90%);
+        border-radius: 4px;
+      }
+      #finance summary {
+        cursor: pointer;
+        font-weight: bold;
+      }
+      #finance.deficit summary {
+        color: #b00020;
+      }
+      #finance h3 {
+        margin: 6px 0 2px;
+        font-size: 12px;
+      }
+      #finance .finance-row {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+      #finance .finance-row > :first-child {
+        flex: 1;
+      }
+      #finance .finance-rate {
+        min-width: 3.5em;
+        text-align: center;
+      }
+      #finance .finance-amount {
+        min-width: 5em;
+        text-align: right;
+      }
+      #finance .finance-net {
+        justify-content: space-between;
+        margin-top: 4px;
+        padding-top: 2px;
+        font-weight: bold;
+        border-top: 1px solid #888;
+      }
+      #finance.deficit .finance-net {
+        color: #b00020;
+      }
+      #finance .finance-note {
+        margin: 4px 0 0;
+        font-size: 11px;
+        color: #555;
+      }
+    </style>
+    <details id="finance">
+      <summary>収支</summary>
+      <div data-finance-body></div>
     </details>
     <button type="button" id="feedback-open" hidden>フィードバック</button>
     <div id="dev-tools">

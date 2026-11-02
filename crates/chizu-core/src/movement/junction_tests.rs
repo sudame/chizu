@@ -484,3 +484,49 @@ fn a_car_just_past_a_junction_survives_the_removal_of_the_road_behind_it() {
     }
     assert!(arrived);
 }
+
+#[test]
+fn a_car_that_waits_past_the_rescue_walks_instead() {
+    use super::parking::Then;
+    let mut c = Cars::new(crossroads());
+    let id = c.drive(at(4, 10, (1, 0), 7_000), at(18, 10, (1, 0), 0));
+    let slot = id.slot();
+    let to = at(18, 10, (1, 0), 0);
+    let lot = crate::id::BuildingId {
+        index: 0,
+        generation: 0,
+    };
+    {
+        let t = c.trips.rows[slot].as_mut().unwrap();
+        t.waiting = true;
+        t.then = Then::Walk { lot, to };
+        t.stalled = junction::RESCUE;
+        assert!(!car::given_up(t));
+        t.stalled = junction::RESCUE + 1;
+        assert!(car::given_up(t));
+    }
+    let mut ended = Vec::new();
+    c.trips
+        .walk_instead(&c.net, &mut c.router, vec![slot], &mut ended);
+    assert!(ended.is_empty());
+    let t = c.trips.get(id).unwrap();
+    assert_eq!(t.mode(), LaneMode::Sidewalk);
+    assert!(!car::given_up(t));
+    assert_eq!(c.trips.rescues().walked_instead, 1);
+    assert_eq!(c.trips.rescues().teleported, 0);
+}
+
+#[test]
+fn a_waiting_car_that_gets_a_place_starts_counting_again() {
+    let mut c = Cars::new(crossroads());
+    let id = c.drive(at(4, 10, (1, 0), 7_000), at(18, 10, (1, 0), 0));
+    {
+        let t = c.trips.rows[id.slot()].as_mut().unwrap();
+        t.waiting = true;
+        t.stalled = junction::RESCUE;
+    }
+    c.step();
+    let t = c.trips.get(id).unwrap();
+    assert!(!t.waiting);
+    assert_eq!(t.stalled, 0);
+}

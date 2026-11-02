@@ -29,7 +29,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
-pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM};
+pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, OWNER_DRIVE_MIN_MM};
 pub use congestion::{Congestion, classify as classify_congestion};
 pub use parking::{Lot, PARK_RADIUS, building_spot};
 pub use pos::SidewalkPos;
@@ -43,6 +43,20 @@ use crate::routing::{
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::TilePos;
 use crate::units::{LaneOffset, Mm, MmPerTick, Tick, WorldPos};
+
+/// 歩く人を並列に進めるときに、1 本のスレッドが受け持つ行の数の下限。行がこの 2 倍に満たなければ
+/// 1 本のスレッドで回す。1 行は数ナノ秒で済むので、これより小さく分けると、スレッドを起こして
+/// 待ち合わせる時間のほうが長くなる。
+///
+/// 分け方で結果は変わらない。単体テストでは、小さな街でも分けた道を通してスレッド数に依らないことを
+/// 確かめられるように 1 にする。
+#[cfg(feature = "parallel")]
+const PAR_MIN_WALKS: usize = if cfg!(test) { 1 } else { 8_192 };
+
+/// 車の前を見て速さを決めるのを並列に回すときに、1 本のスレッドが受け持つ車の数の下限。
+/// 単体テストで 1 にするのは [`PAR_MIN_WALKS`] と同じ理由である。
+#[cfg(feature = "parallel")]
+const PAR_MIN_CARS: usize = if cfg!(test) { 1 } else { 256 };
 
 /// 歩くか車で走って移動している主体。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -478,6 +492,10 @@ impl Trips {
         self.finished.clear();
         let done = self.advance(net, router.connectors());
         let mut ended = self.next_legs(net, router, done);
+        let give_up: Vec<usize> = (0..self.rows.len())
+            .filter(|i| self.rows[*i].as_ref().is_some_and(car::given_up))
+            .collect();
+        self.walk_instead(net, router, give_up, &mut ended);
         ended.sort_unstable();
         ended
             .into_iter()
@@ -511,6 +529,7 @@ impl Trips {
         let arrived: Vec<usize> = self
             .rows
             .par_iter_mut()
+            .with_min_len(PAR_MIN_WALKS)
             .enumerate()
             .filter_map(advance)
             .collect();

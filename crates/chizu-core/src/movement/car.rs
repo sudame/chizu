@@ -129,6 +129,11 @@ impl LaneIndex {
 /// 行 `i` の車を、いまのリンクの車線に置く。車の少ない車線から順に、いまの位置から後ろへ下げて
 /// 空いた位置を探す。どの車線にも空きがなければ、出発を待たせて `false` を返す。
 /// `ix` は行 `i` を除いた車線の上の車で、置いたら行 `i` を足す。
+/// 車線に一度も出られないまま `RESCUE` tick を越えて待っている車か。
+pub(super) fn given_up(t: &Trip) -> bool {
+    t.mode == LaneMode::Car && t.waiting && t.stalled > junction::RESCUE
+}
+
 pub(super) fn place(
     rows: &mut [Option<Trip>],
     net: &Network,
@@ -143,7 +148,7 @@ pub(super) fn place(
         .find_map(|l| Some((l, ix.room_behind(l, t.offset)?)));
     match found {
         Some((lane, at)) => {
-            (t.lane, t.offset, t.waiting) = (lane, at, false);
+            (t.lane, t.offset, t.waiting, t.stalled) = (lane, at, false, 0);
             ix.insert(lane, at);
             true
         }
@@ -451,9 +456,14 @@ pub(super) fn step(
     let waiting: Vec<usize> = (0..rows.len())
         .filter(|i| rows[*i].as_ref().is_some_and(|t| t.waiting))
         .collect();
-    let mut ix = LaneIndex::of(rows, None);
-    for i in waiting {
-        place(rows, net, &mut ix, i);
+    let mut still_waiting = Vec::new();
+    if !waiting.is_empty() {
+        let mut ix = LaneIndex::of(rows, None);
+        for i in waiting {
+            if !place(rows, net, &mut ix, i) {
+                still_waiting.push(i);
+            }
+        }
     }
     let st = LaneState::of(rows);
     // 車線ごとに、前の車から順に並べる。
@@ -469,7 +479,11 @@ pub(super) fn step(
     let rows_ro = &*rows;
     let look_at = |k: usize| look(rows_ro, net, conn, &st, &order, k);
     #[cfg(feature = "parallel")]
-    let looks: Vec<Look> = (0..order.len()).into_par_iter().map(look_at).collect();
+    let looks: Vec<Look> = (0..order.len())
+        .into_par_iter()
+        .with_min_len(super::PAR_MIN_CARS)
+        .map(look_at)
+        .collect();
     #[cfg(not(feature = "parallel"))]
     let looks: Vec<Look> = (0..order.len()).map(look_at).collect();
     // 交差点の手前で止める車を、前の tick の状態だけからノードの順に決める。
@@ -507,7 +521,11 @@ pub(super) fn step(
         (i, t.speed, v, at, next_lane, held[k])
     };
     #[cfg(feature = "parallel")]
-    let moves: Vec<_> = (0..order.len()).into_par_iter().map(plan).collect();
+    let moves: Vec<_> = (0..order.len())
+        .into_par_iter()
+        .with_min_len(super::PAR_MIN_CARS)
+        .map(plan)
+        .collect();
     #[cfg(not(feature = "parallel"))]
     let moves: Vec<_> = (0..order.len()).map(plan).collect();
 
@@ -580,6 +598,11 @@ pub(super) fn step(
         }
         #[cfg(test)]
         check_lane(rows, lane);
+    }
+    // 満車の車線に出られないまま待つ車の tick 数を数える。`RESCUE` を越えた車は、呼び出し側が歩きに切り替える。
+    for i in still_waiting {
+        let t = rows[i].as_mut().expect("車の主体がない");
+        t.stalled = t.stalled.saturating_add(1);
     }
     rescue_stalled(rows, &was, &mut arrived, rescues);
     arrived
