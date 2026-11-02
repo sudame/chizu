@@ -39,6 +39,7 @@ import {
   type Tile,
   type Tool,
 } from "./map/tools.ts";
+import { parseOverview, renderOverview } from "./overview.ts";
 import {
   CHUNK_SIDE,
   type CommandMessage,
@@ -653,6 +654,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     mapCanvas.dataset.firstBuilding = Array.from(message.buildings.subarray(0, 4)).join(",");
     mapCanvas.dataset.unsupplied = String(unsuppliedCount(message.buildings));
     mapCanvas.dataset.facilities = String(message.facilities.length / FACILITY_STRIDE);
+    return;
+  }
+  if (message.kind === "overview") {
+    renderOverview(parseOverview(message.overview));
     return;
   }
   if (message.kind === "outcome") {

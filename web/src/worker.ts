@@ -111,6 +111,19 @@ function sendBuildings(sim: Simulation): void {
   ]);
 }
 
+// 人口と幸福度は建物の表が変わらなくても動く。住民の数だけ数え直すので、間引いて送る。
+// 一時停止中は街が進まないので、最初の 1 回のあとは送らない。最初の 1 回を画面は基準にする
+const OVERVIEW_INTERVAL_MS = 500;
+let overviewSentAt = Number.NEGATIVE_INFINITY;
+function sendOverview(sim: Simulation, now: number, paused: boolean, force = false): void {
+  const first = overviewSentAt === Number.NEGATIVE_INFINITY;
+  if (!force && !first && (paused || now - overviewSentAt < OVERVIEW_INTERVAL_MS)) {
+    return;
+  }
+  overviewSentAt = now;
+  reply({ kind: "overview", overview: [...sim.overview()] });
+}
+
 // 実時間に合わせて tick を進める。何 tick 進めるかはここで決め、中核には整数の tick 数だけを渡す
 function run(sim: Simulation): (paused: boolean) => void {
   const perSecond = ticks_per_second();
@@ -130,6 +143,7 @@ function run(sim: Simulation): (paused: boolean) => void {
     sendOutcomes(sim);
     sendRoads(sim);
     sendBuildings(sim);
+    sendOverview(sim, now, paused);
     sendChunks(sim);
     layerSender.send(sim, reply, CHUNKS_PER_FRAME, now);
   }, FRAME_MS);
@@ -182,6 +196,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         sendOutcomes(sim);
         sendRoads(sim);
         sendBuildings(sim);
+        sendOverview(sim, performance.now(), false, true);
         layerSender.send(sim, reply, CHUNKS_PER_FRAME);
         break;
       case "layers":
