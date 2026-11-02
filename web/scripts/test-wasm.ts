@@ -283,6 +283,59 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   await page.close();
 }
 
+// 地図のラベル。起動した直後の画面には高速道路が入らないので、引きの段（倍率 4 未満で、戻る側は 3.5 未満）
+// まで引いてから、高速道路の名前が、地図の上に重ねたラベルの canvas に緑の盾で出ることを確かめる
+async function checkLabels(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  const labels = page.locator("#labels");
+  const zoom = async () => Number(await page.locator("#map").getAttribute("data-zoom"));
+  for (let i = 0; i < 10 && (await zoom()) >= 3; i++) {
+    const before = await zoom();
+    await page.locator("#zoom-out").click();
+    await page.waitForFunction(
+      (z) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) < z,
+      before,
+    );
+  }
+  await labels.and(page.locator("[data-label-stage='0']")).waitFor({
+    state: "attached",
+    timeout: TIMEOUT_MS,
+  });
+  check(true, `引きの段まで引く（倍率 ${(await zoom()).toFixed(2)}）`);
+  // 高速道路は開始地点から下へ延び、画面の下の道具の帯に隠れるので、地図を上へ引きずって画面の真ん中に出す
+  await page.mouse.move(640, 560);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(640, 160, { steps: 8 });
+  await page.mouse.up({ button: "middle" });
+  await page.waitForFunction(
+    () =>
+      (document.querySelector<HTMLElement>("#labels")?.dataset.labels ?? "").includes("自動車道"),
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  // ラベルは 200ms かけて現れる
+  await page.waitForTimeout(400);
+  // 盾の緑（#1e7b4a）の画素を数える
+  const shield = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#labels");
+    const ctx = canvas?.getContext("2d");
+    if (canvas === null || canvas === undefined || ctx === null || ctx === undefined) return 0;
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const near = (i: number, v: number) => Math.abs((data[i] ?? 0) - v) <= 6;
+    let n = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] === 255 && near(i, 0x1e) && near(i + 1, 0x7b) && near(i + 2, 0x4a)) n++;
+    }
+    return n;
+  });
+  check(
+    shield > 20,
+    `高速道路の名前が緑の盾で描かれる（${await labels.getAttribute("data-labels")}、緑の画素 ${shield}）`,
+  );
+  await page.close();
+}
+
 // 開発用の道具で歩く人を出し、描かれること、時間を進めると動くこと、着くと消えることを確かめる。
 // 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その左寄りと右寄りのマスのあいだに出す
 async function checkDevWalks(page: Page, at: string): Promise<void> {
@@ -580,7 +633,6 @@ try {
     initialSegments > 0,
     `起動すると、外部接続の高速道路のある道路網が届く（${initialSegments} 本）`,
   );
-
   // 道路を引く道具で、画面の中心の行に横の道路を引く
   const message = page.locator("#tool-message");
   const outcomeCount = async () => Number((await message.getAttribute("data-count")) ?? 0);
@@ -1600,6 +1652,7 @@ try {
   await page.close();
   await checkHudPanel(await browser.newPage(), url);
   await checkDevWalks(await browser.newPage(), url);
+  await checkLabels(await browser.newPage(), url);
 } finally {
   await browser.close();
   await server?.close();

@@ -171,6 +171,8 @@ export type WorkerToMain =
       roadCosts: number[];
       /** chizu-wasm の service_table。 */
       serviceTable: number[];
+      /** 街の種（10 進の文字列）。地図の名前を作るのに使う。 */
+      seed: string;
     }
   | { kind: "chunks"; chunks: ChunkData[] }
   /** データレイヤーの値。版が変わったチャンクだけを送る。 */
@@ -252,7 +254,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         typeof v.n === "number" &&
         typeof v.sum === "bigint" &&
         Array.isArray(v.roadCosts) &&
-        Array.isArray(v.serviceTable)
+        Array.isArray(v.serviceTable) &&
+        typeof v.seed === "string"
       );
     case "chunks":
       return Array.isArray(v.chunks) && v.chunks.every(isChunkData);

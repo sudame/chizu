@@ -227,6 +227,7 @@ const ready = (async () => {
     sum: parallel_sum(SUM_N),
     roadCosts: [...road_cost_table()],
     serviceTable: [...service_table()],
+    seed: (JSON.parse(sim.save_meta()) as { seed: string }).seed,
   });
   return { sim, setPaused, setPace };
 })();

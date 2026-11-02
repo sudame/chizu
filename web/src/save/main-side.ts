@@ -96,6 +96,9 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
   // 続いている状態や、気づかないと困る失敗の知らせは、閉じるまで残す
   const alertsEl = make("div", "", { id: "save-alerts" });
   const noticeHost = document.querySelector("#notices") ?? controls;
+  // 地図のラベルは、この 2 つの下に置かない
+  noticeEl.dataset.mapPanel = "";
+  alertsEl.dataset.mapPanel = "";
   noticeHost.append(noticeEl, alertsEl);
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
   const showNotice = (text: string, kind: NoticeKind = "transient") => {

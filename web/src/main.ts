@@ -22,6 +22,7 @@ import {
   type Viewport,
 } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
+import { LabelLayer } from "./map/label-layer.ts";
 import { setupLayerPanel } from "./map/layers.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
 import {
@@ -233,6 +234,8 @@ function createRenderer(): MapRenderer | null {
   }
 }
 let renderer = createRenderer();
+// 道路名、地区名、施設名。WebGL2 とは別の Canvas 2D に描くので、地図を描けなくても作る
+const labels = new LabelLayer(element<HTMLCanvasElement>("#labels"));
 // 最後に届いた道路網と建物。コンテキストを失ったあとに貼り直す
 let roads: RoadMeshes | null = null;
 let buildings: BuildingMeshes | null = null;
@@ -343,6 +346,7 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   const range = camera.visibleChunks(vp);
   sendView(range);
   const drawn = renderer?.draw(camera, vp, range) ?? 0;
+  labels.frame(camera, vp, performance.now());
   const movers =
     header === null
       ? 0
@@ -850,6 +854,7 @@ setupFeedback({
       send({ kind: "feedback" });
     }),
   map: mapCanvas,
+  overlays: [labels.canvas],
   camera: () => ({ x: camera.x, y: camera.y, zoom: camera.zoom }),
 });
 
@@ -942,6 +947,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "chunks") {
     for (const chunk of store.receive(message.chunks)) {
       renderer?.upload(chunk);
+      labels.setChunkTiles(chunk.cx, chunk.cy, chunk.tiles);
     }
     return;
   }
@@ -963,6 +969,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     mapCanvas.dataset.removedCrosswalks = String(crosswalks.filter((arm) => arm.removed).length);
     updatePreview();
     renderer?.roads.setRoads(roads);
+    labels.setRoads(message.segments);
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);
     mapCanvas.dataset.roadSegments = String(message.segments.length / SEGMENT_STRIDE);
@@ -978,6 +985,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "buildings") {
     buildings = buildingMeshes(message.buildings, message.facilities);
     renderer?.roads.setBuildings(buildings);
+    labels.setBuildings(message.buildings, message.facilities);
     renderCityStats(parseCityStats(message.stats), unsuppliedCount(message.buildings));
     // test:wasm が読む
     mapCanvas.dataset.firstBuilding = Array.from(message.buildings.subarray(0, 4)).join(",");
@@ -1048,6 +1056,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   roadCosts = parseRoadCostTable(message.roadCosts);
   services = parseServiceTable(message.serviceTable);
+  labels.setSeed(message.seed);
   let reader: SnapshotReader;
   try {
     reader = new SnapshotReader(message.memory, message.snapshotOffset);

@@ -108,6 +108,14 @@
         touch-action: none;
         cursor: grab;
       }
+      /* 道路名、地区名、施設名。地図の上に重ね、操作は下の地図に通す */
+      #labels {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
       #map:not([data-tool="none"]) {
         cursor: crosshair;
       }
@@ -870,8 +878,9 @@
       </defs>
     </svg>
     <canvas id="map" data-tool="none"></canvas>
+    <canvas id="labels" aria-hidden="true"></canvas>
     <div id="overlay">
-      <div id="hudbar">
+      <div id="hudbar" data-map-panel>
         <p id="hud">
           <span id="hud-clock">1 日目 00:00</span>
           <span class="vsep" aria-hidden="true"></span>
@@ -892,11 +901,11 @@
         </div>
         <button type="button" id="hud-toggle" aria-label="詳細" aria-controls="hud-details" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-more" /></svg></button>
       </div>
-      <div id="finance" class="panel" hidden>
+      <div id="finance" data-map-panel class="panel" hidden>
         <h2 data-finance-summary>収支</h2>
         <div data-finance-body></div>
       </div>
-      <div id="hud-details" class="panel" hidden>
+      <div id="hud-details" data-map-panel class="panel" hidden>
         <div id="hud-extra">
           <span class="extra-label">ほかの速度と保存</span>
           <div id="controls">
@@ -923,7 +932,7 @@
           <div id="overview-parts"></div>
         </details>
       </div>
-      <aside id="inspector" class="panel" hidden>
+      <aside id="inspector" data-map-panel class="panel" hidden>
         <header>
           <span data-inspector-title aria-live="polite"></span>
           <button type="button" id="inspector-close" data-inspector-close aria-label="閉じる">×</button>
@@ -932,14 +941,14 @@
       </aside>
     </div>
     <div id="notices">
-      <div id="city-shortage" role="status" hidden></div>
-      <div id="growth-notice" hidden>
+      <div id="city-shortage" data-map-panel role="status" hidden></div>
+      <div id="growth-notice" data-map-panel hidden>
         <div role="status"><strong id="growth-notice-head"></strong><div id="growth-notice-action"></div></div>
         <button type="button" id="growth-notice-jump" hidden></button>
       </div>
-      <div id="milestone-notice" role="status" hidden></div>
+      <div id="milestone-notice" data-map-panel role="status" hidden></div>
     </div>
-    <div id="toolstack">
+    <div id="toolstack" data-map-panel>
       <div id="tool-status" class="panel">
         <span id="tool-info"></span>
         <span id="tool-message" aria-live="polite"></span>
@@ -995,8 +1004,8 @@
     </div>
     <div id="map-controls">
       <div class="layer-wrap">
-        <button type="button" id="layers-open" class="map-button" aria-label="レイヤー" aria-controls="layer-panel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-layers" /></svg></button>
-        <div id="layer-panel" class="panel" hidden>
+        <button type="button" id="layers-open" data-map-panel class="map-button" aria-label="レイヤー" aria-controls="layer-panel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-layers" /></svg></button>
+        <div id="layer-panel" data-map-panel class="panel" hidden>
           <h2>レイヤー</h2>
           <div id="layers"></div>
           <details id="legend">
@@ -1005,12 +1014,12 @@
           </details>
         </div>
       </div>
-      <div id="zoom">
+      <div id="zoom" data-map-panel>
         <button type="button" id="zoom-in" class="map-button" aria-label="拡大"><svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg></button>
         <button type="button" id="zoom-out" class="map-button" aria-label="縮小"><svg class="icon" aria-hidden="true"><use href="#i-minus" /></svg></button>
       </div>
     </div>
-    <div id="map-meta">
+    <div id="map-meta" data-map-panel>
       <div id="dev-tools">
         <p id="dev-flag" hidden>開発用の操作あり：再現不可</p>
         <button type="button" class="chip" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>
@@ -1022,7 +1031,7 @@
         <div data-scale-line></div>
       </div>
     </div>
-    <button type="button" id="feedback-open" aria-label="フィードバック" title="フィードバック" hidden><svg class="icon" aria-hidden="true"><use href="#i-chat" /></svg></button>
+    <button type="button" id="feedback-open" data-map-panel aria-label="フィードバック" title="フィードバック" hidden><svg class="icon" aria-hidden="true"><use href="#i-chat" /></svg></button>
     <dialog id="feedback">
       <form method="dialog">
         <p>気づいたことを書く。画面、状態、これまでの操作の記録と一緒に保存する。</p>
