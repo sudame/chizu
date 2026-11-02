@@ -248,12 +248,17 @@ impl Sim {
         out
     }
 
-    /// ノードを、1 つにつき `[x, y, つながる区間の数]` の 3 つの数で返す。
+    /// ノードを、1 つにつき `[x, y, つながる区間の数, 外の世界か（0 か 1）]` の 4 つの数で返す。
     pub fn road_nodes(&self) -> Vec<f64> {
         let mut out = Vec::new();
         for (_, node) in self.world.network().nodes() {
             let t = node.tile();
-            out.extend([t.x as f64, t.y as f64, node.segments.len() as f64]);
+            out.extend([
+                t.x as f64,
+                t.y as f64,
+                node.segments.len() as f64,
+                f64::from(u8::from(node.outside)),
+            ]);
         }
         out
     }
@@ -941,7 +946,10 @@ mod tests {
         assert_eq!(segments[4], 4.0);
         assert_eq!(segments[segments.len() - 5..], [0.0, 0.0, 4.0, 0.0, 1.0]);
         let nodes = sim.road_nodes();
-        assert_eq!(nodes[nodes.len() - 6..], [0.0, 0.0, 1.0, 4.0, 0.0, 1.0]);
+        assert_eq!(
+            nodes[nodes.len() - 8..],
+            [0.0, 0.0, 1.0, 0.0, 4.0, 0.0, 1.0, 0.0]
+        );
 
         let far = (CHUNK_SIDE as i64) * 3;
         sim.submit(road((far, 0), (far + 2, 0))).unwrap();
