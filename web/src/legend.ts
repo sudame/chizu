@@ -1,14 +1,15 @@
 // 地図の色と印の凡例。色と形は描画で使う定数（map/roads.ts）から取る。
 
+import { GLYPH_PATHS, GLYPH_SCALE } from "./map/facility-symbols.ts";
 import { HIGHWAY_CODE } from "./map/lanes.ts";
 import { TRAFFIC_LEVELS } from "./map/layers.ts";
 import { CAR_COLORS, WALKER_COLOR } from "./map/mover-colors.ts";
+import { type FacilityGlyph, facilityStyle } from "./map/palette.ts";
 import {
   BOLT_SHAPE,
   buildingColor,
   buildingEdgeColor,
   DROP_SHAPE,
-  FACILITY_COLOR,
   NO_POWER_COLOR,
   NO_WATER_COLOR,
   roadStyle,
@@ -16,12 +17,16 @@ import {
   zoneGroundColor,
 } from "./map/roads.ts";
 
-/** 凡例の 1 項目。swatch は色の四角で、border があれば縁をその色で描く。icon は印の形（三角形の組み合わせ）である。 */
+/**
+ * 凡例の 1 項目。swatch は色の四角で、border があれば縁をその色で描く。icon は印の形（三角形の組み合わせ）、
+ * symbol は施設の丸い記号（色は color、中の絵は glyph）である。
+ */
 export type LegendItem = {
   label: string;
   color: string;
   border?: string;
   icon?: { triangles: readonly Triangle[] };
+  symbol?: { glyph: FacilityGlyph };
 };
 
 export type LegendSection = { title: string; items: LegendItem[] };
@@ -37,6 +42,12 @@ const ZONES: [number, string][] = [
   [2, "商業"],
   [3, "工業"],
   [4, "オフィス"],
+];
+
+// 施設の種類（ServiceKind の値）と凡例の名前
+const FACILITIES: [number, string][] = [
+  [1, "発電所"],
+  [2, "浄水場"],
 ];
 
 const ROADS: [number, string][] = [
@@ -84,11 +95,12 @@ export function legendSections(): LegendSection[] {
       items: TRAFFIC_LEVELS.map((l) => ({ label: l.label, color: cssColor(l.color) })),
     },
     {
-      title: "公共施設",
-      items: [
-        { label: "発電所", color: cssColor(FACILITY_COLOR[1] ?? [0.6, 0.6, 0.6, 1]) },
-        { label: "浄水場", color: cssColor(FACILITY_COLOR[2] ?? [0.6, 0.6, 0.6, 1]) },
-      ],
+      title: "公共施設（丸い記号）",
+      items: FACILITIES.map(([kind, label]) => ({
+        label,
+        color: facilityStyle(kind).circle,
+        symbol: { glyph: facilityStyle(kind).glyph },
+      })),
     },
     {
       title: "道路（広いほど車道が太い。高速道路は橙、大きい道路は黄）",
@@ -114,8 +126,38 @@ export function trianglePoints(t: Triangle, size: number): string {
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const ICON_PX = 16;
+const SYMBOL_PX = 20;
+
+function symbolSwatch(color: string, glyph: FacilityGlyph): Element {
+  const svg = document.createElementNS(SVG_NS, "svg");
+  svg.setAttribute("class", "swatch-icon");
+  svg.setAttribute("width", String(SYMBOL_PX));
+  svg.setAttribute("height", String(SYMBOL_PX));
+  svg.setAttribute("viewBox", `0 0 ${SYMBOL_PX} ${SYMBOL_PX}`);
+  svg.setAttribute("aria-hidden", "true");
+  const c = SYMBOL_PX / 2;
+  const ring = document.createElementNS(SVG_NS, "circle");
+  ring.setAttribute("cx", String(c));
+  ring.setAttribute("cy", String(c));
+  ring.setAttribute("r", String(c));
+  ring.setAttribute("fill", "#ffffff");
+  const disc = document.createElementNS(SVG_NS, "circle");
+  disc.setAttribute("cx", String(c));
+  disc.setAttribute("cy", String(c));
+  disc.setAttribute("r", String(c - 1.5));
+  disc.setAttribute("fill", color);
+  const path = document.createElementNS(SVG_NS, "path");
+  path.setAttribute("d", GLYPH_PATHS[glyph]);
+  path.setAttribute("fill", "#ffffff");
+  path.setAttribute("transform", `translate(${c} ${c}) scale(${(c - 1.5) * GLYPH_SCALE})`);
+  svg.append(ring, disc, path);
+  return svg;
+}
 
 function swatch(item: LegendItem): Element {
+  if (item.symbol !== undefined) {
+    return symbolSwatch(item.color, item.symbol.glyph);
+  }
   if (item.icon === undefined) {
     const box = document.createElement("span");
     box.className = "swatch";

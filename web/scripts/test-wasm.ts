@@ -1329,10 +1329,37 @@ try {
   await chooseLayer(page, "none");
   await page.waitForTimeout(100);
   const markAfter = await markPixels();
+  // 発電所の敷地は、淡い橙の面（#f8e3cf）で、標準では地面から段の重みだけ寄せて描かれる
   const plantColor = await colorOfTile(54, 34);
   check(
-    !anyYellow(markAfter) && (plantColor[0] ?? 0) > 200 && (plantColor[2] ?? 0) < 100,
-    `施設が橙で描かれ、建物に供給が届いて印が消える（施設 ${plantColor.join(", ")}、印の場所 ${markAfter.map((c) => c.join(",")).join(" ")}）`,
+    !anyYellow(markAfter) &&
+      near(plantColor, mixHex(GROUND_HEX, "#f8e3cf", stageWeights(view.zoom).marks), 4),
+    `施設の敷地が淡い橙で描かれ、建物に供給が届いて印が消える（敷地 ${plantColor.join(", ")}、印の場所 ${markAfter.map((c) => c.join(",")).join(" ")}）`,
+  );
+  // 発電所の記号は、敷地の中心に、地図の上に重ねたラベルの canvas に橙の丸（#e8710a）で描かれる。
+  // 丸の左寄り（半径 8px の丸で、絵の稲妻より外）を読む。ラベルの置き場所が決まったあとに描かれるので、橙になるまで待つ
+  const symbolAt = {
+    x: cx + (55 - view.x) * view.zoom - 5,
+    y: cy + (35 - view.y) * view.zoom,
+  };
+  const symbolPixel = () =>
+    page.evaluate((at) => {
+      const canvas = document.querySelector<HTMLCanvasElement>("#labels");
+      const dpr = window.devicePixelRatio;
+      const d = canvas
+        ?.getContext("2d")
+        ?.getImageData(Math.round(at.x * dpr), Math.round(at.y * dpr), 1, 1).data;
+      return [d?.[0] ?? 0, d?.[1] ?? 0, d?.[2] ?? 0, d?.[3] ?? 0];
+    }, symbolAt);
+  const untilSymbol = Date.now() + TIMEOUT_MS;
+  let symbolColor = await symbolPixel();
+  while (!near(symbolColor, "#e8710a", 4) && Date.now() < untilSymbol) {
+    await page.waitForTimeout(100);
+    symbolColor = await symbolPixel();
+  }
+  check(
+    near(symbolColor, "#e8710a", 4),
+    `発電所の記号が橙の丸で描かれる（${symbolColor.join(", ")}）`,
   );
   // 「見る」で建物を押すと様子のパネルが出て、何もないところを押すと閉じる
   await page.locator('button[data-tool="none"]').click();

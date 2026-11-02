@@ -4,6 +4,14 @@
 
 import { TILE_WATER } from "../protocol/messages.ts";
 import {
+  drawSymbol,
+  type FacilitySymbol,
+  facilitySymbols,
+  SYMBOL_BORDER,
+  symbolBox,
+  symbolLook,
+} from "./facility-symbols.ts";
+import {
   type CameraView,
   type Candidate,
   type DistrictLabel,
@@ -15,8 +23,8 @@ import {
   LabelFader,
   type LabelSize,
   nextLabelStage,
+  type Obstacle,
   placeLabels,
-  type Rect,
   type RoadRun,
   roadCandidates,
   roadRuns,
@@ -69,6 +77,7 @@ export class LabelLayer {
   #runs: RoadRun[] = [];
   #districts: DistrictLabel[] = [];
   #facilityLabels: FacilityLabel[] = [];
+  #symbols: FacilitySymbol[] = [];
   #roadsDirty = false;
   #placesDirty = false;
   #stage = STAGE_STANDARD;
@@ -209,7 +218,17 @@ export class LabelLayer {
       ...districtCandidates(this.#districts, camera, viewport, this.#stage, measure),
       ...facilityCandidates(this.#facilityLabels, camera, viewport, this.#stage, measure),
     ];
-    const placed = placeLabels(candidates, this.#fader.shown(), this.#readObstacles());
+    // 施設の記号の上にも、ほかのラベルを置かない
+    this.#symbols = facilitySymbols(this.#facilityLabels, camera.zoom);
+    const look = symbolLook(camera.zoom);
+    const symbolObstacles: Obstacle[] = this.#symbols.map((s) => ({
+      ...symbolBox(s, camera, viewport, look.radius),
+      owner: s.owner,
+    }));
+    const placed = placeLabels(candidates, this.#fader.shown(), [
+      ...this.#readObstacles(),
+      ...symbolObstacles,
+    ]);
     this.#fader.update(placed);
     // test:wasm が読む
     const texts = placed.map((c) => c.text).join("|");
@@ -221,9 +240,9 @@ export class LabelLayer {
   }
 
   /** 見えているパネルの範囲。置き場所を求めるたびに読み直す。 */
-  #readObstacles(): Rect[] {
+  #readObstacles(): Obstacle[] {
     const map = this.canvas.getBoundingClientRect();
-    const out: Rect[] = [];
+    const out: Obstacle[] = [];
     for (const el of document.querySelectorAll(PANEL_SELECTOR)) {
       const r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
@@ -249,6 +268,7 @@ export class LabelLayer {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, width, height);
     }
+    this.#drawSymbols(camera, viewport);
     for (const { label, alpha } of this.#fader.items()) {
       const sprite = this.#sprite(label.text, label.style, label.vertical);
       const sx = (label.wx - camera.x) * camera.zoom + viewport.width / 2;
@@ -266,6 +286,29 @@ export class LabelLayer {
         ctx.setTransform(c, s, -s, c, sx * dpr, sy * dpr);
         ctx.drawImage(sprite.image, label.ox, label.oy, sprite.w, sprite.h);
       }
+    }
+    ctx.globalAlpha = 1;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  /** 施設の丸い記号。ラベルの下に描く。画面の外のものは描かない。 */
+  #drawSymbols(camera: CameraView, viewport: Viewport): void {
+    const ctx = this.#ctx;
+    const look = symbolLook(camera.zoom);
+    const reach = look.radius + SYMBOL_BORDER + 2;
+    ctx.setTransform(this.#dpr, 0, 0, this.#dpr, 0, 0);
+    for (const s of this.#symbols) {
+      const sx = (s.x - camera.x) * camera.zoom + viewport.width / 2;
+      const sy = (s.y - camera.y) * camera.zoom + viewport.height / 2;
+      if (
+        sx < -reach ||
+        sy < -reach ||
+        sx > viewport.width + reach ||
+        sy > viewport.height + reach
+      ) {
+        continue;
+      }
+      drawSymbol(ctx, s, sx, sy, look);
     }
     ctx.globalAlpha = 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);

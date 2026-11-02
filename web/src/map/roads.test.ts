@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { carriagewayHalfWidth, HIGHWAY_CODE, laneCenter } from "./lanes.ts";
+import { hex } from "./palette.ts";
 import {
   asphaltHalfWidth,
   buildingColor,
@@ -7,7 +8,8 @@ import {
   buildingMeshes,
   CLUSTER_INSET,
   crosswalkArms,
-  FACILITY_COLOR,
+  facilitySiteColor,
+  facilitySiteEdgeColor,
   footprintOutline,
   Geometry,
   headingBit,
@@ -98,7 +100,7 @@ describe("建物", () => {
     expect(edge).toEqual(Array.from(new Float32Array(buildingEdgeColor(1).slice(0, 3))));
   });
 
-  test("施設はどの段でも縁と本体を描き、電気か水道の届かない建物には印を足す", () => {
+  test("施設は敷地の縁と面を描き、電気か水道の届かない建物には印を足す", () => {
     const facilities = new Float64Array([0, 0, 3, 3, 1]);
     // 電気も水道も届く、電気だけ届く、どちらも届かない
     const supplies = [3, 1, 0];
@@ -108,14 +110,20 @@ describe("建物", () => {
     const m = buildingMeshes(buildings, facilities);
     // 影は施設 1 つと建物 3 つ、縁は建物 3 つ
     expect(m.details.vertexCount).toBe(6 * (4 + 3));
-    expect(m.facilities.vertexCount).toBe(6 * 2);
+    expect(m.facilities.vertexCount).toBe(6 * 5);
     // 印は水滴 2 つ（9 頂点）と稲妻 1 つ（6 頂点）
     expect(m.marks.vertexCount).toBe(9 * 2 + 6);
     expect(unsuppliedCount(buildings)).toBe(2);
-    const body = 6 * VERTEX_FLOATS;
-    expect([...m.facilities.build().subarray(body + 6, body + 10)]).toEqual(
-      [...(FACILITY_COLOR[1] ?? [])].map(Math.fround),
+    // 敷地は縁の 4 本と面を重ならないように置く。色は決まりの表の発電所の敷地の縁と面である
+    const body = 4 * 6 * VERTEX_FLOATS;
+    const facilityData = m.facilities.build();
+    expect([...facilityData.subarray(6, 10)]).toEqual(
+      [...facilitySiteEdgeColor(1)].map(Math.fround),
     );
+    expect([...facilityData.subarray(body + 6, body + 10)]).toEqual(
+      [...facilitySiteColor(1)].map(Math.fround),
+    );
+    expect(facilitySiteColor(1)).toEqual(hex("#f8e3cf"));
     // 印の最初が、電気だけ届く建物の水道の印。基準のマスは最初の建物の左上 (10, 20)
     const water = markCenter({ x: 12, y: 20 }, "water");
     const data = m.marks.build();

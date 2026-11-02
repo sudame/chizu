@@ -333,6 +333,34 @@ describe("地区と施設の名前", () => {
     expect(first?.ox).toBe(15);
     expect(near.find((c) => c.text.endsWith("発電所"))?.style.color).toBe("#a8500a");
   });
+
+  test("寄りの名前は、まとまりのいちばん右の記号の右に置き、標準はまとまりの中心に置く", () => {
+    const facilities = [
+      [0, 0, 1, 1, 2],
+      [4, 0, 5, 1, 2],
+      [8, 0, 9, 1, 2],
+    ].flat();
+    const groups = facilityLabels(0, facilities, () => false);
+    expect(groups[0]?.members.map((m) => m.x)).toEqual([1, 5, 9]);
+    const camera = { x: 5, y: 1, zoom: 16 };
+    const vp = { width: 800, height: 300 };
+    const std = facilityCandidates(groups, camera, vp, STAGE_STANDARD, measure)[0];
+    const near = facilityCandidates(groups, camera, vp, STAGE_NEAR, measure)[0];
+    expect(std?.wx).toBe(groups[0]?.centerX);
+    expect(near?.wx).toBe(9);
+    expect(near?.owner).toBe(std?.owner);
+    expect(near?.ox).toBe(15);
+    // いちばん右の記号が画面の外にあるときは、収まる記号の右に置く
+    const narrow = { width: 300, height: 300 };
+    const fallback = facilityCandidates(
+      groups,
+      { x: 0, y: 1, zoom: 16 },
+      narrow,
+      STAGE_NEAR,
+      measure,
+    );
+    expect(fallback[0]?.wx).toBe(1);
+  });
 });
 
 describe("出し入れ", () => {

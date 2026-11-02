@@ -19,7 +19,7 @@ import {
   roadHalfWidth,
   SIDEWALK_WIDTH,
 } from "./lanes.ts";
-import { type Color, GROUND_COLOR, hex } from "./palette.ts";
+import { type Color, facilityStyle, GROUND_COLOR, hex } from "./palette.ts";
 import { stageWeights } from "./stages.ts";
 
 export type { Color };
@@ -501,15 +501,15 @@ export function buildingEdgeColor(zone: number): Color {
 // 建物の縁の幅は BUILDING_EDGE（マス）にする。
 // 影は右下へ画面で BUILDING_SHADOW_PX ずらした `#3c4043` の 18% で、建物の大きさを見やすくする
 const BUILDING_EDGE = 0.05;
-const BUILDING_EDGE_SHADE = 0.68;
 const BUILDING_SHADOW_PX = 2;
 const SHADOW_COLOR = hex("#3c4043", 0.18);
 
-// 施設の色。発電所は橙、浄水場は青緑。値は ServiceKind の値である
-export const FACILITY_COLOR: Record<number, Color> = {
-  1: [0.95, 0.5, 0.1, 1],
-  2: [0.1, 0.65, 0.65, 1],
-};
+/** 施設の敷地の面の色。施設の種類（ServiceKind の値）ごと。丸の色は facility-symbols.ts が使う。 */
+export const facilitySiteColor = (kind: number): Color => hex(facilityStyle(kind).site);
+/** 施設の敷地の縁の色。 */
+export const facilitySiteEdgeColor = (kind: number): Color => hex(facilityStyle(kind).siteEdge);
+/** 施設の丸の色（仮の表示の色にも使う）。 */
+export const facilityCircleColor = (kind: number): Color => hex(facilityStyle(kind).circle);
 // 電気か水道が届いていない建物の印。黄の稲妻と青の水滴を左上に並べる
 export const NO_POWER_COLOR: Color = [1, 0.9, 0.1, 1];
 export const NO_WATER_COLOR: Color = [0.2, 0.5, 1, 1];
@@ -520,8 +520,6 @@ export function markCenter(min: Tile, which: "power" | "water"): { x: number; y:
   return { x: min.x + (which === "power" ? 0.25 : 0.75), y: min.y + 0.3 };
 }
 
-const shade = ([r, g, b, a]: Color, k: number): Color => [r * k, g * k, b * k, a];
-
 type Box = { x0: number; y0: number; x1: number; y1: number; color: Color; edge: Color };
 
 /** 標準の段で、建物のまとまりを描くときに内側に縮める幅（マス）。隣の建物とのあいだに細い隙間だけを残す。 */
@@ -531,7 +529,7 @@ export const CLUSTER_INSET = 0.06;
  * 建物と施設の頂点。段ごとに濃さを変えて重ねるので、描く順に分けて持つ。
  * - `clusters`：標準の段の、建物のまとまり（隙間を細く、縁なし）
  * - `details`：寄りの段の、建物と施設の影と、建物の縁
- * - `facilities`：施設の縁と本体。どの段でも描く
+ * - `facilities`：施設の敷地の縁と面。引きでは描かず、標準から濃くしていく（丸い記号は label-layer.ts が描く）
  * - `bodies`：寄りの段の、1 軒ずつの建物の本体
  * - `marks`：電気か水道が届いていない印
  */
@@ -562,14 +560,13 @@ export function buildingMeshes(buildings: Float64Array, facilities: Float64Array
   const facilityBoxes: Box[] = [];
   for (let i = 0; i + FACILITY_STRIDE <= facilities.length; i += FACILITY_STRIDE) {
     const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, kind = 0] = facilities.subarray(i, i + FACILITY_STRIDE);
-    const color = FACILITY_COLOR[kind] ?? [0.6, 0.6, 0.6, 1];
     facilityBoxes.push({
       x0: x0 + 0.05,
       y0: y0 + 0.05,
       x1: x1 + 0.95,
       y1: y1 + 0.95,
-      color,
-      edge: shade(color, BUILDING_EDGE_SHADE),
+      color: facilitySiteColor(kind),
+      edge: facilitySiteEdgeColor(kind),
     });
   }
   const buildingBoxes: Box[] = [];
@@ -596,8 +593,12 @@ export function buildingMeshes(buildings: Float64Array, facilities: Float64Array
     meshes.details.box(x0, y0, x1, y1, SHADOW_COLOR, BUILDING_SHADOW_PX);
   }
   const e = BUILDING_EDGE;
+  // 敷地は、縁の 4 本と面を重ならないように置く。標準に入るあいだ薄く描いても、縁が面に透けない
   for (const { x0, y0, x1, y1, color, edge } of facilityBoxes) {
-    meshes.facilities.box(x0, y0, x1, y1, edge);
+    meshes.facilities.box(x0, y0, x1, y0 + e, edge);
+    meshes.facilities.box(x0, y1 - e, x1, y1, edge);
+    meshes.facilities.box(x0, y0 + e, x0 + e, y1 - e, edge);
+    meshes.facilities.box(x1 - e, y0 + e, x1, y1 - e, edge);
     meshes.facilities.box(x0 + e, y0 + e, x1 - e, y1 - e, color);
   }
   // 寄りの段に移るあいだは、本体を濃く描いたまま縁を濃くしていくので、縁と本体を分ける
@@ -1192,7 +1193,7 @@ export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
   const order: [MeshName, number][] = [
     ["clusters", w.clusters],
     ["details", w.detail],
-    ["facilities", 1],
+    ["facilities", w.marks],
     // 寄りに移るあいだは、本体を濃いまま描き、縁と影と隙間だけを濃くしていく
     ["bodies", w.detail > 0 ? 1 : 0],
     ["marks", w.marks],

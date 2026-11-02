@@ -66,3 +66,36 @@ export const CLEAR_ZONE_COLOR = hex("#9aa0a6", 0.5);
 /** 区画を塗れるマスに重ねる青の割合。renderer.ts のシェーダーが使う。 */
 export const ZONABLE_MIX = 0.1;
 export const ZONABLE_COLOR = hexRgb(BLUE);
+
+/** 施設の絵。丸の中に白く描く。 */
+export type FacilityGlyph = "bolt" | "drop";
+
+/**
+ * 施設の見た目（docs/map-style.md の「施設の記号」）。色は sRGB の 16 進である。
+ * `circle` は丸の色、`site` と `siteEdge` は敷地の面と縁、`name` は名前の色である。
+ */
+export type FacilityStyle = {
+  circle: string;
+  glyph: FacilityGlyph;
+  site: string;
+  siteEdge: string;
+  name: string;
+};
+
+/** 施設の見た目。キーは ServiceKind の値である。 */
+export const FACILITY_STYLES: Readonly<Record<number, FacilityStyle>> = {
+  1: { circle: "#e8710a", glyph: "bolt", site: "#f8e3cf", siteEdge: "#e8b98e", name: "#a8500a" },
+  2: { circle: "#12a4af", glyph: "drop", site: "#d3ecef", siteEdge: "#95c9d0", name: "#0b6f78" },
+};
+
+/** 知らない種類の施設の見た目。決まりの「交通」の系統の灰青にする。 */
+const UNKNOWN_FACILITY_STYLE: FacilityStyle = {
+  circle: "#5f6b7a",
+  glyph: "bolt",
+  site: "#e4e7eb",
+  siteEdge: "#b9c0c9",
+  name: "#5f6368",
+};
+
+export const facilityStyle = (kind: number): FacilityStyle =>
+  FACILITY_STYLES[kind] ?? UNKNOWN_FACILITY_STYLE;
