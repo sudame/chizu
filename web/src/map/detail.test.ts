@@ -37,6 +37,7 @@ import {
   signalLampCenter,
   VERTEX_FLOATS,
   ZEBRA_COLOR,
+  ZEBRA_LENGTH,
 } from "./roads.ts";
 
 /** 頂点を、ワールド座標と色の組に直す。 */
@@ -168,7 +169,7 @@ describe("道路の細部", () => {
   const nodesOf = (...tiles: [number, number][]) =>
     new Float64Array(tiles.flatMap(([x, y]) => [x, y, 1, 0, 0]));
 
-  test("歩道の外に、2 マスごとの街路樹と、そのあいだに 0.25 マスおきの低木を並べる", () => {
+  test("歩道の外に、2 マスごとの街路樹と、0.5 マスおきの低木を並べる", () => {
     // 横の小の道路。両端の行き止まりのマスには植え込みがないので、x = 1〜7 に並べる
     const v = vertices(
       streetGeometry(new Float64Array([0, 4, 8, 4, 1]), nodesOf([0, 4], [8, 4]), WIDE),
@@ -183,10 +184,10 @@ describe("道路の細部", () => {
     expect(trees.length).toBe(3 * 2);
     expect(hasStreetTree({ x: 2, y: 4 })).toBe(true);
     expect(hasStreetTree({ x: 3, y: 4 })).toBe(false);
-    // 低木は、街路樹のないマスに 4 つ、あるマスに 2 つずつ、両側に
-    expect(shrubs.length).toBe((4 * 4 + 3 * 2) * 2);
-    // 丸は八角形で、街路樹は低木の上に描く
-    expect(v.length).toBe((trees.length + shrubs.length) * DISC_SIDES * 3);
+    // 低木は、どのマスにも、マスの中心から前後へ 0.25 マスの 2 つずつ、両側に
+    expect(shrubs.length).toBe(7 * 2 * 2);
+    // 街路樹は八角形、低木は六角形で、街路樹は低木の上に描く
+    expect(v.length).toBe(trees.length * DISC_SIDES * 3 + shrubs.length * 6 * 3);
     const firstTree = v.findIndex((p) => p.color === f32(STREET_TREE_COLOR));
     const lastShrub = v.map((p) => p.color).lastIndexOf(f32(SHRUB_COLOR));
     expect(lastShrub).toBeLessThan(firstTree);
@@ -244,6 +245,41 @@ describe("道路の細部", () => {
     expect(Math.max(...ys)).toBeCloseTo(4.5 + carriage);
   });
 
+  test("低木を描かないときは、2 マスごとの街路樹だけを並べる", () => {
+    const g = streetGeometry(
+      new Float64Array([0, 4, 8, 4, 1]),
+      nodesOf([0, 4], [8, 4]),
+      WIDE,
+      false,
+    );
+    const v = vertices(g);
+    expect(v.some((p) => p.color === f32(SHRUB_COLOR))).toBe(false);
+    // 低木を描かない倍率では、街路樹も六角形にする
+    expect(v.length).toBe(3 * 2 * 6 * 3);
+  });
+
+  test("横断歩道を外した腕では、停止線を縞の分だけ交差点の側に寄せる", () => {
+    const segments = new Float64Array([0, 4, 4, 4, 2, 4, 4, 8, 4, 2, 4, 4, 4, 8, 2]);
+    // (4, 4) の 5 つめの値は、横断歩道を外した腕の向きのビット。1 は東の腕
+    const nodesWith = (noCrosswalk: number) =>
+      new Float64Array([0, 4, 1, 0, 0, 4, 4, 1, 0, noCrosswalk, 8, 4, 1, 0, 0, 4, 8, 1, 0, 0]);
+    const eastStart = (noCrosswalk: number) =>
+      Math.min(
+        ...vertices(streetGeometry(segments, nodesWith(noCrosswalk), WIDE))
+          .filter((p) => p.color === f32(ZEBRA_COLOR) && p.x > 4.8)
+          .map((p) => p.x),
+      );
+    expect(eastStart(1)).toBeCloseTo(eastStart(0) - ZEBRA_LENGTH);
+    // ほかの腕の停止線は動かない
+    const westEnd = (noCrosswalk: number) =>
+      Math.max(
+        ...vertices(streetGeometry(segments, nodesWith(noCrosswalk), WIDE))
+          .filter((p) => p.color === f32(ZEBRA_COLOR) && p.x < 4.2)
+          .map((p) => p.x),
+      );
+    expect(westEnd(1)).toBeCloseTo(westEnd(0));
+  });
+
   test("範囲にかからない道路の細部は作らない", () => {
     const g = streetGeometry(new Float64Array([0, 4, 8, 4, 1]), nodesOf([0, 4], [8, 4]), {
       minX: 50,
@@ -260,10 +296,12 @@ describe("3 つ並びの信号", () => {
     // (4, 5) の東の腕が赤
     const v = vertices(lampGeometry(new Float64Array([4, 5, 1, 0, 2]), WIDE));
     // 台 1 本と灯火 3 つ
-    expect(v.length).toBe(6 + 3 * DISC_SIDES * 3);
+    // 灯火は六角形
+    const LAMP = 6 * 3;
+    expect(v.length).toBe(6 + 3 * LAMP);
     expect(v.slice(0, 6).every((p) => p.color === f32(SIGNAL_BASE_COLOR))).toBe(true);
     const c = signalLampCenter(4, 5, 1, 0);
-    const lampAt = (k: number) => v.slice(6 + k * DISC_SIDES * 3, 6 + (k + 1) * DISC_SIDES * 3);
+    const lampAt = (k: number) => v.slice(6 + k * LAMP, 6 + (k + 1) * LAMP);
     const lamps = [0, 1, 2].map(lampAt);
     // 東の腕から入る車は西へ進むので、左は南（y の大きい側）。青がいちばん南、赤がいちばん北
     expect(lamps.map((l) => (l[0]?.y ?? 0) - c.y)).toEqual([
@@ -278,7 +316,11 @@ describe("3 つ並びの信号", () => {
     // 青のときは、青だけが明るい
     const green = vertices(lampGeometry(new Float64Array([4, 5, 1, 0, 0]), WIDE));
     expect(green[6]?.color).toBe(f32(SIGNAL_COLOR[0] ?? []));
-    expect(green[6 + 2 * DISC_SIDES * 3]?.color).toBe(f32(SIGNAL_OFF_COLOR));
+    expect(green[6 + 2 * LAMP]?.color).toBe(f32(SIGNAL_OFF_COLOR));
+    // 低木を描かない倍率では、灯火を四角にして頂点を減らす
+    expect(lampGeometry(new Float64Array([4, 5, 1, 0, 2]), WIDE, false).vertexCount).toBe(
+      6 + 3 * 6,
+    );
   });
 
   test("範囲にかからない信号は描かない", () => {
@@ -339,6 +381,39 @@ describe("細部の頂点を作るとき", () => {
     const narrow = cache.update(128, view(0, 0));
     expect(narrow?.roofs).toBeDefined();
     expect(cache.update(128, view(0.5, 0.5))).toBeNull();
+  });
+
+  test("道路網が変わったときは、道路の細部だけを同じ範囲で作り直す", () => {
+    const cache = make();
+    cache.update(128, view(0, 0));
+    cache.setRoads(
+      new Float64Array([0, 1, 8, 1, 1]),
+      new Float64Array([0, 1, 1, 0, 0, 8, 1, 1, 0, 0]),
+    );
+    const roads = cache.update(128, view(0, 0));
+    expect(roads?.streets?.vertexCount).toBeGreaterThan(0);
+    expect(roads?.roofs).toBeUndefined();
+    expect(roads?.lamps).toBeUndefined();
+    expect(cache.update(128, view(0, 0))).toBeNull();
+  });
+
+  test("invalidate のあとは、すべてを作り直す", () => {
+    const cache = make();
+    cache.update(128, view(0, 0));
+    cache.invalidate();
+    const all = cache.update(128, view(0, 0));
+    expect(all?.roofs).toBeDefined();
+    expect(all?.streets).toBeDefined();
+    expect(all?.lamps).toBeDefined();
+  });
+
+  test("低木を描き始める倍率を越えたら、道路の細部だけを作り直す", () => {
+    const cache = make();
+    cache.update(40, view(0, 0));
+    const dense = cache.update(48, view(0, 0));
+    expect(dense?.streets).toBeDefined();
+    expect(dense?.roofs).toBeUndefined();
+    expect(cache.update(64, view(0, 0))).toBeNull();
   });
 
   test("信号が変わったときは、信号だけを同じ範囲で作り直す", () => {

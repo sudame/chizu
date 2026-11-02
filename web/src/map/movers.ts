@@ -144,12 +144,14 @@ void main() {
     vec2 q = v_corner / vec2(${WALKER_SHOULDER[0]}, ${WALKER_SHOULDER[1]});
     float shoulder = length(q);
     float head = length(v_corner) / ${WALKER_HEAD};
-    // 楕円の縁の太さを、画面でほぼ 1px にする
-    float rimWidth = 1.0 / (v_half_px.x * ${WALKER_SHOULDER[0]});
+    // 楕円の縁までの距離を画面のピクセルで近似し（楕円の式の値を、画面のピクセルあたりの変わり方で割る）、
+    // どの向きでも 1px の縁にする
+    vec2 slope = q / (vec2(${WALKER_SHOULDER[0]}, ${WALKER_SHOULDER[1]}) * v_half_px.x);
+    float perPx = length(slope) / max(shoulder, 1e-4);
     if (head <= 1.0) {
       fine = vec4(${glslVec3(WALKER_HEAD_COLOR)}, 1.0);
     } else if (shoulder <= 1.0) {
-      fine = vec4(shoulder > 1.0 - rimWidth ? vec3(1.0) : v_color, 1.0);
+      fine = vec4(1.0 - shoulder < perPx ? vec3(1.0) : v_color, 1.0);
     }
   }
   vec4 c = mix(coarse, fine, u_fine);

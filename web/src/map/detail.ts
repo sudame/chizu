@@ -13,9 +13,11 @@ import {
   buildingEdgeColor,
   DIAGONAL_ASPHALT_HALF,
   Geometry,
+  headingBit,
   isDiagonal,
   isThrough,
   ROAD_VISUAL_HALF,
+  type RoadNet,
   roadNet,
   SIGNAL_BASE_COLOR,
   SIGNAL_COLOR,
@@ -100,7 +102,12 @@ export function roofGeometry(buildings: Float64Array, rect: TileRect): Geometry 
   const geometry = new Geometry({ x: Math.floor(rect.minX), y: Math.floor(rect.minY) });
   const e = BUILDING_EDGE;
   for (let i = 0; i + BUILDING_STRIDE <= buildings.length; i += BUILDING_STRIDE) {
-    const [tx0 = 0, ty0 = 0, tx1 = 0, ty1 = 0, zone = 0] = buildings.subarray(i, i + 5);
+    // 見えない建物も含めて全部を回るので、配列を切り出さずに読む
+    const tx0 = buildings[i] ?? 0;
+    const ty0 = buildings[i + 1] ?? 0;
+    const tx1 = buildings[i + 2] ?? 0;
+    const ty1 = buildings[i + 3] ?? 0;
+    const zone = buildings[i + 4] ?? 0;
     // 本体（縁の内側）の長方形
     const x0 = tx0 + BUILDING_INSET + e;
     const y0 = ty0 + BUILDING_INSET + e;
@@ -179,24 +186,33 @@ export const SHRUB_HALF = 0.04;
 /** 停止線の、腕の向きの太さ（マス）と、横断歩道の外側からのすき間（マス）。 */
 export const STOP_LINE_WIDTH = 0.04;
 const STOP_LINE_GAP = 0.05;
-// 低木を置く、マスの中心からの道路の向きの位置。0.25 マスおきに並べ、街路樹のあるマスでは真ん中の 2 つを省く
-const SHRUB_STEPS = [-0.375, -0.125, 0.125, 0.375];
+// 低木を置く、マスの中心からの道路の向きの位置。0.5 マスおきに並べ、街路樹はそのあいだ（マスの中心）に立つ
+const SHRUB_STEPS = [-0.25, 0.25];
+
+/**
+ * 低木まで描く倍率。細部が濃さをそろえる 48 より手前では、引いていて見える範囲が広く、低木の点は 1〜2px にしかならないので、
+ * 街路樹だけにして頂点を減らす。同じ理由で、48 より手前では街路樹を六角形に、信号の灯火を四角にする。
+ */
+export const SHRUB_ZOOM = 48;
 
 /** 街路樹を置くマスか。ワールドの座標の偶奇で決めるので、道路を引き直しても同じ所に立つ。 */
 export const hasStreetTree = (t: Tile) => (t.x + t.y) % 2 === 0;
 
 /**
- * 道路の細部。歩道の外の植え込みに、2 マスごとの街路樹と、そのあいだの低木の点を並べる。
- * 交差点の腕ごとに、横断歩道の外側の、入ってくる車線の側に停止線を引く。`rect` にかかるものだけを描く。
+ * 道路の細部。歩道の外の植え込みに、2 マスごとの街路樹と、`shrubs` が true ならそのあいだの低木の点を並べる。
+ * 交差点の腕ごとに、横断歩道の外側の、入ってくる車線の側に停止線を引く。横断歩道を外した腕では、縞の分だけ
+ * 交差点の側に寄せる。`rect` にかかるものだけを描く。
  * 高速道路には歩道も横断歩道もないので描かない。斜めの区間には植え込みがないので、街路樹は描かない。
  */
 export function streetGeometry(
   segments: Float64Array,
   nodes: Float64Array,
   rect: TileRect,
+  withShrubs = true,
+  net: RoadNet = roadNet(segments, nodes),
 ): Geometry {
   const geometry = new Geometry({ x: Math.floor(rect.minX), y: Math.floor(rect.minY) });
-  const { ends, nodeList, each } = roadNet(segments, nodes);
+  const { ends, nodeList, each } = net;
   const inRect = (t: Tile) =>
     t.x + 1 >= rect.minX && t.x <= rect.maxX && t.y + 1 >= rect.minY && t.y <= rect.maxY;
   // 植え込みの帯がつながるのは、区間の中のマスと、まっすぐ通り抜けるノードのマスである
@@ -253,28 +269,28 @@ export function streetGeometry(
         if (tree) {
           trees.push([cx, cy]);
         }
-        for (const step of SHRUB_STEPS) {
-          if (!tree || Math.abs(step) > 0.25) {
-            shrubs.push([cx + ux * step, cy + uy * step]);
-          }
+        for (const step of withShrubs ? SHRUB_STEPS : []) {
+          shrubs.push([cx + ux * step, cy + uy * step]);
         }
       }
     }
   });
   for (const [x, y] of shrubs) {
-    geometry.disc(x, y, SHRUB_HALF, SHRUB_COLOR, 0);
+    geometry.disc(x, y, SHRUB_HALF, SHRUB_COLOR, 0, 6);
   }
   for (const [x, y] of trees) {
-    geometry.disc(x, y, STREET_TREE_HALF, STREET_TREE_COLOR);
+    // 低木を描かない引いた倍率では、街路樹も六角形にして頂点を減らす
+    geometry.disc(x, y, STREET_TREE_HALF, STREET_TREE_COLOR, undefined, withShrubs ? 8 : 6);
   }
-  for (const { x, y, node } of nodeList) {
+  for (const { x, y, node, noCrosswalk } of nodeList) {
     if (node.arms.length < 3 || !inRect({ x, y })) {
       continue;
     }
     for (const arm of node.arms) {
       const kind = segments[arm.segment * SEGMENT_STRIDE + 4] ?? 0;
       if (kind !== HIGHWAY_CODE) {
-        stopLine(geometry, { x, y }, arm, node.half, kind);
+        const zebra = (noCrosswalk & headingBit(arm)) === 0;
+        stopLine(geometry, { x, y }, arm, node.half, kind, zebra);
       }
     }
   }
@@ -283,7 +299,7 @@ export function streetGeometry(
 
 /**
  * 交差点 `at` の腕 `arm` の停止線。横断歩道の外側に、入ってくる車線（左側通行なので、交差点から出ていく向きの右）の
- * 幅だけ、腕を横切る線を引く。
+ * 幅だけ、腕を横切る線を引く。`zebra` が false（横断歩道を外した腕）なら、縞の分だけ交差点の側に寄せる。
  */
 function stopLine(
   geometry: Geometry,
@@ -291,6 +307,7 @@ function stopLine(
   arm: { dx: number; dy: number },
   half: number,
   kind: number,
+  zebra: boolean,
 ): void {
   const sx = Math.sign(arm.dx);
   const sy = Math.sign(arm.dy);
@@ -299,7 +316,7 @@ function stopLine(
   const len = Math.hypot(sx, sy);
   const carriage = carriagewayHalfWidth(kind);
   const width = diagonal ? Math.min(carriage, DIAGONAL_ASPHALT_HALF) : carriage;
-  const start = (diagonal ? half * Math.SQRT2 : half) + ZEBRA_LENGTH + STOP_LINE_GAP;
+  const start = (diagonal ? half * Math.SQRT2 : half) + (zebra ? ZEBRA_LENGTH : 0) + STOP_LINE_GAP;
   geometry.strip(
     at,
     next,
@@ -326,10 +343,14 @@ const LAMP_ORDER = [0, 1, 2] as const;
  * 腕ごとの、3 つ並びの信号。暗い台の上に、入ってくる車から見て左から青、黄、赤の灯火を並べ、点いている灯火だけを
  * 明るくする。台は腕を横切る向きに置く。`rect` にかかる腕だけを描く。
  */
-export function lampGeometry(lights: Float64Array, rect: TileRect): Geometry {
+export function lampGeometry(lights: Float64Array, rect: TileRect, round = true): Geometry {
   const geometry = new Geometry({ x: Math.floor(rect.minX), y: Math.floor(rect.minY) });
   for (let i = 0; i + SIGNAL_STRIDE <= lights.length; i += SIGNAL_STRIDE) {
-    const [x = 0, y = 0, dx = 0, dy = 0, light = 2] = lights.subarray(i, i + SIGNAL_STRIDE);
+    const x = lights[i] ?? 0;
+    const y = lights[i + 1] ?? 0;
+    const dx = lights[i + 2] ?? 0;
+    const dy = lights[i + 3] ?? 0;
+    const light = lights[i + 4] ?? 2;
     if (!overlaps(rect, x, y, x + 1, y + 1)) {
       continue;
     }
@@ -350,7 +371,12 @@ export function lampGeometry(lights: Float64Array, rect: TileRect): Geometry {
     for (const [k, lamp] of LAMP_ORDER.entries()) {
       const s = (1 - k) * LAMP_SPACING;
       const color = lamp === light ? (SIGNAL_COLOR[lamp] ?? SIGNAL_OFF_COLOR) : SIGNAL_OFF_COLOR;
-      geometry.disc(c.x + lx * s, c.y + ly * s, LAMP_HALF, color, 0.75);
+      // 低木を描かない引いた倍率では、灯火は 2px ほどなので四角にして頂点を減らす
+      if (round) {
+        geometry.disc(c.x + lx * s, c.y + ly * s, LAMP_HALF, color, 0.75, 6);
+      } else {
+        geometry.dot(c.x + lx * s, c.y + ly * s, LAMP_HALF, color, 0.75);
+      }
     }
   }
   return geometry;
@@ -371,6 +397,9 @@ export class DetailCache {
   #lights: Float64Array = new Float64Array();
   #rect: TileRect | null = null;
   #dirty = { roofs: true, streets: true, lamps: true };
+  #shrubs = false;
+  // 道路網のつながり。細部の段で初めて要るときに作り、道路網が変わるまで使い回す
+  #net: RoadNet | null = null;
   /** 頂点を作った回数。test:wasm が、引いたときに作っていないかを見るのに使う。 */
   builds = 0;
 
@@ -382,6 +411,7 @@ export class DetailCache {
   setRoads(segments: Float64Array, nodes: Float64Array): void {
     this.#segments = segments;
     this.#nodes = nodes;
+    this.#net = null;
     this.#dirty.streets = true;
   }
 
@@ -405,11 +435,11 @@ export class DetailCache {
     let all = false;
     // 寄ったあとも引いたときの広い範囲を持ち続けると、見えない所の頂点まで描くので、広すぎる範囲も作り直す
     const tooWide =
-      this.#rect !== null && this.#rect.maxX - this.#rect.minX > 3 * (view.maxX - view.minX) + 4;
+      this.#rect !== null && this.#rect.maxX - this.#rect.minX > 2.5 * (view.maxX - view.minX) + 4;
     if (this.#rect === null || !contains(this.#rect, view) || tooWide) {
-      // 画面の幅と高さの半分ずつを余白にし、少し動かしただけでは作り直さない
-      const mx = (view.maxX - view.minX) / 2 + 1;
-      const my = (view.maxY - view.minY) / 2 + 1;
+      // 画面の幅と高さの 1/4 ずつを余白にし、少し動かしただけでは作り直さない
+      const mx = (view.maxX - view.minX) / 4 + 1;
+      const my = (view.maxY - view.minY) / 4 + 1;
       this.#rect = {
         minX: Math.floor(view.minX - mx),
         minY: Math.floor(view.minY - my),
@@ -418,16 +448,24 @@ export class DetailCache {
       };
       all = true;
     }
+    // 低木を描くかが変わったら、道路の細部と信号を作り直す
+    const shrubs = zoom >= SHRUB_ZOOM;
+    if (shrubs !== this.#shrubs) {
+      this.#shrubs = shrubs;
+      this.#dirty.streets = true;
+      this.#dirty.lamps = true;
+    }
     const rect = this.#rect;
     const out: DetailMeshes = {};
     if (all || this.#dirty.roofs) {
       out.roofs = roofGeometry(this.#buildings, rect);
     }
     if (all || this.#dirty.streets) {
-      out.streets = streetGeometry(this.#segments, this.#nodes, rect);
+      this.#net ??= roadNet(this.#segments, this.#nodes);
+      out.streets = streetGeometry(this.#segments, this.#nodes, rect, shrubs, this.#net);
     }
     if (all || this.#dirty.lamps) {
-      out.lamps = lampGeometry(this.#lights, rect);
+      out.lamps = lampGeometry(this.#lights, rect, shrubs);
     }
     this.#dirty = { roofs: false, streets: false, lamps: false };
     if (out.roofs === undefined && out.streets === undefined && out.lamps === undefined) {

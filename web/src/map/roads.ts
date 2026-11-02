@@ -240,10 +240,13 @@ export type MeshSource = {
 
 // 丸を近づける正多角形の辺の数と、角の向き。最後に最初の角をもう一度置いて閉じる
 export const DISC_SIDES = 8;
-const DISC_CORNERS = Array.from({ length: DISC_SIDES + 1 }, (_, k) => {
-  const a = (2 * Math.PI * k) / DISC_SIDES;
-  return [Math.cos(a), Math.sin(a)] as const;
-});
+const corners = (sides: number) =>
+  Array.from({ length: sides + 1 }, (_, k) => {
+    const a = (2 * Math.PI * k) / sides;
+    return [Math.cos(a), Math.sin(a)] as const;
+  });
+const DISC_CORNERS = corners(DISC_SIDES);
+const HEX_CORNERS = corners(6);
 
 /** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
 export class Geometry {
@@ -277,7 +280,11 @@ export class Geometry {
       ny,
       half,
       min,
-      ...color,
+      // 頂点の数が多い細部の段（detail.ts）で重くならないよう、展開の構文を使わずに積む
+      color[0],
+      color[1],
+      color[2],
+      color[3],
       extra,
       along,
       dash,
@@ -396,11 +403,15 @@ export class Geometry {
     v(bx, by, -1);
   }
 
-  /** ワールド座標 (x, y) を中心にした、半径 `half` の丸（正八角形）。半径は画面で `min` ピクセルを下回らない。 */
-  disc(x: number, y: number, half: number, color: Color, min = MIN_PX): void {
-    for (let k = 0; k < DISC_SIDES; k++) {
-      const [c0, s0] = DISC_CORNERS[k] ?? [1, 0];
-      const [c1, s1] = DISC_CORNERS[k + 1] ?? [1, 0];
+  /**
+   * ワールド座標 (x, y) を中心にした、半径 `half` の丸。`sides` が 8 なら正八角形、6 なら正六角形で近づける。
+   * 半径は画面で `min` ピクセルを下回らない。
+   */
+  disc(x: number, y: number, half: number, color: Color, min = MIN_PX, sides: 6 | 8 = 8): void {
+    const corners = sides === 6 ? HEX_CORNERS : DISC_CORNERS;
+    for (let k = 0; k < sides; k++) {
+      const [c0, s0] = corners[k] ?? [1, 0];
+      const [c1, s1] = corners[k + 1] ?? [1, 0];
       this.#vertex(x, y, 0, 0, half, min, color);
       this.#vertex(x, y, c0, s0, half, min, color);
       this.#vertex(x, y, c1, s1, half, min, color);
