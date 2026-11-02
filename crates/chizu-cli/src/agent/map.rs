@@ -6,7 +6,9 @@
 use chizu_core::chunk::Layer;
 use chizu_core::network::SegmentKind;
 use chizu_core::tile::local_index;
-use chizu_core::{CHUNK_SIDE, ServiceKind, TilePos, TileRect, World, ZoneKind, is_water};
+use chizu_core::{
+    CHUNK_SIDE, Congestion, ServiceKind, TilePos, TileRect, World, ZoneKind, is_water,
+};
 
 /// 1 回の出力に載せる文字（セル）の数の上限。始めに買ってある 192×192 マスが、縮尺 2 でちょうど収まる。
 /// 行頭の座標などを足しても 1 万文字ほどになる。
@@ -28,9 +30,42 @@ pub const LEGEND: &str = "\
   ,        買っていない土地
   .        買った土地の空きマス（標高はいまどこも 0 の平らな地図なので出さない）";
 
+/// 凡例の「H 1 2 3」の行の代わりに出す、交通の層の道路の凡例。
+const TRAFFIC_LEGEND_LINE: &str = "  - + # X  道路の混み具合（- 空いている、+ やや混んでいる、# 混んでいる、X 詰まっている。H 高速道路は混み具合を数えない）";
+
+/// 地図に重ねる層。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MapLayer {
+    /// 道路を種類で出す。
+    #[default]
+    Terrain,
+    /// 道路を混み具合の段階で出す。
+    Traffic,
+}
+
+impl MapLayer {
+    pub fn parse(name: &str) -> Result<MapLayer, String> {
+        match name {
+            "traffic" => Ok(MapLayer::Traffic),
+            _ => Err(format!("--layer {name:?} は知らない層。traffic だけ使える")),
+        }
+    }
+}
+
+fn congestion_glyph(level: Congestion) -> char {
+    match level {
+        Congestion::Free => '-',
+        Congestion::Busy => '+',
+        Congestion::Heavy => '#',
+        Congestion::Jammed => 'X',
+    }
+}
+
 /// セルにまとめたマスの数え上げ。
 #[derive(Clone, Default)]
 struct Cell {
+    /// 通る区間の混み具合の最大。交通の層でだけ入れる。
+    congestion: Option<Congestion>,
     facility: [u32; 2],
     /// 道路の最大の種類。0 は道路なし。
     road: u8,
@@ -78,7 +113,11 @@ impl Cell {
         match self.road {
             0 => {}
             HIGHWAY => return 'H',
-            k => return char::from(b'0' + k),
+            k => {
+                return self
+                    .congestion
+                    .map_or(char::from(b'0' + k), congestion_glyph);
+            }
         }
         if let Some(i) = argmax(&self.building) {
             return zone_letter(ZoneKind::ALL[i]);
@@ -162,7 +201,12 @@ fn sample_offsets(len: i64) -> impl Iterator<Item = i64> {
 }
 
 /// 範囲 `rect` の地図を、縮尺 `scale` で描く。
-pub fn render(world: &World, rect: TileRect, scale: u64) -> Result<String, String> {
+pub fn render(
+    world: &World,
+    rect: TileRect,
+    scale: u64,
+    layer: MapLayer,
+) -> Result<String, String> {
     if scale == 0 {
         return Err("--scale は 1 以上にする".into());
     }
@@ -243,22 +287,28 @@ pub fn render(world: &World, rect: TileRect, scale: u64) -> Result<String, Strin
     for f in world.facilities() {
         grid.each_tile_in(f.area, |cell, _| cell.facility[f.kind.index()] += 1);
     }
+    // 混み具合は画面の交通のレイヤーと同じ計算で、車のいない区間は載らない（空いている）
+    let congestion = (layer == MapLayer::Traffic).then(|| world.road_congestion());
     for (id, segment) in world.network().segments() {
         let kind = match segment.kind {
             SegmentKind::Road(k) => k as u8,
             SegmentKind::Highway => HIGHWAY,
         };
+        let level = congestion
+            .as_ref()
+            .map(|m| m.get(&id).copied().unwrap_or_default());
         let Some(line) = world.network().segment_line(id) else {
             continue;
         };
         for t in line.tiles() {
             if let Some(cell) = grid.cell_mut(t) {
                 cell.road = cell.road.max(kind);
+                cell.congestion = cell.congestion.max(level);
             }
         }
     }
 
-    Ok(text(&grid))
+    Ok(text(&grid, layer))
 }
 
 /// 上の目盛りの基準にする数。縮尺 1 のときは x、そうでなければ列の番号で、絶対値の下 1 桁が 0 の列に x を書く。
@@ -270,7 +320,7 @@ fn key(grid: &Grid, col: usize) -> i64 {
     }
 }
 
-fn text(grid: &Grid) -> String {
+fn text(grid: &Grid, layer: MapLayer) -> String {
     let rect = grid.rect;
     let mut out = format!(
         "地図 x {}..{} y {}..{}（1 文字 = {s}×{s} マス、{}×{} 文字）\n",
@@ -282,7 +332,22 @@ fn text(grid: &Grid) -> String {
         grid.rows,
         s = grid.scale
     );
-    out.push_str(LEGEND);
+    match layer {
+        MapLayer::Terrain => out.push_str(LEGEND),
+        MapLayer::Traffic => {
+            let lines: Vec<&str> = LEGEND
+                .lines()
+                .map(|l| {
+                    if l.trim_start().starts_with("H 1 2 3") {
+                        TRAFFIC_LEGEND_LINE
+                    } else {
+                        l
+                    }
+                })
+                .collect();
+            out.push_str(&lines.join("\n"));
+        }
+    }
     out.push('\n');
     if grid.scale == 1 {
         out.push_str("座標：行頭が y、上の数は x（下の行は x の絶対値の下 1 桁で、-74 なら 4）\n");
@@ -334,4 +399,57 @@ fn text(grid: &Grid) -> String {
     // 呼び出し側が改行を足して出す。
     out.truncate(out.trim_end().len());
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chizu_core::{CommandLog, TICKS_PER_DAY, replay};
+
+    /// 詰まりが起きる街（`chizu-core/tests/gridlock/city.rec`）の、車が混み合う朝を再生した世界。
+    fn jammed_city() -> World {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../chizu-core/tests/gridlock/city.rec");
+        let log = CommandLog::decode(&std::fs::read(path).unwrap()).unwrap();
+        let mut world = World::new(0);
+        replay(&mut world, &log, 66 * TICKS_PER_DAY + 3_000);
+        world
+    }
+
+    /// 区間の最初のマスを真ん中にした 5 マスの横長の範囲を描き、真ん中のマスの文字を返す。
+    fn glyph_at(world: &World, t: TilePos, layer: MapLayer) -> char {
+        let rect = TileRect::from_corners(TilePos::new(t.x - 2, t.y), TilePos::new(t.x + 2, t.y));
+        let text = render(world, rect, 1, layer).unwrap();
+        let row = text.lines().last().unwrap();
+        row.chars().rev().nth(2).unwrap()
+    }
+
+    /// 区間は座標で選ぶ。この街を再生した結果は決まっているので、段階ごとのマスが決まった文字になる。
+    /// (41, 70) は詰まった道、(68, 97) は混んだ道、(20, 97) は車のいない道、(41, 500) は高速道路である。
+    #[test]
+    fn traffic_layer_marks_jammed_and_free_roads() {
+        let world = jammed_city();
+        let at = |x: i64, y: i64, layer| glyph_at(&world, TilePos::new(x, y), layer);
+        assert_eq!(at(41, 70, MapLayer::Traffic), 'X');
+        assert_eq!(at(68, 97, MapLayer::Traffic), '#');
+        assert_eq!(at(20, 97, MapLayer::Traffic), '-');
+        assert_eq!(at(41, 500, MapLayer::Traffic), 'H');
+        // 層を付けなければ、道路の種類のまま
+        assert!(matches!(at(41, 70, MapLayer::Terrain), '1'..='3'));
+        let text = render(
+            &world,
+            TileRect::from_corners(TilePos::new(39, 70), TilePos::new(43, 70)),
+            1,
+            MapLayer::Traffic,
+        )
+        .unwrap();
+        assert!(text.contains("X 詰まっている"), "{text}");
+        assert!(!text.contains("H 1 2 3"), "{text}");
+    }
+
+    #[test]
+    fn unknown_layer_is_refused() {
+        assert!(MapLayer::parse("traffic").is_ok());
+        assert!(MapLayer::parse("power").is_err());
+    }
 }

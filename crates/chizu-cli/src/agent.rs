@@ -26,7 +26,7 @@ pub const USAGE: &str = r#"使い方:
   chizu-cli agent act <dir> <commands.json>  いまの tick でコマンドを順に適用し、記録に足す
   chizu-cli agent advance <dir> <tick 数>    時間を進める（1 tick はゲーム内の 12 秒、1 日は 7200 tick）
   chizu-cli agent observe <dir>              街の様子を JSON で出す
-  chizu-cli agent map <dir> <x0> <y0> <x1> <y1> [--scale N]
+  chizu-cli agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic]
                                              範囲の地図を、1 マス 1 文字のマス目のテキストで出す
 
 <dir> は state.json と commands.rec を置くディレクトリである。act と advance は agent new で作ったディレクトリにだけ書く。
@@ -63,6 +63,10 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
   同じ種類が混ざるときは数の多いほう（道路は大きいほう）にする。水辺と買った土地は、セルの中の見本のマスの多数決である。
   出力は 9216 文字（96×96 など）までで、超える範囲は、必要な --scale を添えて断る。
   いまの買った土地の範囲は observe の land.ownedBounds にある。
+  --layer traffic を付けると、道路の文字を種類の代わりに混み具合の段階にする（画面の「交通」のレイヤーと同じ計算）。
+  文字は、「-」空いている、「+」やや混んでいる、「#」混んでいる、「X」詰まっている（車が多く、半分以上が止まっている）。
+  区間の上の車の台数を、その区間に並べる台数（車線ごとに長さを 7m で割った台数の合計。最低 1 台）で割った占有率で決め、向きの違う 2 方向のうち混んでいるほうを取る。
+  車が 1 台以下の区間は空いている（1 台しか並べない短い区間で、その 1 台が止まっているときを除く）。高速道路は H のままである。
 
 座標:
   マスの座標 [x, y] は整数で、x は右へ、y は下へ増える。
@@ -762,13 +766,17 @@ pub fn run(args: &[String]) -> Result<String, String> {
             };
             let a = TilePos::new(coord(x0, "x0")?, coord(y0, "y0")?);
             let b = TilePos::new(coord(x1, "x1")?, coord(y1, "y1")?);
-            let scale = match rest {
-                [] => 1,
-                ["--scale", n] => parse_u64(n, "--scale")?,
-                _ => return Err(USAGE.trim_end().to_string()),
-            };
+            let (mut scale, mut layer) = (1, map::MapLayer::Terrain);
+            let mut options = rest.iter();
+            while let Some(&option) = options.next() {
+                match (option, options.next()) {
+                    ("--scale", Some(&n)) => scale = parse_u64(n, "--scale")?,
+                    ("--layer", Some(&name)) => layer = map::MapLayer::parse(name)?,
+                    _ => return Err(USAGE.trim_end().to_string()),
+                }
+            }
             let (_lock, world, _) = open_for_read(Path::new(dir))?;
-            map::render(&world, TileRect::from_corners(a, b), scale)
+            map::render(&world, TileRect::from_corners(a, b), scale, layer)
         }
         _ => Err(USAGE.trim_end().to_string()),
     }

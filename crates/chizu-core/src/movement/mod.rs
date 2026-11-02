@@ -10,6 +10,7 @@ mod car;
 #[cfg(test)]
 mod car_tests;
 mod commute;
+mod congestion;
 mod junction;
 #[cfg(test)]
 mod junction_tests;
@@ -29,6 +30,7 @@ use rayon::prelude::*;
 
 pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
 pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, OWNER_DRIVE_MIN_MM};
+pub use congestion::{Congestion, classify as classify_congestion};
 pub use parking::{Lot, PARK_RADIUS, building_spot};
 pub use pos::SidewalkPos;
 
