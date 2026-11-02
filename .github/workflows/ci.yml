@@ -84,14 +84,14 @@ jobs:
         with:
           path: target
           key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-      # 依存のクレートの保存は 1 つのジョブだけが行う
+      # ネイティブの registry の保存は 1 つのジョブだけが行う
       - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.registry-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-registry-${{ hashFiles('Cargo.lock') }}
+          key: cargo-registry-native-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
   lint-wasm:
     runs-on: ubuntu-26.04
@@ -102,6 +102,8 @@ jobs:
           persist-credentials: false
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache-restore
+        with:
+          registry: wasm
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
           cache_save: ${{ github.ref == 'refs/heads/main' }}
@@ -122,6 +124,8 @@ jobs:
           persist-credentials: false
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache-restore
+        with:
+          registry: wasm
       # tsc が wasm-bindgen の作る型定義を読むので、WASM のビルドに要るものも入れる
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
@@ -156,6 +160,8 @@ jobs:
           persist-credentials: false
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache-restore
+        with:
+          registry: wasm
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
           cache_save: ${{ github.ref == 'refs/heads/main' }}
@@ -166,6 +172,14 @@ jobs:
         with:
           path: target
           key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      # wasm32 の registry の保存は 1 つのジョブだけが行う
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.registry-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-wasm-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
   test-play:
     runs-on: ubuntu-26.04
@@ -189,6 +203,8 @@ jobs:
           persist-credentials: false
       - id: cargo-cache
         uses: ./.github/actions/cargo-cache-restore
+        with:
+          registry: wasm
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
           cache_save: ${{ github.ref == 'refs/heads/main' }}

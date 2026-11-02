@@ -1,8 +1,15 @@
 name: cargo-cache-restore
 description: >-
   cargo のキャッシュを戻す。書くのは main の push だけにして、PR は main のキャッシュを読むだけにする。
-  依存のクレート（registry）はジョブの間で共有し、target はジョブごとに分ける。
-  保存は composite の中ではできないので、呼び出し側がジョブの最後に actions/cache/save で行う。
+  依存のクレート（registry）は、ネイティブと wasm32 の 2 種類に分けて、それぞれジョブの間で共有する。
+  target はジョブごとに分ける。
+  保存は post のステップが composite では使えないので、呼び出し側がジョブの最後に actions/cache/save で行う。
+inputs:
+  registry:
+    description: >-
+      registry の種類。native か wasm。wasm32 でしか使わない依存や、build-std で std を作るときの
+      クレートは、ネイティブのジョブでは取らないので分ける
+    default: native
 outputs:
   target-hit:
     description: target のキャッシュがキーに完全に一致したとき true
@@ -13,15 +20,15 @@ outputs:
 runs:
   using: composite
   steps:
-    # 依存のクレートは Cargo.lock だけで決まり、どのジョブでも同じなので 1 つにまとめる
+    # 同じ種類のジョブなら、取るクレートは Cargo.lock とツールチェーンだけで決まる
     - id: registry
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
-        key: cargo-registry-${{ hashFiles('Cargo.lock') }}
-        restore-keys: cargo-registry-
+        key: cargo-registry-${{ inputs.registry }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+        restore-keys: cargo-registry-${{ inputs.registry }}-
     # キーが外れたら前の main のキャッシュから戻し、足りない分だけビルドし直す
     - id: target
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
