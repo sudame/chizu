@@ -108,7 +108,6 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
       gl?.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
       return [...out];
     }, p);
-  const brightness = (c: number[]) => (c[0] ?? 0) + (c[1] ?? 0) + (c[2] ?? 0);
 
   await setSpeed(1);
   await pause(true);
@@ -132,8 +131,10 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   await waitMap("drawnMovers", "0", "gt");
   const spawned = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
   const walkerColor = await pixel(sidewalk);
+  // 歩く人は明るい歩道の上で赤紫の丸に描くので、明るさではなく色の違いで見る
+  const difference = walkerColor.reduce((sum, v, i) => sum + Math.abs(v - (roadColor[i] ?? 0)), 0);
   check(
-    brightness(walkerColor) > brightness(roadColor) + 200,
+    difference > 150,
     `歩く人を出すと移動体の点が描かれる（${spawned.drawnMovers} 人、${roadColor.join(", ")} → ${walkerColor.join(", ")}）`,
   );
   await pause(false);

@@ -12,6 +12,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { preview } from "vite";
+// 移動体の画素は、車か歩く人の色のどれかに近い。道路の色は、どの移動体の色からも離してある
+import { moverColorAt } from "../src/map/mover-colors.ts";
 
 const TIMEOUT_MS = 30_000;
 // chizu-core の clock.rs と world/people.rs の値
@@ -29,8 +31,6 @@ const TICK = SCENARIO === "errand" ? NOON : TICKS_PER_DAY + INDUSTRIAL_LEAVE_HOM
 const NEED_BOTH = SCENARIO !== "errand";
 const WHEN = SCENARIO === "errand" ? "昼の買い物" : "朝の通勤";
 const SEED = "42";
-// web/src/map/movers.ts の色を足した明るさ（歩く人は約 678、車は約 655）より少し下
-const MOVER_BRIGHTNESS = 560;
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -170,7 +170,6 @@ try {
       gl?.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
       return [...out];
     }, p);
-  const brightness = (c: number[]) => (c[0] ?? 0) + (c[1] ?? 0) + (c[2] ?? 0);
   for (const [key, label] of [
     ["firstWalker", "歩く人"],
     ["firstCar", "車"],
@@ -181,7 +180,7 @@ try {
     }
     const c = await pixel(screenOf(at));
     check(
-      brightness(c) >= MOVER_BRIGHTNESS,
+      moverColorAt(c),
       `${WHEN}で${label}の画素が描かれる（${at}、${c.join(", ")}、移動体 ${d.drawnMovers}）`,
     );
   }

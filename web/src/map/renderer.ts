@@ -6,13 +6,18 @@ import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { chunkKey, type StoredChunk } from "./chunk-sync.ts";
 import { LayerOverlay } from "./layers.ts";
 import { MoverLayer } from "./movers.ts";
-import { GRASS_COLOR, RoadLayer, ZONE_BASE, ZONE_MIX } from "./roads.ts";
+import { type Color, GRASS_COLOR, RoadLayer, zoneEdgeColor, zoneGroundColor } from "./roads.ts";
 
-// 区画の色は roads.ts の ZONE_BASE と共有する（1〜4 の順）
-const ZONE_GLSL = [1, 2, 3, 4].map((zone) => {
-  const [r, g, b] = ZONE_BASE[zone] ?? [0.6, 0.6, 0.6];
-  return `vec3(${r}, ${g}, ${b})`;
-});
+// 区画の地面と枠の色は roads.ts と共有する（1〜4 の順）
+const zoneGlsl = (color: (zone: number) => Color) =>
+  [1, 2, 3, 4].map((zone) => {
+    const [r, g, b] = color(zone);
+    return `vec3(${r}, ${g}, ${b})`;
+  });
+
+// 区画のマスの枠を描き始める倍率と、濃さがそろう倍率（1 マスのピクセル数）
+const ZONE_EDGE_ZOOM = 4;
+const ZONE_EDGE_FULL_ZOOM = 8;
 
 const VERTEX = `#version 300 es
 in vec2 a_corner;
@@ -31,18 +36,29 @@ precision mediump float;
 uniform mediump usampler2D u_tiles;
 uniform bool u_owned;
 uniform bool u_zonable;
-in vec2 v_uv;
+uniform highp float u_size;
+in highp vec2 v_uv;
 out vec4 color;
-// 区画の色は CS2 にならう。住宅は緑、商業は青、工業は黄、オフィスは水色
-const vec3 ZONE[4] = vec3[4](
-  ${ZONE_GLSL.join(",\n  ")}
+// 区画の色は CS2 にならう。住宅は緑、商業は青、工業は黄、オフィスは水色。
+// 地面は薄く塗り、マスの縁を濃い枠で示す
+const vec3 ZONE_GROUND[4] = vec3[4](
+  ${zoneGlsl(zoneGroundColor).join(",\n  ")}
+);
+const vec3 ZONE_EDGE[4] = vec3[4](
+  ${zoneGlsl(zoneEdgeColor).join(",\n  ")}
 );
 void main() {
   uint tile = texture(u_tiles, v_uv).r;
   vec3 c = (tile & ${TILE_WATER}u) != 0u ? vec3(0.24, 0.48, 0.72) : vec3(${GRASS_COLOR.join(", ")});
   uint zone = (tile >> ${TILE_ZONE_SHIFT}u) & 7u;
   if (zone >= 1u && zone <= 4u) {
-    c = mix(c, ZONE[zone - 1u], ${ZONE_MIX});
+    // マスの縁からの距離（画面のピクセル）。隣のマスと合わせて 1 ピクセルほどの枠になる
+    float px = u_size / ${CHUNK_SIDE}.0;
+    highp vec2 f = fract(v_uv * ${CHUNK_SIDE}.0);
+    float e = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)) * px;
+    float edge = (e < 0.6 ? 1.0 : 0.0)
+      * clamp((px - ${ZONE_EDGE_ZOOM}.0) / ${ZONE_EDGE_FULL_ZOOM - ZONE_EDGE_ZOOM}.0, 0.0, 1.0);
+    c = mix(ZONE_GROUND[zone - 1u], ZONE_EDGE[zone - 1u], edge);
   } else if (u_zonable && (tile & ${TILE_ZONABLE}u) != 0u) {
     c = mix(c, vec3(1.0), 0.3);
   }

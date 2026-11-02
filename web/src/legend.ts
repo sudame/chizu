@@ -1,24 +1,26 @@
 // 地図の色と印の凡例。色と形は描画で使う定数（map/roads.ts）から取る。
 
+import { HIGHWAY_CODE } from "./map/lanes.ts";
 import { TRAFFIC_LEVELS } from "./map/layers.ts";
+import { CAR_COLORS, WALKER_COLOR } from "./map/mover-colors.ts";
 import {
   BOLT_SHAPE,
   buildingColor,
-  type Color,
   DROP_SHAPE,
   FACILITY_COLOR,
-  GRASS_COLOR,
   NO_POWER_COLOR,
   NO_WATER_COLOR,
+  roadStyle,
   type Triangle,
-  ZONE_BASE,
-  ZONE_MIX,
+  zoneEdgeColor,
+  zoneGroundColor,
 } from "./map/roads.ts";
 
-/** 凡例の 1 項目。swatch は色の四角、icon は印の形（三角形の組み合わせ）である。 */
+/** 凡例の 1 項目。swatch は色の四角で、border があれば縁をその色で描く。icon は印の形（三角形の組み合わせ）である。 */
 export type LegendItem = {
   label: string;
   color: string;
+  border?: string;
   icon?: { triangles: readonly Triangle[] };
 };
 
@@ -37,20 +39,24 @@ const ZONES: [number, string][] = [
   [4, "オフィス"],
 ];
 
-/** 区画を塗った地面の色。地図の塗りと同じ混ぜ方である。 */
-export function zoneGroundColor(zone: number): Color {
-  const base = ZONE_BASE[zone] ?? [0.6, 0.6, 0.6];
-  const mix = (i: number) => (GRASS_COLOR[i] ?? 0) * (1 - ZONE_MIX) + (base[i] ?? 0) * ZONE_MIX;
-  return [mix(0), mix(1), mix(2), 1];
-}
+const ROADS: [number, string][] = [
+  [1, "小さい道路"],
+  [2, "中くらいの道路"],
+  [3, "大きい道路"],
+  [HIGHWAY_CODE, "高速道路"],
+];
 
 export const LEVELS = [1, 2, 3, 4, 5] as const;
 
 export function legendSections(): LegendSection[] {
   return [
     {
-      title: "区画（地面の色）",
-      items: ZONES.map(([zone, label]) => ({ label, color: cssColor(zoneGroundColor(zone)) })),
+      title: "区画（薄い地面と濃い枠）",
+      items: ZONES.map(([zone, label]) => ({
+        label,
+        color: cssColor(zoneGroundColor(zone)),
+        border: cssColor(zoneEdgeColor(zone)),
+      })),
     },
     {
       title: "建物（濃いほど段階が低い）",
@@ -85,6 +91,20 @@ export function legendSections(): LegendSection[] {
         { label: "浄水場", color: cssColor(FACILITY_COLOR[2] ?? [0.6, 0.6, 0.6, 1]) },
       ],
     },
+    {
+      title: "道路（広いほど車道が太く濃い）",
+      items: ROADS.map(([kind, label]) => {
+        const style = roadStyle(kind);
+        return { label, color: cssColor(style.asphalt), border: cssColor(style.edge) };
+      }),
+    },
+    {
+      title: "移動体",
+      items: [
+        { label: "車（色はいろいろ）", color: cssColor(CAR_COLORS[3] ?? [1, 1, 1]) },
+        { label: "歩く人", color: cssColor(WALKER_COLOR) },
+      ],
+    },
   ];
 }
 
@@ -101,6 +121,9 @@ function swatch(item: LegendItem): Element {
     const box = document.createElement("span");
     box.className = "swatch";
     box.style.background = item.color;
+    if (item.border !== undefined) {
+      box.style.boxShadow = `inset 0 0 0 3px ${item.border}`;
+    }
     return box;
   }
   const svg = document.createElementNS(SVG_NS, "svg");
