@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
   growthNotice,
-  noticeView,
   isolatedNotice,
+  noticeView,
   parseGrowthBlocks,
   parseIsolated,
   parseStalls,
