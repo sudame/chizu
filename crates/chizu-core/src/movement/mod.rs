@@ -87,6 +87,10 @@ pub struct Trip {
     /// 車が交差点の手前で、横断歩道の人だけのために待った tick 数。ノードを抜けたら 0 に戻す。
     /// 歩く人が渡り始めてよいかを決めるのに使う（`crossing`）。
     yielded: u32,
+    /// 車が、いまのリンクで路肩で長く待った車を 1 台前に入れたか、自分がそうして路肩から入った車か。
+    /// ノードを抜けたら `false` に戻す。こうした車は同じリンクでもう譲らず、すぐ前に路肩の車を置かせない
+    /// （`car` のジッパー合流）。
+    let_in: bool,
     /// 車線の上で、位置が変わらないまま過ぎた tick 数。動いたら 0 に戻す。
     stalled: u32,
     /// いま歩いているリンクの、経路の中での番号。
@@ -806,12 +810,13 @@ impl Trips {
                     continue;
                 };
                 let old = self.get(id).expect("探し直す主体がない");
-                let (departed, speed, waiting, waited, yielded, stalled, then) = (
+                let (departed, speed, waiting, waited, yielded, let_in, stalled, then) = (
                     old.departed,
                     old.speed,
                     old.waiting,
                     old.waited,
                     old.yielded,
+                    old.let_in,
                     old.stalled,
                     old.then,
                 );
@@ -829,8 +834,9 @@ impl Trips {
                 };
                 let old_far = old.walk.far;
                 let mut t = make_trip(net, route, ends, dest, departed, jay);
-                (t.speed, t.waiting, t.waited, t.yielded, t.stalled, t.then) =
-                    (speed, waiting, waited, yielded, stalled, then);
+                (
+                    t.speed, t.waiting, t.waited, t.yielded, t.let_in, t.stalled, t.then,
+                ) = (speed, waiting, waited, yielded, let_in, stalled, then);
                 // いまの位置は、いまのリンクと同じ向きのリンクで表してあるので、そのリンクから
                 // 向きを変えたなら、側も入れ替わる。
                 t.walk.far ^= old_far;
@@ -905,6 +911,7 @@ fn make_trip(
         waiting: false,
         waited: 0,
         yielded: 0,
+        let_in: false,
         stalled: 0,
         route,
         leg: 0,
@@ -932,6 +939,7 @@ impl StateHash for Trip {
         h.write(&self.waiting);
         h.write(&self.waited);
         h.write(&self.yielded);
+        h.write(&self.let_in);
         h.write(&self.stalled);
         h.write_len(self.route.links.len());
         for l in &self.route.links {

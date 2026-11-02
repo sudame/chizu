@@ -516,6 +516,159 @@ fn a_car_that_waits_past_the_rescue_walks_instead() {
     assert_eq!(c.trips.rescues().teleported, 0);
 }
 
+/// 小さい道路 (30, 0)〜(30, 10) を南へ下り、途切れなく車の来る大きい道路へ入る車の列。大きい道路の車に
+/// 譲るので、小さい道路の車は `PATIENCE` tick に 1 台ほどしか入れず、列は小さい道路の端まで伸びて止まる。
+struct CurbQueue {
+    c: Cars,
+    tick: usize,
+}
+
+impl CurbQueue {
+    fn new() -> CurbQueue {
+        let mut n = Network::new();
+        road(&mut n, (0, 10), (60, 10), RoadKind::Large);
+        road(&mut n, (30, 0), (30, 10), RoadKind::Small);
+        let mut q = CurbQueue {
+            c: Cars::new(n),
+            tick: 0,
+        };
+        for _ in 0..400 {
+            q.step();
+        }
+        q
+    }
+
+    fn step(&mut self) {
+        let c = &mut self.c;
+        let mut d = vec![(at(0, 10, (1, 0), 0), at(55, 10, (1, 0), 0))];
+        if self.tick.is_multiple_of(5) {
+            d.push((at(30, 0, (0, 1), 0), at(55, 10, (1, 0), 0)));
+        }
+        c.trips.spawn_drives(&c.net, &mut c.router, &d, Tick::ZERO);
+        c.step();
+        self.tick += 1;
+        // 同じ車線の車が重ならない。
+        let mut on: Vec<(LaneId, u32)> = c
+            .trips
+            .iter()
+            .filter(|(_, t)| car::on_road(t))
+            .map(|(_, t)| (t.lane(), t.offset().0))
+            .collect();
+        on.sort_unstable();
+        for w in on.windows(2) {
+            if w[0].0 == w[1].0 {
+                assert!(w[1].1 - w[0].1 >= CAR_LENGTH + MIN_GAP, "重なった {w:?}");
+            }
+        }
+    }
+
+    /// 小さい道路の (30, `y`) の建物の前から、路肩で出発を待つ車を出す。
+    fn curb(&mut self, y: i64, along: u32) -> TripId {
+        let id = self
+            .c
+            .drive(at(30, y, (0, 1), along), at(55, 10, (1, 0), 0));
+        assert!(self.c.trips.get(id).unwrap().waiting, "列に空きがあった");
+        id
+    }
+}
+
+#[test]
+fn a_curb_car_beside_a_stopped_queue_gets_in_when_a_car_behind_yields() {
+    // 大きい道路へ続けて入る車は、もとから減速の上限を越えることがある。路肩の車のいない同じ流れと比べる。
+    let mut twin = CurbQueue::new();
+    let mut q = CurbQueue::new();
+    let id = q.curb(4, 4_000);
+    let mut placed = None;
+    for tick in 0..junction::RESCUE as usize {
+        q.step();
+        twin.step();
+        let t = q.c.trips.get(id).unwrap();
+        if !t.waiting {
+            placed = Some(tick);
+            assert_eq!(t.mode(), LaneMode::Car);
+            // 後ろの車が譲って入れた。
+            let behind = q
+                .c
+                .trips
+                .iter()
+                .filter(|(_, u)| car::on_road(u) && u.lane() == t.lane() && u.offset() < t.offset())
+                .max_by_key(|(_, u)| u.offset())
+                .unwrap();
+            assert!(behind.1.let_in);
+            break;
+        }
+    }
+    let placed = placed.expect("路肩の車が入れない");
+    // 列が止まっているあいだは、待ってから譲られる。
+    assert!(
+        placed >= car::MERGE_WAIT as usize,
+        "待たずに入った {placed}"
+    );
+    assert!(
+        placed <= car::MERGE_WAIT as usize + 60,
+        "待ちすぎた {placed}"
+    );
+    assert_eq!(q.c.hard_brakes, twin.c.hard_brakes, "減速の上限を越えた");
+}
+
+#[test]
+fn curb_cars_and_queued_cars_take_turns() {
+    let mut q = CurbQueue::new();
+    let ids: Vec<TripId> = (0..3).map(|_| q.curb(4, 4_000)).collect();
+    let lane = q.c.trips.get(ids[0]).unwrap().lane();
+    for _ in 0..junction::RESCUE {
+        q.step();
+        if ids
+            .iter()
+            .all(|id| q.c.trips.get(*id).is_some_and(|t| !t.waiting))
+        {
+            break;
+        }
+    }
+    // 車線の車の並びで、路肩から入った車どうしが隣り合わない。
+    let mut queue: Vec<(LaneOffset, TripId)> =
+        q.c.trips
+            .iter()
+            .filter(|(_, t)| car::on_road(t) && t.lane() == lane)
+            .map(|(id, t)| (t.offset(), id))
+            .collect();
+    queue.sort_unstable();
+    let from_curb: Vec<bool> = queue.iter().map(|(_, id)| ids.contains(id)).collect();
+    assert_eq!(
+        from_curb.iter().filter(|b| **b).count(),
+        3,
+        "入れない車がいる"
+    );
+    assert!(
+        from_curb.windows(2).all(|w| !(w[0] && w[1])),
+        "続けて入った {from_curb:?}"
+    );
+}
+
+#[test]
+fn cars_close_to_the_junction_do_not_yield() {
+    // 交差点まで 12m の路肩の車に、交差点の手前まで来た車は譲らない。その後ろの、交差点から離れた車が譲る。
+    let mut q = CurbQueue::new();
+    let id = q.curb(8, 4_000);
+    let mut yielded = 0;
+    for _ in 0..junction::RESCUE {
+        q.step();
+        if !q.c.trips.get(id).unwrap().waiting {
+            break;
+        }
+        for i in car::yielders(&q.c.trips.rows, &q.c.net) {
+            let t = q.c.trips.rows[i].as_ref().unwrap();
+            assert!(
+                !car::near_end(&q.c.net, t),
+                "交差点の手前で譲った {}",
+                t.offset().0
+            );
+            yielded += 1;
+        }
+    }
+    assert!(yielded > 0, "譲る車がいない");
+}
+
 #[test]
 fn a_waiting_car_that_gets_a_place_starts_counting_again() {
     let mut c = Cars::new(crossroads());

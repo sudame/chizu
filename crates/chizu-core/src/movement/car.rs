@@ -10,6 +10,14 @@
 //!
 //! 1. の前に、前の tick の状態だけを読んで、交差点ごとに手前で止める車をノードの順に決める。
 //!    信号のある交差点では、tick と前の tick の車と歩く人の様子から決まる信号の段階も読む（[`signal_demand`]）。
+//!
+//! 路肩で出発を待つ車は、車線に空きがあれば置く。[`MERGE_WAIT`] tick より長く待った車がいれば、
+//! その後ろから来る車の 1 台が、路肩の車の入る所の手前で止まって譲る（ジッパー合流）。前の車が進めば
+//! 譲った車の前に空きができ、路肩の車はそこに入る。入れた車と入った車は、同じリンクではもう譲らず、
+//! すぐ前に路肩の車を置かせない。次に待つ路肩の車には、その後ろの車が譲る。こうして、路肩の車と
+//! 車線の車が 1 台ずつ交互に入る。
+//! 譲るのは減速の上限の内で止まれるときだけで、交差点の手前まで来た車と交差点の中の車、
+//! 区間の途中の衝突区間にかかる車は譲らない（[`merge_gaps`]）。
 
 use std::collections::BTreeMap;
 
@@ -36,6 +44,9 @@ pub const CAR_ACCEL: i32 = 2_500;
 
 /// 安全速度を求めるときの減速の上限（mm/tick）。
 pub const CAR_DECEL: i32 = 4_500;
+
+/// 路肩で出発を待つ車が、この tick 数より長く待ったら、後ろから来る車に譲らせる。
+pub(super) const MERGE_WAIT: u32 = 30;
 
 /// 前の車の後ろの端から、自分の前の端までに空ける距離に、車の長さを足したもの。
 const SPACING: u32 = CAR_LENGTH + MIN_GAP;
@@ -79,7 +90,11 @@ pub(super) fn on_road(t: &Trip) -> bool {
 
 /// 車線ごとの、車線の上の車の位置。前から順に並ぶ。
 #[derive(Default)]
-pub(super) struct LaneIndex(BTreeMap<LaneId, Vec<LaneOffset>>);
+pub(super) struct LaneIndex {
+    at: BTreeMap<LaneId, Vec<LaneOffset>>,
+    /// 路肩で長く待った車を 1 台前に入れた車と、そうして入った車の位置（[`Trip`] の `let_in`）。
+    let_in: std::collections::BTreeSet<(LaneId, LaneOffset)>,
+}
 
 impl LaneIndex {
     /// 行 `skip` を除いた、車線の上の車の位置。
@@ -87,27 +102,32 @@ impl LaneIndex {
         let mut ix = LaneIndex::default();
         for (i, t) in rows.iter().enumerate() {
             if let Some(t) = t.as_ref().filter(|t| on_road(t) && Some(i) != skip) {
-                ix.0.entry(t.lane).or_default().push(t.offset);
+                ix.at.entry(t.lane).or_default().push(t.offset);
+                if t.let_in {
+                    ix.let_in.insert((t.lane, t.offset));
+                }
             }
         }
-        for v in ix.0.values_mut() {
+        for v in ix.at.values_mut() {
             v.sort_unstable_by(|a, b| b.cmp(a));
         }
         ix
     }
 
     fn count(&self, lane: LaneId) -> usize {
-        self.0.get(&lane).map_or(0, Vec::len)
+        self.at.get(&lane).map_or(0, Vec::len)
     }
 
     /// 車線 `lane` で、位置 `at` から後ろへ下げていき、ほかの車と重ならない最初の位置。
-    fn room_behind(&self, lane: LaneId, at: LaneOffset) -> Option<LaneOffset> {
+    /// `turns` なら、路肩の車を 1 台入れた車と、そうして入った車のすぐ前は飛ばす。路肩の車が続けて
+    /// 入らないようにするためである。
+    fn room_behind(&self, lane: LaneId, at: LaneOffset, turns: bool) -> Option<LaneOffset> {
         let mut p = at.0;
-        for c in self.0.get(&lane).into_iter().flatten() {
+        for c in self.at.get(&lane).into_iter().flatten() {
             if c.0 >= p.saturating_add(SPACING) {
                 continue;
             }
-            if c.0.saturating_add(SPACING) <= p {
+            if c.0.saturating_add(SPACING) <= p && !(turns && self.let_in.contains(&(lane, *c))) {
                 break;
             }
             p = c.0.checked_sub(SPACING)?;
@@ -116,9 +136,16 @@ impl LaneIndex {
     }
 
     fn insert(&mut self, lane: LaneId, at: LaneOffset) {
-        let v = self.0.entry(lane).or_default();
+        let v = self.at.entry(lane).or_default();
         let k = v.partition_point(|c| *c > at);
         v.insert(k, at);
+    }
+
+    /// 車線 `lane` の位置 `at` のすぐ後ろの車を、路肩の車を 1 台入れた車にする。
+    fn mark_behind(&mut self, lane: LaneId, at: LaneOffset) {
+        if let Some(c) = self.at.get(&lane).and_then(|v| v.iter().find(|c| **c < at)) {
+            self.let_in.insert((lane, *c));
+        }
     }
 
     /// 車の少ない順に並べた車線。同じなら番号の順にする。
@@ -138,6 +165,8 @@ pub(super) fn given_up(t: &Trip) -> bool {
 }
 
 /// `jay` は車のリンクごとの、区間の途中の衝突区間の真ん中の位置で、車がその区間にかかる位置には置かない。
+/// [`MERGE_WAIT`] tick より長く待った車は、譲られて入るので、路肩の車を入れた車とそうして入った車の
+/// すぐ前には置かない。
 pub(super) fn place(
     rows: &mut [Option<Trip>],
     net: &Network,
@@ -148,10 +177,11 @@ pub(super) fn place(
     let t = rows[i].as_mut().expect("置く車がない");
     let lanes: Vec<LaneId> = net.link_lanes(t.link()).collect();
     let zones = jay.get(&t.link()).map_or(&[][..], Vec::as_slice);
+    let turns = t.stalled > MERGE_WAIT;
     let found = ix
         .by_count(&lanes)
         .into_iter()
-        .find_map(|l| Some((l, room_clear_of(ix, l, t.offset, zones)?)));
+        .find_map(|l| Some((l, room_clear_of(ix, l, t.offset, zones, turns)?)));
     match found {
         Some((lane, at)) => {
             (t.lane, t.offset, t.waiting, t.stalled) = (lane, at, false, 0);
@@ -173,7 +203,7 @@ pub(super) fn keep_lane(rows: &mut [Option<Trip>], net: &Network, i: usize, inde
     let t = rows[i].as_ref().expect("置く車がない");
     let lanes: Vec<LaneId> = net.link_lanes(t.link()).collect();
     let same = lanes[index.min(lanes.len() - 1)];
-    let fits = |l: LaneId| ix.room_behind(l, t.offset) == Some(t.offset);
+    let fits = |l: LaneId| ix.room_behind(l, t.offset, false) == Some(t.offset);
     let others: Vec<LaneId> = lanes.iter().copied().filter(|l| *l != same).collect();
     let found = std::iter::once(same)
         .chain(ix.by_count(&others))
@@ -311,13 +341,15 @@ pub(super) fn safe_speed(me: LaneOffset, at: LaneOffset, v_l: MmPerTick) -> i64 
 /// 数えた位置と速さ）。
 /// `stop` なら、交差点でほかの車に譲るか先の車線の空きを待って、ノードの手前で止まる。
 /// `jay` は、いまのリンクの上の、区間の途中の衝突区間の真ん中の位置で、小さい順に並ぶ。前にあれば
-/// その手前で止まる。どちらも、減速の上限の内で止まれないときは止まらない。
+/// その手前で止まる。`merge` は路肩の車に譲るときの、その車が入る所の前の端で、そこに止まった車が
+/// あるものとして近づく。どれも、減速の上限の内で止まれないときは止まらない。
 fn drive(
     net: &Network,
     t: &Trip,
     leader: Option<(LaneOffset, MmPerTick)>,
     stop: bool,
     jay: &[u32],
+    merge: Option<u32>,
 ) -> (MmPerTick, LaneOffset) {
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
     let mut v = i64::from(t.speed.0)
@@ -336,6 +368,14 @@ fn drive(
     }
     if stop {
         let s = stop_speed(t);
+        if s >= i64::from(t.speed.0) - i64::from(CAR_DECEL) {
+            v = v.min(s);
+        }
+    }
+    if let Some(m) = merge {
+        let at = LaneOffset(m);
+        let room = i64::from(m) - i64::from(SPACING) - i64::from(t.offset.0);
+        let s = safe_speed(t.offset, at, MmPerTick::ZERO).min(room);
         if s >= i64::from(t.speed.0) - i64::from(CAR_DECEL) {
             v = v.min(s);
         }
@@ -377,13 +417,15 @@ fn jay_line(z: u32) -> u32 {
 }
 
 /// 車線 `lane` で、位置 `at` から後ろへ下げていき、ほかの車とも、衝突区間 `zones` とも重ならない最初の位置。
+/// `turns` は [`LaneIndex::room_behind`] と同じ。
 fn room_clear_of(
     ix: &LaneIndex,
     lane: LaneId,
     at: LaneOffset,
     zones: &[u32],
+    turns: bool,
 ) -> Option<LaneOffset> {
-    let mut p = ix.room_behind(lane, at)?;
+    let mut p = ix.room_behind(lane, at, turns)?;
     // 下げるたびに前の衝突区間より手前へ移るので、衝突区間の数より多くは回らない。
     for _ in 0..=zones.len() {
         let hit = zones.iter().rev().find(|z| {
@@ -392,7 +434,7 @@ fn room_clear_of(
         let Some(z) = hit else {
             return Some(p);
         };
-        p = ix.room_behind(lane, LaneOffset(jay_line(*z)))?;
+        p = ix.room_behind(lane, LaneOffset(jay_line(*z)), turns)?;
     }
     Some(p)
 }
@@ -626,8 +668,92 @@ fn look(
     out
 }
 
+/// 路肩で [`MERGE_WAIT`] tick より長く待った車 `waiting` に譲らせる車と、その車が近づく、路肩の車の入る所の
+/// 前の端。`order` の番号ごとに返す。
+///
+/// 譲るのは、同じ車線で路肩の車の位置より 1 台ぶん後ろにいる車のうち、いちばん前の車である。ただし、
+/// このリンクですでに 1 台入れた車と、そうして入った車は飛ばし、その後ろの車にする。入る所は、路肩の車の位置か、
+/// 譲る車の前の車の 1 台ぶん後ろの、手前のほうにする。譲る車が交差点の手前まで来ているか交差点の中に
+/// いるとき、譲る車から入る所までに区間の途中の衝突区間がかかるときは、譲らせない。
+/// 譲る車が 2 台の路肩の車に選ばれたら、手前の入る所に近づく。
+fn merge_gaps(
+    rows: &[Option<Trip>],
+    net: &Network,
+    order: &[(LaneId, core::cmp::Reverse<LaneOffset>, usize)],
+    waiting: &[usize],
+    zones: &BTreeMap<LinkId, Vec<u32>>,
+) -> Vec<Option<u32>> {
+    let mut out = vec![None; order.len()];
+    let car = |k: usize| rows[order[k].2].as_ref().expect("車の主体がない");
+    for &i in waiting {
+        let t = rows[i].as_ref().expect("待つ車がない");
+        if t.stalled <= MERGE_WAIT {
+            continue;
+        }
+        let Some(behind) = t.offset.0.checked_sub(SPACING) else {
+            continue;
+        };
+        let lane = t.lane;
+        let first =
+            order.partition_point(|e| (e.0, e.1) < (lane, core::cmp::Reverse(LaneOffset(behind))));
+        let Some(k) = (first..order.len())
+            .take_while(|k| order[*k].0 == lane)
+            .find(|k| !car(*k).let_in)
+        else {
+            continue;
+        };
+        let y = car(k);
+        let entering = !y.last_leg()
+            && near_end(net, y)
+            && junction::is_junction(net, end_node(net, y.link()));
+        let inside = y.leg > 0 && y.offset.0 < JUNCTION_CLEAR && {
+            let prev = y.route.links[y.leg as usize - 1];
+            net.segment(prev.segment).is_some() && junction::is_junction(net, end_node(net, prev))
+        };
+        if entering || inside {
+            continue;
+        }
+        let ahead = (k > 0 && order[k - 1].0 == lane).then(|| car(k - 1).offset.0);
+        let slot = ahead.map_or(t.offset.0, |a| a.saturating_sub(SPACING).min(t.offset.0));
+        let rear = y.offset.0.saturating_sub(CAR_LENGTH);
+        let crossed = zones.get(&t.link()).is_some_and(|zs| {
+            zs.iter().any(|z| {
+                z.saturating_add(crossing::JAY_HALF_MM) > rear
+                    && z.saturating_sub(crossing::JAY_HALF_MM) < slot
+            })
+        });
+        if crossed {
+            continue;
+        }
+        out[k] = Some(out[k].map_or(slot, |o: u32| o.min(slot)));
+    }
+    out
+}
+
+/// いまの行で、路肩の車に譲らせる車の行の番号。区間の途中の衝突区間はないものとする。
+#[cfg(test)]
+pub(super) fn yielders(rows: &[Option<Trip>], net: &Network) -> Vec<usize> {
+    let mut order: Vec<(LaneId, core::cmp::Reverse<LaneOffset>, usize)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            let t = t.as_ref().filter(|t| on_road(t))?;
+            Some((t.lane, core::cmp::Reverse(t.offset), i))
+        })
+        .collect();
+    order.sort_unstable();
+    let waiting: Vec<usize> = (0..rows.len())
+        .filter(|i| rows[*i].as_ref().is_some_and(|t| t.waiting))
+        .collect();
+    merge_gaps(rows, net, &order, &waiting, &BTreeMap::new())
+        .into_iter()
+        .zip(&order)
+        .filter_map(|(g, e)| g.map(|_| e.2))
+        .collect()
+}
+
 /// リンクの終わりまでが、最高速度から止まるまでの距離と車間より近いか。
-fn near_end(net: &Network, t: &Trip) -> bool {
+pub(super) fn near_end(net: &Network, t: &Trip) -> bool {
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
     let vmax = i64::from(speed_limit(seg.kind).0);
     let left = i64::from(t.link_len.0) - i64::from(t.offset.0);
@@ -718,11 +844,20 @@ pub(super) fn step(
         .filter(|i| rows[*i].as_ref().is_some_and(|t| t.waiting))
         .collect();
     let mut still_waiting = Vec::new();
+    // 譲られて車線に入った車の位置。
+    let mut merged = Vec::new();
     if !waiting.is_empty() {
         let mut ix = LaneIndex::of(rows, None);
         for i in waiting {
+            let long = rows[i].as_ref().is_some_and(|t| t.stalled > MERGE_WAIT);
             if !place(rows, net, &mut ix, i, &occupied.zones) {
                 still_waiting.push(i);
+            } else if long {
+                let t = rows[i].as_mut().expect("置いた車がない");
+                t.let_in = true;
+                ix.let_in.insert((t.lane, t.offset));
+                ix.mark_behind(t.lane, t.offset);
+                merged.push((t.lane, t.offset));
             }
         }
     }
@@ -737,7 +872,17 @@ pub(super) fn step(
         })
         .collect();
     order.sort_unstable();
+    // 長く待った路肩の車を前に入れた車は、このリンクではもう譲らず、すぐ前に路肩の車を置かせない。
+    for (lane, at) in merged {
+        let k = order.partition_point(|e| (e.0, e.1) <= (lane, core::cmp::Reverse(at)));
+        if let Some(&(l, _, j)) = order.get(k)
+            && l == lane
+        {
+            rows[j].as_mut().expect("車の主体がない").let_in = true;
+        }
+    }
     let rows_ro = &*rows;
+    let gaps = merge_gaps(rows_ro, net, &order, &still_waiting, &occupied.zones);
     let look_at = |k: usize| look(rows_ro, net, conn, &st, &order, k);
     #[cfg(feature = "parallel")]
     let looks: Vec<Look> = (0..order.len())
@@ -799,7 +944,7 @@ pub(super) fn step(
                 &both
             }
         };
-        let (v, at) = drive(net, t, leader, held[k] || looks[k].no_room, jay);
+        let (v, at) = drive(net, t, leader, held[k] || looks[k].no_room, jay, gaps[k]);
         (i, t.speed, v, at, next_lane, held[k])
     };
     #[cfg(feature = "parallel")]
@@ -885,7 +1030,7 @@ pub(super) fn step(
             None => {}
         }
         t.leg += 1;
-        (t.waited, t.yielded) = (0, 0);
+        (t.waited, t.yielded, t.let_in) = (0, 0, false);
         t.enter(net, place, Some(lane));
         let r = rear.entry(lane).or_insert(place);
         *r = (*r).min(place);
