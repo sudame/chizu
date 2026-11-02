@@ -20,6 +20,7 @@ import type {
 } from "./protocol/messages.ts";
 import { layout } from "./protocol/snapshot.ts";
 import { startSimulation } from "./save/worker-side.ts";
+import { stepBudget, tickRate } from "./speed.ts";
 
 const SUM_N = 10_000_000;
 const FRAME_MS = 1000 / 60;
@@ -129,32 +130,54 @@ function sendFinance(sim: Simulation, now: number, force = false): void {
   }
 }
 
+// 人口と幸福度は建物の表が変わらなくても動く。住民の数だけ数え直すので、間引いて送る。
+// 一時停止中は街が進まないので、最初の 1 回のあとは送らない。最初の 1 回を画面は基準にする
+const OVERVIEW_INTERVAL_MS = 500;
+let overviewSentAt = Number.NEGATIVE_INFINITY;
+function sendOverview(sim: Simulation, now: number, paused: boolean, force = false): void {
+  const first = overviewSentAt === Number.NEGATIVE_INFINITY;
+  if (!force && !first && (paused || now - overviewSentAt < OVERVIEW_INTERVAL_MS)) {
+    return;
+  }
+  overviewSentAt = now;
+  reply({ kind: "overview", overview: [...sim.overview()] });
+}
+
 // 実時間に合わせて tick を進める。何 tick 進めるかはここで決め、中核には整数の tick 数だけを渡す
-function run(sim: Simulation): (paused: boolean) => void {
+function run(sim: Simulation): {
+  setPaused: (paused: boolean) => void;
+  setPace: (pace: number) => void;
+} {
   const perSecond = ticks_per_second();
   let last = performance.now();
   let budget = 0;
   let paused = false;
+  // 1 倍より遅いときの倍率。中核の速度は 1 のままで、進める頻度だけを落とす
+  let pace = 1;
   setInterval(() => {
     const now = performance.now();
-    const rate = perSecond * sim.speed();
-    budget = paused
-      ? 0
-      : Math.min(budget + ((now - last) / 1000) * rate, rate * MAX_BACKLOG_SECONDS);
+    const rate = tickRate(perSecond, sim.speed(), pace);
+    const step = stepBudget(budget, now - last, rate, paused, MAX_BACKLOG_SECONDS);
+    budget = step.budget;
     last = now;
-    const ticks = Math.floor(budget);
-    budget -= ticks;
-    sim.advance(ticks);
+    sim.advance(step.ticks);
     sendOutcomes(sim);
     sendRoads(sim);
     sendBuildings(sim);
     sendFinance(sim, now);
+    sendOverview(sim, now, paused);
     sendChunks(sim);
     layerSender.send(sim, reply, CHUNKS_PER_FRAME, now);
   }, FRAME_MS);
-  return (p) => {
-    paused = p;
-    sim.set_paused(p);
+  return {
+    setPaused: (p) => {
+      paused = p;
+      sim.set_paused(p);
+    },
+    setPace: (p) => {
+      pace = p;
+      reply({ kind: "pace", pace });
+    },
   };
 }
 
@@ -173,7 +196,7 @@ const ready = (async () => {
   if (!(memory instanceof SharedArrayBuffer)) {
     throw new Error("WASM のメモリが SharedArrayBuffer でない");
   }
-  const setPaused = run(sim);
+  const { setPaused, setPace } = run(sim);
   reply({
     kind: "ready",
     memory,
@@ -185,7 +208,7 @@ const ready = (async () => {
     roadCosts: [...road_cost_table()],
     serviceTable: [...service_table()],
   });
-  return { sim, setPaused };
+  return { sim, setPaused, setPace };
 })();
 
 ready.catch((error: unknown) => reply({ kind: "error", message: String(error) }));
@@ -193,7 +216,7 @@ ready.catch((error: unknown) => reply({ kind: "error", message: String(error) })
 self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
   const message = event.data;
   try {
-    const { sim, setPaused } = await ready;
+    const { sim, setPaused, setPace } = await ready;
     switch (message.kind) {
       case "command":
         // 適用はその場で済むので、止めているときも結果と道路をすぐ返す
@@ -202,7 +225,11 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         sendRoads(sim);
         sendBuildings(sim);
         sendFinance(sim, performance.now(), true);
+        sendOverview(sim, performance.now(), false, true);
         layerSender.send(sim, reply, CHUNKS_PER_FRAME);
+        break;
+      case "pace":
+        setPace(message.pace);
         break;
       case "layers":
         layerSender.setActive(message.active);

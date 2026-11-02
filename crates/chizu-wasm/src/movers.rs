@@ -77,6 +77,7 @@ pub fn visible_movers(world: &World, view: TileRect, out: &mut Vec<Mover>) -> Ch
         heading: heading_code(m.heading),
         kind: kind_of(m),
         id: m.id.index,
+        generation: u32::from(m.id.generation),
     }));
     base
 }

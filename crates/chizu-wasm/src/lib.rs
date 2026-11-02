@@ -195,6 +195,12 @@ impl Simulation {
         self.0.finance()
     }
 
+    /// `[家のある住民の数, 幸福度の平均, 通勤・生活サービス・暮らし向きの平均, 届いた段階,
+    /// 次の段階に届く人口, いまの段階までの枠, 次の段階の枠]`。
+    pub fn overview(&self) -> Vec<f64> {
+        self.0.overview()
+    }
+
     pub fn set_paused(&mut self, paused: bool) {
         self.0.set_paused(paused);
     }
