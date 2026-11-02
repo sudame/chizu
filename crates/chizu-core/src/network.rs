@@ -389,6 +389,23 @@ pub fn road_cost(kind: RoadKind, line: &Line) -> Money {
     Money(round::div_ceil(total, TILE_MM))
 }
 
+/// 既存の区間 1 本の種類を `from` から `to` に変える費用。CS2 と同じく、上げるときは建設費の差額を払い、
+/// 下げるときは払い戻さない。
+pub fn road_change_cost(from: RoadKind, to: RoadKind, line: &Line) -> Money {
+    let diff = road_cost(to, line).0 - road_cost(from, line).0;
+    Money(diff.max(0))
+}
+
+/// 道路の種類を変える見積もり。[`Network::plan_road_kind`] で作り、[`Network::change_road_kind`] で網に映す。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KindChange {
+    pub kind: RoadKind,
+    /// 種類を変える区間。ID の順に並ぶ。
+    pub segments: Vec<SegmentId>,
+    /// 費用の合計。
+    pub cost: Money,
+}
+
 /// 道路と歩道の網。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Network {
@@ -719,6 +736,77 @@ impl Network {
         }
         self.bump_version();
         Ok(())
+    }
+
+    /// 直線 `line` と同じ 1 歩を通る区間。ID の順に並ぶ。
+    pub fn segments_along(&self, line: &Line) -> Vec<SegmentId> {
+        let mut found = BTreeSet::new();
+        for k in 0..line.len {
+            let (p, q) = (line.tile(k), line.tile(k + 1));
+            for s in self.segments_through(p) {
+                if self
+                    .segment_line(s)
+                    .is_some_and(|l| l.position_of(q).is_some())
+                {
+                    found.insert(s);
+                }
+            }
+        }
+        found.into_iter().collect()
+    }
+
+    /// 直線 `line` と同じ 1 歩を通る道路の区間を、区間ごと `kind` に変える見積もり。網は変えない。
+    ///
+    /// 高速道路は外部接続で、歩道もないので変えない。通る道路がなければ `NoRoadToChange`、
+    /// どれもすでに `kind` なら `RoadKindUnchanged` を返す。
+    pub fn plan_road_kind(&self, line: &Line, kind: RoadKind) -> Result<KindChange, DenyReason> {
+        let mut any_road = false;
+        let mut segments = Vec::new();
+        let mut cost = Money::ZERO;
+        for s in self.segments_along(line) {
+            let SegmentKind::Road(old) = self.segments[s].kind else {
+                continue;
+            };
+            any_road = true;
+            if old == kind {
+                continue;
+            }
+            let l = self.segment_line(s).expect("区間がない");
+            cost = cost + road_change_cost(old, kind, &l);
+            segments.push(s);
+        }
+        if !any_road {
+            return Err(DenyReason::NoRoadToChange);
+        }
+        if segments.is_empty() {
+            return Err(DenyReason::RoadKindUnchanged);
+        }
+        Ok(KindChange {
+            kind,
+            segments,
+            cost,
+        })
+    }
+
+    /// 見積もった区間の種類を変え、変えた区間の新しい ID を古い ID の順に返す。区間はノードを変えずに
+    /// 作り直すので、区間と車線の ID が変わる。走っている移動は、呼ぶ前に
+    /// [`crate::movement::Trips::note_before_change`] で控え、呼んだあとに
+    /// [`crate::movement::Trips::reroute_noted`] でいまの位置から探し直す。
+    pub fn change_road_kind(&mut self, change: &KindChange) -> Vec<SegmentId> {
+        let ids = change
+            .segments
+            .iter()
+            .map(|id| {
+                let s = self.remove_segment(*id);
+                assert!(
+                    matches!(s.kind, SegmentKind::Road(_)),
+                    "高速道路の種類は変えない"
+                );
+                self.add_segment(s.a, s.b, SegmentKind::Road(change.kind))
+            })
+            .collect();
+        self.bump_version();
+        ids
     }
 
     /// 交差点 `node` に信号を置くか、外す。3 本以上の区間が集まるノードでなければ置けない。
@@ -1109,6 +1197,88 @@ mod tests {
         assert_eq!(road_cost(RoadKind::Small, &line(0, 0, 4, 0)), Money(1_000));
         // 250 × 11,314 ÷ 8,000 を切り上げる。
         assert_eq!(road_cost(RoadKind::Small, &line(0, 0, 1, 1)), Money(354));
+    }
+
+    #[test]
+    fn changing_the_kind_keeps_the_shape_and_nodes() {
+        let mut n = Network::new();
+        build(&mut n, 0, 0, 10, 0).unwrap();
+        build(&mut n, 5, -5, 5, 5).unwrap();
+        let nodes: Vec<_> = n.nodes().map(|(id, node)| (id, node.tile())).collect();
+        let lines = |n: &Network| {
+            let mut l: Vec<_> = n.segments().map(|(id, _)| n.segment_line(id)).collect();
+            l.sort_by_key(|l| l.map(|l| (l.start.x, l.start.y, l.len)));
+            l
+        };
+        let before = lines(&n);
+        // 横の道路をなぞる。縦の道路は交差点のマスで触れるだけなので変えない。
+        let change = n
+            .plan_road_kind(&line(0, 0, 10, 0), RoadKind::Large)
+            .unwrap();
+        assert_eq!(change.segments.len(), 2);
+        // 小から大へ、1 マス 500 の差額を 10 マスぶん払う。
+        assert_eq!(change.cost, Money(5_000));
+        let version = n.version();
+        let ids = n.change_road_kind(&change);
+        assert_eq!(n.version(), version + 1);
+        assert_eq!(
+            n.nodes()
+                .map(|(id, node)| (id, node.tile()))
+                .collect::<Vec<_>>(),
+            nodes
+        );
+        assert_eq!(lines(&n), before);
+        for id in ids {
+            let seg = n.segment(id).unwrap();
+            assert_eq!(seg.kind, SegmentKind::Road(RoadKind::Large));
+            assert_eq!(seg.lanes.len(), 8);
+        }
+        let vertical = n.segments_along(&line(5, -5, 5, 5));
+        assert!(
+            vertical
+                .iter()
+                .all(|s| n.segment(*s).unwrap().kind == SegmentKind::Road(RoadKind::Small))
+        );
+        check_invariants(&n);
+        // 下げるときは払い戻さない。
+        let down = n
+            .plan_road_kind(&line(2, 0, 3, 0), RoadKind::Medium)
+            .unwrap();
+        assert_eq!((down.segments.len(), down.cost), (1, Money::ZERO));
+        n.change_road_kind(&down);
+        check_invariants(&n);
+    }
+
+    #[test]
+    fn changing_the_kind_is_denied_without_a_road_to_change() {
+        let mut n = Network::new();
+        n.add_highway(TilePos::new(0, 0), TilePos::new(100, 0));
+        build(&mut n, 0, 0, 0, 10).unwrap();
+        let plan = |n: &Network, l: Line| n.plan_road_kind(&l, RoadKind::Medium);
+        // 高速道路と、道路のない所と、道路を横切るだけの直線。
+        for l in [line(0, 0, 20, 0), line(5, 5, 9, 5), line(-3, 4, 3, 4)] {
+            assert_eq!(plan(&n, l), Err(DenyReason::NoRoadToChange), "{l:?}");
+        }
+        let small = line(0, 2, 0, 8);
+        assert_eq!(
+            n.plan_road_kind(&small, RoadKind::Small),
+            Err(DenyReason::RoadKindUnchanged)
+        );
+        // 高速道路と道路をまたいでなぞると、道路だけを変える。
+        let both = n
+            .plan_road_kind(&line(0, 5, 0, 0), RoadKind::Medium)
+            .unwrap();
+        assert_eq!(both.segments.len(), 1);
+        // 斜めの区間も長さに比例した差額になる。
+        build(&mut n, 1, 11, 5, 15).unwrap();
+        let diagonal = n
+            .plan_road_kind(&line(1, 11, 5, 15), RoadKind::Medium)
+            .unwrap();
+        assert_eq!(
+            diagonal.cost,
+            road_cost(RoadKind::Medium, &line(1, 11, 5, 15))
+                - road_cost(RoadKind::Small, &line(1, 11, 5, 15))
+        );
     }
 
     /// 高速道路が `inner` から `outer` への 1 本のまま残り、「外の世界」ノードには高速道路しか

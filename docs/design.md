@@ -159,6 +159,7 @@ pub struct Households { pub home: Vec<BuildingId>, pub money: Vec<i64>, pub memb
 ```rust
 pub enum Command {
     BuildRoad { from: TilePos, to: TilePos, kind: RoadKind },
+    UpgradeRoad { from: TilePos, to: TilePos, kind: RoadKind },  // 直線が通る既存の区間の種類を、区間ごと変える
     Bulldoze { area: TileRect },
     PaintZone { area: TileRect, zone: Option<ZoneKind> },   // None で区画を消す
     PlaceBuilding { kind: ServiceKind, at: TilePos, rotation: u8 },
@@ -171,6 +172,7 @@ pub enum Command {
 
 - 画面は JSON に近いオブジェクトで送り、`chizu-wasm` が `Command` に直す。値の範囲の検証は中核の `Command::validate` が行い、`chizu-wasm` はそれを呼んで不正なコマンドを捨てる。記録も同じ検証を通すので、記録に入ったコマンドは必ず読み戻せる。
 - Worker は受け取った順に番号を振り、まだ step していないいまの tick に `(tick, 番号, Command)` として記録し、その場で適用する。tick T の状態は「tick が T 以下のコマンドを番号順に適用し、step を T 回済ませたもの」と決める。再生（`replay`）で T tick 進めると、最後の step のあとで tick T のコマンドまで適用して終えるので、受けてすぐ適用した状態と一致する。一時停止中も同じで、止めたまま建てられる。`World` は適用済みの記録の次の番号を状態に持ち、途中の状態から続きを再生するときは、その番号より後の記録だけを適用する。再現に必要なのは、種とこの記録だけである。
+- `UpgradeRoad` は CS2 のアップグレードの道具にならい、形とノードを変えずに種類だけを変える。費用は建設費の差額で、下げても払い戻さない。区間は作り直すので ID が変わり、建物の出入口は付け直し、走っている移動は区間が分かれたときと同じく、いまの位置から経路を探し直す。車線が減って重なる車は、空くまで出発を待つ車にする。
 - 計算の細かさは速度で変わり、結果も少し変わる。そのため速度の変更（`SetSimSpeed`）もコマンドとして記録する。
 - 画面の範囲はコマンドにしない。見ている人ごとに範囲が違っても、同じ記録から同じ街を再現できるようにするためである。
 - 一時停止は tick を進めないだけなので、記録しない。

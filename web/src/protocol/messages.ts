@@ -24,6 +24,15 @@ export type CommandMessage =
       toX: number;
       toY: number;
     }
+  /** 直線と同じ 1 歩を通る既存の道路の区間を、区間ごと road の種類に変える。 */
+  | {
+      kind: "UpgradeRoad";
+      road: RoadKindName;
+      fromX: number;
+      fromY: number;
+      toX: number;
+      toY: number;
+    }
   | { kind: "Bulldoze"; minX: number; minY: number; maxX: number; maxY: number }
   | {
       kind: "PaintZone";

@@ -31,10 +31,10 @@ pub use citizens::{
 pub use clock::{GameTime, TICKS_PER_DAY};
 pub use command::{Command, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
 pub use id::{BuildingId, CitizenId, HouseholdId, TripId};
-pub use movement::{Congestion, Mover, SidewalkPos, Trip, Trips};
+pub use movement::{Congestion, Mover, Noted, SidewalkPos, Trip, Trips};
 pub use network::{
-    Dir, Lane, LaneId, LaneMode, Line, LinkId, Network, Node, NodeControl, Segment, SegmentId,
-    SegmentKind,
+    Dir, KindChange, Lane, LaneId, LaneMode, Line, LinkId, Network, Node, NodeControl, Segment,
+    SegmentId, SegmentKind, road_change_cost,
 };
 pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, SeqGap, replay};
 pub use rng::{Pcg32, RngPurpose, mix_words, rng};
