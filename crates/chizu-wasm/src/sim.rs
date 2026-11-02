@@ -399,6 +399,19 @@ impl Sim {
         out
     }
 
+    /// 収支の見込みを次の数で返す。税率の上限（‰）、区画の種類ごとの税率（‰）、区画の種類ごとの税収、
+    /// 道路の維持費、発電所と浄水場の維持費。区画の種類の順は住宅、商業、工業、オフィス。
+    /// 金額はどれも 1 日あたりである。
+    pub fn finance(&self) -> Vec<f64> {
+        let f = self.world.finances();
+        let mut out = vec![f64::from(chizu_core::command::MAX_TAX_PERMILLE)];
+        out.extend(chizu_core::ZoneKind::ALL.map(|z| f64::from(self.world.tax_permille(z))));
+        out.extend(f.taxes.map(|m| m.0 as f64));
+        out.push(f.road_upkeep.0 as f64);
+        out.extend(f.facility_upkeep.map(|m| m.0 as f64));
+        out
+    }
+
     /// 人口と幸福度とマイルストーンを、次の [`OVERVIEW_LENGTH`] 個の数で返す。
     /// 家のある住民の数、幸福度の平均、通勤・生活サービス・暮らし向きの平均、届いた段階、
     /// 次の段階に届く人口、いまの段階までで買える枠の数、次の段階で買える枠の数。
@@ -910,6 +923,26 @@ mod tests {
         };
         assert!(matches!(sim.submit(bad), Err(RecordError::Invalid(_))));
         assert!(sim.log().is_empty());
+    }
+
+    #[test]
+    fn finance_follows_tax_rate_commands_and_the_log() {
+        let mut sim = Sim::new(0);
+        let before = sim.finance();
+        assert_eq!(before.len(), 12);
+        assert_eq!(before[0], f64::from(MAX_TAX_PERMILLE));
+        // 住宅、商業、工業、オフィスの順の税率
+        assert_eq!(&before[1..5], &[100.0; 4]);
+        let set = Command::SetTaxRate {
+            zone: ZoneKind::Commercial,
+            permille: 170,
+        };
+        sim.submit(set).unwrap();
+        sim.advance(1);
+        let after = sim.finance();
+        assert_eq!(&after[1..5], &[100.0, 170.0, 100.0, 100.0]);
+        // 記録に残る
+        assert_eq!(sim.log().len(), 1);
     }
 
     fn road(from: (i64, i64), to: (i64, i64)) -> Command {

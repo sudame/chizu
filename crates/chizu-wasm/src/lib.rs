@@ -190,6 +190,11 @@ impl Simulation {
         self.0.city_stats()
     }
 
+    /// 収支の見込みの 12 個の数。並びは `sim::Sim::finance` にある。
+    pub fn finance(&self) -> Vec<f64> {
+        self.0.finance()
+    }
+
     /// `[家のある住民の数, 幸福度の平均, 通勤・生活サービス・暮らし向きの平均, 届いた段階,
     /// 次の段階に届く人口, いまの段階までの枠, 次の段階の枠]`。
     pub fn overview(&self) -> Vec<f64> {
