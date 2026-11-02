@@ -27,16 +27,19 @@ pub fn workers_by_building(
 
 /// 職場を変える住民と、その新しい職場を、住民の ID の順に返す。
 ///
+/// 職場の上限は、区画の種類ごとの税率のもとで雇える数（[`crate::building::Building::workplaces_at`]）である。
+///
 /// - 消えた建物の職場や、上限を超えた職場は外す。上限を超えたときは、ID の大きい住民から外す。
 /// - 職のない働く年齢の住民に、職場の空きを ID の順に割り当てる。家のない住民には割り当てない。
 pub fn assign_jobs(
     population: &Population,
     buildings: &Buildings,
+    tax_permille: [u16; 4],
 ) -> Vec<(CitizenId, Option<BuildingId>)> {
     let mut vacancy: BTreeMap<BuildingId, u64> = buildings
         .iter()
-        .filter(|(_, b)| b.workplaces() > 0)
-        .map(|(id, b)| (id, b.workplaces()))
+        .map(|(id, b)| (id, b.workplaces_at(tax_permille[b.zone.index()])))
+        .filter(|(_, n)| *n > 0)
         .collect();
     let mut changes = BTreeMap::new();
     let mut seekers = Vec::new();

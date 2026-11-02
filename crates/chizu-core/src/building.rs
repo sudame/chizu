@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use crate::command::ZoneKind;
+use crate::happiness::REFERENCE_TAX_PERMILLE;
 use crate::id::{BuildingId, Slots};
 use crate::network::LinkId;
 use crate::service::Supply;
@@ -72,6 +73,13 @@ impl Building {
             ZoneKind::Office => 4,
         };
         (self.tile_count() * per_four_tiles * u64::from(self.level)).div_ceil(4)
+    }
+
+    /// 税率 `tax_permille` のもとで実際に働き手を雇える職場の数。基準の税率までは [`Building::workplaces`] のままで、
+    /// それより高いと [`jobs_kept_permille`] の割合まで減る。端数は四捨五入する。
+    pub fn workplaces_at(&self, tax_permille: u16) -> u64 {
+        let kept = jobs_kept_permille(tax_permille);
+        (self.workplaces() * kept + 500) / 1_000
     }
 
     /// 駐車場の台数。1 マスに段階の数だけ停められる。
@@ -189,6 +197,15 @@ impl Buildings {
         }
         t
     }
+
+    /// 区画の種類ごとの、税率のもとで雇える職場の数の合計。添え字は [`ZoneKind::index`]。
+    pub fn job_slots(&self, tax_permille: [u16; 4]) -> [u64; 4] {
+        let mut slots = [0; 4];
+        for (_, b) in self.iter() {
+            slots[b.zone.index()] += b.workplaces_at(tax_permille[b.zone.index()]);
+        }
+        slots
+    }
 }
 
 impl StateHash for Buildings {
@@ -220,6 +237,27 @@ pub fn happiness_pull(happiness: u8) -> i64 {
     crate::round::div_floor(i64::from(happiness) - neutral, HAPPINESS_DEMAND_DIVISOR)
 }
 
+/// 税率が基準（[`REFERENCE_TAX_PERMILLE`]）を 1‰ 上回るごとに、雇える職場の割合を減らす値（‰）。
+/// 高い税率では企業が人を雇えなくなり、職のない住民が増えて、幸福度と税収が下がる。
+const JOBS_LOST_PERMILLE_PER_TAX_PERMILLE: u64 = 7;
+
+/// 住宅の需要に、税率の基準との差を効かせる強さ。基準より 2‰ 高いごとに 1 引き、2‰ 低いごとに 1 足す。
+const TAX_DEMAND_DIVISOR: i64 = 2;
+
+/// 税率 `tax_permille` のもとで、職場のうち雇える割合（‰）。基準までは 1000 で、それより高いと下がり、0 で止まる。
+pub fn jobs_kept_permille(tax_permille: u16) -> u64 {
+    let over = u64::from(tax_permille).saturating_sub(REFERENCE_TAX_PERMILLE as u64);
+    1_000u64.saturating_sub(over * JOBS_LOST_PERMILLE_PER_TAX_PERMILLE)
+}
+
+/// 住宅の需要のうち、住宅の税率から来る分。基準より高ければ負、低ければ正である。
+pub fn residential_tax_pull(tax_permille: u16) -> i64 {
+    crate::round::div_floor(
+        REFERENCE_TAX_PERMILLE - i64::from(tax_permille),
+        TAX_DEMAND_DIVISOR,
+    )
+}
+
 /// 働き手がいないうちから、工業が建ち始めるための需要。
 const BASE_INDUSTRIAL_DEMAND: i64 = 10;
 
@@ -230,7 +268,7 @@ const CITIZENS_PER_SHOP_JOB: u64 = 4;
 const INDUSTRIAL_SHARE_PERMILLE: u64 = 600;
 
 /// 需要の式に使う、街の人口と働き口の数。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CityStats {
     pub citizens: u64,
     pub households: u64,
@@ -242,6 +280,10 @@ pub struct CityStats {
     pub homes: u64,
     /// 区画の種類ごとの職場の数。添え字は [`ZoneKind::index`]。
     pub workplaces: [u64; 4],
+    /// 区画の種類ごとの、税率のもとで雇える職場の数。税率が基準以下なら `workplaces` と同じである。
+    pub job_slots: [u64; 4],
+    /// 区画の種類ごとの税率（‰）。
+    pub tax_permille: [u16; 4],
     /// 区画の種類ごとの、埋まっている職場の数。
     pub filled: [u64; 4],
     /// 区画の種類ごとの、塗られていて建てる空きがあるか、建物があるか。
@@ -250,18 +292,40 @@ pub struct CityStats {
     pub happiness: u8,
 }
 
+impl Default for CityStats {
+    fn default() -> CityStats {
+        CityStats {
+            citizens: 0,
+            households: 0,
+            working_age: 0,
+            employed: 0,
+            homes: 0,
+            workplaces: [0; 4],
+            job_slots: [0; 4],
+            tax_permille: [REFERENCE_TAX_PERMILLE as u16; 4],
+            filled: [0; 4],
+            zoned: [false; 4],
+            happiness: 0,
+        }
+    }
+}
+
 impl CityStats {
     /// 建物を 1 つ除いたときの値。
     pub fn without(mut self, b: &Building) -> CityStats {
+        let i = b.zone.index();
         self.homes -= b.households();
-        self.workplaces[b.zone.index()] -= b.workplaces();
+        self.workplaces[i] -= b.workplaces();
+        self.job_slots[i] -= b.workplaces_at(self.tax_permille[i]);
         self
     }
 
     /// 建物を 1 つ足したときの値。
     pub fn with(mut self, b: &Building) -> CityStats {
+        let i = b.zone.index();
         self.homes += b.households();
-        self.workplaces[b.zone.index()] += b.workplaces();
+        self.workplaces[i] += b.workplaces();
+        self.job_slots[i] += b.workplaces_at(self.tax_permille[i]);
         self
     }
 }
@@ -269,18 +333,22 @@ impl CityStats {
 /// 区画の種類ごとの需要。正なら建物が建つ。添え字は [`ZoneKind::index`]。
 ///
 /// CS2 にならい、次のように決める。どれも差の式なので、街が釣り合えば 0 のまわりに収まる。
-/// - 住宅：いつもある需要に、働き口の空きと幸福度の分（[`happiness_pull`]）を足し、空き家の 2 倍と
-///   職のない住民の 1/4 を引く。
+/// - 住宅：いつもある需要に、働き口の空きと幸福度の分（[`happiness_pull`]）、税率の分
+///   （[`residential_tax_pull`]）を足し、空き家の 2 倍と職のない住民の 1/4 を引く。
 /// - 商業：住民の数の 1/[`CITIZENS_PER_SHOP_JOB`] が買い物に要る職場で、いまの商業の職場との差。
+/// - 商業・工業・オフィスは、必要な職場の数に税率の分（[`jobs_kept_permille`]）をかける。
 /// - 工業とオフィス：働く年齢の住民のうち、商業で働かない人に要る職場を、塗られている区画の間で分けたものと、
 ///   いまの職場との差。両方が塗られていれば決まった割合で、片方だけならその区画にすべてを割り当てる。
 ///   商業が塗られていなければ、買い物の職場の分も工業とオフィスに回す。
 pub fn demand(s: &CityStats) -> [i64; 4] {
     let n = |v: u64| i64::try_from(v).expect("街の数があふれた");
     let zoned = |z: ZoneKind| s.zoned[z.index()];
-    let jobs: u64 = s.workplaces.iter().sum();
+    let jobs: u64 = s.job_slots.iter().sum();
     let filled: u64 = s.filled.iter().sum();
     let vacant_jobs = n(jobs.saturating_sub(filled));
+    // 税率が高い区画は、必要な職場の数が減る。企業が増やしたがらないためである。
+    let kept = |z: ZoneKind| jobs_kept_permille(s.tax_permille[z.index()]);
+    let scaled = |v: u64, z: ZoneKind| n(v * kept(z) / 1_000);
     let vacant_homes = n(s.homes.saturating_sub(s.households));
     let jobless_quarter = n(s.working_age.saturating_sub(s.employed) / 4);
     let shop_jobs = s.citizens / CITIZENS_PER_SHOP_JOB;
@@ -299,12 +367,18 @@ pub fn demand(s: &CityStats) -> [i64; 4] {
     let office = other_jobs - industry;
     let w = |z: ZoneKind| n(s.workplaces[z.index()]);
     [
-        BASE_RESIDENTIAL_DEMAND + vacant_jobs + happiness_pull(s.happiness)
+        BASE_RESIDENTIAL_DEMAND
+            + vacant_jobs
+            + happiness_pull(s.happiness)
+            + residential_tax_pull(s.tax_permille[ZoneKind::Residential.index()])
             - 2 * vacant_homes
             - jobless_quarter,
-        n(shop_jobs) - w(ZoneKind::Commercial),
-        BASE_INDUSTRIAL_DEMAND + n(industry) - w(ZoneKind::Industrial),
-        n(office) - w(ZoneKind::Office),
+        scaled(shop_jobs, ZoneKind::Commercial) - w(ZoneKind::Commercial),
+        scaled(
+            BASE_INDUSTRIAL_DEMAND as u64 + industry,
+            ZoneKind::Industrial,
+        ) - w(ZoneKind::Industrial),
+        scaled(office, ZoneKind::Office) - w(ZoneKind::Office),
     ]
 }
 
@@ -320,6 +394,30 @@ mod tests {
             happiness: 50,
             ..CityStats::default()
         }
+    }
+
+    #[test]
+    fn a_high_tax_cuts_jobs_and_demand() {
+        assert_eq!(jobs_kept_permille(0), 1_000);
+        assert_eq!(jobs_kept_permille(100), 1_000);
+        assert_eq!(jobs_kept_permille(150), 650);
+        assert_eq!(jobs_kept_permille(300), 0);
+        assert_eq!(residential_tax_pull(100), 0);
+        assert_eq!(residential_tax_pull(150), -25);
+        assert_eq!(residential_tax_pull(80), 10);
+        let mut taxed = stats([true; 4]);
+        taxed.tax_permille = [150; 4];
+        let base = demand(&stats([true; 4]));
+        let high = demand(&taxed);
+        // 住宅は税率の分だけ下がる。職場は、必要な数が 65% に減る。
+        assert_eq!(high[0], base[0] - 25);
+        assert_eq!(
+            high[1..],
+            [250 * 65 / 100, (10 + 210) * 65 / 100, 140 * 65 / 100]
+        );
+        // 基準以下の税率では、職場の需要は変わらない。
+        taxed.tax_permille = [50; 4];
+        assert_eq!(demand(&taxed)[1..], base[1..]);
     }
 
     #[test]

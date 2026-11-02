@@ -342,7 +342,7 @@ fn economy() -> CommandLog {
         Tick(4_000),
         Command::SetTaxRate {
             zone: ZoneKind::Industrial,
-            permille: 250,
+            permille: 150,
         },
     )
     .unwrap();

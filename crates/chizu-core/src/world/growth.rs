@@ -317,7 +317,8 @@ impl World {
         for id in ids {
             let b = *self.buildings.get(id).expect("建物がない");
             let supplied = b.supply.power && b.supply.water;
-            let full = occupants.get(&id).copied().unwrap_or(0) >= b.households() + b.workplaces();
+            let full = occupants.get(&id).copied().unwrap_or(0)
+                >= b.households() + b.workplaces_at(self.tax_permille[b.zone.index()]);
             let wanted = demand(&stats)[b.zone.index()] > 0;
             if supplied
                 && full

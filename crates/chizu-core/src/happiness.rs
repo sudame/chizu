@@ -49,7 +49,7 @@ pub const SAVINGS_FOR_FULL_BONUS: Money = Money(100_000);
 /// 幸福度を足すときの、通勤・生活サービス・暮らし向きの重み。
 pub const WEIGHTS: [u64; 3] = [1, 1, 3];
 
-/// 電気も水道も届かない住民の幸福度の上限。出ていく境目（45）より低くしてある。
+/// 電気も水道も届かない住民の幸福度の上限。出ていく境目（[`crate::world::people::LEAVE_BELOW`]）より低くしてある。
 pub const SERVICELESS_CAP: u8 = 40;
 
 /// 組ごとの更新で、住民 1 人の点数を求めるのに読むもの。

@@ -378,6 +378,26 @@ fn observe_gives_owned_bounds() {
     );
 }
 
+/// 税率が基準を超えると、observe の jobs.keptPermille と taxEffect に出る。
+#[test]
+fn observe_shows_the_tax_effect() {
+    let dir = small_town("agent-tax-effect");
+    let d = dir.to_str().unwrap();
+    let seen = json(&cli(&["agent", "observe", d]));
+    assert_eq!(seen["jobs"]["keptPermille"]["Commercial"], 1000);
+    assert_eq!(seen["taxEffect"]["residentialDemandShift"], 0);
+    let cmds = write(
+        &dir.join("tax.json"),
+        r#"[{"type":"SetTaxRate","zone":"Residential","permille":150},
+            {"type":"SetTaxRate","zone":"Commercial","permille":150}]"#,
+    );
+    cli(&["agent", "act", d, &cmds]);
+    let seen = json(&cli(&["agent", "observe", d]));
+    assert_eq!(seen["jobs"]["keptPermille"]["Commercial"], 650);
+    assert_eq!(seen["jobs"]["keptPermille"]["Industrial"], 1000);
+    assert_eq!(seen["taxEffect"]["residentialDemandShift"], -25);
+}
+
 /// 公共施設は区画より優先して出る。発電所は道路の下側、浄水場は上側に置く。
 #[test]
 fn map_shows_facilities() {

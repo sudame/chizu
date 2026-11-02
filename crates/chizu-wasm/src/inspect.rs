@@ -136,7 +136,7 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
         residents: None,
     };
     if b.zone != ZoneKind::Residential {
-        info.capacity = b.workplaces();
+        info.capacity = b.workplaces_at(world.tax_permille(b.zone));
         info.occupied = pop
             .citizen_ids()
             .filter(|c| pop.citizen(*c).and_then(|r| r.workplace) == Some(id))
