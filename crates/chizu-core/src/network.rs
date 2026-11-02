@@ -181,7 +181,7 @@ pub enum LaneMode {
 pub enum NodeControl {
     #[default]
     None = 0,
-    /// 固定周期の信号。どの段階にいるかは tick から決まるので、状態は持たない（`movement::signal`）。
+    /// 感応式の信号。灯火は tick と交差点のまわりの車と歩く人から決まるので、状態は持たない（`movement::signal`）。
     Signal = 1,
 }
 
