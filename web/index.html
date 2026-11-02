@@ -108,6 +108,14 @@
         touch-action: none;
         cursor: grab;
       }
+      /* 道路名、地区名、施設名。地図の上に重ね、操作は下の地図に通す */
+      #labels {
+        position: fixed;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
       #map:not([data-tool="none"]) {
         cursor: crosshair;
       }
@@ -698,6 +706,93 @@
         border: 1px solid var(--line);
         border-radius: 50%;
       }
+      /* 主題図の凡例。レイヤーのボタンの左に浮かべ、パネルの中にも同じものを出す */
+      .theme-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+        align-items: center;
+        margin: 0;
+        padding: 0;
+        font-size: 12px;
+        list-style: none;
+      }
+      .theme-legend[hidden] {
+        display: none;
+      }
+      #theme-legend {
+        position: absolute;
+        top: 0;
+        right: calc(100% + var(--gap));
+        box-sizing: border-box;
+        width: max-content;
+        max-width: calc(100vw - 2 * var(--edge) - 40px - var(--gap));
+        min-height: 40px;
+        padding: 6px 12px;
+        background: var(--panel);
+        border-radius: var(--r-panel);
+        box-shadow: var(--shadow);
+      }
+      #layer-theme-legend {
+        margin-top: 8px;
+      }
+      /* 凡例は押せる部品ではないので、下の地図への操作を妨げない。
+         道具の 2 段目とレイヤーのパネルを開いているあいだは、重なるので隠す */
+      #theme-legend {
+        pointer-events: none;
+      }
+      body[data-layers-open] #theme-legend,
+      body[data-menu-open] #theme-legend {
+        display: none;
+      }
+      .theme-legend li {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        white-space: nowrap;
+      }
+      .theme-sample {
+        display: inline-block;
+        box-sizing: border-box;
+        width: 20px;
+        height: 4px;
+        border-radius: 2px;
+        background: var(--c);
+      }
+      .theme-dash {
+        background: repeating-linear-gradient(90deg, var(--c) 0 5px, var(--a, transparent) 5px 8px);
+      }
+      .theme-fill,
+      .theme-hatch {
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+      }
+      .theme-hatch {
+        background: repeating-linear-gradient(45deg, var(--a) 0 1.5px, var(--c) 1.5px 5px);
+      }
+      /* 需要の棒。真ん中の線が需要 0 で、正は右へ、負は左へ伸ばす */
+      .theme-bar {
+        position: relative;
+        width: 40px;
+        height: 10px;
+        background: linear-gradient(var(--line), var(--line)) center / 1px 100% no-repeat;
+        border-radius: 0;
+      }
+      .theme-bar::after {
+        position: absolute;
+        top: 1px;
+        bottom: 1px;
+        width: calc(var(--v) * 50%);
+        background: var(--c);
+        content: "";
+      }
+      .theme-bar[data-sign="pos"]::after {
+        left: 50%;
+      }
+      .theme-bar[data-sign="neg"]::after {
+        right: 50%;
+      }
       #legend {
         margin-top: 8px;
         padding-top: 8px;
@@ -827,6 +922,10 @@
         body[data-layers-open] #map-meta {
           visibility: hidden;
         }
+        /* 狭い画面では浮かべた凡例が左下の部品と知らせに届くので、レイヤーのパネルの中の凡例だけにする */
+        #theme-legend {
+          display: none;
+        }
       }
       /* 幅 640px 以下では、道具の帯を絵だけにし、上の帯は折り返す */
       @media (max-width: 640px) {
@@ -870,8 +969,9 @@
       </defs>
     </svg>
     <canvas id="map" data-tool="none"></canvas>
+    <canvas id="labels" aria-hidden="true"></canvas>
     <div id="overlay">
-      <div id="hudbar">
+      <div id="hudbar" data-map-panel>
         <p id="hud">
           <span id="hud-clock">1 日目 00:00</span>
           <span class="vsep" aria-hidden="true"></span>
@@ -892,11 +992,11 @@
         </div>
         <button type="button" id="hud-toggle" aria-label="詳細" aria-controls="hud-details" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-more" /></svg></button>
       </div>
-      <div id="finance" class="panel" hidden>
+      <div id="finance" data-map-panel class="panel" hidden>
         <h2 data-finance-summary>収支</h2>
         <div data-finance-body></div>
       </div>
-      <div id="hud-details" class="panel" hidden>
+      <div id="hud-details" data-map-panel class="panel" hidden>
         <div id="hud-extra">
           <span class="extra-label">ほかの速度と保存</span>
           <div id="controls">
@@ -923,7 +1023,7 @@
           <div id="overview-parts"></div>
         </details>
       </div>
-      <aside id="inspector" class="panel" hidden>
+      <aside id="inspector" data-map-panel class="panel" hidden>
         <header>
           <span data-inspector-title aria-live="polite"></span>
           <button type="button" id="inspector-close" data-inspector-close aria-label="閉じる">×</button>
@@ -932,14 +1032,14 @@
       </aside>
     </div>
     <div id="notices">
-      <div id="city-shortage" role="status" hidden></div>
-      <div id="growth-notice" hidden>
+      <div id="city-shortage" data-map-panel role="status" hidden></div>
+      <div id="growth-notice" data-map-panel hidden>
         <div role="status"><strong id="growth-notice-head"></strong><div id="growth-notice-action"></div></div>
         <button type="button" id="growth-notice-jump" hidden></button>
       </div>
-      <div id="milestone-notice" role="status" hidden></div>
+      <div id="milestone-notice" data-map-panel role="status" hidden></div>
     </div>
-    <div id="toolstack">
+    <div id="toolstack" data-map-panel>
       <div id="tool-status" class="panel">
         <span id="tool-info"></span>
         <span id="tool-message" aria-live="polite"></span>
@@ -995,22 +1095,24 @@
     </div>
     <div id="map-controls">
       <div class="layer-wrap">
-        <button type="button" id="layers-open" class="map-button" aria-label="レイヤー" aria-controls="layer-panel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-layers" /></svg></button>
-        <div id="layer-panel" class="panel" hidden>
+        <button type="button" id="layers-open" data-map-panel class="map-button" aria-label="レイヤー" aria-controls="layer-panel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-layers" /></svg></button>
+        <ul id="theme-legend" data-map-panel class="theme-legend" aria-label="主題図の凡例" hidden></ul>
+        <div id="layer-panel" data-map-panel class="panel" hidden>
           <h2>レイヤー</h2>
           <div id="layers"></div>
+          <ul id="layer-theme-legend" class="theme-legend" aria-label="主題図の凡例" hidden></ul>
           <details id="legend">
             <summary>凡例</summary>
             <div id="legend-body"></div>
           </details>
         </div>
       </div>
-      <div id="zoom">
+      <div id="zoom" data-map-panel>
         <button type="button" id="zoom-in" class="map-button" aria-label="拡大"><svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg></button>
         <button type="button" id="zoom-out" class="map-button" aria-label="縮小"><svg class="icon" aria-hidden="true"><use href="#i-minus" /></svg></button>
       </div>
     </div>
-    <div id="map-meta">
+    <div id="map-meta" data-map-panel>
       <div id="dev-tools">
         <p id="dev-flag" hidden>開発用の操作あり：再現不可</p>
         <button type="button" class="chip" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>
@@ -1022,7 +1124,7 @@
         <div data-scale-line></div>
       </div>
     </div>
-    <button type="button" id="feedback-open" aria-label="フィードバック" title="フィードバック" hidden><svg class="icon" aria-hidden="true"><use href="#i-chat" /></svg></button>
+    <button type="button" id="feedback-open" data-map-panel aria-label="フィードバック" title="フィードバック" hidden><svg class="icon" aria-hidden="true"><use href="#i-chat" /></svg></button>
     <dialog id="feedback">
       <form method="dialog">
         <p>気づいたことを書く。画面、状態、これまでの操作の記録と一緒に保存する。</p>

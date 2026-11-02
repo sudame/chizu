@@ -8,6 +8,7 @@ import {
   showsMovers,
   smoothstep,
   stageWeights,
+  TRAFFIC_FREE_BAND,
 } from "./stages.ts";
 
 describe("縮尺の段", () => {
@@ -55,6 +56,14 @@ describe("縮尺の段", () => {
     expect(detail.clusters).toBeCloseTo(0.5);
     const movers = stageWeights((MOVER_BAND[0] + MOVER_BAND[1]) / 2);
     expect(movers.movers).toBeCloseTo(0.5);
+  });
+
+  test("交通の主題図の「空いている」は、引きでは描かず、4〜6 で現れる", () => {
+    expect(stageWeights(3).trafficFree).toBe(0);
+    expect(stageWeights((TRAFFIC_FREE_BAND[0] + TRAFFIC_FREE_BAND[1]) / 2).trafficFree).toBeCloseTo(
+      0.5,
+    );
+    expect(stageWeights(8).trafficFree).toBe(1);
   });
 
   test("寄りの段より引いたら、Worker に移動体の範囲を頼まない", () => {
