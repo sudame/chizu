@@ -511,11 +511,12 @@ fn observe(world: &World, before: &CarSample) -> Value {
     let count = |f: &dyn Fn(&Building) -> bool| buildings.iter().filter(|(_, b)| f(b)).count();
     let balance = supply_balance(world.network(), world.facilities(), buildings);
     let utility = |slot: usize| {
-        let (mut capacity, mut need) = (0_u64, 0_u64);
+        let (mut capacity, mut need, mut bare) = (0_u64, 0_u64, 0_u64);
         let mut short = Vec::new();
         for (i, c) in balance.components.iter().enumerate() {
             capacity += c[slot].capacity;
             need += c[slot].demand;
+            bare += u64::from(c[slot].demand > 0 && c[slot].capacity == 0);
             if c[slot].demand > 0 && !c[slot].enough() {
                 let at = balance.spots[i].map(|p| json!([p.x, p.y]));
                 short.push(json!({
@@ -536,9 +537,11 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "headroomPermille": permille,
             "lowHeadroom": need > 0 && headroom >= 0 && permille.is_some_and(|p| p < 100),
             "shortNetworks": short.len(),
+            "networksWithoutFacility": bare,
             "shortAt": short,
         })
     };
+    let growth = world.growth_blocks();
     let facilities = by_service(|k| world.facilities().iter().filter(|f| f.kind == k).count());
     let finances = world.finances();
     let Finances {
@@ -614,6 +617,18 @@ fn observe(world: &World, before: &CarSample) -> Value {
         },
         "facilities": facilities,
         "utilities": {"power": utility(0), "water": utility(1)},
+        // 需要があるのに建たないとき、新築の候補の間口のうち、電気か水道の余裕がなくて建たないものの数。
+        // その網の電気か水道の余裕が足りない。施設を足すか、施設のある網へ道路でつなぐ。
+        // 施設のない網（道路が 1 マス離れているなど）かどうかは、utilities の networksWithoutFacility で見分ける。
+        "growth": by_zone(|z| {
+            let g = growth[z.index()];
+            json!({
+                "fronts": g.fronts,
+                "blocked": g.blocked,
+                "noPower": g.no_power,
+                "noWater": g.no_water,
+            })
+        }),
         "land": {
             "chunkSide": CHUNK_SIDE,
             "ownedChunks": owned,

@@ -474,6 +474,9 @@ fn observe_gives_people_and_traffic_counts() {
             {"type":"BuildRoad","from":[x,y],"to":[b,y],"kind":"Medium"},
             {"type":"PaintZone","area":[[a,y+1],[b,y+6]],"zone":"Residential"},
             {"type":"PaintZone","area":[[a,y-6],[b,y-1]],"zone":"Industrial"},
+            {"type":"PlaceBuilding","kind":"PowerPlant","at":[x+10*inward,y-1],"rotation":2},
+            {"type":"PlaceBuilding","kind":"WaterPump","at":[x+16*inward,y-1],"rotation":2},
+            {"type":"PlaceBuilding","kind":"WaterPump","at":[x+19*inward,y-1],"rotation":2},
         ])
         .to_string(),
     );
@@ -539,4 +542,49 @@ fn observe_points_at_the_short_network() {
     assert_eq!(power["shortNetworks"], 1);
     let at = &power["shortAt"][0]["at"];
     assert!(at[0].is_i64() && at[1].is_i64(), "{power}");
+}
+
+/// 施設のない道路網に建つ分は電気と水道の余裕で止まり、observe の growth と networksWithoutFacility に出る。
+#[test]
+fn observe_shows_why_growth_is_blocked() {
+    let dir = session("agent-growth");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    // 1 マス離した 2 本の道路。どちらも外の道路や施設につながらない。
+    let setup = write(
+        &dir.join("setup.json"),
+        &serde_json::json!([
+            {"type":"BuildRoad","from":[0,0],"to":[30,0],"kind":"Small"},
+            {"type":"BuildRoad","from":[32,0],"to":[80,0],"kind":"Small"},
+            {"type":"PaintZone","area":[[0,1],[80,6]],"zone":"Residential"},
+        ])
+        .to_string(),
+    );
+    cli(&["agent", "act", d, &setup]);
+    let obs = json(&cli(&["agent", "observe", d]));
+    for zone in ["Residential", "Commercial", "Industrial", "Office"] {
+        let g = &obs["growth"][zone];
+        for key in ["fronts", "blocked", "noPower", "noWater"] {
+            assert!(g[key].is_u64(), "{zone}.{key}: {g}");
+        }
+    }
+    cli(&["agent", "advance", d, "6000"]);
+    let obs = json(&cli(&["agent", "observe", d]));
+    let res = &obs["growth"]["Residential"];
+    assert!(res["fronts"].as_u64().unwrap() > 0, "{res}");
+    assert_eq!(res["blocked"], res["fronts"], "{res}");
+    assert_eq!(res["noPower"], res["fronts"], "{res}");
+    assert_eq!(res["noWater"], res["fronts"], "{res}");
+    assert!(
+        obs["utilities"]["power"]["networksWithoutFacility"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert!(
+        obs["utilities"]["water"]["networksWithoutFacility"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
 }

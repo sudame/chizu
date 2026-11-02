@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chizu_core::building::demand;
 use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
+use chizu_core::world::economy::{chunk_slots, milestone_population};
 use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::zone::{ZONE_DEPTH, near_road};
 use chizu_core::{
@@ -15,6 +16,9 @@ use chizu_core::{
 };
 
 use crate::snapshot::{Header, Mover, TripleBuffer};
+
+/// [`Sim::overview`] が返す数の個数。画面の側の `OVERVIEW_LENGTH` と合わせる。
+pub const OVERVIEW_LENGTH: usize = 9;
 
 pub struct Sim {
     world: World,
@@ -390,6 +394,26 @@ impl Sim {
         out
     }
 
+    /// 人口と幸福度とマイルストーンを、次の [`OVERVIEW_LENGTH`] 個の数で返す。
+    /// 家のある住民の数、幸福度の平均、通勤・生活サービス・暮らし向きの平均、届いた段階、
+    /// 次の段階に届く人口、いまの段階までで買える枠の数、次の段階で買える枠の数。
+    /// 建物の表が変わらなくても動く値なので、街の数字（[`Sim::city_stats`]）とは別に返す。
+    pub fn overview(&self) -> Vec<f64> {
+        let (happiness, parts) = self.world.happiness_summary();
+        let step = self.world.milestone();
+        vec![
+            self.world.housed_citizens() as f64,
+            f64::from(happiness),
+            f64::from(parts.commute),
+            f64::from(parts.services),
+            f64::from(parts.wealth),
+            f64::from(step),
+            milestone_population(step + 1) as f64,
+            f64::from(chunk_slots(step)),
+            f64::from(chunk_slots(step + 1)),
+        ]
+    }
+
     /// いまの状態を三重バッファに書く。
     ///
     /// 設計書 2.1 は最高速では移動体を送らないとするが、粗い計算が入るまではどの速度でも細かい計算で
@@ -638,6 +662,23 @@ mod tests {
         assert_eq!(stats[0], count as f64);
         assert!(stats[1] > 0.0);
         assert_ne!(sim.buildings_version(), version);
+        sim.advance(20_000);
+        let o = sim.overview();
+        assert_eq!(o.len(), OVERVIEW_LENGTH);
+        assert!(o[0] >= 0.0, "{o:?}");
+    }
+
+    #[test]
+    fn overview_starts_neutral_and_points_at_the_first_milestone() {
+        let sim = Sim::new(0);
+        let o = sim.overview();
+        assert_eq!(o.len(), OVERVIEW_LENGTH);
+        assert_eq!(o[0], 0.0);
+        assert_eq!(o[2..5], [50.0, 50.0, 50.0]);
+        assert_eq!(o[5], 0.0);
+        assert_eq!(o[6], 250.0);
+        assert_eq!(o[7], 6.0);
+        assert_eq!(o[8], 9.0);
     }
 
     #[test]
