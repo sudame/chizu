@@ -22,7 +22,9 @@ use crate::id::BuildingId;
 use crate::network::{DIAGONAL_TILE_MM, Dir, LaneMode, LinkId, TILE_MM};
 use crate::rng::{RngPurpose, rng};
 use crate::round;
-use crate::service::{Facility, Headroom, Supply, evaluate_supply};
+use crate::service::{
+    Facility, Headroom, IsolatedFacility, Supply, evaluate_supply, isolated_facilities,
+};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, local_index};
 use crate::units::LaneOffset;
 use crate::world::{ApplyOutcome, DenyReason};
@@ -148,6 +150,12 @@ impl World {
     /// 区画ごとの数と同じ計算なので、両方がいるときは [`World::growth_report`] を使う。
     pub fn stalled_networks(&self) -> Vec<StalledNetwork> {
         self.growth_report().1
+    }
+
+    /// 施設はあるが、その網に建物がなく、街の道路網につながっていない施設を、施設の並びの順に返す。状態は変えない。
+    /// 孤立した施設が供給する先はないので、余りに数えてはならない。街にまだ建物がなければ空である。
+    pub fn isolated_facilities(&self) -> Vec<IsolatedFacility> {
+        isolated_facilities(&self.network, &self.facilities, &self.buildings)
     }
 
     /// 区画の種類（[`ZoneKind::index`] の順）ごとに、需要があるのに新築が電気と水道の余裕で止まっている間口を数える。状態は変えない。
@@ -1407,6 +1415,34 @@ mod tests {
         let half = w.stalled_networks();
         assert_eq!(half.len(), 1, "{half:?}");
         assert!(!half[0].no_power && half[0].no_water, "{half:?}");
+    }
+
+    /// 建物のない別の通りに置いた施設は孤立として数えられ、建物が建てば外れる。状態は変わらない。
+    #[test]
+    fn isolated_facilities_are_those_on_networks_without_buildings() {
+        let mut w = served_street();
+        // 街に建物がないあいだは、孤立とは数えない。
+        assert!(w.isolated_facilities().is_empty());
+        run(&mut w, 40 * GROWTH_INTERVAL);
+        assert!(!w.buildings().is_empty());
+        assert!(w.isolated_facilities().is_empty());
+        let end = crate::world::highway_line(w.seed()).start.x.max(40);
+        let (x0, x1) = (end + 2, end + 30);
+        street(&mut w, x0, x1);
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (x0 + 5, 9), 2),
+            ApplyOutcome::Applied
+        );
+        let hash = crate::state_hash_of(&w);
+        let isolated = w.isolated_facilities();
+        assert_eq!(isolated.len(), 1, "{isolated:?}");
+        assert_eq!(isolated[0].kind, ServiceKind::PowerPlant);
+        assert_eq!(isolated[0].front.x, x0 + 5);
+        assert_eq!(crate::state_hash_of(&w), hash);
+        // その網にも建物が建てば、もう孤立していない。
+        paint(&mut w, (x0, 4), (x1, 9), ZoneKind::Residential);
+        run(&mut w, 40 * GROWTH_INTERVAL);
+        assert!(w.isolated_facilities().is_empty());
     }
 
     /// 離れた網に片方の施設だけを置くと、足りないほうだけが `growth_blocks` に数えられる。

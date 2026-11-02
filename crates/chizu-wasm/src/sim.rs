@@ -403,11 +403,13 @@ impl Sim {
         out
     }
 
-    /// 街の数字を次の 16 個の数で返す。建物の数、世帯の上限、雇える職場の数（税率が高いと建物の上限より少ない）、
+    /// 街の数字を次の 21 個の数で返す。建物の数、世帯の上限、雇える職場の数（税率が高いと建物の上限より少ない）、
     /// 住宅・商業・工業・オフィスの需要、電気の供給量、水道の供給量、電気と水道の需要、
     /// 電気と水道のそれぞれで供給量が需要に足りない網の数、
-    /// 電気と水道のそれぞれで施設のない網の数、電気と水道のそれぞれの不足量。
-    /// 供給量は道路網につながった施設の合計である。
+    /// 電気と水道のそれぞれで施設のない網の数、電気と水道のそれぞれの不足量、
+    /// 主の網（需要がいちばん大きい網）の電気の供給量、水道の供給量、需要、
+    /// 主の網以外で施設か建物のある網の数（電気、水道の順）。
+    /// 供給量は道路網につながった施設の合計である。余りは網をまたいで足さず、主の網で見る。
     pub fn city_stats(&self) -> Vec<f64> {
         let buildings = self.world.buildings();
         let capacity = buildings.capacity();
@@ -424,6 +426,18 @@ impl Sim {
         let need: u64 = buildings.iter().map(|(_, b)| building_demand(b)).sum();
         out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
         out.extend(crate::layers::utility_gaps(&self.world).map(|v| v as f64));
+        out.extend(crate::layers::utility_main(&self.world).map(|v| v as f64));
+        out
+    }
+
+    /// 孤立した施設（施設はあるが、その網に建物がなく、建物のある網につながっていない施設）を、
+    /// 施設ごとに `[道路に面したマスの x, y, 種類]` で並べる。種類は `ServiceKind` の値である。
+    /// 余りの数や建たない理由とは別の読み取りで、状態は変えない。
+    pub fn isolated_facilities(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for f in self.world.isolated_facilities() {
+            out.extend([f.front.x as f64, f.front.y as f64, f64::from(f.kind as u8)]);
+        }
         out
     }
 
@@ -803,6 +817,55 @@ mod tests {
             "{s:?}"
         );
         assert_eq!(s[2], 3.0, "{s:?}");
+    }
+
+    /// つながっていない通りの発電所は、孤立した施設として出る。余りは主の網だけで数え、ほかの網に分ける。
+    #[test]
+    fn isolated_facilities_and_main_network_numbers_are_reported_apart() {
+        let mut sim = Sim::new(0);
+        assert!(sim.isolated_facilities().is_empty());
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        for (kind, x) in [(ServiceKind::PowerPlant, 14), (ServiceKind::WaterPump, 24)] {
+            sim.submit(Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, 9),
+                rotation: 2,
+            })
+            .unwrap();
+        }
+        // 離れた通りに、建物のない発電所を置く
+        sim.submit(road((10, 40), (30, 40))).unwrap();
+        sim.submit(Command::PlaceBuilding {
+            kind: ServiceKind::PowerPlant,
+            at: TilePos::new(20, 39),
+            rotation: 2,
+        })
+        .unwrap();
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 * 3);
+        let stats = sim.city_stats();
+        assert!(stats[9] > 0.0, "{stats:?}");
+        let power = ServiceKind::PowerPlant.capacity() as f64;
+        // 主の網の電気は 1 基ぶん、合計は 2 基ぶん。ほかの網は電気だけが 1 つある。
+        assert_eq!(stats[7], 2.0 * power, "{stats:?}");
+        assert_eq!(
+            stats[16..21],
+            [
+                power,
+                ServiceKind::WaterPump.capacity() as f64,
+                stats[9],
+                1.0,
+                0.0
+            ]
+        );
+        let isolated = sim.isolated_facilities();
+        assert_eq!(isolated.len(), 3, "{isolated:?}");
+        assert_eq!(isolated[2], f64::from(ServiceKind::PowerPlant as u8));
+        assert!((10.0..=30.0).contains(&isolated[0]) && isolated[1] >= 39.0 && isolated[1] <= 41.0);
     }
 
     #[test]

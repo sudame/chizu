@@ -2,7 +2,9 @@ import { describe, expect, test } from "vitest";
 import {
   growthNotice,
   noticeView,
+  isolatedNotice,
   parseGrowthBlocks,
+  parseIsolated,
   parseStalls,
   pickStall,
   sameView,
@@ -110,5 +112,51 @@ describe("growth notice", () => {
     expect(n?.headline).toContain("電気の余裕がなく");
     expect(n?.headline).not.toContain("水道");
     expect(n?.action).toContain("発電所");
+  });
+});
+
+describe("つながっていない施設の知らせ", () => {
+  const isolated = parseIsolated([10, -59, 1, 14, -59, 1, 3, 4, 2]);
+  const growing = parseGrowthBlocks(
+    Array.from({ length: 21 }, (_, i) => (i === 9 || i === 10 ? 4 : 0)),
+  );
+
+  test("平らな配列を施設ごとに読む", () => {
+    expect(isolated).toEqual([
+      { x: 10, y: -59, kind: 1 },
+      { x: 14, y: -59, kind: 1 },
+      { x: 3, y: 4, kind: 2 },
+    ]);
+    expect(parseIsolated([1, 2])).toEqual([]);
+  });
+
+  test("施設の種類ごとの数を見出しに出す", () => {
+    expect(isolatedNotice([])).toBeNull();
+    const n = isolatedNotice(isolated);
+    expect(n?.headline).toBe("施設はあるが、街の道路網につながっていない（発電所 2・浄水場 1）");
+    expect(n?.action).toContain("道路でつなぐ");
+  });
+
+  test("区画が止まっていなくても、孤立した施設があれば知らせて移れる", () => {
+    const none = parseGrowthBlocks([]);
+    expect(noticeView(none, [], [])).toBeNull();
+    expect(noticeView(none, [], isolated.slice(0, 1))).toMatchObject({
+      jump: "つながっていない施設へ移る",
+    });
+    expect(noticeView(none, [], isolated)?.jump).toContain("押すたびに次の場所");
+  });
+
+  test("区画が止まっているときは、見出しは区画の知らせのまま、施設の知らせを足す", () => {
+    const view = noticeView(growing, parseStalls([40, 12, 3]), isolated);
+    expect(view?.headline).toContain("電気の余裕がなく");
+    expect(view?.action).toContain("施設はあるが、街の道路網につながっていない");
+    expect(view?.jump).toContain("止まっている区画・つながっていない施設");
+    expect(sameView(view, noticeView(growing, parseStalls([40, 12, 3]), []))).toBe(false);
+  });
+
+  test("移る先は座標の順で、施設も数に入る", () => {
+    const targets = [...parseStalls([40, 12, 3]), ...isolated];
+    expect(pickStall(targets, null)).toMatchObject({ x: 3, y: 4 });
+    expect(pickStall(targets, { x: 3, y: 4 })).toMatchObject({ x: 10, y: -59 });
   });
 });

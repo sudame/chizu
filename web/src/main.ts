@@ -9,7 +9,12 @@ import {
   parseFinance,
   setupFinance,
 } from "./finance.ts";
-import { parseGrowthBlocks, parseStalls, setupGrowthNotice } from "./growth-notice.ts";
+import {
+  parseGrowthBlocks,
+  parseIsolated,
+  parseStalls,
+  setupGrowthNotice,
+} from "./growth-notice.ts";
 import { setupHudPanel, trackHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
@@ -1121,7 +1126,11 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "overview") {
     renderOverview(parseOverview(message.overview));
-    growthNotice.render(parseGrowthBlocks(message.overview), parseStalls(message.stalls));
+    growthNotice.render(
+      parseGrowthBlocks(message.overview),
+      parseStalls(message.stalls),
+      parseIsolated(message.isolated),
+    );
     return;
   }
   if (message.kind === "outcome") {

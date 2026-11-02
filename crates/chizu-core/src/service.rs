@@ -176,6 +176,59 @@ pub struct SupplyBalance {
     pub spots: Vec<Option<TilePos>>,
 }
 
+impl SupplyBalance {
+    /// `slot`（電気が 0、水道が 1）の主の網の `components` の添え字。
+    /// 需要がいちばん大きい網で、同じなら添え字の小さいほう。どの網にも需要がなければ `None`。
+    pub fn main_network(&self, slot: usize) -> Option<usize> {
+        let mut best: Option<(u64, usize)> = None;
+        for (i, c) in self.components.iter().enumerate() {
+            let d = c[slot].demand;
+            if d > 0 && best.is_none_or(|(b, _)| d > b) {
+                best = Some((d, i));
+            }
+        }
+        best.map(|(_, i)| i)
+    }
+}
+
+/// 施設はあるが、その網に建物（需要）がなく、街の道路網につながっていない施設。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IsolatedFacility {
+    pub kind: ServiceKind,
+    /// 施設の道路に面したマス。
+    pub front: TilePos,
+}
+
+/// 孤立した施設を、施設の並びの順に返す。状態は変えない。
+///
+/// 施設のある網に同じ資源の需要が 0 で、別の網には需要がある（街のどこかに建物がある）とき、孤立している。
+/// 街に建物がまだないあいだは、どの施設も孤立とは数えない。
+pub fn isolated_facilities(
+    network: &Network,
+    facilities: &[Facility],
+    buildings: &Buildings,
+) -> Vec<IsolatedFacility> {
+    let balance = supply_balance(network, facilities, buildings);
+    let of_segment: BTreeMap<SegmentId, usize> = balance.segments.iter().copied().collect();
+    facilities
+        .iter()
+        .filter(|f| {
+            let slot = match f.kind {
+                ServiceKind::PowerPlant => 0,
+                ServiceKind::WaterPump => 1,
+            };
+            let Some(&c) = f.entrance.and_then(|e| of_segment.get(&e.segment)) else {
+                return false;
+            };
+            balance.components[c][slot].demand == 0 && balance.main_network(slot).is_some()
+        })
+        .map(|f| IsolatedFacility {
+            kind: f.kind,
+            front: f.front,
+        })
+        .collect()
+}
+
 /// 成分ごとに施設の供給量と建物の需要を足したもの。
 struct Tally {
     comps: Components,
