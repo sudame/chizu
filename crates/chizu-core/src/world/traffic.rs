@@ -28,9 +28,6 @@ pub struct DayTraffic {
     pub no_route: u64,
     /// 着いた移動にかかった時間の合計（tick）。
     pub travel_ticks: u64,
-    /// その日の tick ごとの、歩いている人の数の合計（人・tick）。通勤に限らず、歩いているすべての人を数える。
-    /// 横断歩道を外して遠回りが増えると増える。
-    pub walking_ticks: u64,
 }
 
 /// 通勤の移動の結果の集計。今日と前の日だけを持つ。状態ハッシュには入れない。
@@ -153,17 +150,6 @@ impl World {
         } else {
             day.abandoned += 1;
         }
-    }
-
-    /// この tick に歩いている人の数を足す。
-    pub(super) fn tally_walking(&mut self) {
-        let walking = self
-            .trips
-            .iter()
-            .filter(|(_, t)| t.mode() == LaneMode::Sidewalk)
-            .count();
-        let day = self.tick.0 / TICKS_PER_DAY;
-        self.traffic.day_mut(day).walking_ticks += walking as u64;
     }
 
     /// 経路が見つからず、移動を始められなかった通勤を足す。

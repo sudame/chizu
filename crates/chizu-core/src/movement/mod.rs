@@ -104,6 +104,9 @@ pub struct Trip {
     then: parking::Then,
     /// 歩道の側と、区間の途中の横切り。歩くときだけ使う。
     walk: crossing::Walk,
+    /// 交差点で車道を渡り始めた人の、次のリンクでの側と渡る腕。渡り終えるまで変えない。渡っている途中で
+    /// 横断歩道を外したり戻したりしても、いまの位置が別の腕の上へ移らないようにするためである。
+    across: Option<(bool, crossing::Arms)>,
     departed: Tick,
     /// 車線や歩道が変わった直後の、描くずれの移り変わり。描画のためだけの値で、状態ハッシュには入れない。
     blend: Option<lane_shift::Blend>,
@@ -250,6 +253,7 @@ impl Trip {
                 return (false, None);
             }
             let (far, arms) = self.departure(net);
+            let fixed = (far, arms.clone());
             // 渡る所を、リンクの上の位置の区間 [始まり, 終わり) で並べる。
             let node = car::end_node(net, self.link());
             let mut spans: SmallVec<[(u32, u32, crossing::Occ); 4]> = SmallVec::new();
@@ -271,6 +275,9 @@ impl Trip {
             }
             if p1 < at {
                 self.offset = LaneOffset(p1);
+                if p1 > end {
+                    self.across = Some(fixed);
+                }
                 let occ = spans
                     .iter()
                     .find(|(s, e, _)| *s < p1 && p1 < *e)
@@ -278,6 +285,7 @@ impl Trip {
                 return (false, occ);
             }
             let rest = p1 - at;
+            self.across = None;
             self.leg += 1;
             self.enter(net, LaneOffset(rest), None);
             self.walk.far = far;
@@ -289,6 +297,9 @@ impl Trip {
     /// 渡る腕。次のリンクが経路の最後なら、行き先の建物の側へ出る。そうでなければ、その次の交差点で
     /// 横断歩道を外した腕を越えずに済む側を選ぶ。
     fn departure(&self, net: &Network) -> (bool, crossing::Arms) {
+        if let Some((far, arms)) = &self.across {
+            return (*far, arms.clone());
+        }
         let link = self.link();
         let next = self.route.links[self.leg as usize + 1];
         let len = self.route.links.len();
@@ -893,6 +904,7 @@ fn make_trip(
         dest_offset: to,
         then: parking::Then::Arrive,
         walk,
+        across: None,
         departed: now,
         blend: None,
     };
@@ -928,6 +940,14 @@ impl StateHash for Trip {
         h.write(&self.walk.jay);
         h.write(&self.walk.far_end);
         h.write(&self.walk.hold);
+        h.write(&self.across.is_some());
+        if let Some((far, arms)) = &self.across {
+            h.write(far);
+            h.write_len(arms.len());
+            for s in arms {
+                h.write(s);
+            }
+        }
         h.write(&self.departed);
     }
 }

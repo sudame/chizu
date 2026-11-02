@@ -116,18 +116,19 @@ struct Corners {
 
 /// 角から角へ回る道筋。
 struct Way {
-    /// 越える、横断歩道のない腕（高速道路と、横断歩道を外した腕）の数。
-    blocked: usize,
-    /// そのうち、横断歩道を外した腕の数。
+    /// 越える高速道路の腕の数。
+    highways: usize,
+    /// 越える、横断歩道を外した腕の数。
     removed: usize,
     /// 渡る腕。横断歩道のある腕と、ほかに回れずに越える、横断歩道を外した腕である。
     arms: Arms,
 }
 
 impl Way {
-    /// 道筋を比べる鍵。横断歩道のない腕を越える数が少なく、次に渡る腕の少ないものを選ぶ。
-    fn key(&self) -> (usize, usize) {
-        (self.blocked, self.arms.len())
+    /// 道筋を比べる鍵。越える高速道路の腕が少なく、次に越える横断歩道を外した腕が少なく、次に渡る腕の
+    /// 少ないものを選ぶ。高速道路の腕は車を止めずに越えるので、外した腕を渡って済むなら、そちらを選ぶ。
+    fn key(&self) -> (usize, usize, usize) {
+        (self.highways, self.removed, self.arms.len())
     }
 }
 
@@ -159,14 +160,14 @@ impl Corners {
         self.arms.iter().position(|x| x.0 == s)
     }
 
-    /// 角 `p` から角 `q` へ回る道筋のうち、横断歩道のない腕を越える数が少なく、次に渡る腕の少ないもの。
+    /// 角 `p` から角 `q` へ回る道筋のうち、`Way::key` のいちばん小さいもの。
     /// 高速道路の腕は、横断歩道なしに越えるので、渡る腕には入れない。横断歩道を外した腕は、越えるなら
     /// 横断歩道があるときと同じく渡る（車道に人が出るので、車はその前で止まる）。
     fn walk(&self, p: usize, q: usize) -> Way {
         let m = 2 * self.arms.len();
         let way = |forward: bool| {
             let mut w = Way {
-                blocked: 0,
+                highways: 0,
                 removed: 0,
                 arms: Arms::new(),
             };
@@ -177,11 +178,10 @@ impl Corners {
                     match arm {
                         Arm::Crosswalk => w.arms.push(s),
                         Arm::Removed => {
-                            w.blocked += 1;
                             w.removed += 1;
                             w.arms.push(s);
                         }
-                        Arm::Highway => w.blocked += 1,
+                        Arm::Highway => w.highways += 1,
                     }
                 }
                 at = if forward {
@@ -249,7 +249,7 @@ pub(crate) fn removed_crossings(
 }
 
 /// 歩道のリンク `from` の `from_far` の側からノード `node` を通ってリンク `to` へ移る人の、`to` での側と、
-/// 渡る腕。`need` があれば、その側へ出る。なければ、横断歩道のない腕を越える数が少なく、次に渡る腕の少ない
+/// 渡る腕。`need` があれば、その側へ出る。なければ、`Way::key` の小さい
 /// 側（同じなら右）へ出る。`then` は `to` の次に歩くリンクと、そこで出る側の決まりで、越える数には、
 /// `to` の終わりの交差点で越える、横断歩道を外した腕の数も足す。外した腕を避けられる側へ、先に移っておく
 /// ためである。3 本より少ない区間のノードでは渡る腕はない。
@@ -299,8 +299,8 @@ pub fn depart(
         let p = 2 * i + usize::from(from_far);
         let q = |far: bool| 2 * j + usize::from(!far);
         let key = |far: bool| {
-            let (blocked, arms) = c.walk(p, q(far)).key();
-            (blocked + ahead(far), arms)
+            let (highways, removed, arms) = c.walk(p, q(far)).key();
+            (highways, removed + ahead(far), arms)
         };
         let side = need.unwrap_or_else(|| key(true) < key(false));
         Some((side, c.walk(p, q(side)).arms))

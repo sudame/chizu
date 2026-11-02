@@ -75,7 +75,9 @@ struct Cell {
     signal: bool,
     /// 横断歩道のある交差点（3 本以上の区間が集まるノード）があるか。
     crosswalk: bool,
-    /// 横断歩道を外した腕のある交差点があるか。
+    /// 横断歩道を外した腕のある、信号のある交差点があるか。
+    signal_removed: bool,
+    /// 横断歩道を外した腕のある、信号のない交差点があるか。
     removed: bool,
     /// 道路の最大の種類。0 は道路なし。
     road: u8,
@@ -126,7 +128,7 @@ impl Cell {
         }
         // 交通の層では、道路の混み具合を信号より先に出す。
         if self.signal && self.congestion.is_none() {
-            return if self.removed { 's' } else { 'S' };
+            return if self.signal_removed { 's' } else { 'S' };
         }
         if self.crosswalk && self.congestion.is_none() {
             return if self.removed { 'Y' } else { 'Z' };
@@ -351,7 +353,10 @@ pub fn render(
             });
             let junction = n.segments.len() >= 3 && roads.count() > 0;
             cell.crosswalk |= junction;
-            cell.removed |= junction && n.no_crosswalk != 0;
+            let removed = junction && n.no_crosswalk != 0;
+            let signal = n.control == NodeControl::Signal;
+            cell.signal_removed |= signal && removed;
+            cell.removed |= !signal && removed;
         }
     }
 

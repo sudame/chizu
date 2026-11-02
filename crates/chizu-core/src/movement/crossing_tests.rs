@@ -868,3 +868,95 @@ fn walkers_still_get_through_a_junction_with_every_crosswalk_removed() {
     assert!(t.trips.is_empty(), "残った {}", t.trips.len());
     assert_eq!(crossed.len(), 1, "越えるのは 1 本だけ {crossed:?}");
 }
+
+#[test]
+fn walkers_take_a_removed_crosswalk_rather_than_crossing_a_highway_unguarded() {
+    // 高速道路の内側の T 字路で東の腕の横断歩道を外す。西の腕の北の側から東の腕の北の側へ出る人は、
+    // 高速道路の腕を車を止めずに越えるのではなく、南へ回って西の腕と、外した東の腕を渡る。
+    let mut n = Network::new();
+    n.add_highway(TilePos::new(10, 10), TilePos::new(10, -20));
+    road(&mut n, (0, 10), (20, 10));
+    let node = n.node_at(TilePos::new(10, 10)).unwrap();
+    n.set_crosswalk(node, Heading::E, false).unwrap();
+    let side = |a, b| link(&n, a, b, LaneMode::Sidewalk);
+    let (w, c, e) = ((9, 10), (10, 10), (11, 10));
+    let (far, arms) = crossing::depart(&n, node, (side(w, c), true), side(c, e), Some(true), None);
+    assert!(far);
+    assert_eq!(arms.as_slice(), &[side(w, c).segment, side(c, e).segment]);
+}
+
+/// `t` を、歩く人 `walker` が交差点の車道を渡っている途中になるまで進める。
+fn until_crossing(t: &mut Town, node: NodeId, walker: TripId) {
+    for _ in 0..200 {
+        let inside = t
+            .trips
+            .get(walker)
+            .is_some_and(|w| !w.last_leg() && w.offset > w.link_len);
+        if inside {
+            return;
+        }
+        t.step(node);
+    }
+    panic!("渡り始めない");
+}
+
+/// 渡っている途中の `walker` の道のりが、網を `change` で変えても渡り終えるまで変わらないことを確かめる。
+fn crossing_keeps_its_way(
+    mut t: Town,
+    node: NodeId,
+    walker: TripId,
+    change: impl Fn(&mut Network),
+) {
+    until_crossing(&mut t, node, walker);
+    let way = t.trips.get(walker).unwrap().departure(&t.net);
+    let leg = t.trips.get(walker).unwrap().leg;
+    change(&mut t.net);
+    loop {
+        t.step(node);
+        let Some(w) = t.trips.get(walker).filter(|w| w.leg == leg) else {
+            break;
+        };
+        assert_eq!(w.departure(&t.net), way, "渡っている途中で道のりが変わった");
+    }
+    for _ in 0..1_500 {
+        t.step(node);
+    }
+    assert!(t.trips.is_empty(), "残った {}", t.trips.len());
+}
+
+#[test]
+fn walkers_keep_their_way_when_crosswalks_change_while_they_cross() {
+    // 西の腕の南の側から東へ、南の腕を渡っている人がいるあいだに、北と東の腕を外し、南の腕も外す。
+    // 人は渡りかけた南の腕を渡りきり、そのあいだ車はその前で止まる（`Town::step` が確かめる）。
+    for arms in [vec![Heading::N, Heading::E], vec![Heading::S]] {
+        let (n, node) = crossroads();
+        let mut t = Town::new(n);
+        let walker = t.walk(at(9, 10, (1, 0), 6_000), at(18, 10, (1, 0), 0));
+        for k in 0..6 {
+            t.drive(at(10, 1 + k, (0, 1), 0), at(10, 19, (0, 1), 0));
+        }
+        crossing_keeps_its_way(t, node, walker, |n| {
+            for h in &arms {
+                n.set_crosswalk(node, *h, false).unwrap();
+            }
+        });
+    }
+}
+
+#[test]
+fn walkers_keep_their_way_when_the_next_junction_changes_while_they_cross() {
+    // 西の交差点を渡っている人がいるあいだに、東の交差点の西と南の腕を外す。外すと、西の交差点で
+    // 先に移っておく側が変わるが、渡りかけた人の道のりは変えない。
+    let mut n = Network::new();
+    road(&mut n, (0, 10), (30, 10));
+    road(&mut n, (10, 0), (10, 20));
+    road(&mut n, (20, 0), (20, 20));
+    let west = n.node_at(TilePos::new(10, 10)).unwrap();
+    let east = n.node_at(TilePos::new(20, 10)).unwrap();
+    let mut t = Town::new(n);
+    let walker = t.walk(at(9, 10, (1, 0), 6_000), at(28, 10, (1, 0), 0));
+    crossing_keeps_its_way(t, west, walker, |n| {
+        n.set_crosswalk(east, Heading::W, false).unwrap();
+        n.set_crosswalk(east, Heading::S, false).unwrap();
+    });
+}

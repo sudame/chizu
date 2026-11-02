@@ -751,7 +751,6 @@ impl World {
             .trips
             .step(&self.network, &mut self.router.router, tick);
         self.end_commutes(ended);
-        self.tally_walking();
         self.grow_buildings();
         self.update_economy();
         self.tick = tick.next();

@@ -580,8 +580,10 @@ function clickTile(at: Tile): void {
   } else if (tool.kind === "signal") {
     sendCommand(signalCommand(at, tool.on));
   } else if (tool.kind === "crosswalk") {
-    if (shownCrosswalk !== null) {
-      sendCommand(crosswalkCommand(shownCrosswalk, tool.on));
+    // 触って操作する画面では押す前にカーソルが動かないので、押した位置から選び直す
+    const arm = cursorPoint === null ? null : pickCrosswalk(crosswalks, cursorPoint, tool.on);
+    if (arm !== null) {
+      sendCommand(crosswalkCommand(arm, tool.on));
     }
   } else if (mapCanvas.dataset.tool === DEV_WALK_TOOL) {
     devWalks.click(at);
@@ -634,6 +636,7 @@ mapCanvas.addEventListener("pointerdown", (event) => {
   const area = tool.kind === "bulldoze" || tool.kind === "zone";
   const mode = event.button === 1 ? "pan" : area ? "area" : "click";
   pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, mode, start: tileAt(event) };
+  cursorPoint = pointAt(event);
   mapCanvas.setPointerCapture(event.pointerId);
   updatePreview();
 });
@@ -670,6 +673,7 @@ mapCanvas.addEventListener("pointerup", (event) => {
   pointer = null;
   noSnap = event.altKey;
   if (done.mode === "click") {
+    cursorPoint = pointAt(event);
     clickTile(tileAt(event));
   } else if (done.mode === "area") {
     const end = tileAt(event);

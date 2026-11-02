@@ -75,8 +75,6 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  ゲーム内の日ごとの結果で、arrived 着いた数、abandoned 道路が変わるなどして途中で着けなくなった数、
                  noRoute 出発のときに経路がなく始められなかった数、avgTravelTicks と avgTravelMinutes 着いた移動の平均の移動時間
                  （1 tick は 12 秒）。着いた移動がなければ null。yesterday は始まって 1 日たつまでは null。
-                 walkingTicks その日の tick ごとの歩いている人の数の合計（人・tick。通勤に限らない）、
-                 walkingMinutesPerArrived それを着いた移動の数で割った分。横断歩道を外して遠回りが増えると増える。
   migration      転入。wantingHouseholds 移住の処理（60 tick ごと）1 回で外から来ようとする世帯の数、
                  vacantHomes 外の世界と道路でつながった住宅の空き戸数、homelessHouseholds と homelessCitizens 家がなく空き家を待つ世帯と住民、
                  blockedHouseholds 来ようとしても空き家が足りず入れない世帯の数。
@@ -601,22 +599,16 @@ fn day_traffic(d: Option<DayTraffic>) -> Value {
         abandoned,
         no_route,
         travel_ticks,
-        walking_ticks,
     } = d;
-    let per_arrived = |ticks: u64| (arrived > 0).then(|| ticks as f64 / arrived as f64);
-    let avg = per_arrived(travel_ticks);
-    let walk = per_arrived(walking_ticks);
-    // 1 tick は 12 秒である。
-    let minutes = |t: Option<f64>| t.map(|t| (t * 12.0 / 60.0 * 10.0).round() / 10.0);
+    let avg = (arrived > 0).then(|| travel_ticks as f64 / arrived as f64);
     json!({
         "day": day + 1,
         "arrived": arrived,
         "abandoned": abandoned,
         "noRoute": no_route,
         "avgTravelTicks": avg.map(|t| (t * 10.0).round() / 10.0),
-        "avgTravelMinutes": minutes(avg),
-        "walkingTicks": walking_ticks,
-        "walkingMinutesPerArrived": minutes(walk),
+        // 1 tick は 12 秒である。
+        "avgTravelMinutes": avg.map(|t| (t * 12.0 / 60.0 * 10.0).round() / 10.0),
     })
 }
 

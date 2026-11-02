@@ -987,10 +987,6 @@ fn map_marks_junctions_with_crosswalks_and_observe_counts_crossing_walkers() {
     let walkers = &seen["traffic"]["walkers"];
     assert_eq!(walkers["atCrosswalks"], 0, "{seen}");
     assert_eq!(walkers["midblock"], 0, "{seen}");
-    assert!(
-        seen["traffic"]["trips"]["today"]["walkingTicks"].is_u64(),
-        "{seen}"
-    );
     assert_eq!(seen["removedCrosswalks"], serde_json::json!([]), "{seen}");
 }
 
@@ -1052,4 +1048,32 @@ fn act_removes_and_restores_a_crosswalk_by_tile_and_observe_and_map_show_it() {
     assert_eq!(grid_rows(&map, 3, 3), [".1.", "1Z1", ".1."], "{map}");
     let seen = json(&cli(&["agent", "observe", d]));
     assert_eq!(seen["removedCrosswalks"], serde_json::json!([]), "{seen}");
+}
+
+#[test]
+fn map_marks_a_signal_with_removed_crosswalks_only_from_the_same_junction() {
+    let dir = session("agent-crosswalk-scale");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    // (5, 5) の信号のある交差点と、(7, 5) の横断歩道を外した交差点を、6×6 マスの 1 文字にまとめる。
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,5],"to":[10,5],"kind":"Small"},
+            {"type":"BuildRoad","from":[5,0],"to":[5,10],"kind":"Small"},
+            {"type":"BuildRoad","from":[7,0],"to":[7,10],"kind":"Small"},
+            {"type":"SetSignal","at":[5,5],"on":true},
+            {"type":"SetCrosswalk","at":[7,5],"arm":"N","on":false}]"#,
+    );
+    cli(&["agent", "act", d, &cmds]);
+    let cell = || {
+        let map = cli(&["agent", "map", d, "3", "3", "8", "8", "--scale", "6"]);
+        grid_rows(&map, 1, 1)[0].clone()
+    };
+    assert_eq!(cell(), "S");
+    let more = write(
+        &dir.join("more.json"),
+        r#"{"type":"SetCrosswalk","at":[5,5],"arm":"N","on":false}"#,
+    );
+    cli(&["agent", "act", d, &more]);
+    assert_eq!(cell(), "s");
 }
