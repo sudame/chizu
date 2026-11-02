@@ -427,6 +427,11 @@ impl Headroom {
         Some(self.left[c].map(|r| r < 1))
     }
 
+    /// 出入口が `link` の網の識別子。同じ網なら同じ値で、網の中の最小のノードの添え字である。区間が消えていれば `None`。
+    pub(crate) fn network_of(&mut self, network: &Network, link: LinkId) -> Option<usize> {
+        self.comps.of_link(network, link)
+    }
+
     /// 出入口が `link` の、需要 `demand` の建物を建てる余地が電気にも水道にもあれば、その分を差し引いて真を返す。
     pub(crate) fn take(&mut self, network: &Network, link: LinkId, demand: u64) -> bool {
         let Some(c) = self.comps.of_link(network, link) else {

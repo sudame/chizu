@@ -1,11 +1,71 @@
 import { describe, expect, test } from "vitest";
-import { growthNotice, parseGrowthBlocks } from "./growth-notice.ts";
+import {
+  growthNotice,
+  noticeView,
+  parseGrowthBlocks,
+  parseStalls,
+  pickStall,
+  sameView,
+} from "./growth-notice.ts";
 
 /** 区画ごとの [止まっている数, 電気, 水道] から overview の並びを作る。 */
 const overview = (zones: [number, number, number][]) => {
   const flat = zones.flat();
   return [...new Array<number>(9).fill(0), ...flat, ...new Array<number>(12 - flat.length).fill(0)];
 };
+
+describe("止まっている網への移動", () => {
+  const stalls = parseStalls([40, 12, 3, 90, 7, 1]);
+
+  test("平らな配列を網ごとに読む", () => {
+    expect(stalls).toEqual([
+      { x: 40, y: 12, lacks: 3 },
+      { x: 90, y: 7, lacks: 1 },
+    ]);
+    expect(parseStalls([])).toEqual([]);
+    expect(parseStalls([1, 2])).toEqual([]);
+  });
+
+  test("押すたびに座標の順で次の網へ移り、最後の次は最初へ戻る", () => {
+    const first = pickStall(stalls, null);
+    expect(first?.x).toBe(40);
+    const second = pickStall(stalls, first ?? null);
+    expect(second?.x).toBe(90);
+    expect(pickStall(stalls, second ?? null)?.x).toBe(40);
+  });
+
+  test("網が増減しても、前の網の代表より後ろへ移る", () => {
+    const last = { x: 40, y: 12 };
+    // 前の網が消えても、同じ座標に戻らず後ろの網へ移る
+    expect(pickStall(parseStalls([90, 7, 1]), last)?.x).toBe(90);
+    // 間に網が増えたら、その網へ移る
+    expect(pickStall(parseStalls([40, 12, 3, 60, 1, 2, 90, 7, 1]), last)?.x).toBe(60);
+    // 後ろの網がなければ最初へ戻る
+    expect(pickStall(parseStalls([10, 5, 1, 30, 5, 1]), last)?.x).toBe(10);
+  });
+
+  test("網がなければ移らない", () => {
+    expect(pickStall([], null)).toBeNull();
+    expect(pickStall([], { x: 1, y: 1 })).toBeNull();
+  });
+
+  test("網の数でボタンの文言が決まり、中身が同じあいだは作り直さない", () => {
+    const blocks = parseGrowthBlocks(
+      Array.from({ length: 21 }, (_, i) => (i === 9 || i === 10 || i === 11 ? 4 : 0)),
+    );
+    const one = noticeView(blocks, parseStalls([40, 12, 3]));
+    const same = noticeView(blocks, parseStalls([41, 13, 3]));
+    const two = noticeView(blocks, stalls);
+    expect(one?.jump).toBe("止まっている区画へ移る");
+    expect(two?.jump).toContain("押すたびに次の道路網");
+    expect(sameView(one, same)).toBe(true);
+    expect(sameView(one, two)).toBe(false);
+    expect(noticeView(blocks, [])?.jump).toBeNull();
+    expect(noticeView(parseGrowthBlocks([]), stalls)).toBeNull();
+    expect(sameView(null, null)).toBe(true);
+    expect(sameView(null, one)).toBe(false);
+  });
+});
 
 describe("growth notice", () => {
   test("overview から区画ごとの数を読む", () => {
