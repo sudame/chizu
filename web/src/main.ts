@@ -8,6 +8,7 @@ import {
   parseFinance,
   setupFinance,
 } from "./finance.ts";
+import { parseGrowthBlocks, renderGrowthNotice } from "./growth-notice.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
@@ -744,6 +745,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "overview") {
     renderOverview(parseOverview(message.overview));
+    renderGrowthNotice(parseGrowthBlocks(message.overview));
     return;
   }
   if (message.kind === "outcome") {

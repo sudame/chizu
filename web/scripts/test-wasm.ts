@@ -754,6 +754,22 @@ try {
       /足りない|つながっていない/.test((await shortage.textContent()) ?? ""),
     `届いていない建物の数と理由が欄に出る（${await shortage.textContent()}）`,
   );
+  // 施設のない網に塗った区画が建たない理由は、500 ミリ秒ごとの overview で届く
+  const growth = page.locator("#growth-notice");
+  await page
+    .waitForFunction(
+      () => document.querySelector<HTMLElement>("#growth-notice")?.hidden === false,
+      undefined,
+      {
+        timeout: TIMEOUT_MS,
+      },
+    )
+    .catch(() => undefined);
+  check(
+    (await growth.isVisible()) &&
+      /余裕がなく.*新築が止まっている/.test((await growth.textContent()) ?? ""),
+    `施設のない網の区画が建たない理由が出る（${await growth.textContent()}）`,
+  );
   check(
     (await page.locator("#legend-body li").count()) >= 10,
     "凡例に区画・建物の段階・印・施設が並ぶ",
@@ -829,6 +845,20 @@ try {
     `発電所と浄水場を置ける（${plant.text}、${pump.text}）`,
   );
   await waitUnsupplied("zero");
+  // 施設を置いて余裕が戻ると、建たない理由の知らせは消える
+  await page
+    .waitForFunction(
+      () => document.querySelector<HTMLElement>("#growth-notice")?.hidden === true,
+      undefined,
+      {
+        timeout: TIMEOUT_MS,
+      },
+    )
+    .catch(() => undefined);
+  check(
+    !(await growth.isVisible()),
+    `施設を置いて余裕が戻ると、建たない理由の知らせが消える（${await growth.textContent()}）`,
+  );
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
   // 水道のレイヤーも重ねると、各マスの左半分が電気、右半分が水道になる。発電所は電気のレイヤーだけで黄に塗る

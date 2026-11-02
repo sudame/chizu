@@ -622,7 +622,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
         "facilities": facilities,
         "utilities": {"power": utility(0), "water": utility(1)},
         // 需要があるのに建たないとき、新築の候補の間口のうち、電気か水道の余裕がなくて建たないものの数。
-        // その網の電気か水道の余裕が足りない。施設を足すか、施設のある網へ道路でつなぐ。
+        // その網の電気か水道の余裕が足りない。区画の需要が 0 以下なら、余裕の有無にかかわらず数えない。施設を足すか、施設のある網へ道路でつなぐ。
         // 施設のない網（道路が 1 マス離れているなど）かどうかは、utilities の networksWithoutFacility で見分ける。
         "growth": by_zone(|z| {
             let g = growth[z.index()];
