@@ -18,7 +18,7 @@ use chizu_core::{
 use crate::snapshot::{Header, Mover, TripleBuffer};
 
 /// [`Sim::overview`] が返す数の個数。画面の側の `OVERVIEW_LENGTH` と合わせる。
-pub const OVERVIEW_LENGTH: usize = 9;
+pub const OVERVIEW_LENGTH: usize = 21;
 
 pub struct Sim {
     world: World,
@@ -415,11 +415,13 @@ impl Sim {
     /// 人口と幸福度とマイルストーンを、次の [`OVERVIEW_LENGTH`] 個の数で返す。
     /// 家のある住民の数、幸福度の平均、通勤・生活サービス・暮らし向きの平均、届いた段階、
     /// 次の段階に届く人口、いまの段階までで買える枠の数、次の段階で買える枠の数。
+    /// そのあとに、住宅・商業・工業・オフィスの順で、区画ごとに
+    /// 電気か水道の余裕がなくて新築が止まっている間口の数、そのうち電気、水道の余裕がない間口の数を並べる。
     /// 建物の表が変わらなくても動く値なので、街の数字（[`Sim::city_stats`]）とは別に返す。
     pub fn overview(&self) -> Vec<f64> {
         let (happiness, parts) = self.world.happiness_summary();
         let step = self.world.milestone();
-        vec![
+        let mut out = vec![
             self.world.housed_citizens() as f64,
             f64::from(happiness),
             f64::from(parts.commute),
@@ -429,7 +431,11 @@ impl Sim {
             milestone_population(step + 1) as f64,
             f64::from(chunk_slots(step)),
             f64::from(chunk_slots(step + 1)),
-        ]
+        ];
+        for b in self.world.growth_blocks() {
+            out.extend([b.blocked, b.no_power, b.no_water].map(|v| v as f64));
+        }
+        out
     }
 
     /// いまの状態を三重バッファに書く。
@@ -687,6 +693,34 @@ mod tests {
     }
 
     #[test]
+    fn overview_reports_lots_stalled_on_a_network_without_facilities() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+        let o = sim.overview();
+        let [blocked, no_power, no_water] = [o[9], o[10], o[11]];
+        assert!(blocked > 0.0, "{o:?}");
+        assert_eq!([no_power, no_water], [blocked, blocked], "{o:?}");
+        assert!(o[12..].iter().all(|v| *v == 0.0), "{o:?}");
+        // 発電所と浄水場を置くと、止まっている間口がなくなる
+        for (kind, x) in [(ServiceKind::PowerPlant, 16), (ServiceKind::WaterPump, 20)] {
+            sim.submit(Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, 9),
+                rotation: 2,
+            })
+            .unwrap();
+        }
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+        assert_eq!(sim.overview()[9], 0.0);
+    }
+
+    #[test]
     fn overview_starts_neutral_and_points_at_the_first_milestone() {
         let sim = Sim::new(0);
         let o = sim.overview();
@@ -697,6 +731,7 @@ mod tests {
         assert_eq!(o[6], 250.0);
         assert_eq!(o[7], 6.0);
         assert_eq!(o[8], 9.0);
+        assert!(o[9..].iter().all(|v| *v == 0.0));
     }
 
     #[test]

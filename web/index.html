@@ -100,8 +100,14 @@
       }
       #status,
       #city-numbers,
-      #city-utilities {
+      #city-utilities,
+      #growth-notice {
         margin: 0;
+      }
+      #growth-notice {
+        max-width: 22em;
+        font-size: 13px;
+        color: #a31515;
       }
       #city {
         display: flex;
@@ -244,6 +250,7 @@
         <div>
           <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
           <p id="city-utilities">電気 0 / 需要 0・水道 0 / 需要 0</p>
+          <p id="growth-notice" role="status" hidden></p>
         </div>
         <div id="demand" title="区画の種類ごとの需要">
           <div><div class="slot"><div class="bar" style="background: #26f226"></div></div><div class="label">住</div></div>

@@ -9,7 +9,7 @@ export const CITY_STATS_LENGTH = 16;
 export const FINANCE_LENGTH = 12;
 
 /** chizu-wasm の overview の数の個数。 */
-export const OVERVIEW_LENGTH = 9;
+export const OVERVIEW_LENGTH = 21;
 /** 区画の種類。Clear は区画を消す。 */
 export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
 
