@@ -1133,19 +1133,16 @@ fn print(value: &Value) -> String {
 }
 
 /// 新しいセッションを作り、街の様子を返す。`from` があれば、そのディレクトリの種、tick、記録を写す。
-/// `from_cache` は写し元のキャッシュで、写し元がセッションのときだけ渡す。
-fn new_session(
-    dir: &str,
-    from: Saved,
-    from_dir: Option<&str>,
-    from_cache: Option<Cache>,
-) -> Result<Value, String> {
+///
+/// 写すときは写し元のキャッシュを使わず、記録を先頭から再生する。写し直すのは、食い違ったセッションから
+/// 記録だけで立ち直るための手段だからである。写し先には、その再生の結果でキャッシュを書く。
+fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, String> {
     let keep = Cache::here(Path::new(dir));
     let Rebuilt {
         world,
         before,
         checkpoint,
-    } = from.rebuild(from_cache.as_ref(), keep.as_ref());
+    } = from.rebuild(None, keep.as_ref());
     let copied = from_dir.map(|d| {
         let hash = hash_text(&world);
         let recorded = from.saved_hash().map(str::to_string);
@@ -1235,6 +1232,11 @@ fn export_markdown(dir: &Path) -> Result<String, String> {
     }))
 }
 
+/// キャッシュの鍵（実行ファイルの xxh3）をいまの実行ファイルで決める。`main` の先頭で、ロックを待つ前に呼ぶ。
+pub fn fix_build_key() {
+    cache::build_key();
+}
+
 /// `agent` のあとの引数を受けて、標準出力に書く文字列を返す。
 pub fn run(args: &[String]) -> Result<String, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1242,11 +1244,9 @@ pub fn run(args: &[String]) -> Result<String, String> {
         [] | ["help" | "--help" | "-h"] => Ok(USAGE.trim_end().to_string()),
         ["new", dir, "--from", from] => {
             // 写し元がセッションなら、observe と同じく共有ロックを取ってから読む。
-            let from_lock = lock(Path::new(from), false, false)?;
+            let _from_lock = lock(Path::new(from), false, false)?;
             let saved = read_saved(Path::new(from))?;
-            let cache =
-                Cache::here(Path::new(from)).filter(|_| saved.is_session(from_lock.is_some()));
-            Ok(print(&new_session(dir, saved, Some(from), cache)?))
+            Ok(print(&new_session(dir, saved, Some(from))?))
         }
         ["new", dir, seed] => {
             let saved = Saved {
@@ -1255,7 +1255,7 @@ pub fn run(args: &[String]) -> Result<String, String> {
                 tick: 0,
                 log: CommandLog::new(),
             };
-            Ok(print(&new_session(dir, saved, None, None)?))
+            Ok(print(&new_session(dir, saved, None)?))
         }
         ["act", dir, commands, rest @ ..] => {
             let verbose = match rest {
@@ -1502,6 +1502,54 @@ mod tests {
         assert_eq!(cached.before, before);
         assert!(cached.checkpoint.is_some());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// new --from は写し元のキャッシュを使わず、記録を先頭から再生する。
+    /// 写し元に、検査は通るが別の街の入ったキャッシュがあっても、写した街は記録の再生と同じになる。
+    #[test]
+    fn new_from_ignores_the_source_cache() {
+        let seed = 42;
+        let base = std::env::temp_dir().join(format!("chizu-agent-from-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        // 件数の同じ 2 つの記録。道路の長さだけが違う。
+        let town = |len: i64| {
+            let mut log = CommandLog::new();
+            let mut world = World::new(seed);
+            let cmds = [
+                json!({"type":"BuildRoad","from":[0,0],"to":[len,0],"kind":"Medium"}),
+                json!({"type":"PaintZone","area":[[0,1],[24,6]],"zone":"Residential"}),
+            ];
+            act(&mut world, &mut log, &cmds, false);
+            replay(&mut world, &log, 300);
+            (world, log)
+        };
+        let (real, log) = town(20);
+        let (other, _) = town(30);
+        assert_ne!(real.state_hash(), other.state_hash());
+        // 別の街を、写し元の記録の先頭に合わせた見出しで書く。
+        let cache = Cache::here(&src).expect("実行ファイルを読めない");
+        cache.store(&cache.encode(&other, &log));
+        let from = saved_at(seed, 400, &log);
+        // 写し元のキャッシュを読めば、別の街から続けてしまう。
+        let fooled = from.rebuild(Some(&cache), None).world;
+        assert_ne!(fooled.state_hash(), {
+            let mut w = World::new(seed);
+            replay(&mut w, &log, 400);
+            w.state_hash()
+        });
+
+        let made = new_session(dst.to_str().unwrap(), from, Some(src.to_str().unwrap())).unwrap();
+        let mut fresh = World::new(seed);
+        replay(&mut fresh, &log, 400);
+        assert_eq!(made["stateHash"], hash_text(&fresh));
+        // 写し先のキャッシュは、記録の再生と同じ街になる。
+        let copied = saved_at(seed, 400, &log)
+            .rebuild(Cache::here(&dst).as_ref(), None)
+            .world;
+        assert_eq!(copied, fresh);
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// 止まっている車を見分ける見本は、いまでなく `window` tick 前の車の位置である。

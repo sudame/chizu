@@ -39,6 +39,9 @@ const VERSION: u32 = 1;
 const HEADER_LEN: usize = 8 + 4 + 8 * 6;
 
 /// いま動いている chizu-cli の実行ファイルの xxh3。読めなければ `None` で、キャッシュを使わない。
+///
+/// 初めて呼んだときの値をプロセスのあいだ使い続ける。実行ファイルはあとから作り直されうるので、
+/// `main` の先頭で 1 回呼んで、ロックを待つ前の値に決めておく。
 pub fn build_key() -> Option<u64> {
     static KEY: OnceLock<Option<u64>> = OnceLock::new();
     *KEY.get_or_init(|| {
