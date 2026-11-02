@@ -522,8 +522,11 @@ fn observe_gives_people_and_traffic_counts() {
     assert!(yesterday["avgTravelTicks"].as_f64().unwrap() > 0.0);
     let m = &o["migration"];
     assert!(m["vacantHomes"].is_u64() && m["blockedHouseholds"].is_u64());
-    // 同じ記録を再生した observe は、毎回同じ値になる。
-    assert_eq!(o, json(&cli(&["agent", "observe", d])));
+    // 同じ記録を再生した observe は、前の observe からの増減を除いて、毎回同じ値になる。
+    let mut again = json(&cli(&["agent", "observe", d]));
+    assert_eq!(again["sinceLastObserve"]["changes"], serde_json::json!({}));
+    again["sinceLastObserve"] = o["sinceLastObserve"].clone();
+    assert_eq!(o, again);
 }
 
 /// 施設のない街では、足りない網の代表のマスが出て、余りは負か 0 になる。
@@ -622,7 +625,7 @@ fn act_places_a_signal_by_tile_and_observe_and_map_show_it() {
             {"type":"SetSignal","at":[0,5],"on":true},
             {"type":"SetSignal","at":[3,3],"on":true}]"#,
     );
-    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let acted = json(&cli(&["agent", "act", d, &cmds, "--verbose"]));
     let results = acted["results"].as_array().unwrap();
     let outcomes: Vec<&str> = results
         .iter()
@@ -652,6 +655,311 @@ fn act_places_a_signal_by_tile_and_observe_and_map_show_it() {
         [".-.", "---", ".-."],
         "{traffic}"
     );
+}
+
+/// act の結果は既定では短く、--verbose を付けたときだけ記録に入った形のコマンドを添える。
+#[test]
+fn act_is_short_unless_verbose() {
+    let dir = session("agent-act-verbose");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"SetTaxRate","zone":"Office","permille":120}]"#,
+    );
+    let short = json(&cli(&["agent", "act", d, &cmds]));
+    assert_eq!(short["results"][0]["outcome"], "Applied", "{short}");
+    assert!(short["results"][0].get("command").is_none(), "{short}");
+    let long = json(&cli(&["agent", "act", d, &cmds, "--verbose"]));
+    assert_eq!(
+        long["results"][0]["command"]["type"], "SetTaxRate",
+        "{long}"
+    );
+    cli_fails(&["agent", "act", d, &cmds, "--loud"]);
+}
+
+/// NotOwned で断ったときは、買っていないマスとそのチャンクを返す。
+#[test]
+fn not_owned_names_the_tiles_and_chunks() {
+    let dir = session("agent-not-owned");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    // 買った土地は x が 127 まで。128 からの 8 マスが外にはみ出す。
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[120,0],"to":[135,0],"kind":"Small"},
+            {"type":"PlaceBuilding","kind":"PowerPlant","at":[126,20],"rotation":0}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let road = &acted["results"][0];
+    assert_eq!(road["reason"], "NotOwned", "{acted}");
+    assert_eq!(road["notOwned"]["count"], 8, "{acted}");
+    assert_eq!(road["notOwned"]["tiles"][0], serde_json::json!([128, 0]));
+    assert_eq!(road["notOwned"]["chunks"], serde_json::json!([[2, 0]]));
+    // 発電所は 4×4 で、x が 126〜129 に延びるので、128 と 129 の 2 列が外にある。
+    let plant = &acted["results"][1];
+    assert_eq!(plant["reason"], "NotOwned", "{acted}");
+    assert_eq!(plant["notOwned"]["count"], 8, "{acted}");
+    assert_eq!(plant["notOwned"]["chunks"], serde_json::json!([[2, 0]]));
+    assert_eq!(
+        plant["notOwned"]["chunksNotAdjacent"],
+        serde_json::json!([])
+    );
+    // 買った土地と角でしか接しないチャンクは、買えるほうに入れない。
+    let diagonal = write(
+        &dir.join("diag.json"),
+        r#"{"type":"BuildRoad","from":[120,120],"to":[135,135],"kind":"Small"}"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &diagonal]));
+    let diag = &acted["results"][0]["notOwned"];
+    assert_eq!(diag["chunks"], serde_json::json!([]), "{acted}");
+    assert_eq!(
+        diag["chunksNotAdjacent"],
+        serde_json::json!([[2, 2]]),
+        "{acted}"
+    );
+    // 返されたチャンクを買えば、同じ道路が通る。
+    let buy = write(
+        &dir.join("buy.json"),
+        r#"[{"type":"BuyChunk","chunk":[2,0]},
+            {"type":"BuildRoad","from":[120,0],"to":[135,0],"kind":"Small"}]"#,
+    );
+    let bought = json(&cli(&["agent", "act", d, &buy]));
+    assert_eq!(bought["results"][0]["outcome"], "Applied", "{bought}");
+    assert_eq!(bought["results"][1]["outcome"], "Applied", "{bought}");
+}
+
+/// observe は、前の observe からの増減を出す。フィードバックのディレクトリには何も書かない。
+#[test]
+fn observe_shows_changes_since_the_last_observe() {
+    let dir = session("agent-observe-diff");
+    let d = dir.to_str().unwrap();
+    let made = json(&cli(&["agent", "new", d, "42"]));
+    assert!(made.get("sinceLastObserve").is_none(), "{made}");
+    let first = json(&cli(&["agent", "observe", d]));
+    assert_eq!(first["sinceLastObserve"]["fromTick"], 0, "{first}");
+    assert_eq!(
+        first["sinceLastObserve"]["changes"],
+        serde_json::json!({}),
+        "{first}"
+    );
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"{"type":"BuildRoad","from":[0,0],"to":[10,0],"kind":"Small"}"#,
+    );
+    cli(&["agent", "act", d, &cmds]);
+    cli(&["agent", "advance", d, "100"]);
+    let second = json(&cli(&["agent", "observe", d]));
+    let diff = &second["sinceLastObserve"];
+    assert_eq!(diff["fromTick"], 0, "{second}");
+    assert_eq!(diff["toTick"], 100, "{second}");
+    assert_eq!(diff["changes"]["money"]["from"], 500000, "{second}");
+    assert!(
+        diff["changes"]["money"]["delta"].as_i64().unwrap() < 0,
+        "{second}"
+    );
+    let third = json(&cli(&["agent", "observe", d]));
+    assert_eq!(third["sinceLastObserve"]["fromTick"], 100, "{third}");
+    assert_eq!(third["sinceLastObserve"]["changes"], serde_json::json!({}));
+
+    let fb = make_feedback("agent-observe-diff-feedback", 0);
+    let before = files(&fb);
+    let seen = json(&cli(&["agent", "observe", fb.to_str().unwrap()]));
+    assert!(seen["sinceLastObserve"].is_null(), "{seen}");
+    assert_eq!(files(&fb), before, "フィードバックのディレクトリが変わった");
+}
+
+/// 電気が届かなくなった建物は、地図で区画の文字の代わりに印が付く。
+#[test]
+fn map_marks_buildings_without_power_or_water() {
+    let (dir, x, y) = supplied_town("agent-map-unsupplied");
+    let d = dir.to_str().unwrap();
+    let supplied = town_map(d, x, y);
+    assert!(map_body(&supplied).contains('R'), "{supplied}");
+    for mark in ['*', '^', '%'] {
+        assert!(!map_body(&supplied).contains(mark), "{supplied}");
+    }
+    // 発電所を壊すと、建物は残って電気だけが届かなくなる。
+    bulldoze(&dir, [x + 27, y - 4, x + 30, y - 1]);
+    let dark = town_map(d, x, y);
+    assert!(map_body(&dark).contains('*'), "{dark}");
+    assert!(!map_body(&dark).contains('R'), "{dark}");
+    assert!(dark.contains("電気か水が届いていない建物"), "{dark}");
+    // 浄水場も壊すと、両方届かない。
+    bulldoze(&dir, [x + 36, y - 2, x + 37, y - 1]);
+    let both = town_map(d, x, y);
+    assert!(map_body(&both).contains('%'), "{both}");
+    assert!(!map_body(&both).contains('*'), "{both}");
+    assert!(!map_body(&both).contains('^'), "{both}");
+}
+
+/// 浄水場だけを壊すと、水だけが届かない建物が `^` になる。
+#[test]
+fn map_marks_buildings_without_water_only() {
+    let (dir, x, y) = supplied_town("agent-map-dry");
+    let d = dir.to_str().unwrap();
+    bulldoze(&dir, [x + 36, y - 2, x + 37, y - 1]);
+    let dry = town_map(d, x, y);
+    assert!(map_body(&dry).contains('^'), "{dry}");
+    assert!(!map_body(&dry).contains('*'), "{dry}");
+    assert!(!map_body(&dry).contains('%'), "{dry}");
+    assert!(!map_body(&dry).contains('R'), "{dry}");
+}
+
+/// 凡例を除いた、地図の本体の行。
+fn map_body(text: &str) -> String {
+    text.lines().skip(12).collect::<Vec<_>>().join("\n")
+}
+
+fn town_map(d: &str, x: i64, y: i64) -> String {
+    let (x0, y0, x1, y1) = (
+        x.to_string(),
+        (y - 6).to_string(),
+        (x + 40).to_string(),
+        (y + 7).to_string(),
+    );
+    cli(&["agent", "map", d, &x0, &y0, &x1, &y1])
+}
+
+fn bulldoze(dir: &Path, [x0, y0, x1, y1]: [i64; 4]) {
+    let file = write(
+        &dir.join("b.json"),
+        &serde_json::json!({"type":"Bulldoze","area":[[x0,y0],[x1,y1]]}).to_string(),
+    );
+    cli(&["agent", "act", dir.to_str().unwrap(), &file]);
+}
+
+/// 高速道路から道路を引き、住宅の区画、発電所、浄水場を置いて 2 日進めた街。(x, y) は道路の始点である。
+fn supplied_town(name: &str) -> (PathBuf, i64, i64) {
+    let dir = session(name);
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let end = json(&cli(&["agent", "observe", d]))["highway"]["end"].clone();
+    let [x, y] = [end[0].as_i64().unwrap(), end[1].as_i64().unwrap()];
+    let setup = write(
+        &dir.join("setup.json"),
+        &serde_json::json!([
+            {"type":"BuildRoad","from":[x,y],"to":[x+40,y],"kind":"Medium"},
+            {"type":"PaintZone","area":[[x+1,y+1],[x+40,y+6]],"zone":"Residential"},
+            {"type":"PlaceBuilding","kind":"PowerPlant","at":[x+30,y-1],"rotation":2},
+            {"type":"PlaceBuilding","kind":"WaterPump","at":[x+36,y-1],"rotation":2},
+        ])
+        .to_string(),
+    );
+    let acted = json(&cli(&["agent", "act", d, &setup]));
+    for r in acted["results"].as_array().unwrap() {
+        assert_eq!(r["outcome"], "Applied", "{acted}");
+    }
+    cli(&["agent", "advance", d, &(2 * 7200).to_string()]);
+    (dir, x, y)
+}
+
+/// 前の observe の記録が壊れていても、observe は落ちず、前の値なしとして上書きする。
+#[test]
+fn observe_survives_a_broken_last_observe_file() {
+    let dir = session("agent-observe-broken");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let path = dir.join("last-observe.json");
+    let broken = [
+        "ここは JSON ではない",
+        "[1, 2]",
+        r#"{"tick":"x","values":{}}"#,
+        r#"{"tick":0,"values":{"money":"文字列"}}"#,
+        r#"{"tick":0,"values":{"money":-9223372036854775808}}"#,
+        r#"{"tick":0,"values":{"money":18446744073709551615}}"#,
+    ];
+    for text in broken {
+        std::fs::write(&path, text).unwrap();
+        let seen = json(&cli(&["agent", "observe", d]));
+        let diff = &seen["sinceLastObserve"];
+        assert!(
+            diff.is_null() || diff["changes"].is_object(),
+            "{text}: {seen}"
+        );
+        // 上書きされて、次は普通に増減が出る。
+        let again = json(&cli(&["agent", "observe", d]));
+        assert_eq!(again["sinceLastObserve"]["changes"], serde_json::json!({}));
+    }
+}
+
+/// export は、種、tick、ハッシュ、コミット、記録の base64 を、貼れる markdown にして出す。
+#[test]
+fn export_prints_a_reproduction_in_markdown() {
+    let dir = session("agent-export");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"{"type":"BuildRoad","from":[0,0],"to":[10,0],"kind":"Small"}"#,
+    );
+    cli(&["agent", "act", d, &cmds]);
+    cli(&["agent", "advance", d, "50"]);
+    let before = files(&dir);
+    let md = cli(&["agent", "export", d]);
+    assert_eq!(files(&dir), before, "export が書き込んだ");
+    let state = json(&std::fs::read_to_string(dir.join("state.json")).unwrap());
+    let hash = state["stateHash"].as_str().unwrap();
+    assert!(md.contains(&format!("`{hash}`")), "{md}");
+    assert!(md.contains("| 種 | `42` |"), "{md}");
+    assert!(md.contains("| tick | `50` |"), "{md}");
+    assert!(md.contains("base64 -d > repro/commands.rec"), "{md}");
+    assert!(md.contains("agent new play --from repro"), "{md}");
+    let commit = md
+        .lines()
+        .find_map(|l| l.strip_prefix("| ビルドしたコミット | `"))
+        .unwrap()
+        .trim_end_matches("` |");
+    let sha = commit.strip_suffix("-dirty").unwrap_or(commit);
+    assert!(
+        sha == "unknown" || (sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit())),
+        "{commit}"
+    );
+    assert_eq!(
+        md.contains("コミットしていない変更を入れてビルドした"),
+        commit.ends_with("-dirty")
+    );
+    // 貼られた 2 つのファイルを取り出して、new --from で同じ街を作り直せる。
+    let block = |start: &str| -> String {
+        let (_, rest) = md.split_once(start).unwrap();
+        rest.split_once("EOF\n").unwrap().0.to_string()
+    };
+    let record = decode_base64(&block("base64 -d > repro/commands.rec <<'EOF'\n"));
+    assert_eq!(record, std::fs::read(dir.join("commands.rec")).unwrap());
+    let repro = session("agent-export-repro");
+    std::fs::create_dir_all(&repro).unwrap();
+    std::fs::write(repro.join("commands.rec"), record).unwrap();
+    std::fs::write(
+        repro.join("state.json"),
+        block("cat > repro/state.json <<'EOF'\n"),
+    )
+    .unwrap();
+    let play = session("agent-export-play");
+    let made = json(&cli(&[
+        "agent",
+        "new",
+        play.to_str().unwrap(),
+        "--from",
+        repro.to_str().unwrap(),
+    ]));
+    assert_eq!(made["copiedFrom"]["matches"], true, "{made}");
+    assert_eq!(made["stateHash"], hash);
+}
+
+/// テスト用の base64 の復号（改行は読み飛ばす）。
+fn decode_base64(text: &str) -> Vec<u8> {
+    const ALPHABET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = Vec::new();
+    let (mut acc, mut bits) = (0_u32, 0);
+    for c in text.chars().filter(|c| !c.is_whitespace() && *c != '=') {
+        acc = acc << 6 | ALPHABET.find(c).unwrap() as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits & 0xff) as u8);
+        }
+    }
+    out
 }
 
 #[test]
