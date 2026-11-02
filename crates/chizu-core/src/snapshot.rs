@@ -219,7 +219,11 @@ mod tests {
     #[test]
     fn broken_network_is_rejected_without_panic() {
         let mut world = World::new(1);
-        let (node, _) = world.network().nodes().next().expect("高速道路のノードがない");
+        let (node, _) = world
+            .network()
+            .nodes()
+            .next()
+            .expect("高速道路のノードがない");
         world.network_mut().remove_node_unchecked(node);
         let bytes = world.to_snapshot();
         assert_eq!(
