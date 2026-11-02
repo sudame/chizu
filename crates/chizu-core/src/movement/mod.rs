@@ -2,6 +2,7 @@
 //!
 //! 移動の主体は、経路と、いまのリンクの上の位置（リンクの始まりからの距離）を持つ。
 //! 1 tick に移動の 1 秒ぶん進み、行き先に着いたら消える。歩行者どうしはぶつからない。
+//! 歩行者は交差点の横断歩道と、区間の途中の横切りで車道を渡り、渡るあいだは車を止める（`crossing`）。
 //! 車は同じ車線の前の車との車間で速さを決め、ノードで次のリンクの車線へ移る。
 //! 交差点では、衝突する向きの車に譲ってノードの手前で待つ（`junction`）。
 //! 建物から建物へ車で向かう移動は、歩く → 車 → 歩く の 3 つの区切りを順に進む（`parking`）。
@@ -11,6 +12,9 @@ mod car;
 mod car_tests;
 mod commute;
 mod congestion;
+pub mod crossing;
+#[cfg(test)]
+mod crossing_tests;
 mod junction;
 #[cfg(test)]
 mod junction_tests;
@@ -28,6 +32,8 @@ mod tests;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use smallvec::SmallVec;
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -90,6 +96,8 @@ pub struct Trip {
     dest_offset: LaneOffset,
     /// いまの区切りが終わったあとにすること。
     then: parking::Then,
+    /// 歩道の側と、区間の途中の横切り。歩くときだけ使う。
+    walk: crossing::Walk,
     departed: Tick,
     /// 車線や歩道が変わった直後の、描くずれの移り変わり。描画のためだけの値で、状態ハッシュには入れない。
     blend: Option<lane_shift::Blend>,
@@ -125,9 +133,26 @@ impl Trip {
         self.departed
     }
 
-    /// いまの位置。
+    /// いまの位置。歩く人が交差点で車道を渡っているあいだは、リンクの終わりにいるものとする。
     pub fn position(&self) -> SidewalkPos {
-        SidewalkPos::along(self.start, self.step, self.offset)
+        let at = if self.mode == LaneMode::Sidewalk {
+            self.offset.min(self.link_len)
+        } else {
+            self.offset
+        };
+        SidewalkPos::along(self.start, self.step, at)
+    }
+
+    /// 歩く人が、交差点の横断歩道か区間の途中の横切りで、車道を渡っているか渡るのを待っているか。
+    /// 区間の途中なら `Some(true)`、横断歩道なら `Some(false)`。
+    pub fn crossing(&self) -> Option<bool> {
+        if self.mode != LaneMode::Sidewalk {
+            return None;
+        }
+        if self.walk.jay.is_some() {
+            return Some(true);
+        }
+        (!self.last_leg() && self.offset >= self.link_len).then_some(false)
     }
 
     /// リンク `link` のいまの車線のずれ。車線を移る前のずれからの移り変わりは含まない。
@@ -139,7 +164,12 @@ impl Trip {
                 .unwrap_or(0),
             LaneMode::Sidewalk => 0,
         };
-        lane_shift::target(net, link, self.step, index)
+        let (x, y) = lane_shift::target(net, link, self.step, index);
+        if self.mode == LaneMode::Sidewalk && self.walk.far {
+            (-x, -y)
+        } else {
+            (x, y)
+        }
     }
 
     /// 経路の `leg` 番めのリンクの上にいるときの、描くずれ。
@@ -160,20 +190,97 @@ impl Trip {
         self.leg as usize + 1 == self.route.links.len()
     }
 
-    /// 1 tick 進める。着いたら `true`。
-    fn advance(&mut self, net: &Network) -> bool {
-        self.offset = self.offset.advance(WALK_SPEED.distance(1));
+    /// 歩く人を 1 tick 進める。着いたかと、この tick の終わりに渡っている所を返す。
+    ///
+    /// 交差点を通るときは、リンクの終わりを越えた距離を、渡る腕の横断歩道を順に並べた道のりの上の位置とみなす。
+    /// 渡り始めるところで `gate` が許さなければ、その手前（歩道の端）で待つ。
+    fn advance(&mut self, net: &Network, gate: &crossing::Gate) -> (bool, Option<crossing::Occ>) {
+        let speed = u32::try_from(WALK_SPEED.0).expect("歩く速さが負");
+        if let Some(done) = self.walk.jay {
+            let spot = (self.link(), self.offset.0);
+            let w = crossing::width(net, spot.0.segment);
+            let next = if done == 0 && !gate.may_jaywalk(net, spot.0, spot.1) {
+                0
+            } else {
+                done.saturating_add(speed)
+            };
+            if next < w {
+                self.walk.jay = Some(next);
+                return (
+                    false,
+                    (next > 0).then_some(crossing::Occ::Jay(spot.0, spot.1)),
+                );
+            }
+            // 渡り終えた。反対の側の歩道から、少しずつ寄せて歩き出す。
+            let shown = self.shift_on_leg(net, self.leg as usize);
+            self.walk.far = !self.walk.far;
+            self.walk.jay = None;
+            self.blend = Some(lane_shift::Blend {
+                from: shown,
+                start: self.offset.0,
+            });
+            return (false, None);
+        }
+        let mut p0 = self.offset.0;
+        let mut p1 = p0.saturating_add(speed);
         loop {
             if self.last_leg() {
-                return self.offset >= self.dest_offset;
+                self.offset = LaneOffset(p1);
+                return (p1 >= self.dest_offset.0, None);
             }
-            if self.offset < self.link_len {
-                return false;
+            let end = self.link_len.0;
+            if p1 < end {
+                self.offset = LaneOffset(p1);
+                return (false, None);
             }
-            let rest = self.link_len.distance_to(self.offset);
+            let (far, arms) = self.departure(net);
+            // 渡る所を、リンクの上の位置の区間 [始まり, 終わり) で並べる。
+            let node = car::end_node(net, self.link());
+            let mut spans: SmallVec<[(u32, u32, crossing::Occ); 4]> = SmallVec::new();
+            let mut at = end;
+            for s in arms {
+                let w = crossing::width(net, s);
+                spans.push((at, at + w, crossing::Occ::Crosswalk(node, s)));
+                at += w;
+            }
+            for &(s, _, occ) in &spans {
+                let crossing::Occ::Crosswalk(n, seg) = occ else {
+                    continue;
+                };
+                if p0 <= s && s < p1 && !gate.may_cross(net, n, seg) {
+                    p1 = s;
+                    break;
+                }
+            }
+            if p1 < at {
+                self.offset = LaneOffset(p1);
+                let occ = spans
+                    .iter()
+                    .find(|(s, e, _)| *s < p1 && p1 < *e)
+                    .map(|x| x.2);
+                return (false, occ);
+            }
+            let rest = p1 - at;
             self.leg += 1;
-            self.enter(net, LaneOffset::START.advance(rest), None);
+            self.enter(net, LaneOffset(rest), None);
+            self.walk.far = far;
+            (p0, p1) = (0, rest);
         }
+    }
+
+    /// 歩く人が、いまのリンクの終わりのノードから次のリンクへ移るときの、次のリンクでの歩道の側と、
+    /// 渡る腕。次のリンクが経路の最後なら、行き先の建物の側へ出る。
+    fn departure(&self, net: &Network) -> (bool, crossing::Arms) {
+        let link = self.link();
+        let next = self.route.links[self.leg as usize + 1];
+        let need = (self.leg as usize + 2 == self.route.links.len()).then_some(self.walk.far_end);
+        crossing::depart(
+            net,
+            car::end_node(net, link),
+            (link, self.walk.far),
+            next,
+            need,
+        )
     }
 
     /// いまの経路の番号のリンクに入る。車線を指定しなければ、リンクの最初の車線に入る。
@@ -283,7 +390,9 @@ fn driven_ms(net: &Network, g: &Graph, route: &Route, (from, to): Ends) -> Optio
 /// 歩くときは、出発と行き先のそれぞれで 2 つの向きを試し、歩く距離のいちばん短い組を選ぶ。
 /// 距離の同じ組は、位置を表したままの向きを先に選ぶ。同じリンクの手前へ戻る組は、向きを入れ替えた
 /// まっすぐの組に必ず負けるので、ほかの組があれば探さない。
-/// 横切りの罰則と衝突区間が入るまでは、反対側の歩道へ移る費用を 0 として扱う。
+/// 歩く人は、どちらの向きに歩いても建物の側の歩道を歩き、交差点の横断歩道で側を変える（`crossing`）。
+/// 出発と行き先が同じリンクの上にあり、建物が反対の側どうしなら、出発の位置で道路を横切る。そのときは
+/// 歩く距離に [`crossing::JAYWALK_DETOUR_MM`] を足して比べるので、横断歩道までの遠回りがそれより短ければ横切らない。
 ///
 /// 車も CS2 と同じく、建物の前からどちらの向きの車線へも出られ、どちらの向きからも着ける。
 /// 出発と行き先のそれぞれで 2 つの向きを試し、走る費用のいちばん小さい組を選ぶ。こうしないと、
@@ -295,7 +404,7 @@ fn plan(
     mode: LaneMode,
     ends: &[Ends],
     fixed_start: bool,
-) -> Vec<Option<(Arc<Route>, Ends)>> {
+) -> Vec<Option<(Arc<Route>, Ends, crossing::Walk)>> {
     let candidates: Vec<Vec<Ends>> = ends
         .iter()
         .map(|(a, b)| {
@@ -315,19 +424,31 @@ fn plan(
     let g = router.graph(mode);
     candidates
         .iter()
-        .map(|c| {
+        .zip(ends)
+        .map(|(c, (a, b))| {
             c.iter()
                 .filter_map(|e| {
                     // 候補ごとに探した経路を 1 つずつ受け取るので、どの候補でも先に取り出す。
                     let r = found.next().expect("探した経路の数が合わない")?;
+                    // 出発と行き先の建物が、選んだリンクの進む向きの左にあるか。同じリンクの上で
+                    // 側が違えば、出発の位置で道路を横切る。
+                    let (far, far_end) = (e.0.0 != a.0, e.1.0 != b.0);
+                    let jay = mode == LaneMode::Sidewalk && r.links.len() == 1 && far != far_end;
+                    let walk = crossing::Walk {
+                        far: mode == LaneMode::Sidewalk && far,
+                        jay: jay.then_some(0),
+                        far_end: mode == LaneMode::Sidewalk && far_end,
+                    };
                     let key = match mode {
                         LaneMode::Car => driven_ms(net, g, &r, *e)?,
-                        LaneMode::Sidewalk => walked_mm(net, &r, *e)?,
+                        LaneMode::Sidewalk => walked_mm(net, &r, *e)?
+                            .checked_add(u64::from(jay) * crossing::JAYWALK_DETOUR_MM)?,
                     };
-                    Some((key, r, *e))
+                    let jay = walk;
+                    Some((key, r, *e, jay))
                 })
-                .min_by_key(|(key, _, _)| *key)
-                .map(|(_, r, e)| (r, e))
+                .min_by_key(|(key, _, _, _)| *key)
+                .map(|(_, r, e, jay)| (r, e, jay))
         })
         .collect()
 }
@@ -479,8 +600,8 @@ impl Trips {
             .zip(walks)
             .map(|(e, (_, to))| {
                 (*e)?;
-                let (route, e) = routes.next().expect("探した経路の数が合わない")?;
-                let id = self.insert(make_trip(net, route, e, *to, now));
+                let (route, e, jay) = routes.next().expect("探した経路の数が合わない")?;
+                let id = self.insert(make_trip(net, route, e, *to, now, jay));
                 if mode == LaneMode::Car {
                     car::place(&mut self.rows, net, &mut ix, id.slot());
                 }
@@ -525,12 +646,15 @@ impl Trips {
 
     /// 歩く人と車を 1 tick 進め、区切りの終わりに着いた行を番号の順に返す。
     fn advance(&mut self, net: &Network, connectors: &[Connector], now: Tick) -> Vec<usize> {
+        // 歩く人が渡り始めてよいかは、前の tick の車の様子だけから決める。
+        let gate = car::gate(&self.rows, net, now);
         let advance = |(i, t): (usize, &mut Option<Trip>)| {
-            let t = t.as_mut()?;
-            (t.mode == LaneMode::Sidewalk && t.advance(net)).then_some(i)
+            let t = t.as_mut().filter(|t| t.mode == LaneMode::Sidewalk)?;
+            let (arrived, occ) = t.advance(net, &gate);
+            (arrived || occ.is_some()).then_some((i, arrived, occ))
         };
         #[cfg(feature = "parallel")]
-        let arrived: Vec<usize> = self
+        let walked: Vec<(usize, bool, Option<crossing::Occ>)> = self
             .rows
             .par_iter_mut()
             .with_min_len(PAR_MIN_WALKS)
@@ -538,19 +662,21 @@ impl Trips {
             .filter_map(advance)
             .collect();
         #[cfg(not(feature = "parallel"))]
-        let arrived: Vec<usize> = self
+        let walked: Vec<(usize, bool, Option<crossing::Occ>)> = self
             .rows
             .iter_mut()
             .enumerate()
             .filter_map(advance)
             .collect();
-        let mut arrived = arrived;
+        let mut arrived: Vec<usize> = walked.iter().filter(|w| w.1).map(|w| w.0).collect();
+        let occupied = crossing::Occupied::of(net, walked.iter().filter_map(|w| w.2));
         arrived.extend(car::step(
             &mut self.rows,
             net,
             connectors,
             &mut self.rescues,
             now,
+            &occupied,
         ));
         arrived.sort_unstable();
         arrived
@@ -586,7 +712,7 @@ impl Trips {
                     .into_iter()
                     .zip(plan(router, net, mode, &ends, mode == LaneMode::Car))
             {
-                let Some((route, ends)) = route else {
+                let Some((route, ends, jay)) = route else {
                     lost.push(id);
                     continue;
                 };
@@ -606,9 +732,17 @@ impl Trips {
                     .unwrap_or(0);
                 // 探し直す前に描いていたずれ。車線や経路が変わっても、そこから少しずつ移す。
                 let shown = old.shift_on_leg(net, old.leg as usize);
-                let mut t = make_trip(net, route, ends, dest, departed);
+                let old_far = old.walk.far;
+                let mut t = make_trip(net, route, ends, dest, departed, jay);
                 (t.speed, t.waiting, t.waited, t.stalled, t.then) =
                     (speed, waiting, waited, stalled, then);
+                if mode == LaneMode::Sidewalk {
+                    // いまの位置は、いま歩いているリンクと同じ向きのリンクで表してあるので、そのリンクから
+                    // 向きを変えたなら、側も入れ替わる。渡りかけていた横切りは、歩道の端からやり直す。
+                    t.walk.far ^= old_far;
+                    let mismatch = t.route.links.len() == 1 && t.walk.far != t.walk.far_end;
+                    t.walk.jay = mismatch.then_some(0);
+                }
                 self.rows[id.slot()] = Some(t);
                 if mode == LaneMode::Car && !waiting {
                     car::keep_lane(&mut self.rows, net, id.slot(), index);
@@ -663,6 +797,7 @@ fn make_trip(
     ((_, from), (_, to)): Ends,
     dest: SidewalkPos,
     now: Tick,
+    walk: crossing::Walk,
 ) -> Trip {
     let mode = route.links[0].mode;
     let first = route.links[0];
@@ -682,6 +817,7 @@ fn make_trip(
         dest,
         dest_offset: to,
         then: parking::Then::Arrive,
+        walk,
         departed: now,
         blend: None,
     };
@@ -712,6 +848,9 @@ impl StateHash for Trip {
         h.write(&self.dest);
         h.write(&self.dest_offset);
         h.write(&self.then);
+        h.write(&self.walk.far);
+        h.write(&self.walk.jay);
+        h.write(&self.walk.far_end);
         h.write(&self.departed);
     }
 }
