@@ -124,13 +124,57 @@ fn other_snapshot_versions_are_refused() {
         Err(SnapshotError::Decode(_))
     ));
     assert!(matches!(
-        World::from_snapshot(&good[..good.len() - 1]),
+        World::from_snapshot(&good[..16]),
         Err(SnapshotError::Decode(_))
     ));
+    assert_eq!(
+        World::from_snapshot(&good[..good.len() - 1]),
+        Err(SnapshotError::Checksum)
+    );
     let mut longer = good.clone();
     longer.push(0);
+    assert_eq!(World::from_snapshot(&longer), Err(SnapshotError::Checksum));
+}
+
+/// 中身の整合が崩れたバイト列から街を作り直すと、経路探索のグラフを作るところで panic しうる。
+/// 1 バイトでも壊れていれば、作り直す前に断ることを確かめる。
+#[test]
+fn a_corrupted_snapshot_is_refused_without_panicking() {
+    let (_, log) = golden_logs()
+        .into_iter()
+        .find(|(name, _)| name == "commute")
+        .expect("commute の記録がない");
+    let mut world = World::new(SEED);
+    replay(&mut world, &log, 3_000);
+    let good = world.to_snapshot();
+    let mut bytes = good.clone();
+    for i in 0..bytes.len() {
+        for bit in [0x01, 0x80] {
+            bytes[i] ^= bit;
+            assert!(
+                World::from_snapshot(&bytes).is_err(),
+                "{i} バイト目を {bit:#x} で反転しても読めた"
+            );
+            bytes[i] ^= bit;
+        }
+    }
+    for len in (0..good.len()).step_by(97) {
+        assert!(
+            World::from_snapshot(&good[..len]).is_err(),
+            "{len} バイトで切った"
+        );
+    }
+}
+
+#[test]
+fn a_snapshot_the_caller_rejects_is_refused() {
+    let mut world = World::new(SEED);
+    world.step();
+    let bytes = world.to_snapshot();
     assert_eq!(
-        World::from_snapshot(&longer),
-        Err(SnapshotError::TrailingBytes(1))
+        World::from_snapshot_where(&bytes, |w| w.tick().0 == 2),
+        Err(SnapshotError::Rejected)
     );
+    let back = World::from_snapshot_where(&bytes, |w| w.tick().0 == 1).unwrap();
+    assert!(back == world);
 }

@@ -208,13 +208,15 @@ impl Restore {
 /// 街の状態を読み戻す。読み戻せないか、保存データのほかの欄と食い違えば `None` を返し、記録の再生に任せる。
 ///
 /// 状態ハッシュも比べる。状態の形を変えたのに版を上げ忘れていても、読み違えた街から始めないためである。
+/// 比べるのは経路探索のグラフを作る前である。
 fn world_from_state(data: &SaveData, state: &[u8]) -> Option<World> {
-    let world = World::from_snapshot(state).ok()?;
-    let agrees = world.seed() == data.seed
-        && world.tick().0 == data.tick
-        && world.next_seq() == data.command_count
-        && world.state_hash() == data.state_hash;
-    agrees.then_some(world)
+    World::from_snapshot_where(state, |world| {
+        world.seed() == data.seed
+            && world.tick().0 == data.tick
+            && world.next_seq() == data.command_count
+            && world.state_hash() == data.state_hash
+    })
+    .ok()
 }
 
 /// 画面から受け取った保存データを確かめて [`SaveData`] にする。
@@ -499,11 +501,15 @@ mod tests {
         let state = data.state.clone().unwrap();
         let mut other_version = state.clone();
         other_version[8..12].copy_from_slice(&(chizu_core::SNAPSHOT_VERSION + 1).to_le_bytes());
+        let mut flipped = state.clone();
+        let middle = flipped.len() / 2;
+        flipped[middle] ^= 0x80;
         let mut earlier = Sim::new(3);
         earlier.advance(5);
         let cases = [
             ("版が違う", other_version),
             ("途中で切れている", state[..state.len() / 2].to_vec()),
+            ("1 バイト壊れている", flipped),
             ("別の時点の状態", earlier.world().to_snapshot()),
         ];
         for (what, state) in cases {

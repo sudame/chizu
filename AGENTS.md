@@ -143,7 +143,7 @@ observe は、人と車の動きも出す（`citizenPlaces`、`traffic`、`migra
 - 自動保存の枠に書けるのは、Web Locks の `chizu-auto-save` を取れた 1 つのタブだけである。
 - 保存データを作るのと再生するのは `crates/chizu-wasm/src/save.rs`、画面の側は `web/src/save/` にある。IndexedDB に書くのはメインスレッドで、再生は Worker の中で少しずつ回す。
 - 記録の形式の版が違う保存データは読めないものとして断る。版の運用は `crates/chizu-core/src/record.rs` の先頭にある。
-- 街の状態は `World::to_snapshot` で書き出す。形式と版の運用は `crates/chizu-core/src/snapshot.rs` の先頭にある。`World` に欄を足したり、欄の型や順番を変えたりしたら版を上げる。
+- 街の状態は `World::to_snapshot` で書き出す。形式と版の運用は `crates/chizu-core/src/snapshot.rs` の先頭にある。`World` に欄を足したり、欄の型や順番を変えたりしたら版を上げる。書き出したバイト列のハッシュは `tests/golden/snapshot.hash` に固定してあり、形が変わるとゴールデンのテストが落ちる。
 - 保存データには状態ハッシュを添えてあり、読み込んで作り直した街のハッシュと食い違えば画面に示す。
 
 ## 依存の更新
