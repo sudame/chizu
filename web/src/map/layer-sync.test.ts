@@ -1,7 +1,15 @@
 import { describe, expect, test } from "vitest";
 import { CHUNK_AREA, type WorkerToMain } from "../protocol/messages.ts";
 import { LAYER_CHECK_MS, LayerSender, type LayerSource } from "./layer-sync.ts";
-import { DATA_LAYERS, PALETTE_SIZE, paletteArray, TRAFFIC_LAYER } from "./layers.ts";
+import {
+  DATA_LAYERS,
+  PALETTE_SIZE,
+  styleArrays,
+  TRAFFIC_LAYER,
+  TRAFFIC_LEVELS,
+  WASH,
+} from "./layers.ts";
+import { hex } from "./palette.ts";
 
 function fakeSource() {
   const calls: string[] = [];
@@ -73,33 +81,51 @@ describe("LayerSender", () => {
 });
 
 describe("データレイヤーの色", () => {
-  test("色の表は uniform の長さにそろえ、値 0 は塗らない", () => {
+  test("塗り方の並びは uniform の長さにそろえ、値 0 は塗らずに下の地図を薄めるだけにする", () => {
     for (const layer of DATA_LAYERS) {
-      const a = paletteArray(layer.palette);
-      expect(a).toHaveLength(PALETTE_SIZE * 4);
-      expect(a[3]).toBe(0);
-      expect(layer.palette.length).toBeLessThanOrEqual(PALETTE_SIZE);
+      const { palette, accent, style } = styleArrays(layer.styles);
+      expect(palette).toHaveLength(PALETTE_SIZE * 4);
+      expect(accent).toHaveLength(PALETTE_SIZE * 4);
+      expect(style).toHaveLength(PALETTE_SIZE);
+      expect(style[0]).toBe(0);
+      expect(layer.styles.length).toBeLessThanOrEqual(PALETTE_SIZE);
     }
   });
 
-  test("交通は値 1〜4 を、緑、黄、橙、赤の順に塗る", () => {
-    const traffic = DATA_LAYERS.find((l) => l.code === TRAFFIC_LAYER);
-    expect(traffic?.label).toBe("交通");
-    const [none, free, busy, heavy, jammed] = traffic?.palette ?? [];
-    expect(none?.[3]).toBe(0);
-    expect(traffic?.palette).toHaveLength(5);
-    // 緑は緑が強く、黄は赤と緑が強く、橙は赤が強く緑が半分ほど、赤は赤だけが強い
-    expect(free && free[1] > free[0] && free[1] > free[2]).toBe(true);
-    expect(busy && busy[0] > 0.9 && busy[1] > 0.8 && busy[2] < 0.3).toBe(true);
-    expect(heavy && heavy[0] > 0.9 && heavy[1] > 0.4 && heavy[1] < 0.7).toBe(true);
-    expect(jammed && jammed[0] > 0.8 && jammed[1] < 0.3 && jammed[2] < 0.3).toBe(true);
-    // 隣り合う段階の色は見分けられる
-    const colors = [free, busy, heavy, jammed];
-    for (const [i, a] of colors.entries()) {
-      for (const b of colors.slice(i + 1)) {
-        const d = [0, 1, 2].reduce((s, k) => s + Math.abs((a?.[k] ?? 0) - (b?.[k] ?? 0)), 0);
-        expect(d).toBeGreaterThan(0.4);
-      }
+  test("電気と水道は、決まりの色で建物と道路を塗り、施設は薄めずに見せる", () => {
+    const power = DATA_LAYERS.find((l) => l.code === 1);
+    const { palette, accent, style } = styleArrays(power?.styles ?? []);
+    const color = (i: number) => Array.from(palette.subarray(i * 4, i * 4 + 4));
+    const f32 = (c: readonly number[]) => Array.from(new Float32Array(c));
+    // 値は chizu-wasm の layers::SUPPLY_BUILDING_ON などの並び
+    expect(color(1)).toEqual(f32(hex("#81c995")));
+    expect(style[2]).toBe(2);
+    expect(color(2)).toEqual(f32(hex("#f28b82")));
+    expect(Array.from(accent.subarray(8, 12))).toEqual(f32(hex("#d93025")));
+    expect(color(3)).toEqual(f32(hex("#1a73e8")));
+    expect(color(4)).toEqual(f32(hex("#f29900")));
+    expect(style[5]).toBe(3);
+    expect(color(5)).toEqual(f32(hex("#9aa0a6")));
+    expect(style[6]).toBe(4);
+    expect(WASH).toBe(0.5);
+  });
+
+  test("交通は面で塗らず、4 段の色は決まりの色で、明るさも段々に暗くなる", () => {
+    expect(DATA_LAYERS.some((l) => l.code === TRAFFIC_LAYER)).toBe(false);
+    expect(TRAFFIC_LEVELS.map((l) => l.label)).toEqual([
+      "空いている",
+      "やや混んでいる",
+      "混んでいる",
+      "詰まっている",
+    ]);
+    expect(TRAFFIC_LEVELS.map((l) => l.color)).toEqual(
+      ["#63d668", "#ff974d", "#f23c32", "#811f1f"].map((c) => hex(c)),
+    );
+    const luma = ([r, g, b]: readonly number[]) =>
+      0.2126 * (r ?? 0) + 0.7152 * (g ?? 0) + 0.0722 * (b ?? 0);
+    const lumas = TRAFFIC_LEVELS.map((l) => luma(l.color));
+    for (let i = 1; i < lumas.length; i++) {
+      expect(lumas[i]).toBeLessThan(lumas[i - 1] ?? 0);
     }
   });
 });

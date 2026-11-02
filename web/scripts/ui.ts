@@ -43,7 +43,7 @@ export async function pickSpeed(page: Page, speed: number | string): Promise<voi
   await button.click();
 }
 
-/** レイヤーを選ぶ。パネルが閉じていれば開いてから押す。layer は "none" かレイヤーの番号。 */
+/** 主題図を選ぶ。パネルが閉じていれば開いてから押す。layer は主題図の名前（"none"、"traffic" など）。 */
 export async function chooseLayer(page: Page, layer: string): Promise<void> {
   if (!(await page.locator("#layer-panel").isVisible())) {
     await page.locator("#layers-open").click();
