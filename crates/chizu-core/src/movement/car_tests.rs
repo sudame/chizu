@@ -40,7 +40,7 @@ impl Cars {
     }
 
     fn step(&mut self) -> Vec<TripId> {
-        let arrived = self.trips.step(&self.net, &mut self.router);
+        let arrived = self.trips.step(&self.net, &mut self.router, Tick::ZERO);
         check_spacing(&self.trips);
         arrived
     }

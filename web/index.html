@@ -29,8 +29,13 @@
         left: 50%;
         transform: translateX(-50%);
         display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
         gap: 4px;
         align-items: center;
+        width: max-content;
+        max-width: calc(100vw - 16px);
+        box-sizing: border-box;
         padding: 4px 8px;
         background: rgb(255 255 255 / 85%);
         border-radius: 4px;
@@ -298,6 +303,8 @@
       <button type="button" data-tool="zone-Clear" aria-pressed="false">区画を消す</button>
       <button type="button" data-tool="service-PowerPlant" aria-pressed="false">発電所</button>
       <button type="button" data-tool="service-WaterPump" aria-pressed="false">浄水場</button>
+      <button type="button" data-tool="signal-on" aria-pressed="false">信号を置く</button>
+      <button type="button" data-tool="signal-off" aria-pressed="false">信号を外す</button>
       <button type="button" data-tool="buy" aria-pressed="false">土地を買う</button>
       <span id="tool-info"></span>
       <span id="tool-message" aria-live="polite"></span>

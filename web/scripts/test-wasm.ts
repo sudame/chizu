@@ -475,6 +475,42 @@ try {
     `1 マス手前で離した道路は既存の道路につながる（${snapSegments} → ${await roadSegments()} 本）`,
   );
 
+  // 信号の道具。吸い付けた道路でできた T 字路 (30, 32) に置いて、腕 3 本の灯火が届くかを見る
+  const waitSignalArms = (n: number) =>
+    page.waitForFunction(
+      (expected) =>
+        Number(document.querySelector<HTMLElement>("#map")?.dataset.signalArms ?? 0) === expected,
+      n,
+      { timeout: TIMEOUT_MS },
+    );
+  const junction = tileCenter(30, 32);
+  await page.locator('button[data-tool="signal-on"]').click();
+  const beforeSignal = await outcomeCount();
+  await page.mouse.click(junction.x, junction.y);
+  const signalled = await nextOutcome(beforeSignal);
+  check(
+    signalled.command === "SetSignal" && signalled.outcome === "Applied",
+    `交差点に信号を置ける（${signalled.text}）`,
+  );
+  await waitSignalArms(3);
+  check(true, "置いた信号の、腕 3 本の灯火が届く");
+  const beforeMidway = await outcomeCount();
+  const midway = tileCenter(40, 32);
+  await page.mouse.click(midway.x, midway.y);
+  const refused = await nextOutcome(beforeMidway);
+  check(
+    refused.outcome === "Rejected" && (refused.text ?? "").includes("交差点がない"),
+    `交差点のないマスには置けない（${refused.text}）`,
+  );
+  await page.locator('button[data-tool="signal-off"]').click();
+  const beforeOff = await outcomeCount();
+  await page.mouse.click(junction.x, junction.y);
+  const removed = await nextOutcome(beforeOff);
+  check(removed.outcome === "Applied", `信号を外せる（${removed.text}）`);
+  await waitSignalArms(0);
+  check(true, "外した信号は描かれなくなる");
+  await page.locator('button[data-tool="road-Small"]').click();
+
   const again = await drawRoad();
   check(
     again.result.outcome === "Denied" && (again.result.text ?? "").includes("重なる"),

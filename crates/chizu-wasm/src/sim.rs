@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chizu_core::building::demand;
+use chizu_core::movement::signal;
 use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
 use chizu_core::world::economy::{chunk_slots, milestone_population};
@@ -11,8 +12,8 @@ use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::zone::{ZONE_DEPTH, near_road};
 use chizu_core::{
     ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
-    Layer, Line, SegmentKind, ServiceKind, StateHasher, TerrainTiles, Tick, TilePos, TileRect,
-    TileUse, World, terrain,
+    Layer, Line, NodeControl, SegmentKind, ServiceKind, StateHasher, TerrainTiles, Tick, TilePos,
+    TileRect, TileUse, World, terrain,
 };
 
 use crate::snapshot::{Header, Mover, TripleBuffer};
@@ -244,6 +245,25 @@ impl Sim {
                     .into_iter()
                     .chain([f64::from(segment_kind_code(segment.kind))]),
             );
+        }
+        out
+    }
+
+    /// 信号の腕を、1 本につき `[ノードの x, ノードの y, 腕の向きの x, 腕の向きの y, 灯火]` の 5 つの数で返す。
+    /// 腕の向きはノードから出ていく 1 歩で、灯火は `Light` の値（0 が青、1 が黄、2 が赤）である。
+    /// 灯火は、次に進める tick の段階を表す。ノードの ID、区間の ID の順に並べる。
+    pub fn signal_lights(&self) -> Vec<f64> {
+        let (net, now) = (self.world.network(), self.world.tick());
+        let mut out = Vec::new();
+        for (id, node) in net.nodes() {
+            if node.control != NodeControl::Signal {
+                continue;
+            }
+            let t = node.tile();
+            for ((dx, dy), light) in signal::arm_lights(net, id, now) {
+                out.extend([t.x, t.y, dx, dy].map(|v| v as f64));
+                out.push(f64::from(light as u8));
+            }
         }
         out
     }
@@ -487,6 +507,8 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::Occupied => "ほかの施設か道路がある",
         DenyReason::NoRoadAccess => "道路に面していない",
         DenyReason::NoChunkSlot => "買える土地の枠がない。人口が増えると枠が増える",
+        DenyReason::NotJunction => "3 本以上の道路が集まる交差点でない",
+        DenyReason::SignalUnchanged => "信号はもうその状態になっている",
     }
 }
 
@@ -1010,6 +1032,31 @@ mod tests {
             to: TilePos::new(to.0, to.1),
             kind: RoadKind::Small,
         }
+    }
+
+    #[test]
+    fn signal_lights_list_the_arms_of_each_signal() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 5), (10, 5))).unwrap();
+        sim.submit(road((5, 5), (5, 10))).unwrap();
+        assert!(sim.signal_lights().is_empty());
+        let node = sim.world().network().node_at(TilePos::new(5, 5)).unwrap();
+        sim.submit(Command::SetSignal { node, on: true }).unwrap();
+        let lights = sim.signal_lights();
+        // T 字路の 3 本の腕。向き合う東西の腕は同じ灯火になり、南の腕とは同時に青にならない。
+        assert_eq!(lights.len(), 3 * 5);
+        let arms: Vec<&[f64]> = lights.chunks(5).collect();
+        for arm in &arms {
+            assert_eq!(&arm[..2], &[5.0, 5.0]);
+        }
+        let light = |dx: f64, dy: f64| {
+            arms.iter()
+                .find(|a| a[2] == dx && a[3] == dy)
+                .map(|a| a[4])
+                .unwrap()
+        };
+        assert_eq!(light(1.0, 0.0), light(-1.0, 0.0));
+        assert!(light(1.0, 0.0) != 0.0 || light(0.0, 1.0) != 0.0);
     }
 
     #[test]

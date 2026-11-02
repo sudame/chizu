@@ -6,6 +6,7 @@ import {
   FACILITY_STRIDE,
   NODE_STRIDE,
   SEGMENT_STRIDE,
+  SIGNAL_STRIDE,
   SUPPLY_POWER,
   SUPPLY_WATER,
 } from "../protocol/messages.ts";
@@ -491,6 +492,44 @@ export function roadLaneGeometry(segments: Float64Array, nodes: Float64Array): G
   return geometry;
 }
 
+// 信号の灯火の色。値は chizu-core の Light の値（0 青、1 黄、2 赤）である
+export const SIGNAL_COLOR: Record<number, Color> = {
+  0: [0.2, 0.9, 0.35, 1],
+  1: [1, 0.8, 0.1, 1],
+  2: [0.95, 0.2, 0.2, 1],
+};
+const SIGNAL_BASE_COLOR: Color = [0.12, 0.12, 0.14, 1];
+const SIGNAL_BASE_HALF = 0.16;
+const SIGNAL_LAMP_HALF = 0.1;
+// 灯火を置く位置。交差点の中心から腕の向きへ ALONG、入ってくる車線の側へ SIDE（マス）だけずらす
+const SIGNAL_ALONG = 0.42;
+const SIGNAL_SIDE = 0.2;
+
+/**
+ * 腕 1 本の灯火を置く位置（マスの単位）。ノード (x, y) の中心から腕の向き (dx, dy) へ進め、
+ * 腕から入ってくる車の車線の側に寄せる。左側通行で y は下向きなので、入ってくる向き (-dx, -dy) の左は (-dy, dx) である。
+ */
+export function signalLampCenter(x: number, y: number, dx: number, dy: number): Tile {
+  const len = Math.hypot(dx, dy) || 1;
+  const [ux, uy] = [dx / len, dy / len];
+  return {
+    x: x + 0.5 + ux * SIGNAL_ALONG - uy * SIGNAL_SIDE,
+    y: y + 0.5 + uy * SIGNAL_ALONG + ux * SIGNAL_SIDE,
+  };
+}
+
+/** Worker から届いた信号の灯火を頂点に直す。腕ごとに、暗い台の上に灯火の色の四角を置く。 */
+export function signalGeometry(lights: Float64Array): Geometry {
+  const geometry = new Geometry({ x: lights[0] ?? 0, y: lights[1] ?? 0 });
+  for (let i = 0; i + SIGNAL_STRIDE <= lights.length; i += SIGNAL_STRIDE) {
+    const [x = 0, y = 0, dx = 0, dy = 0, light = 2] = lights.subarray(i, i + SIGNAL_STRIDE);
+    const c = signalLampCenter(x, y, dx, dy);
+    geometry.dot(c.x, c.y, SIGNAL_BASE_HALF, SIGNAL_BASE_COLOR);
+    geometry.dot(c.x, c.y, SIGNAL_LAMP_HALF, SIGNAL_COLOR[light] ?? SIGNAL_BASE_COLOR);
+  }
+  return geometry;
+}
+
 /** 縮小したときの 1 本の線と、拡大したときの車線ごとの描き方。 */
 export type RoadMeshes = { simple: Geometry; lanes: Geometry };
 
@@ -508,6 +547,7 @@ export class RoadLayer {
   readonly #buildings: Mesh;
   readonly #roads: Mesh;
   readonly #lanes: Mesh;
+  readonly #signals: Mesh;
   readonly #preview: Mesh;
 
   constructor(
@@ -524,6 +564,7 @@ export class RoadLayer {
     this.#buildings = this.#mesh();
     this.#roads = this.#mesh();
     this.#lanes = this.#mesh();
+    this.#signals = this.#mesh();
     this.#preview = this.#mesh();
   }
 
@@ -566,6 +607,10 @@ export class RoadLayer {
     this.#upload(this.#lanes, meshes.lanes);
   }
 
+  setSignals(geometry: Geometry): void {
+    this.#upload(this.#signals, geometry);
+  }
+
   setPreview(geometry: Geometry | null): void {
     this.#upload(this.#preview, geometry ?? new Geometry({ x: 0, y: 0 }));
   }
@@ -578,7 +623,7 @@ export class RoadLayer {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     const roads = showsLanes(camera.zoom) ? this.#lanes : this.#roads;
-    for (const mesh of [this.#buildings, roads, this.#preview]) {
+    for (const mesh of [this.#buildings, roads, this.#signals, this.#preview]) {
       if (mesh.count === 0) {
         continue;
       }

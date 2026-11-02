@@ -9,6 +9,7 @@
 //!    移る先の車線の最後尾との車間が足りなければ、リンクの終わりで止める。
 //!
 //! 1. の前に、前の tick の状態だけを読んで、交差点ごとに手前で止める車をノードの順に決める。
+//!    信号のある交差点では、tick から決まる信号の段階も読む。
 
 use std::collections::BTreeMap;
 
@@ -20,7 +21,7 @@ use super::junction::{self, Approach, Inside};
 use crate::command::NodeId;
 use crate::network::{Dir, LaneId, LaneMode, LinkId, Network};
 use crate::routing::{Connector, speed_limit};
-use crate::units::{LaneOffset, MmPerTick};
+use crate::units::{LaneOffset, MmPerTick, Tick};
 
 /// 車の長さ（mm）。
 pub const CAR_LENGTH: u32 = 4_500;
@@ -445,12 +446,13 @@ fn check_lane(rows: &[Option<Trip>], lane: LaneId) {
     }
 }
 
-/// 車を 1 tick 進め、着いた主体の行の番号を返す。
+/// 車を tick `now` から 1 tick 進め、着いた主体の行の番号を返す。
 pub(super) fn step(
     rows: &mut [Option<Trip>],
     net: &Network,
     conn: &[Connector],
     rescues: &mut junction::Rescues,
+    now: Tick,
 ) -> Vec<usize> {
     // 出発を待っている車を、主体の番号の順に置き直す。
     let waiting: Vec<usize> = (0..rows.len())
@@ -493,9 +495,9 @@ pub(super) fn step(
         acc.1.extend(l.inside);
         acc
     });
-    let (stop, passed) = junction::holds(net, cands, inside);
-    rescues.passed_stuck = rescues.passed_stuck.saturating_add(passed);
-    for k in stop {
+    let stop = junction::holds(net, cands, inside, now);
+    rescues.passed_stuck = rescues.passed_stuck.saturating_add(stop.passed);
+    for k in stop.ids {
         held[k] = true;
     }
     let plan = |k: usize| {

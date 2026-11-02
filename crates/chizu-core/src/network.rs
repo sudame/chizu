@@ -175,12 +175,14 @@ pub enum LaneMode {
     Sidewalk = 1,
 }
 
-/// ノードでの交通の整理。信号は信号を入れるときに足す。
+/// ノードでの交通の整理。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum NodeControl {
     #[default]
     None = 0,
+    /// 固定周期の信号。どの段階にいるかは tick から決まるので、状態は持たない（`movement::signal`）。
+    Signal = 1,
 }
 
 /// 区間の種類。
@@ -692,6 +694,25 @@ impl Network {
         Ok(())
     }
 
+    /// 交差点 `node` に信号を置くか、外す。3 本以上の区間が集まるノードでなければ置けない。
+    /// 信号は経路探索に効かないので、網の版は上げない。
+    pub fn set_signal(&mut self, node: NodeId, on: bool) -> Result<(), DenyReason> {
+        let n = self.nodes.get_mut(node).ok_or(DenyReason::NotJunction)?;
+        if on && n.segments.len() < 3 {
+            return Err(DenyReason::NotJunction);
+        }
+        let control = if on {
+            NodeControl::Signal
+        } else {
+            NodeControl::None
+        };
+        if n.control == control {
+            return Err(DenyReason::SignalUnchanged);
+        }
+        n.control = control;
+        Ok(())
+    }
+
     /// 長方形にかかる道路の区間を消し、つながりのなくなったノードも消す。消した区間の直線を返す。
     /// 高速道路は消さない。消すものがなければ網を変えずにエラーを返す。
     pub fn bulldoze(&mut self, area: TileRect) -> Result<Vec<Line>, DenyReason> {
@@ -718,6 +739,9 @@ impl Network {
             for n in [seg.a, seg.b] {
                 if self.nodes.get(n).is_some_and(|n| n.segments.is_empty()) {
                     self.nodes.remove(n);
+                } else if let Some(n) = self.nodes.get_mut(n).filter(|n| n.segments.len() < 3) {
+                    // 交差点でなくなったノードの信号は外す。
+                    n.control = NodeControl::None;
                 }
             }
         }

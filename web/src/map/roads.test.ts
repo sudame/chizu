@@ -9,6 +9,9 @@ import {
   roadGeometry,
   roadLaneGeometry,
   roadMeshes,
+  SIGNAL_COLOR,
+  signalGeometry,
+  signalLampCenter,
   unsuppliedCount,
   VERTEX_FLOATS,
 } from "./roads.ts";
@@ -182,5 +185,30 @@ describe("miterTrim", () => {
   test("45 度の折れ曲がりは tan(22.5 度) 倍", () => {
     const d = { x: Math.SQRT1_2, y: Math.SQRT1_2 };
     expect(miterTrim(east, d, 0.2)).toBeCloseTo(0.2 * Math.tan(Math.PI / 8));
+  });
+});
+
+describe("信号", () => {
+  test("灯火は腕の側の、入ってくる車線の側に置く", () => {
+    // 東の腕から入る車は西へ進むので、左側通行では南（y の大きい側）の車線を走る
+    const east = signalLampCenter(10, 10, 1, 0);
+    expect(east.x).toBeGreaterThan(10.5);
+    expect(east.y).toBeGreaterThan(10.5);
+    // 北の腕から入る車は南へ進み、東（x の大きい側）の車線を走る
+    const north = signalLampCenter(10, 10, 0, -1);
+    expect(north.y).toBeLessThan(10.5);
+    expect(north.x).toBeGreaterThan(10.5);
+  });
+
+  test("腕ごとに台と灯火の 2 つの四角を、灯火の色で描く", () => {
+    const lights = new Float64Array([4, 5, 1, 0, 0, 4, 5, 0, 1, 2]);
+    const g = signalGeometry(lights);
+    expect(g.vertexCount).toBe(2 * 2 * 6);
+    const data = g.build();
+    const colorAt = (vertex: number) =>
+      Array.from(data.subarray(vertex * VERTEX_FLOATS + 5, vertex * VERTEX_FLOATS + 9));
+    // 1 本めの灯火（7 番めの頂点から）は青、2 本めは赤
+    expect(colorAt(6)).toEqual(Array.from(new Float32Array(SIGNAL_COLOR[0] ?? [])));
+    expect(colorAt(18)).toEqual(Array.from(new Float32Array(SIGNAL_COLOR[2] ?? [])));
   });
 });

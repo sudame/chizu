@@ -71,7 +71,7 @@ impl Street {
     }
 
     fn step(&mut self) -> Vec<TripId> {
-        let ended = self.trips.step(&self.net, &mut self.router);
+        let ended = self.trips.step(&self.net, &mut self.router, Tick::ZERO);
         self.check();
         ended
     }

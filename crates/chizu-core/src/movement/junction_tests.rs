@@ -98,7 +98,7 @@ impl Cars {
             .filter(|(_, t)| car::on_road(t))
             .map(|(id, t)| (id, std::ptr::from_ref(t.route()), t.speed().0))
             .collect();
-        let arrived = self.trips.step(&self.net, &mut self.router);
+        let arrived = self.trips.step(&self.net, &mut self.router, Tick::ZERO);
         for (id, route, v) in before {
             let Some(t) = self.trips.get(id) else {
                 continue;

@@ -36,7 +36,9 @@ export type CommandMessage =
   | { kind: "BuyChunk"; cx: number; cy: number }
   /** 区画の種類ごとの税率（‰）。上限は chizu-core の MAX_TAX_PERMILLE で、中核が検証する。 */
   | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear">; permille: number }
-  | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number };
+  | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number }
+  /** マス (x, y) の交差点に信号を置くか（on が true）、外す。chizu-wasm がマスのノードを引く。 */
+  | { kind: "SetSignal"; x: number; y: number; on: boolean };
 
 /** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
 export type Outcome = "Applied" | "Denied" | "Rejected" | "NotImplemented";
@@ -52,6 +54,8 @@ export const SUPPLY_WATER = 2;
 export const FACILITY_STRIDE = 5;
 /** ノード 1 つの数の個数。chizu-wasm の road_nodes と同じ。 */
 export const NODE_STRIDE = 4;
+/** 信号の腕 1 本の数の個数。chizu-wasm の signal_lights と同じ。 */
+export const SIGNAL_STRIDE = 5;
 
 /** チャンクの 1 辺のマス数。chizu-core の CHUNK_SIDE と同じ。 */
 export const CHUNK_SIDE = 64;
@@ -169,6 +173,11 @@ export type WorkerToMain =
   | { kind: "inspect"; query: InspectQuery; info: number[] }
   /** フィードバックの状態を返せなかった。 */
   | { kind: "feedback-error"; message: string }
+  /**
+   * 信号の腕ごとの灯火。chizu-wasm の signal_lights で、変わったときだけ送る。配列は移譲して送る。
+   * 腕 1 本は [ノードの x, ノードの y, 腕の向きの x, 腕の向きの y, 灯火（0 青、1 黄、2 赤）] である。
+   */
+  | { kind: "signals"; lights: Float64Array }
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
   | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
   /**
@@ -249,6 +258,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.nodes instanceof Float64Array &&
         v.nodes.length % NODE_STRIDE === 0
       );
+    case "signals":
+      return v.lights instanceof Float64Array && v.lights.length % SIGNAL_STRIDE === 0;
     case "buildings":
       return (
         v.buildings instanceof Float64Array &&

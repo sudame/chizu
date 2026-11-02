@@ -7,6 +7,7 @@ use chizu_core::{
     ChunkCoord, Command, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, ZoneKind,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// 中核の列挙と、JSON で文字列にする列挙を、両方向ともすべての値を書いて対応させる。
 macro_rules! mirror_enum {
@@ -104,6 +105,34 @@ enum CommandJson {
     SetSimSpeed {
         speed: u16,
     },
+}
+
+/// `SetSignal` をマス `at` で書いたものを、そのマスのノードの ID で書いた形に直す。ほかのコマンドはそのまま返す。
+/// マスで指せるのは act の入力だけで、記録と出力はノードの ID の形にそろえる。
+pub fn resolve_signal_at(
+    value: &Value,
+    node_at: impl Fn(TilePos) -> Option<NodeId>,
+) -> Result<Value, String> {
+    let (Some("SetSignal"), Some(at)) =
+        (value.get("type").and_then(Value::as_str), value.get("at"))
+    else {
+        return Ok(value.clone());
+    };
+    if value.get("node").is_some() {
+        return Err("SetSignal には at と node のどちらか一方だけを書く".into());
+    }
+    let at: [i64; 2] = serde_json::from_value(at.clone()).map_err(|e| format!("at: {e}"))?;
+    let node = node_at(tile(at)).ok_or_else(|| format!("マス {at:?} にノードがない"))?;
+    let mut out = value.clone();
+    let obj = out
+        .as_object_mut()
+        .expect("type のある値はオブジェクトである");
+    obj.remove("at");
+    obj.insert(
+        "node".into(),
+        serde_json::json!({"index": node.index, "generation": node.generation}),
+    );
+    Ok(out)
 }
 
 fn tile([x, y]: [i64; 2]) -> TilePos {
@@ -250,6 +279,32 @@ mod tests {
                 area: TileRect::from_corners(TilePos::new(1, 1), TilePos::new(3, 3))
             }
         );
+    }
+
+    #[test]
+    fn set_signal_at_a_tile_becomes_the_node_form() {
+        let node_at = |t: TilePos| {
+            (t == TilePos::new(4, -2)).then_some(NodeId {
+                index: 5,
+                generation: 1,
+            })
+        };
+        let at = json!({"type":"SetSignal","at":[4,-2],"on":true});
+        let resolved = resolve_signal_at(&at, node_at).unwrap();
+        assert_eq!(
+            resolved,
+            json!({"type":"SetSignal","node":{"index":5,"generation":1},"on":true})
+        );
+        assert!(parse(&resolved).is_ok());
+        assert!(
+            resolve_signal_at(&json!({"type":"SetSignal","at":[0,0],"on":true}), node_at).is_err()
+        );
+        let both =
+            json!({"type":"SetSignal","at":[4,-2],"node":{"index":5,"generation":1},"on":true});
+        assert!(resolve_signal_at(&both, node_at).is_err());
+        // ほかのコマンドと、ノードで書いた信号はそのまま通す。
+        let road = json!({"type":"BuildRoad","from":[0,1],"to":[5,1],"kind":"Medium"});
+        assert_eq!(resolve_signal_at(&road, node_at).unwrap(), road);
     }
 
     /// すべての種類を JSON にして読み戻すと元に戻る。種類を足したら、ここにも 1 つ足す。
