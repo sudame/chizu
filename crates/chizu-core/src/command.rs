@@ -166,6 +166,13 @@ pub enum Command {
     SetSimSpeed {
         speed: SimSpeed,
     },
+    /// `from` から `to` への直線と同じ 1 歩を通る道路の区間を、区間ごと `kind` の種類に変える。
+    /// 上げるのにも下げるのにも使う。形とノードは変えない。高速道路は変えない。
+    UpgradeRoad {
+        from: TilePos,
+        to: TilePos,
+        kind: RoadKind,
+    },
 }
 
 /// コマンドの値が受け付ける範囲の外にある。
@@ -232,7 +239,9 @@ impl Command {
     /// コマンドが指すマスとチャンクが、すべて [`WORLD_LIMIT`] の範囲の中か。
     fn in_world(&self) -> bool {
         match *self {
-            Command::BuildRoad { from, to, .. } => from.in_world() && to.in_world(),
+            Command::BuildRoad { from, to, .. } | Command::UpgradeRoad { from, to, .. } => {
+                from.in_world() && to.in_world()
+            }
             Command::Bulldoze { area } | Command::PaintZone { area, .. } => area.in_world(),
             Command::PlaceBuilding { at, .. } => at.in_world(),
             Command::BuyChunk { coord } => coord.in_world(),
@@ -271,7 +280,9 @@ impl Command {
                     Err(InvalidCommand::TaxRateTooHigh(permille))
                 }
             }
-            Command::BuildRoad { from, to, .. } => Line::between(from, to).map(|_| ()),
+            Command::BuildRoad { from, to, .. } | Command::UpgradeRoad { from, to, .. } => {
+                Line::between(from, to).map(|_| ())
+            }
             Command::PlaceBuilding { rotation, .. } => {
                 if rotation <= 3 {
                     Ok(())
@@ -380,6 +391,17 @@ mod tests {
             road(0, 0, max + 1, 0),
             Err(InvalidCommand::RoadTooLong { .. })
         ));
+        // 種類を変える直線も、道路を引く直線と同じ決まりで確かめる。
+        let upgrade = |fx, fy, tx, ty| {
+            let (from, to) = (TilePos::new(fx, fy), TilePos::new(tx, ty));
+            let kind = RoadKind::Large;
+            Command::UpgradeRoad { from, to, kind }.validate()
+        };
+        assert_eq!(upgrade(3, 3, -2, -2), Ok(()));
+        assert_eq!(upgrade(1, 2, 1, 2), road(1, 2, 1, 2));
+        assert_eq!(upgrade(0, 0, 2, 1), road(0, 0, 2, 1));
+        assert_eq!(upgrade(0, 0, max + 1, 0), road(0, 0, max + 1, 0));
+        assert_eq!(upgrade(-3, 0, i64::MAX, 0), Err(InvalidCommand::OutOfWorld));
         for (fx, tx) in [(-3, i64::MAX), (i64::MIN, i64::MAX)] {
             assert_eq!(
                 road(fx, 0, tx, 0),

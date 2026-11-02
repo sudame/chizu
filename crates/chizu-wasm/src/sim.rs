@@ -512,6 +512,8 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::NoChunkSlot => "買える土地の枠がない。人口が増えると枠が増える",
         DenyReason::NotJunction => "3 本以上の道路が集まる交差点でない",
         DenyReason::SignalUnchanged => "信号はもうその状態になっている",
+        DenyReason::NoRoadToChange => "種類を変えられる道路がない（高速道路は変えない）",
+        DenyReason::RoadKindUnchanged => "道路はもうその種類になっている",
     }
 }
 

@@ -110,6 +110,13 @@ observe の signals:
 コマンド（type で種類を選ぶ）:
   {"type":"BuildRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
       道路を引く。縦か横か 45 度の斜めの直線だけで、1 マスあたり 250、450、750 かかる。
+      既存の道路に重ねると Denied（Overlap）になる。種類を変えるときは UpgradeRoad を使う。
+  {"type":"UpgradeRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
+      直線と同じ 1 歩を通る既存の道路の区間を、区間ごと kind に変える（上げるのにも下げるのにも使う）。
+      直線の形は BuildRoad と同じ決まりで、直線が区間の一部しか通らなくても、ノードからノードまでの区間全体が変わる。
+      形、ノード、信号、区画、建物はそのままで、走っている車と歩く人は、いまの位置から経路を探し直す。
+      費用は区間ごとの建設費の差額で、上げるときだけかかり、下げても払い戻さない。高速道路は変えない。
+      変える道路がなければ Denied（NoRoadToChange）、どれもすでに kind なら Denied（RoadKindUnchanged）。
   {"type":"Bulldoze","area":[[x,y],[x,y]]}
       範囲の道路、施設、建物を取り壊す。
   {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"Commercial"|"Industrial"|"Office"|null}
@@ -1164,8 +1171,24 @@ mod tests {
 
         // 時間を進めてから、もう一度 act する。
         replay(&mut world, &log, 300);
-        let more = [json!({"type":"BuildRoad","from":[30,10],"to":[30,40],"kind":"Medium"})];
-        act(&mut world, &mut log, &more, false);
+        let more = [
+            json!({"type":"BuildRoad","from":[30,10],"to":[30,40],"kind":"Medium"}),
+            json!({"type":"UpgradeRoad","from":[0,10],"to":[30,10],"kind":"Large"}),
+            json!({"type":"UpgradeRoad","from":[0,10],"to":[30,10],"kind":"Large"}),
+        ];
+        let results = act(&mut world, &mut log, &more, false);
+        let outcomes: Vec<(&str, Option<&str>)> = results
+            .iter()
+            .map(|r| (r["outcome"].as_str().unwrap(), r["reason"].as_str()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("Applied", None),
+                ("Applied", None),
+                ("Denied", Some("RoadKindUnchanged"))
+            ]
+        );
         replay(&mut world, &log, 200);
 
         let log = CommandLog::decode(&log.encode()).unwrap();

@@ -119,6 +119,13 @@ fn scenarios() -> Vec<Scenario> {
             money: None,
         },
         Scenario {
+            name: "road_upgrade",
+            seed: 42,
+            ticks: UPGRADE_TICK + 900,
+            log: road_upgrade(),
+            money: None,
+        },
+        Scenario {
             name: "errand",
             seed: 42,
             ticks: ERRAND_TICKS,
@@ -1446,4 +1453,137 @@ fn driving_golden() {
     assert!(end.trips().lots().any(|(_, l)| l.parked > 0));
     assert_eq!(driving_checkpoints(SEED, TICKS).0, got);
     compare_golden("driving", &got);
+}
+
+/// 通勤のシナリオで、朝の車が走っている通りを `UPGRADE_TICK` に大きい道路へ上げる tick。
+const UPGRADE_TICK: u64 = 2_100;
+
+/// 通勤のシナリオの朝に、車の走る通りを大きい道路に上げ、少しあとに中の道路へ下げる記録。
+/// 下げるときは通りの一部だけをなぞるが、種類は区間ごと変わる。
+fn road_upgrade() -> CommandLog {
+    let mut log = commute();
+    let street = |from: i64, to: i64, kind| Command::UpgradeRoad {
+        from: TilePos::new(from, 0),
+        to: TilePos::new(to, 0),
+        kind,
+    };
+    log.record(Tick(UPGRADE_TICK), street(-40, 100, RoadKind::Large))
+        .unwrap();
+    log.record(Tick(UPGRADE_TICK + 150), street(20, 60, RoadKind::Medium))
+        .unwrap();
+    log
+}
+
+/// 道路の種類を変えるシナリオで、上げると下げるの両方が適用される。
+#[test]
+fn road_upgrade_scenario_applies_both_changes() {
+    let mut world = World::new(42);
+    let stats = replay(&mut world, &road_upgrade(), UPGRADE_TICK + 151);
+    assert_eq!(stats.denied, 0);
+    let net = world.network();
+    let kind_at = |x: i64| {
+        let s = net.segments_through(TilePos::new(x, 0))[0];
+        net.segment(s).unwrap().kind
+    };
+    for x in [-30, 30, 90] {
+        assert_eq!(
+            kind_at(x),
+            chizu_core::SegmentKind::Road(RoadKind::Medium),
+            "{x}"
+        );
+    }
+}
+
+/// 朝の通勤の車が走る通りを大きい道路に上げても、建物と区画が残り、走っていた車が車線の上を進み続ける。
+#[test]
+fn upgrading_a_busy_street_keeps_buildings_and_moving_cars() {
+    let mut world = World::new(42);
+    replay(&mut world, &commute(), UPGRADE_TICK);
+    let buildings: Vec<_> = world
+        .buildings()
+        .iter()
+        .map(|(id, b)| (id, b.area, b.zone, b.level))
+        .collect();
+    assert!(buildings.len() >= 20, "建物が少ない {}", buildings.len());
+    let band = TileRect::from_corners(TilePos::new(-40, -8), TilePos::new(100, 8));
+    let zones = |w: &World| {
+        (band.min.y..=band.max.y)
+            .flat_map(|y| (band.min.x..=band.max.x).map(move |x| TilePos::new(x, y)))
+            .map(|t| w.zone_at(t))
+            .collect::<Vec<_>>()
+    };
+    let zones_before = zones(&world);
+    let on_street = |w: &World| -> Vec<(chizu_core::TripId, SidewalkPos)> {
+        w.trips()
+            .iter()
+            .filter(|(_, t)| t.mode() == LaneMode::Car && t.position().tile.y == 0)
+            .map(|(id, t)| (id, t.position()))
+            .collect()
+    };
+    let cars = on_street(&world);
+    assert!(cars.len() >= 10, "通りを走る車が少ない {}", cars.len());
+
+    let line = chizu_core::Line::between(TilePos::new(-40, 0), TilePos::new(100, 0)).unwrap();
+    let cost = world
+        .network()
+        .plan_road_kind(&line, RoadKind::Large)
+        .unwrap()
+        .cost;
+    let money = world.money();
+    let up = Command::UpgradeRoad {
+        from: line.start,
+        to: line.end(),
+        kind: RoadKind::Large,
+    };
+    assert_eq!(world.apply(&up), chizu_core::ApplyOutcome::Applied);
+    assert_eq!(world.money(), money - cost);
+    // 小 250、大 750 の 1 マスあたりの差額を、通りの 140 マスぶん払う。
+    assert_eq!(cost, Money(500 * 140));
+
+    let after: Vec<_> = world
+        .buildings()
+        .iter()
+        .map(|(id, b)| (id, b.area, b.zone, b.level))
+        .collect();
+    assert_eq!(after, buildings, "建物が変わった");
+    assert_eq!(zones(&world), zones_before, "区画が変わった");
+    // 通りに面した建物の出入口は、上げた道路の歩道に付け直してある。
+    let net = world.network();
+    for (_, b) in world.buildings().iter() {
+        let seg = net
+            .segment(b.entrance.segment)
+            .expect("出入口が消えた区間を指す");
+        if b.front.y.abs() <= 6 {
+            assert_eq!(seg.kind, chizu_core::SegmentKind::Road(RoadKind::Large));
+        }
+    }
+
+    // 上げたあとも、どの車もいまのリンクの車線の上にいて、通りにいた車はどれも動くか着く。
+    let mut moved: std::collections::BTreeMap<_, _> =
+        cars.iter().map(|(id, pos)| (*id, (*pos, false))).collect();
+    for _ in 0..200 {
+        replay(&mut world, &commute(), 1);
+        let net = world.network();
+        for (id, t) in world.trips().iter() {
+            let lane = net.lane(t.lane()).expect("車が消えた車線にいる");
+            let link = t.link();
+            assert_eq!(
+                (lane.segment, lane.dir, lane.mode),
+                (link.segment, link.dir, t.mode()),
+                "{id:?}"
+            );
+        }
+        for (id, (pos, done)) in moved.iter_mut() {
+            let now = world.trips().get(*id).map(|t| (t.mode(), t.position()));
+            if now != Some((LaneMode::Car, *pos)) {
+                *done = true;
+            }
+        }
+    }
+    let stuck: Vec<_> = moved
+        .iter()
+        .filter(|(_, (_, d))| !d)
+        .map(|(id, _)| id)
+        .collect();
+    assert!(stuck.is_empty(), "止まったままの車 {stuck:?}");
 }

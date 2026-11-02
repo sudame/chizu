@@ -28,6 +28,8 @@ pub mod signal;
 mod signal_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod upgrade_tests;
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

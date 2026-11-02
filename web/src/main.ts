@@ -58,6 +58,8 @@ import {
   signalCommand,
   type Tile,
   type Tool,
+  upgradePlan,
+  upgradeRoadCommand,
 } from "./map/tools.ts";
 import { parseOverview, renderOverview } from "./overview.ts";
 import {
@@ -305,6 +307,8 @@ function startDrawing(reader: SnapshotReader): void {
 const CLICK_SLOP_PX = 4;
 const PREVIEW_OK: Color = [0.3, 0.6, 1, 0.7];
 const PREVIEW_BAD: Color = [1, 0.3, 0.3, 0.7];
+// 種類を変える道具でなぞった直線。変わる区間の色より薄くする
+const PREVIEW_LINE: Color = [1, 1, 1, 0.3];
 const BULLDOZE_AREA: Color = [1, 0.3, 0.3, 0.35];
 // 区画を塗る長方形の色。renderer.ts の区画の色に合わせる
 const ZONE_AREA: Record<ZoneName, Color> = {
@@ -327,6 +331,8 @@ let probeSent = "";
 let money = 0;
 let roadStart: Tile | null = null;
 let roadIndex: RoadIndex = EMPTY_ROAD_INDEX;
+// 最後に届いた道路の区間（chizu-wasm の road_segments）。種類を変える道具の見積もりに使う
+let roadSegments: ArrayLike<number> = [];
 // Alt を押しているあいだは、道路を近くの道路に吸い付けない
 let noSnap = false;
 // プレビューで最後に見せた道路。押したときは、これと同じ道路を送る
@@ -356,7 +362,31 @@ function updatePreview(): void {
   let geometry: Geometry | null = null;
   let info = "";
   let infoText = "";
-  if (tool.kind === "road" && cursor !== null) {
+  if (tool.kind === "upgrade" && cursor !== null) {
+    const { from, to } = roadEndpoints(roadIndex, roadStart, cursor, noSnap);
+    shownRoad = { start: roadStart, cursor, noSnap, from, to };
+    geometry = new Geometry(from);
+    if (roadStart === null) {
+      info = "変えたい道路の端を押し、なぞってもう一度押す";
+    } else if (roadCosts !== null) {
+      // 変わるのは直線が通る区間の全体なので、区間ごと塗る
+      const plan = upgradePlan(roadSegments, roadCosts, tool.road, from, to);
+      const short = plan.cost > 0 && plan.cost > money;
+      const color = short || plan.segments.length === 0 ? PREVIEW_BAD : PREVIEW_OK;
+      roadFootprint(geometry, from, to, PREVIEW_LINE, MIN_PX);
+      for (const s of plan.segments) {
+        roadFootprint(geometry, s.from, s.to, color, MIN_PX);
+      }
+      info =
+        plan.roads === 0
+          ? "変えられる道路がない（高速道路は変えない）"
+          : plan.segments.length === 0
+            ? "道路はもうその種類になっている"
+            : `区間 ${plan.segments.length} 本・費用 ${plan.cost.toLocaleString("ja-JP")}`;
+      mapCanvas.dataset.previewCost = String(plan.cost);
+    }
+    geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK, MIN_PX);
+  } else if (tool.kind === "road" && cursor !== null) {
     const { from, to } = roadEndpoints(roadIndex, roadStart, cursor, noSnap);
     shownRoad = { start: roadStart, cursor, noSnap, from, to };
     geometry = new Geometry(from);
@@ -491,13 +521,14 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
 }
 
 function clickTile(at: Tile): void {
-  if (tool.kind === "road") {
+  if (tool.kind === "road" || tool.kind === "upgrade") {
     if (roadStart === null) {
       roadStart = roadAt(at).from;
     } else {
       const end = roadAt(at).to;
       if (end.x !== roadStart.x || end.y !== roadStart.y) {
-        sendCommand(buildRoadCommand(tool.road, roadStart, end));
+        const make = tool.kind === "road" ? buildRoadCommand : upgradeRoadCommand;
+        sendCommand(make(tool.road, roadStart, end));
         // CS2 と同じく、引いた終点から続けて引ける
         roadStart = end;
       }
@@ -665,26 +696,30 @@ for (const button of toolButtons) {
   button.addEventListener("click", () => {
     const name = button.dataset.tool ?? "none";
     const road = name.startsWith("road-") ? (name.slice(5) as RoadKindName) : null;
+    const upgrade = name.startsWith("upgrade-") ? (name.slice(8) as RoadKindName) : null;
     const zone = name.startsWith("zone-") ? (name.slice(5) as ZoneName) : null;
     const service = name.startsWith("service-") ? (name.slice(8) as ServiceName) : null;
     const next: Tool =
       road !== null
         ? { kind: "road", road }
-        : zone !== null
-          ? { kind: "zone", zone }
-          : service !== null
-            ? { kind: "service", service }
-            : name === "signal-on" || name === "signal-off"
-              ? { kind: "signal", on: name === "signal-on" }
-              : name === "bulldoze" || name === "buy"
-                ? { kind: name }
-                : { kind: "none" };
+        : upgrade !== null
+          ? { kind: "upgrade", road: upgrade }
+          : zone !== null
+            ? { kind: "zone", zone }
+            : service !== null
+              ? { kind: "service", service }
+              : name === "signal-on" || name === "signal-off"
+                ? { kind: "signal", on: name === "signal-on" }
+                : name === "bulldoze" || name === "buy"
+                  ? { kind: name }
+                  : { kind: "none" };
     selectTool(next, button);
   });
 }
 
 const DONE: Record<CommandMessage["kind"], string> = {
   BuildRoad: "道路を引いた",
+  UpgradeRoad: "道路の種類を変えた",
   Bulldoze: "取り壊した",
   BuyChunk: "土地を買った",
   PaintZone: "区画を塗った",
@@ -742,6 +777,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "roads") {
     roads = roadMeshes(message.segments, message.nodes);
     roadIndex = buildRoadIndex(message.segments, message.nodes);
+    roadSegments = message.segments;
     updatePreview();
     renderer?.roads.setRoads(roads);
     // test:wasm が読む
