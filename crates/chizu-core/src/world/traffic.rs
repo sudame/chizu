@@ -84,7 +84,8 @@ impl CarSample {
         self.0.values().filter(|(_, w)| *w).count()
     }
 
-    /// 車線の上で、`earlier` から同じ場所（ずれは数 mm まで）にいる車の台数。路肩で待つ車は数えない。
+    /// 道路の上で、`earlier` から同じ場所（ずれは数 mm まで）にいる車の台数。建物の前の路肩で待つ車は数えない。
+    /// 道路の種類を下げて車線を外れ、車線に戻るのを待つ車は、道路の上で止まっているので数える。
     pub fn stopped_on_road_since(&self, earlier: &CarSample) -> usize {
         self.unmoved(earlier).filter(|(_, (_, w))| !*w).count()
     }

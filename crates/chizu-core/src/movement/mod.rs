@@ -81,6 +81,9 @@ pub struct Trip {
     speed: MmPerTick,
     /// 出発の位置の車線に空きがなく、車線の上に出るのを待っている車か。
     waiting: bool,
+    /// `waiting` の車のうち、道路の種類が変わって走っていた車線がなくなり、区間の途中で車線に戻るのを
+    /// 待っている車か。建物の前から出発を待つ車とは分けて数える。
+    rejoining: bool,
     /// 車なら、交差点の手前で、ほかの車や横断歩道の人に譲って待った tick 数。ノードを抜けたら 0 に戻す。
     /// 歩く人なら、車道を渡り始めるのを続けて待った tick 数。歩き出したら 0 に戻す。
     waited: u32,
@@ -127,7 +130,7 @@ impl Trip {
 
     /// 路肩で、車線に出る順番を待っている車か。
     pub fn waiting_to_depart(&self) -> bool {
-        self.mode == LaneMode::Car && self.waiting
+        self.mode == LaneMode::Car && self.waiting && !self.rejoining
     }
 
     pub fn speed(&self) -> MmPerTick {
@@ -814,10 +817,11 @@ impl Trips {
                     continue;
                 };
                 let old = self.get(id).expect("探し直す主体がない");
-                let (departed, speed, waiting, waited, yielded, stalled, then) = (
+                let (departed, speed, waiting, rejoining, waited, yielded, stalled, then) = (
                     old.departed,
                     old.speed,
                     old.waiting,
+                    old.rejoining,
                     old.waited,
                     old.yielded,
                     old.stalled,
@@ -837,8 +841,15 @@ impl Trips {
                 };
                 let old_far = old.walk.far;
                 let mut t = make_trip(net, route, ends, dest, departed, jay);
-                (t.speed, t.waiting, t.waited, t.yielded, t.stalled, t.then) =
-                    (speed, waiting, waited, yielded, stalled, then);
+                (
+                    t.speed,
+                    t.waiting,
+                    t.rejoining,
+                    t.waited,
+                    t.yielded,
+                    t.stalled,
+                    t.then,
+                ) = (speed, waiting, rejoining, waited, yielded, stalled, then);
                 // いまの位置は、いまのリンクと同じ向きのリンクで表してあるので、そのリンクから
                 // 向きを変えたなら、側も入れ替わる。
                 t.walk.far ^= old_far;
@@ -911,6 +922,7 @@ fn make_trip(
         lane: net.link_lanes(first).next().expect("リンクに車線がない"),
         speed: MmPerTick::ZERO,
         waiting: false,
+        rejoining: false,
         waited: 0,
         yielded: 0,
         stalled: 0,
@@ -938,6 +950,7 @@ impl StateHash for Trip {
         h.write(&self.lane);
         h.write(&self.speed);
         h.write(&self.waiting);
+        h.write(&self.rejoining);
         h.write(&self.waited);
         h.write(&self.yielded);
         h.write(&self.stalled);

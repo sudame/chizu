@@ -61,7 +61,8 @@ observe の growth（新築が電気か水道の余裕で止まっている間�
 observe の人と車の欄（原因が交通にあるかを見分けるためのもの）:
   citizenPlaces  住民のいまの居場所ごとの人数。atHome 家、atWork 職場か学校、atShop 帰りに寄った店、
                  walking 歩いて移動中（車を降りて歩く区切りを含む）、driving 車で移動中、homeless 家のない世帯の住民。
-  traffic.cars   車の台数。total 全部、stopped 車線の上で、直前の 100 tick（ゲーム内の約 20 分）のあいだ同じ位置にいる車、
+  traffic.cars   車の台数。total 全部、stopped 道路の上で、直前の 100 tick（ゲーム内の約 20 分）のあいだ同じ位置にいる車
+                 （道路の種類を下げて車線を外れ、車線に戻るのを待つ車も含む）、
                  waitingAtCurb 建物の前の路肩で、車線に出る順番を待っている車、moving それ以外。
                  stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。waitingAtCurb が多いのは、
                  建物の前の車線が埋まって出られない車が多いということである。

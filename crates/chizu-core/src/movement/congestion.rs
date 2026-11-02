@@ -82,19 +82,21 @@ pub(super) fn capacity_cars(net: &Network, link: LinkId) -> u64 {
 }
 
 /// この速さ（mm/tick）より遅い車を、車線に並んでいる車とみなす。時速 7.2km である。
-const QUEUED_BELOW: i32 = 2_000;
+pub(super) const QUEUED_BELOW: i32 = 2_000;
 
 /// 並んでいる車 1 台が、1 車線のリンクを抜けるまでに足す遅れ（ms）。
 /// 交差する流れのある交差点や信号では、車線の先頭から 4 tick に 1 台ほど抜けるので、その見積もりにする。
-const QUEUE_MS_PER_CAR: u64 = 4_000;
+pub(super) const QUEUE_MS_PER_CAR: u64 = 4_000;
 
 impl Trips {
     /// 車のリンクごとの、並んでいる車から見積もった遅れ。並んでいる台数 × [`QUEUE_MS_PER_CAR`] を、
-    /// リンクの車線の数で割る。出発を待つ車はまだ車線にいないので数えない。
+    /// リンクの車線の数で割る。建物の前から出発を待つ車はまだ車線にいないので数えないが、道路の種類が
+    /// 変わって車線に戻るのを待つ車は、区間の途中で止まっているので数える。
     pub fn queue_delays(&self, net: &Network) -> Delays {
         let mut queued = BTreeMap::<LinkId, u64>::new();
         for t in self.rows.iter().flatten() {
-            if t.mode != LaneMode::Car || t.waiting || t.speed.0 >= QUEUED_BELOW {
+            let parked = t.waiting && !t.rejoining;
+            if t.mode != LaneMode::Car || parked || t.speed.0 >= QUEUED_BELOW {
                 continue;
             }
             let Some(lane) = net.lane(t.lane) else {

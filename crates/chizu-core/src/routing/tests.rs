@@ -667,3 +667,57 @@ fn surely_connected_links_always_have_a_route() {
     assert!(router.surely_connected(LaneMode::Car, near, link(&n, (4, 4), (0, 4), LaneMode::Car)));
     assert!(!router.surely_connected(LaneMode::Car, near, far));
 }
+
+/// 外の世界へ出る高速道路と、行き止まりと、離れた道路のある網。外の世界のノードでは折り返せないので、
+/// 出ていく高速道路のリンクは抜け出せない行き止まりになり、入ってくるリンクには戻れない。
+fn highway_city() -> Network {
+    let mut n = Network::new();
+    n.add_highway(TilePos::new(8, 8), TilePos::new(8, 40));
+    for i in 0..=2 {
+        road(&mut n, (0, i * 4), (8, i * 4), RoadKind::Small);
+        road(&mut n, (i * 4, 0), (i * 4, 8), RoadKind::Medium);
+    }
+    road(&mut n, (0, 8), (-6, 8), RoadKind::Small);
+    road(&mut n, (100, 100), (110, 100), RoadKind::Small);
+    n
+}
+
+#[test]
+fn surely_connected_agrees_with_the_search_around_a_highway_exit() {
+    let n = highway_city();
+    let router = AstarRouter::new(&n);
+    let mut s = Scratch::default();
+    for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+        let g = router.graph(mode);
+        let links: Vec<LinkId> = n.links().filter(|l| l.mode == mode).collect();
+        let (mut sure, mut found, mut missing) = (0, 0, 0);
+        for a in &links {
+            for b in &links {
+                let route = if a == b {
+                    // 同じリンクへ戻る輪があるか。次のリンクのどれかから戻れればよい。
+                    let v = g.vertex(*a).unwrap();
+                    g.edges(v)
+                        .iter()
+                        .any(|e| astar(g, g.link(e.to), *a, &mut s).is_some())
+                } else {
+                    astar(g, *a, *b, &mut s).is_some()
+                };
+                let surely = router.surely_connected(mode, *a, *b);
+                assert!(!surely || route, "{mode:?} {a:?} から {b:?} へは経路がない");
+                sure += usize::from(surely);
+                found += usize::from(route);
+                missing += usize::from(!route);
+            }
+        }
+        assert!(sure > 0 && missing > 0, "{mode:?} {sure} {missing}");
+        if mode == LaneMode::Car {
+            // 高速道路へ出ていくリンクには行けるが、成分が違うので網の形だけでは言えない組がある。
+            assert!(found > sure, "{found} {sure}");
+        }
+    }
+    // 外の世界へ出ていく高速道路のリンクからは、どこへも行けない。
+    let out = link(&n, (8, 8), (8, 40), LaneMode::Car);
+    let back = link(&n, (8, 40), (8, 8), LaneMode::Car);
+    assert!(!router.surely_connected(LaneMode::Car, out, back));
+    assert!(astar(router.graph(LaneMode::Car), out, back, &mut s).is_none());
+}
