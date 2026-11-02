@@ -227,10 +227,21 @@ describe("道路の見た目", () => {
   });
 
   test("段ごとに描くものを替え、段の境目の幅でだけ両方を描く", () => {
-    const drawn = (zoom: number) => new Map(roadDrawOrder(zoom).filter(([, alpha]) => alpha > 0));
-    // 引き：線の道路だけ。小の道路は薄い。建物は街区の面（シェーダー）で塗るので、まとまりも描かない
+    const drawn = (zoom: number) =>
+      new Map(
+        roadDrawOrder(zoom)
+          .filter(([, alpha]) => alpha > 0)
+          .map(([name, alpha]) => [name, alpha]),
+      );
+    const fadeOf = (zoom: number, name: string) =>
+      roadDrawOrder(zoom).find(([n]) => n === name)?.[2];
+    // 引き：線の道路だけ。小の道路は不透明のまま、色を地面に寄せて薄くする。
+    // 建物は街区の面（シェーダー）で塗るので、まとまりも描かない
     const hiki = drawn(2);
-    expect(hiki.get("minor")).toBeCloseTo(0.55);
+    expect(hiki.get("minor")).toBe(1);
+    expect(fadeOf(2, "minor")).toBeCloseTo(0.55);
+    expect(fadeOf(8, "minor")).toBe(1);
+    expect(fadeOf(2, "major")).toBe(1);
     expect(hiki.get("major")).toBe(1);
     for (const name of ["clusters", "bodies", "details", "lanes", "markings", "signals", "marks"]) {
       expect(hiki.has(name as never)).toBe(false);

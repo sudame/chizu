@@ -552,8 +552,10 @@ try {
       },
       { x, y },
     );
-  // 画素の色（0〜255）が、色の表の値（`#rrggbb`）に近いか
+  // 画素の色（0〜255）が、色の表の値（`#rrggbb`）に近いか。キャンバスのアルファが 1 を切ると、
+  // ページの背景と混ざって白く飛ぶので、アルファが 255 のままであることも確かめる
   const near = (c: number[], code: string, tolerance = 6) =>
+    c[3] === 255 &&
     [1, 3, 5].every(
       (at, i) => Math.abs((c[i] ?? 0) - Number.parseInt(code.slice(at, at + 2), 16)) <= tolerance,
     );
@@ -653,11 +655,10 @@ try {
   // カーソルのある道路には始点の印が重なるので、道路から離れたところへ動かしてから色を読む
   await page.mouse.move(cx, cy - 120, { steps: 2 });
   await page.waitForTimeout(100);
-  // 小さい道路は白の塗りに縁（#c8c2b6）、地面は淡い地面の色（#f4f2ec）で、白とは青の強さで見分けられる。
-  // 引きの段では、小さい道路の縁と塗りを薄く重ねる（stages.ts）。ノードのマスは四角を重ねるので白に近い
-  const minor = stageWeights(zoom).minorRoad;
-  const minorRoadHex = mixHex(mixHex(GROUND_HEX, "#c8c2b6", minor), "#ffffff", minor);
-  const isRoad = (c: number[]) => near(c, minorRoadHex, 4) || near(c, "#ffffff", 4);
+  // 小さい道路は白の塗り、地面は淡い地面の色（#f4f2ec）で、白とは青の強さで見分けられる。
+  // 引きの段では、小さい道路の色を地面の色に寄せて薄くする（stages.ts）。区間の途中もノードも同じ色になる
+  const minorRoadHex = mixHex(GROUND_HEX, "#ffffff", stageWeights(zoom).minorRoad);
+  const isRoad = (c: number[]) => near(c, minorRoadHex, 3);
   const isGround = (c: number[]) => near(c, GROUND_HEX, 4);
   const colorAt = async (x: number, y: number) => {
     const p = tileCenter(x, y);

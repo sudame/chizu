@@ -19,7 +19,7 @@ import {
   roadHalfWidth,
   SIDEWALK_WIDTH,
 } from "./lanes.ts";
-import { type Color, hex } from "./palette.ts";
+import { type Color, GROUND_COLOR, hex } from "./palette.ts";
 import { stageWeights } from "./stages.ts";
 
 export type { Color };
@@ -35,7 +35,11 @@ export const THIN_PX = 0.5;
 // 半分の太さは、世界の単位の a_half を画面に直した値と、画面のピクセルの下限 a_min の大きいほうに、
 // 画面のピクセルの a_extra を足した値にする。a_dash が正なら、a_along（世界の距離）に沿って、
 // 画面で a_dash ピクセルの周期の破線にする。
-// u_alpha は、拡大したときだけ描く路面の線を、縮尺に合わせて薄くするのに使う
+// u_alpha は、拡大したときだけ描く路面の線を、縮尺に合わせて薄くするのに使う。
+// u_fade は、色を地面の色から本来の色へ寄せる割合で、引いたときの小の道路を薄く描くのに使う。
+// 不透明のまま色を薄めるので、帯とノードの四角が重なる所だけ濃くなることがない
+const glslVec3 = ([r, g, b]: readonly number[]) => `vec3(${r}, ${g}, ${b})`;
+
 const VERTEX = `#version 300 es
 in vec2 a_pos;
 in vec2 a_normal;
@@ -49,6 +53,7 @@ uniform vec2 u_offset;
 uniform float u_zoom;
 uniform vec2 u_viewport;
 uniform float u_alpha;
+uniform float u_fade;
 out vec4 v_color;
 out float v_distance;
 flat out float v_dash;
@@ -56,7 +61,7 @@ void main() {
   float half_px = max(a_half * u_zoom, a_min) + a_extra;
   vec2 p = (a_pos * u_zoom + u_offset + a_normal * half_px) / (u_viewport * 0.5);
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
-  v_color = vec4(a_color.rgb, a_color.a * u_alpha);
+  v_color = vec4(mix(${glslVec3(GROUND_COLOR)}, a_color.rgb, u_fade), a_color.a * u_alpha);
   v_distance = a_along * u_zoom;
   v_dash = a_dash;
 }`;
@@ -1176,35 +1181,40 @@ const MESH_NAMES = [
 export type MeshName = (typeof MESH_NAMES)[number];
 
 /**
- * 倍率 zoom で、下から順に描くメッシュとその濃さ。濃さが 0 のメッシュは描かない。
- * 段の境目の幅（stages.ts）のあいだだけ、前の段と次の段の両方を描く。
+ * 倍率 zoom で、下から順に描くメッシュと、その不透明度と、地面の色から本来の色へ寄せる割合。
+ * 不透明度が 0 のメッシュは描かない。段の境目の幅（stages.ts）のあいだだけ、前の段と次の段の両方を描く。
  */
-export function roadDrawOrder(zoom: number): [MeshName, number][] {
+export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
   const w = stageWeights(zoom);
   // 線で描く道路は、寄りの描き方がそろうまでその下に残す。車線ごとの描き方は、
   // 歩道と植え込みでマスいっぱいを覆うので、上に重ねて濃くしていけば線が見えなくなる
   const lines = w.detail < 1 ? 1 : 0;
-  return [
+  const order: [MeshName, number][] = [
     ["clusters", w.clusters],
     ["details", w.detail],
     ["facilities", 1],
     // 寄りに移るあいだは、本体を濃いまま描き、縁と影と隙間だけを濃くしていく
     ["bodies", w.detail > 0 ? 1 : 0],
     ["marks", w.marks],
-    ["minor", lines * w.minorRoad],
+    ["minor", lines],
     ["major", lines],
     ["lanes", w.detail],
     ["markings", w.detail],
     ["signals", w.detail],
     ["preview", 1],
   ];
+  // 小の道路は不透明に描き、色を地面の色に寄せて薄くする
+  return order.map(([name, alpha]) => [name, alpha, name === "minor" ? w.minorRoad : 1]);
 }
 
 // 道路と建物は、1 つ変わるたびに全体を受け取り直して頂点を作り直す。重くなったらチャンクごとのメッシュに分ける。
 export class RoadLayer {
   readonly #gl: WebGL2RenderingContext;
   readonly #program: WebGLProgram;
-  readonly #u: Record<"offset" | "zoom" | "viewport" | "alpha", WebGLUniformLocation | null>;
+  readonly #u: Record<
+    "offset" | "zoom" | "viewport" | "alpha" | "fade",
+    WebGLUniformLocation | null
+  >;
   readonly #meshes: Record<MeshName, Mesh>;
 
   constructor(
@@ -1218,6 +1228,7 @@ export class RoadLayer {
       zoom: gl.getUniformLocation(this.#program, "u_zoom"),
       viewport: gl.getUniformLocation(this.#program, "u_viewport"),
       alpha: gl.getUniformLocation(this.#program, "u_alpha"),
+      fade: gl.getUniformLocation(this.#program, "u_fade"),
     };
     this.#meshes = Object.fromEntries(MESH_NAMES.map((name) => [name, this.#mesh()])) as Record<
       MeshName,
@@ -1289,13 +1300,15 @@ export class RoadLayer {
     gl.uniform1f(this.#u.zoom, camera.zoom);
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
-    for (const [name, alpha] of roadDrawOrder(camera.zoom)) {
+    // 色だけを重ね、フレームバッファのアルファは 1 のまま保つ（キャンバスがページの背景と混ざって白く飛ばないように）
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+    for (const [name, alpha, fade] of roadDrawOrder(camera.zoom)) {
       const mesh = this.#meshes[name];
       if (mesh.count === 0 || alpha === 0) {
         continue;
       }
       gl.uniform1f(this.#u.alpha, alpha);
+      gl.uniform1f(this.#u.fade, fade);
       gl.uniform2f(
         this.#u.offset,
         (mesh.origin.x - camera.x) * camera.zoom,
