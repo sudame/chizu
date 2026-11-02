@@ -605,6 +605,9 @@ fn observe_shows_power_plants_cut_off_from_the_main_network() {
     assert_eq!(others["demand"], 0, "{power}");
     assert!(others["headroom"].as_i64().unwrap() > 0, "{power}");
     let main = &power["main"];
+    // 主の網は足りない。合計では余って見えるが、孤立した発電所の分は主の網に届かない。
+    assert!(main["headroom"].as_i64().unwrap() < 0, "{power}");
+    assert!(power["capacity"].as_i64().unwrap() > power["demand"].as_i64().unwrap());
     assert_eq!(
         main["headroom"].as_i64().unwrap(),
         main["capacity"].as_i64().unwrap() - main["demand"].as_i64().unwrap()

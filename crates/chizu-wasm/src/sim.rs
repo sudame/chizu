@@ -430,7 +430,7 @@ impl Sim {
         out
     }
 
-    /// 孤立した施設（施設はあるが、その網に建物がなく、建物のある網につながっていない施設）を、
+    /// 孤立した施設（街の道路網につながっていない施設。定義は `chizu_core::service::isolated_facilities`）を、
     /// 施設ごとに `[道路に面したマスの x, y, 種類]` で並べる。種類は `ServiceKind` の値である。
     /// 余りの数や建たない理由とは別の読み取りで、状態は変えない。
     pub fn isolated_facilities(&self) -> Vec<f64> {
@@ -830,14 +830,13 @@ mod tests {
             zone: Some(ZoneKind::Residential),
         })
         .unwrap();
-        for (kind, x) in [(ServiceKind::PowerPlant, 14), (ServiceKind::WaterPump, 24)] {
-            sim.submit(Command::PlaceBuilding {
-                kind,
-                at: TilePos::new(x, 9),
-                rotation: 2,
-            })
-            .unwrap();
-        }
+        // 主の網には浄水場だけを置くので、電気が足りない
+        sim.submit(Command::PlaceBuilding {
+            kind: ServiceKind::WaterPump,
+            at: TilePos::new(24, 9),
+            rotation: 2,
+        })
+        .unwrap();
         // 離れた通りに、建物のない発電所を置く
         sim.submit(road((10, 40), (30, 40))).unwrap();
         sim.submit(Command::PlaceBuilding {
@@ -850,12 +849,12 @@ mod tests {
         let stats = sim.city_stats();
         assert!(stats[9] > 0.0, "{stats:?}");
         let power = ServiceKind::PowerPlant.capacity() as f64;
-        // 主の網の電気は 1 基ぶん、合計は 2 基ぶん。ほかの網は電気だけが 1 つある。
-        assert_eq!(stats[7], 2.0 * power, "{stats:?}");
+        // 主の網の電気は 0、合計は 1 基ぶん。ほかの網は電気だけが 1 つある。
+        assert_eq!(stats[7], power, "{stats:?}");
         assert_eq!(
             stats[16..21],
             [
-                power,
+                0.0,
                 ServiceKind::WaterPump.capacity() as f64,
                 stats[9],
                 1.0,

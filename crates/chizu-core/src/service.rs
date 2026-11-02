@@ -162,6 +162,12 @@ impl Balance {
     pub fn enough(self) -> bool {
         self.capacity > 0 && self.capacity >= self.demand
     }
+
+    /// 余りが負か、供給量の 1 割未満か。需要があって供給量が 0 のときも真。画面の前もっての知らせと同じ基準である。
+    pub fn is_tight(self) -> bool {
+        self.capacity <= self.demand && self.demand > 0
+            || self.capacity > self.demand && (self.capacity - self.demand) * 10 < self.capacity
+    }
 }
 
 /// 道路網の連結成分ごとの、電気と水道の釣り合い。
@@ -191,7 +197,7 @@ impl SupplyBalance {
     }
 }
 
-/// 施設はあるが、その網に建物（需要）がなく、街の道路網につながっていない施設。
+/// 街の道路網につながっていない施設（定義は [`isolated_facilities`]）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IsolatedFacility {
     pub kind: ServiceKind,
@@ -201,8 +207,13 @@ pub struct IsolatedFacility {
 
 /// 孤立した施設を、施設の並びの順に返す。状態は変えない。
 ///
-/// 施設のある網に同じ資源の需要が 0 で、別の網には需要がある（街のどこかに建物がある）とき、孤立している。
-/// 街に建物がまだないあいだは、どの施設も孤立とは数えない。
+/// 次のどちらかに当たる施設である。
+/// - 入口がない（面した道路が消えた）。
+/// - 主の網ではない網にあり、その網の余りが正で、主の網の余りが少ないか足りない
+///   （余りが供給量の 1 割未満か負、供給量 0 で需要があるときも足りない）。
+///
+/// 主の網に十分な余りがあるあいだは、ほかの網に施設があっても数えない。別の町を作る遊び方で、
+/// 誤った知らせを出さないためである。切れた道路に区画を塗って家が建っても、主の網が足りないあいだは数える。
 pub fn isolated_facilities(
     network: &Network,
     facilities: &[Facility],
@@ -218,9 +229,13 @@ pub fn isolated_facilities(
                 ServiceKind::WaterPump => 1,
             };
             let Some(&c) = f.entrance.and_then(|e| of_segment.get(&e.segment)) else {
+                return true;
+            };
+            let Some(main) = balance.main_network(slot) else {
                 return false;
             };
-            balance.components[c][slot].demand == 0 && balance.main_network(slot).is_some()
+            let (here, top) = (balance.components[c][slot], balance.components[main][slot]);
+            c != main && here.capacity > here.demand && top.is_tight()
         })
         .map(|f| IsolatedFacility {
             kind: f.kind,

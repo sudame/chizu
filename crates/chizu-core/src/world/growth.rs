@@ -152,8 +152,8 @@ impl World {
         self.growth_report().1
     }
 
-    /// 施設はあるが、その網に建物がなく、街の道路網につながっていない施設を、施設の並びの順に返す。状態は変えない。
-    /// 孤立した施設が供給する先はないので、余りに数えてはならない。街にまだ建物がなければ空である。
+    /// 街の道路網につながっていない施設を、施設の並びの順に返す。状態は変えない。定義は [`isolated_facilities`]。
+    /// 孤立した施設は主の網に届かないので、余りに数えてはならない。
     pub fn isolated_facilities(&self) -> Vec<IsolatedFacility> {
         isolated_facilities(&self.network, &self.facilities, &self.buildings)
     }
@@ -1417,32 +1417,100 @@ mod tests {
         assert!(!half[0].no_power && half[0].no_water, "{half:?}");
     }
 
-    /// 建物のない別の通りに置いた施設は孤立として数えられ、建物が建てば外れる。状態は変わらない。
-    #[test]
-    fn isolated_facilities_are_those_on_networks_without_buildings() {
-        let mut w = served_street();
-        // 街に建物がないあいだは、孤立とは数えない。
-        assert!(w.isolated_facilities().is_empty());
-        run(&mut w, 40 * GROWTH_INTERVAL);
-        assert!(!w.buildings().is_empty());
-        assert!(w.isolated_facilities().is_empty());
-        let end = crate::world::highway_line(w.seed()).start.x.max(40);
-        let (x0, x1) = (end + 2, end + 30);
-        street(&mut w, x0, x1);
+    /// 主の網の電気だけが足りない街。小さな区画を塗った通りに、浄水場だけを置く。
+    fn short_of_power() -> World {
+        let mut w = zoned_street();
         assert_eq!(
-            place(&mut w, ServiceKind::PowerPlant, (x0 + 5, 9), 2),
+            place(&mut w, ServiceKind::WaterPump, (30, 9), 2),
             ApplyOutcome::Applied
         );
+        run(&mut w, 20 * GROWTH_INTERVAL);
+        assert!(!w.buildings().is_empty());
+        w
+    }
+
+    /// 主の網より東の、つながっていない通りを引き、そこに発電所を置く。
+    fn cut_off_plant(w: &mut World) -> (i64, i64) {
+        let end = crate::world::highway_line(w.seed()).start.x.max(40);
+        let (x0, x1) = (end + 2, end + 30);
+        street(w, x0, x1);
+        assert_eq!(
+            place(w, ServiceKind::PowerPlant, (x0 + 5, 9), 2),
+            ApplyOutcome::Applied
+        );
+        (x0, x1)
+    }
+
+    /// 主の網が足りないあいだ、切れた通りの発電所は孤立として数えられる。通りに区画を塗って家が建っても残る。
+    /// 状態は変わらない。
+    #[test]
+    fn isolated_facilities_stay_while_the_main_network_is_short() {
+        let mut w = short_of_power();
+        assert!(w.isolated_facilities().is_empty());
+        let (x0, x1) = cut_off_plant(&mut w);
         let hash = crate::state_hash_of(&w);
         let isolated = w.isolated_facilities();
         assert_eq!(isolated.len(), 1, "{isolated:?}");
         assert_eq!(isolated[0].kind, ServiceKind::PowerPlant);
         assert_eq!(isolated[0].front.x, x0 + 5);
         assert_eq!(crate::state_hash_of(&w), hash);
-        // その網にも建物が建てば、もう孤立していない。
-        paint(&mut w, (x0, 4), (x1, 9), ZoneKind::Residential);
+        // 切れた通りに少し塗って家が建っても、主の網が足りないあいだは知らせが残る。
+        paint(&mut w, (x0, 9), (x0 + 3, 9), ZoneKind::Residential);
         run(&mut w, 40 * GROWTH_INTERVAL);
+        let b = crate::service::supply_balance(w.network(), w.facilities(), w.buildings());
+        assert!(
+            b.components.iter().filter(|c| c[0].demand > 0).count() >= 2,
+            "切れた通りに家が建っていない"
+        );
+        let main = b.main_network(0).unwrap();
+        assert_eq!(b.components[main][0].capacity, 0, "主の網に発電所がある");
+        assert!(x1 > x0);
+        assert_eq!(w.isolated_facilities().len(), 1);
+    }
+
+    /// 主の網に十分な余りがあるあいだは、ほかの網に施設があっても数えない。
+    #[test]
+    fn isolated_facilities_are_quiet_while_the_main_network_has_room() {
+        let mut w = World::new(7);
+        let road = Command::BuildRoad {
+            from: TilePos::new(0, 10),
+            to: TilePos::new(40, 10),
+            kind: RoadKind::Small,
+        };
+        assert_eq!(w.apply(&road), ApplyOutcome::Applied);
+        paint(&mut w, (0, 9), (3, 9), ZoneKind::Residential);
+        connect_to_outside(&mut w);
+        for (kind, x) in [(ServiceKind::PowerPlant, 20), (ServiceKind::WaterPump, 30)] {
+            assert_eq!(place(&mut w, kind, (x, 9), 2), ApplyOutcome::Applied);
+        }
+        run(&mut w, 20 * GROWTH_INTERVAL);
+        assert!(!w.buildings().is_empty());
+        cut_off_plant(&mut w);
+        let b = crate::service::supply_balance(w.network(), w.facilities(), w.buildings());
+        let main = b.main_network(0).unwrap();
+        assert!(
+            !b.components[main][0].is_tight(),
+            "{:?}",
+            b.components[main]
+        );
         assert!(w.isolated_facilities().is_empty());
+    }
+
+    /// 面した道路が消えて入口を失った施設は、街に建物がなくても孤立として数えられる。
+    #[test]
+    fn facilities_without_an_entrance_are_isolated() {
+        let mut w = World::new(7);
+        let (x0, x1) = cut_off_plant(&mut w);
+        assert!(w.isolated_facilities().is_empty());
+        let cut = Command::Bulldoze {
+            area: rect((x0, 10), (x1, 10)),
+        };
+        assert_eq!(w.apply(&cut), ApplyOutcome::Applied);
+        assert_eq!(w.facilities().len(), 1);
+        assert!(w.facilities()[0].entrance.is_none());
+        let isolated = w.isolated_facilities();
+        assert_eq!(isolated.len(), 1, "{isolated:?}");
+        assert_eq!(isolated[0].front.x, x0 + 5);
     }
 
     /// 離れた網に片方の施設だけを置くと、足りないほうだけが `growth_blocks` に数えられる。
