@@ -34,6 +34,8 @@ import {
   buildingEdgeColor,
   buildingGeometry,
   type Color,
+  type CrosswalkArm,
+  crosswalkArms,
   FACILITY_COLOR,
   footprintOutline,
   Geometry,
@@ -61,10 +63,12 @@ import {
   buyChunkCommand,
   chooseRotation,
   clampArea,
+  crosswalkCommand,
   MAX_ZONE_SIDE,
   paintZoneCommand,
   parseRoadCostTable,
   parseServiceTable,
+  pickCrosswalk,
   placeServiceCommand,
   type RoadCostTable,
   roadCost,
@@ -363,6 +367,9 @@ function roadPreview(geometry: Geometry, from: Tile, to: Tile, road: RoadKindNam
     ok ? 0 : DASH_PX,
   );
 }
+// 横断歩道の道具で変えられる腕の目印と、いま押すと変わる腕の印。置ける仮の表示の色を使う
+const CROSSWALK_HALF = 0.14;
+const CROSSWALK_PICKED_HALF = 0.24;
 
 let tool: Tool = { kind: "none" };
 let roadCosts: RoadCostTable | null = null;
@@ -388,6 +395,12 @@ let shownRoad: {
   to: Tile;
 } | null = null;
 let cursor: Tile | null = null;
+// カーソルのワールド座標（マスの単位）。横断歩道の道具は、マスの中のどの腕に近いかで選ぶ
+let cursorPoint: { x: number; y: number } | null = null;
+// 交差点の、横断歩道を置ける腕。道路網が届くたびに作り直す
+let crosswalks: CrosswalkArm[] = [];
+// プレビューで最後に見せた横断歩道の腕。押したときは、これと同じ腕を送る
+let shownCrosswalk: CrosswalkArm | null = null;
 let pointer: {
   id: number;
   x: number;
@@ -399,6 +412,10 @@ let pointer: {
 const tileAt = (event: PointerEvent): Tile => {
   const rect = mapCanvas.getBoundingClientRect();
   return screenToTile(camera, event.clientX - rect.left, event.clientY - rect.top, viewport());
+};
+const pointAt = (event: PointerEvent): { x: number; y: number } => {
+  const rect = mapCanvas.getBoundingClientRect();
+  return camera.screenToWorld(event.clientX - rect.left, event.clientY - rect.top, viewport());
 };
 
 // 道具の仮の表示と、道路の長さと費用の見積もりを書き直す
@@ -476,6 +493,26 @@ function updatePreview(): void {
     // test:wasm が読む
     mapCanvas.dataset.serviceRotation = String(choice.rotation);
     mapCanvas.dataset.servicePlaceable = String(choice.placeable);
+  } else if (tool.kind === "crosswalk") {
+    // 変えられる腕に印を付け、カーソルに近い腕を大きく示す
+    const on = tool.on;
+    const candidates = crosswalks.filter((arm) => arm.removed === on);
+    geometry = new Geometry(candidates[0] ?? { x: 0, y: 0 });
+    for (const arm of candidates) {
+      geometry.dot(arm.cx, arm.cy, CROSSWALK_HALF, PREVIEW_OK_COLOR, MIN_PX);
+    }
+    shownCrosswalk = cursorPoint === null ? null : pickCrosswalk(crosswalks, cursorPoint, on);
+    if (shownCrosswalk !== null) {
+      const { cx, cy } = shownCrosswalk;
+      geometry.dot(cx, cy, CROSSWALK_PICKED_HALF, PREVIEW_OK_EDGE_COLOR, MIN_PX);
+    }
+    info = on
+      ? candidates.length === 0
+        ? "横断歩道を外した腕がない"
+        : "印の腕を押して横断歩道を戻す。歩く人は近道でき、曲がる車はまた歩く人を待つ"
+      : candidates.length === 0
+        ? "横断歩道のある交差点がない"
+        : "印の腕を押して横断歩道を外す。曲がる車は止まらなくなり、歩く人は交差点を回り込む";
   } else if (tool.kind === "signal" && cursor !== null) {
     geometry = new Geometry(cursor);
     geometry.rect(cursor, cursor, HINT_FILL_COLOR);
@@ -595,6 +632,12 @@ function clickTile(at: Tile): void {
     sendCommand(buyChunkCommand(at));
   } else if (tool.kind === "signal") {
     sendCommand(signalCommand(at, tool.on));
+  } else if (tool.kind === "crosswalk") {
+    // 触って操作する画面では押す前にカーソルが動かないので、押した位置から選び直す
+    const arm = cursorPoint === null ? null : pickCrosswalk(crosswalks, cursorPoint, tool.on);
+    if (arm !== null) {
+      sendCommand(crosswalkCommand(arm, tool.on));
+    }
   } else if (mapCanvas.dataset.tool === DEV_WALK_TOOL) {
     devWalks.click(at);
   } else if (tool.kind === "service") {
@@ -646,12 +689,16 @@ mapCanvas.addEventListener("pointerdown", (event) => {
   const area = tool.kind === "bulldoze" || tool.kind === "zone";
   const mode = event.button === 1 ? "pan" : area ? "area" : "click";
   pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, mode, start: tileAt(event) };
+  cursorPoint = pointAt(event);
   mapCanvas.setPointerCapture(event.pointerId);
   updatePreview();
 });
 mapCanvas.addEventListener("pointermove", (event) => {
   const at = tileAt(event);
-  if (cursor?.x !== at.x || cursor?.y !== at.y || noSnap !== event.altKey) {
+  cursorPoint = pointAt(event);
+  const picked =
+    tool.kind === "crosswalk" && pickCrosswalk(crosswalks, cursorPoint, tool.on) !== shownCrosswalk;
+  if (cursor?.x !== at.x || cursor?.y !== at.y || noSnap !== event.altKey || picked) {
     noSnap = event.altKey;
     cursor = at;
     updatePreview();
@@ -679,6 +726,7 @@ mapCanvas.addEventListener("pointerup", (event) => {
   pointer = null;
   noSnap = event.altKey;
   if (done.mode === "click") {
+    cursorPoint = pointAt(event);
     clickTile(tileAt(event));
   } else if (done.mode === "area") {
     const end = tileAt(event);
@@ -768,9 +816,11 @@ for (const button of toolButtons) {
               ? { kind: "service", service }
               : name === "signal-on" || name === "signal-off"
                 ? { kind: "signal", on: name === "signal-on" }
-                : name === "bulldoze" || name === "buy"
-                  ? { kind: name }
-                  : { kind: "none" };
+                : name === "crosswalk-on" || name === "crosswalk-off"
+                  ? { kind: "crosswalk", on: name === "crosswalk-on" }
+                  : name === "bulldoze" || name === "buy"
+                    ? { kind: name }
+                    : { kind: "none" };
     selectTool(next, button);
   });
 }
@@ -783,6 +833,7 @@ const DONE: Record<CommandMessage["kind"], string> = {
   PaintZone: "区画を塗った",
   PlaceBuilding: "施設を置いた",
   SetSignal: "信号を切り替えた",
+  SetCrosswalk: "横断歩道を切り替えた",
   SetSimSpeed: "速度を変えた",
   SetTaxRate: "税率を変えた",
 };
@@ -836,6 +887,9 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     roads = roadMeshes(message.segments, message.nodes);
     roadIndex = buildRoadIndex(message.segments, message.nodes);
     roadSegments = message.segments;
+    crosswalks = crosswalkArms(message.segments, message.nodes);
+    // test:wasm が読む
+    mapCanvas.dataset.removedCrosswalks = String(crosswalks.filter((arm) => arm.removed).length);
     updatePreview();
     renderer?.roads.setRoads(roads);
     // test:wasm が読む

@@ -615,6 +615,40 @@ try {
   check(removed.outcome === "Applied", `信号を外せる（${removed.text}）`);
   await waitSignalArms(0);
   check(true, "外した信号は描かれなくなる");
+
+  // 横断歩道の道具。T 字路 (30, 32) の北の腕の縞の上を押して外し、外した腕が道路網に載って縞が描かれなくなるのを見る。
+  // 縞の真ん中は、交差点のマスの中心から北へ約 0.38 マス（小さい道路の半分の幅と縞の長さの半分）にある
+  const waitRemovedCrosswalks = (n: number) =>
+    page.waitForFunction(
+      (expected) =>
+        Number(document.querySelector<HTMLElement>("#map")?.dataset.removedCrosswalks ?? -1) ===
+        expected,
+      n,
+      { timeout: TIMEOUT_MS },
+    );
+  const above = tileCenter(30, 31);
+  const zebraAt = {
+    x: junction.x + (above.x - junction.x) * 0.38,
+    y: junction.y + (above.y - junction.y) * 0.38,
+  };
+  await page.locator('button[data-tool="crosswalk-off"]').click();
+  await page.mouse.move(zebraAt.x, zebraAt.y, { steps: 2 });
+  const beforeCrosswalk = await outcomeCount();
+  await page.mouse.click(zebraAt.x, zebraAt.y);
+  const crosswalkOff = await nextOutcome(beforeCrosswalk);
+  check(
+    crosswalkOff.command === "SetCrosswalk" && crosswalkOff.outcome === "Applied",
+    `交差点の腕の横断歩道を外せる（${crosswalkOff.text}）`,
+  );
+  await waitRemovedCrosswalks(1);
+  check(true, "外した腕は道路網に載り、縞が描かれなくなる");
+  await page.locator('button[data-tool="crosswalk-on"]').click();
+  const beforeBack = await outcomeCount();
+  await page.mouse.click(zebraAt.x, zebraAt.y);
+  const crosswalkOn = await nextOutcome(beforeBack);
+  check(crosswalkOn.outcome === "Applied", `外した横断歩道を戻せる（${crosswalkOn.text}）`);
+  await waitRemovedCrosswalks(0);
+  check(true, "戻した腕には縞がまた描かれる");
   await page.locator('button[data-tool="road-Small"]').click();
 
   const again = await drawRoad();

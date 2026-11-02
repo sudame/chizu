@@ -57,7 +57,7 @@ describe("snapRoadStart", () => {
   test("高速道路の途中には吸い付けない", () => {
     const highway = buildRoadIndex(
       new Float64Array([0, 0, 10, 0, HIGHWAY_CODE]),
-      new Float64Array([0, 0, 1, 0, 10, 0, 1, 1]),
+      new Float64Array([0, 0, 1, 0, 0, 10, 0, 1, 1, 0]),
     );
     expect(snapRoadStart(highway, t(5, 1))).toEqual(t(5, 1));
     // 内側の端には吸い付けるが、外の世界につながる外側の端には吸い付けない
@@ -131,7 +131,7 @@ describe("isDisconnected", () => {
   test("高速道路の途中を横切る道路は、つながるとは数えない", () => {
     const highway = buildRoadIndex(
       new Float64Array([0, 0, 10, 0, HIGHWAY_CODE]),
-      new Float64Array([0, 0, 1, 0, 10, 0, 1, 1]),
+      new Float64Array([0, 0, 1, 0, 0, 10, 0, 1, 1, 0]),
     );
     expect(isDisconnected(highway, t(5, -3), t(5, 3))).toBe(true);
   });
@@ -173,7 +173,7 @@ describe("既存の道路と重なる吸い付けはしない", () => {
   test("高速道路の途中を通る道路は断られると数える", () => {
     const highway = buildRoadIndex(
       new Float64Array([0, 0, 10, 0, HIGHWAY_CODE]),
-      new Float64Array([0, 0, 1, 0, 10, 0, 1, 1]),
+      new Float64Array([0, 0, 1, 0, 0, 10, 0, 1, 1, 0]),
     );
     expect(isRefused(highway, t(5, -2), t(5, 2))).toBe(true);
     expect(isRefused(highway, t(0, -2), t(0, 2))).toBe(false);
