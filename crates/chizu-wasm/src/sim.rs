@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chizu_core::building::demand;
+use chizu_core::movement::signal;
 use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
 use chizu_core::world::economy::{chunk_slots, milestone_population};
@@ -11,14 +12,14 @@ use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::zone::{ZONE_DEPTH, near_road};
 use chizu_core::{
     ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
-    Layer, Line, SegmentKind, ServiceKind, StateHasher, TerrainTiles, Tick, TilePos, TileRect,
-    TileUse, World, terrain,
+    Layer, Line, NodeControl, SegmentKind, ServiceKind, StateHasher, TerrainTiles, Tick, TilePos,
+    TileRect, TileUse, World, terrain,
 };
 
 use crate::snapshot::{Header, Mover, TripleBuffer};
 
 /// [`Sim::overview`] が返す数の個数。画面の側の `OVERVIEW_LENGTH` と合わせる。
-pub const OVERVIEW_LENGTH: usize = 9;
+pub const OVERVIEW_LENGTH: usize = 21;
 
 pub struct Sim {
     world: World,
@@ -248,6 +249,25 @@ impl Sim {
         out
     }
 
+    /// 信号の腕を、1 本につき `[ノードの x, ノードの y, 腕の向きの x, 腕の向きの y, 灯火]` の 5 つの数で返す。
+    /// 腕の向きはノードから出ていく 1 歩で、灯火は `Light` の値（0 が青、1 が黄、2 が赤）である。
+    /// 灯火は、次に進める tick の段階を表す。ノードの ID、区間の ID の順に並べる。
+    pub fn signal_lights(&self) -> Vec<f64> {
+        let (net, now) = (self.world.network(), self.world.tick());
+        let mut out = Vec::new();
+        for (id, node) in net.nodes() {
+            if node.control != NodeControl::Signal {
+                continue;
+            }
+            let t = node.tile();
+            for ((dx, dy), light) in signal::arm_lights(net, id, now) {
+                out.extend([t.x, t.y, dx, dy].map(|v| v as f64));
+                out.push(f64::from(light as u8));
+            }
+        }
+        out
+    }
+
     /// ノードを、1 つにつき `[x, y, つながる区間の数, 外の世界か（0 か 1）]` の 4 つの数で返す。
     pub fn road_nodes(&self) -> Vec<f64> {
         let mut out = Vec::new();
@@ -418,11 +438,13 @@ impl Sim {
     /// 人口と幸福度とマイルストーンを、次の [`OVERVIEW_LENGTH`] 個の数で返す。
     /// 家のある住民の数、幸福度の平均、通勤・生活サービス・暮らし向きの平均、届いた段階、
     /// 次の段階に届く人口、いまの段階までで買える枠の数、次の段階で買える枠の数。
+    /// そのあとに、住宅・商業・工業・オフィスの順で、区画ごとに
+    /// 電気か水道の余裕がなくて新築が止まっている間口の数、そのうち電気、水道の余裕がない間口の数を並べる。
     /// 建物の表が変わらなくても動く値なので、街の数字（[`Sim::city_stats`]）とは別に返す。
     pub fn overview(&self) -> Vec<f64> {
         let (happiness, parts) = self.world.happiness_summary();
         let step = self.world.milestone();
-        vec![
+        let mut out = vec![
             self.world.housed_citizens() as f64,
             f64::from(happiness),
             f64::from(parts.commute),
@@ -432,7 +454,11 @@ impl Sim {
             milestone_population(step + 1) as f64,
             f64::from(chunk_slots(step)),
             f64::from(chunk_slots(step + 1)),
-        ]
+        ];
+        for b in self.world.growth_blocks() {
+            out.extend([b.blocked, b.no_power, b.no_water].map(|v| v as f64));
+        }
+        out
     }
 
     /// いまの状態を三重バッファに書く。
@@ -484,6 +510,8 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::Occupied => "ほかの施設か道路がある",
         DenyReason::NoRoadAccess => "道路に面していない",
         DenyReason::NoChunkSlot => "買える土地の枠がない。人口が増えると枠が増える",
+        DenyReason::NotJunction => "3 本以上の道路が集まる交差点でない",
+        DenyReason::SignalUnchanged => "信号はもうその状態になっている",
     }
 }
 
@@ -690,6 +718,58 @@ mod tests {
     }
 
     #[test]
+    fn overview_reports_lots_stalled_on_a_network_without_facilities() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+        let o = sim.overview();
+        let [blocked, no_power, no_water] = [o[9], o[10], o[11]];
+        assert!(blocked > 0.0, "{o:?}");
+        assert_eq!([no_power, no_water], [blocked, blocked], "{o:?}");
+        assert!(o[12..].iter().all(|v| *v == 0.0), "{o:?}");
+        // 発電所だけなら水道だけが、浄水場だけなら電気だけが足りない
+        let place = |sim: &mut Sim, kind, x| {
+            sim.submit(Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, 9),
+                rotation: 2,
+            })
+            .unwrap();
+            sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+        };
+        place(&mut sim, ServiceKind::PowerPlant, 16);
+        let o = sim.overview();
+        assert!(o[10] == 0.0 && o[11] > 0.0, "{o:?}");
+        place(&mut sim, ServiceKind::WaterPump, 20);
+        assert_eq!(sim.overview()[9], 0.0);
+    }
+
+    #[test]
+    fn overview_shows_power_short_when_only_a_water_pump_stands() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        sim.submit(Command::PlaceBuilding {
+            kind: ServiceKind::WaterPump,
+            at: TilePos::new(20, 9),
+            rotation: 2,
+        })
+        .unwrap();
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 * 2);
+        let o = sim.overview();
+        assert!(o[9] > 0.0 && o[10] > 0.0 && o[11] == 0.0, "{o:?}");
+    }
+
+    #[test]
     fn overview_starts_neutral_and_points_at_the_first_milestone() {
         let sim = Sim::new(0);
         let o = sim.overview();
@@ -700,6 +780,7 @@ mod tests {
         assert_eq!(o[6], 250.0);
         assert_eq!(o[7], 6.0);
         assert_eq!(o[8], 9.0);
+        assert!(o[9..].iter().all(|v| *v == 0.0));
     }
 
     #[test]
@@ -954,6 +1035,31 @@ mod tests {
             to: TilePos::new(to.0, to.1),
             kind: RoadKind::Small,
         }
+    }
+
+    #[test]
+    fn signal_lights_list_the_arms_of_each_signal() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 5), (10, 5))).unwrap();
+        sim.submit(road((5, 5), (5, 10))).unwrap();
+        assert!(sim.signal_lights().is_empty());
+        let node = sim.world().network().node_at(TilePos::new(5, 5)).unwrap();
+        sim.submit(Command::SetSignal { node, on: true }).unwrap();
+        let lights = sim.signal_lights();
+        // T 字路の 3 本の腕。向き合う東西の腕は同じ灯火になり、南の腕とは同時に青にならない。
+        assert_eq!(lights.len(), 3 * 5);
+        let arms: Vec<&[f64]> = lights.chunks(5).collect();
+        for arm in &arms {
+            assert_eq!(&arm[..2], &[5.0, 5.0]);
+        }
+        let light = |dx: f64, dy: f64| {
+            arms.iter()
+                .find(|a| a[2] == dx && a[3] == dy)
+                .map(|a| a[4])
+                .unwrap()
+        };
+        assert_eq!(light(1.0, 0.0), light(-1.0, 0.0));
+        assert!(light(1.0, 0.0) != 0.0 || light(0.0, 1.0) != 0.0);
     }
 
     #[test]

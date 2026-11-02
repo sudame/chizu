@@ -6,7 +6,7 @@
 use core::fmt;
 
 use chizu_core::{
-    ChunkCoord, Command, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, ZoneKind,
+    ChunkCoord, Command, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, ZoneKind,
 };
 
 /// オブジェクトのフィールドを読んだ値。
@@ -15,7 +15,8 @@ pub enum Field {
     Missing,
     Number(f64),
     Text(String),
-    /// 数でも文字列でもない値。
+    Bool(bool),
+    /// 数でも文字列でも真偽値でもない値。
     Other,
 }
 
@@ -32,6 +33,10 @@ pub enum InputError {
     /// 税率をかける区画の種類でない（消す指定の Clear は取れない）。
     BadTaxZone,
     BadService,
+    /// 真偽値で読めないフィールド。
+    BadBool(&'static str),
+    /// 信号を置く・外すマスにノードがない。
+    NoNode,
 }
 
 impl fmt::Display for InputError {
@@ -44,6 +49,8 @@ impl fmt::Display for InputError {
             InputError::BadInteger(name) => write!(f, "{name} が範囲の中の整数でない"),
             InputError::BadRoadKind => write!(f, "road は Small、Medium、Large のどれかで指定する"),
             InputError::BadService => write!(f, "service は PowerPlant か WaterPump で指定する"),
+            InputError::BadBool(name) => write!(f, "{name} が真偽値でない"),
+            InputError::NoNode => write!(f, "そのマスに交差点がない"),
             InputError::BadTaxZone => write!(
                 f,
                 "zone は Residential、Commercial、Industrial、Office のどれかで指定する"
@@ -59,7 +66,12 @@ impl fmt::Display for InputError {
 impl std::error::Error for InputError {}
 
 /// `is_object` は入力がオブジェクトか、`field` は名前を渡すとそのフィールドを読む関数である。
-pub fn parse(is_object: bool, field: impl Fn(&str) -> Field) -> Result<Command, InputError> {
+/// `node_at` はマスにあるノードを引く関数で、マスで指す信号のコマンドをノードの ID に直すのに使う。
+pub fn parse(
+    is_object: bool,
+    field: impl Fn(&str) -> Field,
+    node_at: impl Fn(TilePos) -> Option<NodeId>,
+) -> Result<Command, InputError> {
     if !is_object {
         return Err(InputError::NotObject);
     }
@@ -153,6 +165,14 @@ pub fn parse(is_object: bool, field: impl Fn(&str) -> Field) -> Result<Command, 
                 coord: ChunkCoord::new(coord("cx")?, coord("cy")?),
             })
         }
+        "SetSignal" => {
+            let on = match field("on") {
+                Field::Bool(b) => b,
+                _ => return Err(InputError::BadBool("on")),
+            };
+            let node = node_at(tile(&field, "x", "y")?).ok_or(InputError::NoNode)?;
+            Ok(Command::SetSignal { node, on })
+        }
         _ => Err(InputError::UnknownKind(kind)),
     }
 }
@@ -184,12 +204,48 @@ mod tests {
     use super::*;
 
     fn object(fields: &[(&str, Field)]) -> Result<Command, InputError> {
-        parse(true, |name| {
-            fields
-                .iter()
-                .find(|(n, _)| *n == name)
-                .map_or(Field::Missing, |(_, v)| v.clone())
-        })
+        parse(
+            true,
+            |name| {
+                fields
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(Field::Missing, |(_, v)| v.clone())
+            },
+            |t| {
+                (t == TilePos::new(3, 4)).then_some(NodeId {
+                    index: 7,
+                    generation: 2,
+                })
+            },
+        )
+    }
+
+    #[test]
+    fn set_signal_finds_the_node_on_the_tile() {
+        let signal = |x: f64, on: Field| {
+            object(&[
+                ("kind", Field::Text("SetSignal".into())),
+                ("x", Field::Number(x)),
+                ("y", Field::Number(4.0)),
+                ("on", on),
+            ])
+        };
+        assert_eq!(
+            signal(3.0, Field::Bool(false)),
+            Ok(Command::SetSignal {
+                node: NodeId {
+                    index: 7,
+                    generation: 2
+                },
+                on: false
+            })
+        );
+        assert_eq!(signal(5.0, Field::Bool(true)), Err(InputError::NoNode));
+        assert_eq!(
+            signal(3.0, Field::Number(1.0)),
+            Err(InputError::BadBool("on"))
+        );
     }
 
     fn speed(value: Field) -> Result<Command, InputError> {
@@ -218,7 +274,7 @@ mod tests {
     #[test]
     fn rejects_non_objects() {
         assert_eq!(
-            parse(false, |_| Field::Text("SetSimSpeed".into())),
+            parse(false, |_| Field::Text("SetSimSpeed".into()), |_| None),
             Err(InputError::NotObject)
         );
     }

@@ -19,6 +19,9 @@ mod parking;
 #[cfg(test)]
 mod parking_tests;
 mod pos;
+pub mod signal;
+#[cfg(test)]
+mod signal_tests;
 #[cfg(test)]
 mod tests;
 
@@ -486,12 +489,12 @@ impl Trips {
             .collect()
     }
 
-    /// 1 tick 進め、移動を終えた主体を消して、その ID の順に返す。区切りの終わりに着いた主体は、
+    /// tick `now` から 1 tick 進め、移動を終えた主体を消して、その ID の順に返す。区切りの終わりに着いた主体は、
     /// その場で次の区切りの経路を探して進む。経路が見つからなかった主体も消して返す。
-    /// `router` は `net` に合わせてあること。
-    pub fn step(&mut self, net: &Network, router: &mut AstarRouter) -> Vec<TripId> {
+    /// `router` は `net` に合わせてあること。`now` は信号の段階を決めるのに使う。
+    pub fn step(&mut self, net: &Network, router: &mut AstarRouter, now: Tick) -> Vec<TripId> {
         self.finished.clear();
-        let done = self.advance(net, router.connectors());
+        let done = self.advance(net, router.connectors(), now);
         let mut ended = self.next_legs(net, router, done);
         let give_up: Vec<usize> = (0..self.rows.len())
             .filter(|i| self.rows[*i].as_ref().is_some_and(car::given_up))
@@ -521,7 +524,7 @@ impl Trips {
     }
 
     /// 歩く人と車を 1 tick 進め、区切りの終わりに着いた行を番号の順に返す。
-    fn advance(&mut self, net: &Network, connectors: &[Connector]) -> Vec<usize> {
+    fn advance(&mut self, net: &Network, connectors: &[Connector], now: Tick) -> Vec<usize> {
         let advance = |(i, t): (usize, &mut Option<Trip>)| {
             let t = t.as_mut()?;
             (t.mode == LaneMode::Sidewalk && t.advance(net)).then_some(i)
@@ -547,6 +550,7 @@ impl Trips {
             net,
             connectors,
             &mut self.rescues,
+            now,
         ));
         arrived.sort_unstable();
         arrived

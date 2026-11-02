@@ -1,4 +1,4 @@
-//! 信号のない交差点で、どの車をノードに入れるかを決める。
+//! 交差点で、どの車をノードに入れるかを決める。
 //!
 //! 3 本以上の区間が集まるノードを交差点とする。交差点の手前まで来た車線の先頭の車（候補）は、
 //! 入ってくるリンクから出ていくリンクへの「動き」を持つ。入ってくるリンクの違う 2 つの動きは、
@@ -42,13 +42,20 @@
 //! 入口は少し進めた所、出口は少し戻した所に置く。2 つの動きの弦の端が円の上で互い違いに
 //! 並べば、道筋が交わる。
 //!
-//! 信号を入れるときは、いまの段階で赤の動きを候補から外し、残りをこの順で決める形にする。
+//! 信号（`signal`）のある交差点では、先に黄と赤の腕から来た候補を、止まりきれない車を除いて
+//! ノードの手前で止め、残りの候補をこの順で決める。止めた候補は動きを置かないので、青の腕の車を
+//! 待たせない。信号で止めたあいだも、待った tick 数に数える。交差点の中で止まった車をすり抜ける
+//! `GIVE_UP` が、赤の待ちを含めて数えないと、軸の多い交差点で `RESCUE` より遅れるためである。
+//! 一方で 2. の順番は、赤の待ちだけで取れないよう、`PATIENCE` に腕が 1 周期に赤である tick 数を
+//! 足した長さで決める。赤を 1 回待っただけの車が、同じ青で来た直進より先に右折しないようにする。
 
 use core::cmp::Reverse;
 use serde::{Deserialize, Serialize};
 
+use super::signal::{self, Light};
 use crate::command::{NodeId, RoadKind};
 use crate::network::{LaneId, LinkId, Network, SegmentKind};
+use crate::units::Tick;
 
 /// この tick 数より長く待った車は、道路の格に関わらず先に入れる。
 pub(super) const PATIENCE: u32 = 30;
@@ -169,13 +176,22 @@ pub(super) struct Inside {
     pub stopped: bool,
 }
 
-/// 交差点ごとに候補を優先の順に見て、ノードの手前で止める候補の `id` を小さい順に返す。
-/// あわせて、交差点の中で止まった車を無視して入れた候補の数を返す。
+/// 交差点で止める候補。
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct Held {
+    /// ノードの手前で止める候補の `id`。小さい順に並ぶ。
+    pub ids: Vec<usize>,
+    /// 交差点の中で止まった車を無視して入れた候補の数。
+    pub passed: u64,
+}
+
+/// 交差点ごとに候補を優先の順に見て、tick `now` にノードの手前で止める候補を決める。
 pub(super) fn holds(
     net: &Network,
     mut cands: Vec<Approach>,
     mut inside: Vec<Inside>,
-) -> (Vec<usize>, u64) {
+    now: Tick,
+) -> Held {
     let mut passed = 0_u64;
     cands.sort_unstable_by_key(|c| (c.node, c.id));
     // 同じノードの中の並びは結果に効かない。
@@ -188,20 +204,33 @@ pub(super) fn holds(
         let node = same[0].node;
         let lo = inside.partition_point(|x| x.node < node);
         let hi = inside.partition_point(|x| x.node <= node);
-        if same.len() == 1 && lo == hi {
+        group.clear();
+        group.extend(same.iter().map(|c| (*c, Move::new(net, c.from, c.to))));
+        let mut patience = PATIENCE;
+        if let Some(st) = signal::state(net, node, now) {
+            patience = patience.saturating_add(st.red_ticks);
+            // 青でない腕の候補は、止まりきれるかぎり停止線で止め、動きも置かない。
+            group.retain(|(c, mv)| {
+                let stop = !c.committed && st.light_for(mv.arm_in % 4) != Light::Green;
+                if stop {
+                    held.push(c.id);
+                }
+                !stop
+            });
+        }
+        if group.len() <= 1 && lo == hi {
             // ほかに車がいなければ、先の車線の空きだけで決まる。
-            let c = &same[0];
-            if !(c.committed || c.room) {
+            if let Some((c, _)) = group.first()
+                && !(c.committed || c.room)
+            {
                 held.push(c.id);
             }
             continue;
         }
-        group.clear();
-        group.extend(same.iter().map(|c| (*c, Move::new(net, c.from, c.to))));
         group.sort_unstable_by_key(|(c, mv)| {
             (
                 !c.committed,
-                c.waited < PATIENCE,
+                c.waited < patience,
                 Reverse(c.class),
                 mv.turn(),
                 Reverse(c.waited),
@@ -235,7 +264,7 @@ pub(super) fn holds(
         }
     }
     held.sort_unstable();
-    (held, passed)
+    Held { ids: held, passed }
 }
 
 /// 詰まりをほどく救済が働いた回数。状態には入れず、状態ハッシュにも含めない。

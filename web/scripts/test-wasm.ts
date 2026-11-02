@@ -475,6 +475,42 @@ try {
     `1 マス手前で離した道路は既存の道路につながる（${snapSegments} → ${await roadSegments()} 本）`,
   );
 
+  // 信号の道具。吸い付けた道路でできた T 字路 (30, 32) に置いて、腕 3 本の灯火が届くかを見る
+  const waitSignalArms = (n: number) =>
+    page.waitForFunction(
+      (expected) =>
+        Number(document.querySelector<HTMLElement>("#map")?.dataset.signalArms ?? 0) === expected,
+      n,
+      { timeout: TIMEOUT_MS },
+    );
+  const junction = tileCenter(30, 32);
+  await page.locator('button[data-tool="signal-on"]').click();
+  const beforeSignal = await outcomeCount();
+  await page.mouse.click(junction.x, junction.y);
+  const signalled = await nextOutcome(beforeSignal);
+  check(
+    signalled.command === "SetSignal" && signalled.outcome === "Applied",
+    `交差点に信号を置ける（${signalled.text}）`,
+  );
+  await waitSignalArms(3);
+  check(true, "置いた信号の、腕 3 本の灯火が届く");
+  const beforeMidway = await outcomeCount();
+  const midway = tileCenter(40, 32);
+  await page.mouse.click(midway.x, midway.y);
+  const refused = await nextOutcome(beforeMidway);
+  check(
+    refused.outcome === "Rejected" && (refused.text ?? "").includes("交差点がない"),
+    `交差点のないマスには置けない（${refused.text}）`,
+  );
+  await page.locator('button[data-tool="signal-off"]').click();
+  const beforeOff = await outcomeCount();
+  await page.mouse.click(junction.x, junction.y);
+  const removed = await nextOutcome(beforeOff);
+  check(removed.outcome === "Applied", `信号を外せる（${removed.text}）`);
+  await waitSignalArms(0);
+  check(true, "外した信号は描かれなくなる");
+  await page.locator('button[data-tool="road-Small"]').click();
+
   const again = await drawRoad();
   check(
     again.result.outcome === "Denied" && (again.result.text ?? "").includes("重なる"),
@@ -754,6 +790,22 @@ try {
       /足りない|つながっていない/.test((await shortage.textContent()) ?? ""),
     `届いていない建物の数と理由が欄に出る（${await shortage.textContent()}）`,
   );
+  // 施設のない網に塗った区画が建たない理由は、500 ミリ秒ごとの overview で届く
+  const growth = page.locator("#growth-notice");
+  await page
+    .waitForFunction(
+      () => document.querySelector<HTMLElement>("#growth-notice")?.hidden === false,
+      undefined,
+      {
+        timeout: TIMEOUT_MS,
+      },
+    )
+    .catch(() => undefined);
+  check(
+    (await growth.isVisible()) &&
+      /余裕がなく.*新築が止まっている/.test((await growth.textContent()) ?? ""),
+    `施設のない網の区画が建たない理由が出る（${await growth.textContent()}）`,
+  );
   check(
     (await page.locator("#legend-body li").count()) >= 10,
     "凡例に区画・建物の段階・印・施設が並ぶ",
@@ -829,6 +881,20 @@ try {
     `発電所と浄水場を置ける（${plant.text}、${pump.text}）`,
   );
   await waitUnsupplied("zero");
+  // 施設を置いて余裕が戻ると、建たない理由の知らせは消える
+  await page
+    .waitForFunction(
+      () => document.querySelector<HTMLElement>("#growth-notice")?.hidden === true,
+      undefined,
+      {
+        timeout: TIMEOUT_MS,
+      },
+    )
+    .catch(() => undefined);
+  check(
+    !(await growth.isVisible()),
+    `施設を置いて余裕が戻ると、建たない理由の知らせが消える（${await growth.textContent()}）`,
+  );
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
   // 水道のレイヤーも重ねると、各マスの左半分が電気、右半分が水道になる。発電所は電気のレイヤーだけで黄に塗る
