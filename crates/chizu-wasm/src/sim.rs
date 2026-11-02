@@ -18,7 +18,7 @@ use chizu_core::{
 
 use crate::snapshot::{Header, Mover, TripleBuffer};
 
-/// [`Sim::overview`] が返す数の個数。画面の側の `OVERVIEW_LENGTH` と合わせる。
+/// [`Sim::overview`] が返す数のうち、固定の並びの個数。そのあとに止まっている道路網の並びが続く。画面の側の `OVERVIEW_LENGTH` と合わせる。
 pub const OVERVIEW_LENGTH: usize = 21;
 
 pub struct Sim {
@@ -455,24 +455,18 @@ impl Sim {
             f64::from(chunk_slots(step)),
             f64::from(chunk_slots(step + 1)),
         ];
-        for b in self.world.growth_blocks() {
+        let (blocks, stalls) = self.world.growth_report();
+        for b in blocks {
             out.extend([b.blocked, b.no_power, b.no_water].map(|v| v as f64));
         }
+        // 最初の [`OVERVIEW_LENGTH`] 個のあとに、新築が止まっている道路網ごとの `[x, y, 足りない資源]` を並べる。
+        // `x, y` は網の中で止まっている間口のうち座標が最小のマス、足りない資源は電気が 1、水道が 2 の和である。
+        // 網は中核が決めた順に並ぶ。
+        for n in stalls {
+            let lacks = u8::from(n.no_power) + 2 * u8::from(n.no_water);
+            out.extend([n.at.x as f64, n.at.y as f64, f64::from(lacks)]);
+        }
         out
-    }
-
-    /// 新築が電気か水道の余裕で止まっている道路網ごとに `[x, y, 足りない資源]` を並べた平らな配列。
-    /// `x, y` は網の中で止まっている間口のうち座標が最小のマス、足りない資源は電気が 1、水道が 2 の和である。
-    /// 網は中核が決めた順に並ぶ。
-    pub fn growth_stalls(&self) -> Vec<f64> {
-        self.world
-            .stalled_networks()
-            .into_iter()
-            .flat_map(|n| {
-                let lacks = u8::from(n.no_power) + 2 * u8::from(n.no_water);
-                [n.at.x as f64, n.at.y as f64, f64::from(lacks)]
-            })
-            .collect()
     }
 
     /// いまの状態を三重バッファに書く。
@@ -729,7 +723,7 @@ mod tests {
         assert_ne!(sim.buildings_version(), version);
         sim.advance(20_000);
         let o = sim.overview();
-        assert_eq!(o.len(), OVERVIEW_LENGTH);
+        assert!(o.len() >= OVERVIEW_LENGTH && (o.len() - OVERVIEW_LENGTH) % 3 == 0);
         assert!(o[0] >= 0.0, "{o:?}");
     }
 
@@ -747,7 +741,7 @@ mod tests {
         let [blocked, no_power, no_water] = [o[9], o[10], o[11]];
         assert!(blocked > 0.0, "{o:?}");
         assert_eq!([no_power, no_water], [blocked, blocked], "{o:?}");
-        assert!(o[12..].iter().all(|v| *v == 0.0), "{o:?}");
+        assert!(o[12..OVERVIEW_LENGTH].iter().all(|v| *v == 0.0), "{o:?}");
         // 発電所だけなら水道だけが、浄水場だけなら電気だけが足りない
         let place = |sim: &mut Sim, kind, x| {
             sim.submit(Command::PlaceBuilding {
@@ -768,7 +762,7 @@ mod tests {
     #[test]
     fn growth_stalls_point_at_the_network_without_facilities() {
         let mut sim = Sim::new(0);
-        assert!(sim.growth_stalls().is_empty());
+        assert_eq!(sim.overview().len(), OVERVIEW_LENGTH);
         sim.submit(road((10, 10), (30, 10))).unwrap();
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
@@ -776,7 +770,8 @@ mod tests {
         })
         .unwrap();
         sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
-        let s = sim.growth_stalls();
+        let o = sim.overview();
+        let s = &o[OVERVIEW_LENGTH..];
         assert_eq!(s.len(), 3, "{s:?}");
         assert!(
             (10.0..=30.0).contains(&s[0]) && (10.0..=16.0).contains(&s[1]),
@@ -809,7 +804,7 @@ mod tests {
     fn overview_starts_neutral_and_points_at_the_first_milestone() {
         let sim = Sim::new(0);
         let o = sim.overview();
-        assert_eq!(o.len(), OVERVIEW_LENGTH);
+        assert!(o.len() >= OVERVIEW_LENGTH && (o.len() - OVERVIEW_LENGTH) % 3 == 0);
         assert_eq!(o[0], 0.0);
         assert_eq!(o[2..5], [50.0, 50.0, 50.0]);
         assert_eq!(o[5], 0.0);

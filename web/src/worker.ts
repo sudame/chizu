@@ -18,6 +18,7 @@ import type {
   Outcome,
   WorkerToMain,
 } from "./protocol/messages.ts";
+import { OVERVIEW_LENGTH } from "./protocol/messages.ts";
 import { layout } from "./protocol/snapshot.ts";
 import { startSimulation } from "./save/worker-side.ts";
 import { stepBudget, tickRate } from "./speed.ts";
@@ -152,7 +153,13 @@ function sendOverview(sim: Simulation, now: number, paused: boolean, force = fal
     return;
   }
   overviewSentAt = now;
-  reply({ kind: "overview", overview: [...sim.overview()], stalls: [...sim.growth_stalls()] });
+  // 固定の並びのあとに、止まっている道路網の並びが続く
+  const all = [...sim.overview()];
+  reply({
+    kind: "overview",
+    overview: all.slice(0, OVERVIEW_LENGTH),
+    stalls: all.slice(OVERVIEW_LENGTH),
+  });
 }
 
 // 実時間に合わせて tick を進める。何 tick 進めるかはここで決め、中核には整数の tick 数だけを渡す

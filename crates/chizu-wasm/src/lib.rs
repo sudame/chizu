@@ -207,11 +207,6 @@ impl Simulation {
         self.0.overview()
     }
 
-    /// 新築が止まっている道路網ごとの `[x, y, 足りない資源]`。並びは `sim::Sim::growth_stalls` にある。
-    pub fn growth_stalls(&self) -> Vec<f64> {
-        self.0.growth_stalls()
-    }
-
     pub fn set_paused(&mut self, paused: bool) {
         self.0.set_paused(paused);
     }

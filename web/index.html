@@ -212,6 +212,9 @@
         border-radius: 4px;
         cursor: pointer;
       }
+      #growth-notice button[hidden] {
+        display: none;
+      }
       #growth-notice button:hover {
         background: #9a5008;
       }
@@ -395,7 +398,10 @@
     </div>
     <div id="notices">
       <div id="city-shortage" role="status" hidden></div>
-      <div id="growth-notice" role="status" hidden></div>
+      <div id="growth-notice" hidden>
+        <div role="status"><strong id="growth-notice-head"></strong><div id="growth-notice-action"></div></div>
+        <button type="button" id="growth-notice-jump" hidden></button>
+      </div>
       <div id="milestone-notice" role="status" hidden></div>
     </div>
     <div id="toolbar">

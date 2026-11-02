@@ -145,16 +145,31 @@ pub struct StalledNetwork {
 
 impl World {
     /// 需要があるのに新築が電気か水道の余裕で止まっている道路網を、網の識別子の順に返す。状態は変えない。
-    ///
-    /// 数え方は [`World::growth_blocks`] と同じで、その間口を網ごとにまとめる。
+    /// 区画ごとの数と同じ計算なので、両方がいるときは [`World::growth_report`] を使う。
     pub fn stalled_networks(&self) -> Vec<StalledNetwork> {
+        self.growth_report().1
+    }
+
+    /// 区画の種類（[`ZoneKind::index`] の順）ごとに、需要があるのに新築が電気と水道の余裕で止まっている間口を数える。状態は変えない。
+    pub fn growth_blocks(&self) -> [GrowthBlock; 4] {
+        self.growth_report().0
+    }
+
+    /// [`World::growth_blocks`] と [`World::stalled_networks`] を 1 回の走査で求める。
+    /// 止まっている間口が 1 つでもあれば、網の一覧は空でない。
+    pub fn growth_report(&self) -> ([GrowthBlock; 4], Vec<StalledNetwork>) {
         let mut headroom = Headroom::of(&self.network, &self.facilities, &self.buildings);
-        let mut out = BTreeMap::<usize, StalledNetwork>::new();
+        let mut out = [GrowthBlock::default(); 4];
+        let mut nets = BTreeMap::<usize, StalledNetwork>::new();
         let demand = demand(&self.city_stats());
         for (front, (zone, d)) in &self.lots.fronts {
+            let slot = &mut out[zone.index()];
+            slot.fronts += 1;
+            // 新築は需要が正の区画にしか建たない。需要のない区画は、施設を置いても建たない。
             if demand[zone.index()] <= 0 {
                 continue;
             }
+            // 新築と同じく、1 マスの建物（需要 1）が入らなければ建たない。
             let Some((link, _)) = self.frontage(*front, FRONT_DIRS[usize::from(*d)]) else {
                 continue;
             };
@@ -167,8 +182,11 @@ impl World {
             if !(power || water) {
                 continue;
             }
+            slot.blocked += 1;
+            slot.no_power += u64::from(power);
+            slot.no_water += u64::from(water);
             // 間口は座標の順に来るので、網で最初に来たものが最小である。
-            let entry = out.entry(net).or_insert(StalledNetwork {
+            let entry = nets.entry(net).or_insert(StalledNetwork {
                 at: *front,
                 no_power: false,
                 no_water: false,
@@ -176,32 +194,7 @@ impl World {
             entry.no_power |= power;
             entry.no_water |= water;
         }
-        out.into_values().collect()
-    }
-
-    /// 区画の種類（[`ZoneKind::index`] の順）ごとに、需要があるのに新築が電気と水道の余裕で止まっている間口を数える。状態は変えない。
-    pub fn growth_blocks(&self) -> [GrowthBlock; 4] {
-        let mut headroom = Headroom::of(&self.network, &self.facilities, &self.buildings);
-        let mut out = [GrowthBlock::default(); 4];
-        let demand = demand(&self.city_stats());
-        for (front, (zone, d)) in &self.lots.fronts {
-            let slot = &mut out[zone.index()];
-            slot.fronts += 1;
-            // 新築は需要が正の区画にしか建たない。需要のない区画は、施設を置いても建たない。
-            if demand[zone.index()] <= 0 {
-                continue;
-            }
-            // 新築と同じく、1 マスの建物（需要 1）が入らなければ建たない。
-            let lacks = self
-                .frontage(*front, FRONT_DIRS[usize::from(*d)])
-                .and_then(|(link, _)| headroom.lacks(&self.network, link));
-            if let Some([power, water]) = lacks.filter(|l| l.iter().any(|x| *x)) {
-                slot.blocked += 1;
-                slot.no_power += u64::from(power);
-                slot.no_water += u64::from(water);
-            }
-        }
-        out
+        (out, nets.into_values().collect())
     }
 
     /// マスの区画と使い道。メモリにないチャンクのマスは `None` である。
@@ -1383,13 +1376,23 @@ mod tests {
     /// 止まっている網ごとに、座標が最小の間口と、足りない資源が返る。
     #[test]
     fn stalled_networks_name_the_blocked_network_and_what_it_lacks() {
+        // 止まっている間口が 1 つでもあることと、網の一覧が空でないことは、いつも一致する。
+        let agree = |w: &World| {
+            let (blocks, nets) = w.growth_report();
+            assert_eq!(blocks, w.growth_blocks());
+            assert_eq!(nets, w.stalled_networks());
+            let blocked: u64 = blocks.iter().map(|b| b.blocked).sum();
+            assert_eq!(blocked > 0, !nets.is_empty(), "{blocks:?} {nets:?}");
+        };
         let mut w = served_street();
+        agree(&w);
         assert!(w.stalled_networks().is_empty());
         let end = crate::world::highway_line(w.seed()).start.x.max(40);
         let (x0, x1) = (end + 1, end + 40);
         street(&mut w, x0, x1);
         paint(&mut w, (x0, 4), (x1, 9), ZoneKind::Residential);
         run(&mut w, 40 * GROWTH_INTERVAL);
+        agree(&w);
         let bare = w.stalled_networks();
         assert_eq!(bare.len(), 1, "{bare:?}");
         assert!(bare[0].no_power && bare[0].no_water, "{bare:?}");
@@ -1400,6 +1403,7 @@ mod tests {
             ApplyOutcome::Applied
         );
         run(&mut w, 40 * GROWTH_INTERVAL);
+        agree(&w);
         let half = w.stalled_networks();
         assert_eq!(half.len(), 1, "{half:?}");
         assert!(!half[0].no_power && half[0].no_water, "{half:?}");

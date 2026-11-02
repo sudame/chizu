@@ -51,64 +51,93 @@ export function parseStalls(flat: number[]): Stall[] {
   return out;
 }
 
-/** 押すたびに次の網を選ぶ。網の数が変わっても範囲に収める。網がなければ null。 */
-export function pickStall(stalls: Stall[], cursor: number): { stall: Stall; next: number } | null {
-  const at = stalls.length === 0 ? 0 : ((cursor % stalls.length) + stalls.length) % stalls.length;
-  const stall = stalls[at];
-  return stall === undefined ? null : { stall, next: at + 1 };
+const before = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+  a.x < b.x || (a.x === b.x && a.y < b.y);
+
+/**
+ * 前に移った網の代表のマス last より座標の順で後ろにある、最初の網を選ぶ。後ろがなければ最初の網へ戻る。
+ * last が null なら最初の網である。網の数が変わっても、同じ網に戻ったり、飛ばしたりしにくい。
+ */
+export function pickStall(stalls: Stall[], last: { x: number; y: number } | null): Stall | null {
+  const sorted = [...stalls].sort((a, b) => (before(a, b) ? -1 : before(b, a) ? 1 : 0));
+  if (last === null) {
+    return sorted[0] ?? null;
+  }
+  return sorted.find((s) => before(last, s)) ?? sorted[0] ?? null;
+}
+
+/** 知らせの見た目。ボタンの文言は網の数で決まる。 */
+export type NoticeView = { headline: string; action: string; jump: string | null };
+
+export function noticeView(blocks: GrowthBlocks, stalls: Stall[]): NoticeView | null {
+  const notice = growthNotice(blocks);
+  if (notice === null) {
+    return null;
+  }
+  const jump =
+    stalls.length === 0
+      ? null
+      : stalls.length > 1
+        ? "止まっている区画へ移る（押すたびに次の道路網）"
+        : "止まっている区画へ移る";
+  return { ...notice, jump };
+}
+
+/** 前に出した見た目と同じなら、DOM に触らなくてよい。触ると読み上げが繰り返され、フォーカスも外れる。 */
+export function sameView(a: NoticeView | null, b: NoticeView | null): boolean {
+  return (
+    a === b ||
+    (a !== null &&
+      b !== null &&
+      a.headline === b.headline &&
+      a.action === b.action &&
+      a.jump === b.jump)
+  );
 }
 
 /**
  * 知らせを押せるようにする。押すと止まっている道路網の区画へ jump を呼び、網が複数あれば押すたびに次へ移る。
- * 作り直すとボタンのフォーカスが外れるので、中身が変わらないあいだは DOM に触らない。
+ * 要素は index.html に置いてあり、ここでは文言だけを書き換える。読み上げるのは見出しの文だけである。
  */
 export function setupGrowthNotice(jump: (x: number, y: number) => void): {
   render: (blocks: GrowthBlocks, stalls: Stall[]) => void;
 } {
-  const el = document.querySelector<HTMLElement>("#growth-notice");
+  const root = document.querySelector<HTMLElement>("#growth-notice");
+  const head = document.querySelector<HTMLElement>("#growth-notice-head");
+  const action = document.querySelector<HTMLElement>("#growth-notice-action");
+  const button = document.querySelector<HTMLButtonElement>("#growth-notice-jump");
   let stalls: Stall[] = [];
-  let cursor = 0;
-  let shown = "";
-  const go = () => {
-    const picked = pickStall(stalls, cursor);
+  let last: { x: number; y: number } | null = null;
+  let shown: NoticeView | null = null;
+  button?.addEventListener("click", () => {
+    const picked = pickStall(stalls, last);
     if (picked === null) {
       return;
     }
-    cursor = picked.next;
-    jump(picked.stall.x, picked.stall.y);
-  };
+    last = { x: picked.x, y: picked.y };
+    jump(picked.x, picked.y);
+  });
   return {
     render(blocks, next) {
-      if (el === null) {
-        return;
-      }
       stalls = next;
-      const notice = growthNotice(blocks);
-      el.hidden = notice === null;
-      if (notice === null) {
-        shown = "";
-        el.replaceChildren();
+      const view = noticeView(blocks, next);
+      if (view === null) {
+        // 知らせが消えたら、次は最初の網から数え直す
+        last = null;
+      }
+      if (root === null || head === null || action === null || button === null) {
         return;
       }
-      const key = JSON.stringify([notice, stalls.length]);
-      if (key === shown) {
+      if (sameView(shown, view)) {
         return;
       }
-      shown = key;
-      const head = document.createElement("strong");
-      head.textContent = notice.headline;
-      const action = document.createElement("div");
-      action.textContent = notice.action;
-      el.replaceChildren(head, action);
-      if (stalls.length > 0) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent =
-          stalls.length > 1
-            ? "止まっている区画へ移る（押すたびに次の道路網）"
-            : "止まっている区画へ移る";
-        button.addEventListener("click", go);
-        el.append(button);
+      shown = view;
+      root.hidden = view === null;
+      if (view !== null) {
+        head.textContent = view.headline;
+        action.textContent = view.action;
+        button.hidden = view.jump === null;
+        button.textContent = view.jump ?? "";
       }
     },
   };
