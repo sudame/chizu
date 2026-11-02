@@ -102,6 +102,21 @@ impl CarSample {
     }
 }
 
+/// 通勤の直線距離の分布。職のある住民の、家から職場までの出入口の直線距離で数える。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommuteDistances {
+    /// 職があり、家と職場の建物がある住民の数。
+    pub commuters: u64,
+    /// 距離（m）の中央値。通勤する住民がいなければ `None`。
+    pub median_m: Option<u64>,
+    /// 500m 未満の人数。150m 未満は歩く住民が多い。
+    pub under_500m: u64,
+    /// 500m 以上 1km 未満の人数。
+    pub under_1km: u64,
+    /// 1km 以上の人数。
+    pub from_1km: u64,
+}
+
 /// 住民の居場所ごとの人数。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CitizenPlaces {
@@ -166,6 +181,34 @@ impl World {
     /// 車のいる区間の混み具合。空いている区間は載せない。状態は変えず、状態ハッシュにも入れない。
     pub fn road_congestion(&self) -> BTreeMap<SegmentId, Congestion> {
         self.trips.congestion(&self.network)
+    }
+
+    /// 通勤の直線距離の分布。状態は変えず、状態ハッシュにも入れない。
+    pub fn commute_distances(&self) -> CommuteDistances {
+        let p = &self.population;
+        let mut meters = Vec::new();
+        for id in p.citizen_ids() {
+            let row = p.citizen(id).expect("いる住民の行がない");
+            let home = p.home(row.household).flatten().and_then(|h| self.buildings.get(h));
+            let work = row.workplace.and_then(|w| self.buildings.get(w));
+            if let (Some(h), Some(w)) = (home, work) {
+                meters.push(crate::jobs::commute_meters(h, w));
+            }
+        }
+        meters.sort_unstable();
+        let mut out = CommuteDistances {
+            commuters: meters.len() as u64,
+            median_m: meters.get(meters.len() / 2).copied(),
+            ..CommuteDistances::default()
+        };
+        for m in meters {
+            match m {
+                0..500 => out.under_500m += 1,
+                500..1000 => out.under_1km += 1,
+                _ => out.from_1km += 1,
+            }
+        }
+        out
     }
 
     /// 住民の居場所ごとの人数。状態は変えない。
