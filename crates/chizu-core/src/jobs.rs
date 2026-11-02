@@ -225,12 +225,20 @@ mod tests {
     fn nearest_matches_brute_force() {
         let mut state = 12345u64;
         let mut next = |m: i64| {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((state >> 33) as i64) % m
         };
         let mut open = BTreeMap::new();
         for i in 0..60 {
-            open.insert(id(i), (TilePos::new(next(300) - 100, next(200) - 50), 1 + next(3) as u64));
+            open.insert(
+                id(i),
+                (
+                    TilePos::new(next(300) - 100, next(200) - 50),
+                    1 + next(3) as u64,
+                ),
+            );
         }
         let mut brute: Vec<(BuildingId, TilePos, u64)> =
             open.iter().map(|(i, (p, n))| (*i, *p, *n)).collect();

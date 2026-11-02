@@ -189,7 +189,10 @@ impl World {
         let mut meters = Vec::new();
         for id in p.citizen_ids() {
             let row = p.citizen(id).expect("いる住民の行がない");
-            let home = p.home(row.household).flatten().and_then(|h| self.buildings.get(h));
+            let home = p
+                .home(row.household)
+                .flatten()
+                .and_then(|h| self.buildings.get(h));
             let work = row.workplace.and_then(|w| self.buildings.get(w));
             if let (Some(h), Some(w)) = (home, work) {
                 meters.push(crate::jobs::commute_meters(h, w));

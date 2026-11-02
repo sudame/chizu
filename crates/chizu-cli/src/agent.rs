@@ -19,9 +19,8 @@ use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
-    CommuteDistances,
-    DayTraffic, DenyReason, GameTime, Line, MigrationOutlook, NodeControl, ServiceKind, TilePos,
-    TileRect, Traffic, World, ZoneKind, replay,
+    CommuteDistances, DayTraffic, DenyReason, GameTime, Line, MigrationOutlook, NodeControl,
+    ServiceKind, TilePos, TileRect, Traffic, World, ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
