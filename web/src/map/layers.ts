@@ -225,7 +225,8 @@ export class LayerOverlay {
     gl.useProgram(this.#program);
     gl.bindVertexArray(this.#vao);
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // 色だけを重ね、フレームバッファのアルファは 1 のまま保つ（キャンバスがページの背景と混ざって白く飛ばないように）
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
     gl.uniform1i(this.#u.values, 0);
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     gl.uniform1f(this.#u.size, CHUNK_SIDE * camera.zoom);

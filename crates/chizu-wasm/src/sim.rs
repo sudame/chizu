@@ -144,6 +144,9 @@ impl Sim {
             if road {
                 *tile |= TILE_ROAD;
             }
+            if layer.occupancy[i] == TileUse::Building {
+                *tile |= TILE_BUILDING;
+            }
             if let Some(zone) = layer.zone[i] {
                 *tile |= (zone as u8) << TILE_ZONE_SHIFT;
             }
@@ -544,6 +547,10 @@ pub const TILE_ROAD: u8 = 1 << 1;
 pub const TILE_ZONABLE: u8 = 1 << 2;
 /// 区画の種類（`ZoneKind` の値、なければ 0）を置くビットの位置。3 ビットを使う。
 pub const TILE_ZONE_SHIFT: u8 = 3;
+/// 区画の種類を取り出すマスク（`TILE_ZONE_SHIFT` だけずらしたあとに掛ける）。
+pub const TILE_ZONE_MASK: u8 = 0b111;
+/// 区画に建った建物があるマスのビット。施設のマスには立てない。
+pub const TILE_BUILDING: u8 = 1 << 6;
 
 fn encode_terrain(terrain: &TerrainTiles) -> Vec<u8> {
     let mut tiles = vec![0; CHUNK_AREA];
@@ -692,6 +699,18 @@ mod tests {
         assert_eq!(buildings[4], f64::from(ZoneKind::Residential as u8));
         assert_eq!(buildings[5], 1.0);
         assert_eq!(buildings[6], 0.0, "施設がないので電気も水道も届かない");
+        // 建物のマスにだけ、建物のビットが立つ
+        let tiles = sim.chunk_tiles(ChunkCoord::new(0, 0));
+        let side = CHUNK_SIDE as i64;
+        for (i, t) in tiles.iter().enumerate() {
+            let at = TilePos::new(i as i64 % side, i as i64 / side);
+            let built = sim
+                .world()
+                .buildings()
+                .iter()
+                .any(|(_, b)| rect_contains(b.area, at));
+            assert_eq!(t & TILE_BUILDING != 0, built, "{at:?}");
+        }
         // 道路の下側に発電所と浄水場を置くと、どちらも届き、版が変わる
         let before = sim.buildings_version();
         for (kind, x) in [(ServiceKind::PowerPlant, 16), (ServiceKind::WaterPump, 20)] {
@@ -953,7 +972,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(
-            tile(&sim, 13, 12) >> TILE_ZONE_SHIFT,
+            (tile(&sim, 13, 12) >> TILE_ZONE_SHIFT) & TILE_ZONE_MASK,
             ZoneKind::Commercial as u8
         );
         assert_ne!(sim.chunk_tiles_version(origin), before);

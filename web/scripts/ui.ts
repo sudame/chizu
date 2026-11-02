@@ -50,3 +50,20 @@ export async function chooseLayer(page: Page, layer: string): Promise<void> {
   }
   await page.locator(`#layers button[data-layer="${layer}"]`).click();
 }
+
+/**
+ * 画面の真ん中を中心に、拡大のボタンで倍率が min 以上になるまで拡大し、拡大したあとの倍率を返す。
+ * 車と人は、寄りの段（倍率 12 から、16 で濃さがそろう）まで寄らないと描かれない。
+ */
+export async function zoomInTo(page: Page, min: number): Promise<number> {
+  const zoom = async () => Number(await page.locator("#map").getAttribute("data-zoom"));
+  for (let i = 0; i < 20 && (await zoom()) < min; i++) {
+    const before = await zoom();
+    await page.locator("#zoom-in").click();
+    await page.waitForFunction(
+      (z) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) > z,
+      before,
+    );
+  }
+  return zoom();
+}
