@@ -520,7 +520,13 @@ impl World {
 
     /// 職場を割り当て直し、職場の変わった住民の予定を立て直す。
     fn update_jobs(&mut self) {
-        for (id, workplace) in assign_jobs(&self.population, &self.buildings, self.tax_permille) {
+        for (id, workplace) in assign_jobs(
+            &self.population,
+            &self.buildings,
+            self.tax_permille,
+            self.seed,
+            self.tick,
+        ) {
             self.population.set_workplace(id, workplace);
             let schedule = match workplace {
                 Some(w) => ScheduleState {
@@ -1194,5 +1200,115 @@ pub(crate) mod tests {
         let mut served = city(&zones);
         run_days(&mut served, 4);
         assert!(served.city_stats().citizens > late.citizens * 2);
+    }
+
+    /// 家から職場までの出入口の直線距離（m）。
+    fn commute_of(w: &World, id: CitizenId) -> Option<u64> {
+        let p = w.population();
+        let row = p.citizen(id)?;
+        let home = w.buildings().get(p.home(row.household).flatten()?)?;
+        let work = w.buildings().get(row.workplace?)?;
+        Some(crate::jobs::commute_meters(home, work))
+    }
+
+    /// 通勤の距離の分布は、住民ごとの家と職場の出入口から数えた値と合う。
+    #[test]
+    fn commute_distances_count_the_fronts_of_home_and_work() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 3);
+        let mut meters: Vec<u64> = w
+            .population()
+            .citizen_ids()
+            .filter_map(|id| commute_of(&w, id))
+            .collect();
+        meters.sort_unstable();
+        assert!(meters.len() > 50, "通勤する住民が少ない：{}", meters.len());
+        let d = w.commute_distances();
+        assert_eq!(d.commuters, meters.len() as u64);
+        assert_eq!(d.median_m, Some(meters[meters.len() / 2]));
+        let count = |f: &dyn Fn(u64) -> bool| meters.iter().filter(|m| f(**m)).count() as u64;
+        assert_eq!(d.under_500m, count(&|m| m < 500));
+        assert_eq!(d.under_1km, count(&|m| (500..1000).contains(&m)));
+        assert_eq!(d.from_1km, count(&|m| m >= 1000));
+        assert_eq!(d.under_500m + d.under_1km + d.from_1km, d.commuters);
+    }
+
+    /// 職の割り当ては、働く年齢で家のある住民だけを対象にし、家から近い職場を選ぶ。
+    #[test]
+    fn assign_jobs_gives_nearby_jobs_to_housed_workers_only() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 3);
+        let tax = ZoneKind::ALL.map(|z| w.tax_permille(z));
+        let p = w.population();
+        let b = w.buildings();
+        let changes = crate::jobs::assign_jobs(p, b, tax, w.seed(), w.tick());
+        // 空いている職場の出入口。
+        let workers = crate::jobs::workers_by_building(p, b);
+        let open: Vec<TilePos> = b
+            .iter()
+            .filter(|(id, x)| {
+                x.workplaces_at(tax[x.zone.index()]) > workers.get(id).copied().unwrap_or(0)
+            })
+            .map(|(_, x)| x.front)
+            .collect();
+        assert!(!open.is_empty());
+        let (mut picked, mut all, mut n) = (0_u64, 0_u64, 0_u64);
+        for (id, job) in changes {
+            let row = p.citizen(id).unwrap();
+            let Some(job) = job else { continue };
+            assert!(
+                crate::citizens::WORKING_AGES.contains(&row.age),
+                "働く年齢でない住民に職がついた"
+            );
+            let home = p
+                .home(row.household)
+                .flatten()
+                .expect("家のない住民に職がついた");
+            let at = b.get(home).unwrap().front;
+            let d = |t: TilePos| t.x.abs_diff(at.x).pow(2) + t.y.abs_diff(at.y).pow(2);
+            picked += d(b.get(job).unwrap().front);
+            all += open.iter().map(|t| d(*t)).sum::<u64>() / open.len() as u64;
+            n += 1;
+        }
+        assert!(n > 0, "職が割り当てられない");
+        // 空きの中から偏りなく選んだときの距離の 2 乗の平均より、はっきり近い。
+        assert!(
+            picked * 2 < all,
+            "近い職場を選んでいない：{picked} / {all} ({n} 人)"
+        );
+    }
+
+    /// あとから近くに職場の区画ができると、すでに勤めている住民が乗り換え、通勤の距離が縮む。
+    #[test]
+    fn workers_move_to_new_nearby_jobs() {
+        let zones = [
+            ZoneKind::Residential,
+            ZoneKind::Residential,
+            ZoneKind::Residential,
+            ZoneKind::Industrial,
+        ];
+        let mut w = city(&zones);
+        run_days(&mut w, 5);
+        let before: BTreeMap<CitizenId, u64> = w
+            .population()
+            .citizen_ids()
+            .filter_map(|id| Some((id, commute_of(&w, id)?)))
+            .collect();
+        assert!(before.len() > 50, "勤める住民が少ない：{}", before.len());
+        road(&mut w, (-60, 22), (20, 22));
+        for (y0, y1) in [(17, 21), (23, 27)] {
+            let area = TileRect::from_corners(TilePos::new(-59, y0), TilePos::new(19, y1));
+            let zone = Some(ZoneKind::Industrial);
+            apply(&mut w, Command::PaintZone { area, zone });
+        }
+        run_days(&mut w, 8);
+        // 前から勤めていて、家も同じままの住民の通勤の距離の合計。
+        let same: Vec<(u64, u64)> = before
+            .iter()
+            .filter_map(|(id, was)| Some((*was, commute_of(&w, *id)?)))
+            .collect();
+        assert!(same.len() > 30, "残った住民が少ない：{}", same.len());
+        let (was, now): (u64, u64) = same.iter().fold((0, 0), |a, s| (a.0 + s.0, a.1 + s.1));
+        assert!(now * 10 < was * 9, "通勤の距離が縮まない：{was} → {now}");
     }
 }
