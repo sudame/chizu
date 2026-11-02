@@ -480,8 +480,16 @@ impl World {
             return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
         }
         self.money = self.money - change.cost;
+        // 区間を消す前に、その区間を通る移動の車線の番号と描いていたずれを控え、その場で探し直す。
+        let noted = self
+            .trips
+            .note_before_change(&self.network, &change.segments);
         self.network.change_road_kind(&change);
         self.refresh_buildings();
+        let lost = self
+            .trips
+            .reroute_noted(&self.network, &mut self.router.router, &noted);
+        self.end_commutes(lost);
         ApplyOutcome::Applied
     }
 

@@ -180,7 +180,8 @@ pub(super) fn keep_lane(rows: &mut [Option<Trip>], net: &Network, i: usize, inde
     let t = rows[i].as_mut().expect("置く車がない");
     match found {
         Some(lane) => t.lane = lane,
-        None => (t.lane, t.speed, t.waiting) = (same, MmPerTick::ZERO, true),
+        // 待ち始めから数え直す。引き継いだまま待たせると、すぐ歩きに切り替わってしまう。
+        None => (t.lane, t.speed, t.waiting, t.stalled) = (same, MmPerTick::ZERO, true, 0),
     }
 }
 

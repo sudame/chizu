@@ -49,9 +49,12 @@ impl Cars {
     fn change(&mut self, from: (i64, i64), to: (i64, i64), kind: RoadKind) {
         let line = Line::between(TilePos::new(from.0, from.1), TilePos::new(to.0, to.1)).unwrap();
         let change = self.net.plan_road_kind(&line, kind).unwrap();
+        let noted = self.trips.note_before_change(&self.net, &change.segments);
         self.net.change_road_kind(&change);
         assert!(self.router.sync(&self.net));
-        let lost = self.trips.reroute(&self.net, &mut self.router);
+        let lost = self
+            .trips
+            .reroute_noted(&self.net, &mut self.router, &noted);
         assert!(lost.is_empty(), "通れなくなった車がある {lost:?}");
         self.check();
     }
@@ -101,11 +104,11 @@ impl Cars {
     }
 }
 
-/// 小さい道路を東西に 2 区間つなぎ、西の区間の上を両向きに車が走る。東の区間から西へ向かう車もいる。
-fn two_ways() -> Cars {
+/// `kind` の道路を東西に 2 区間つなぎ、西の区間の上を両向きに車が走る。東の区間から西へ向かう車もいる。
+fn two_ways(kind: RoadKind) -> Cars {
     let mut n = Network::new();
-    road(&mut n, (0, 0), (30, 0), RoadKind::Small);
-    road(&mut n, (30, 0), (60, 0), RoadKind::Small);
+    road(&mut n, (0, 0), (30, 0), kind);
+    road(&mut n, (30, 0), (60, 0), kind);
     let mut c = Cars::new(n);
     for _ in 0..6 {
         c.drive(at(2, 0, (1, 0)), at(55, 0, (1, 0)));
@@ -122,7 +125,13 @@ fn two_ways() -> Cars {
 
 #[test]
 fn cars_keep_their_lane_and_arrive_after_the_road_is_upgraded() {
-    let mut c = two_ways();
+    for from in [RoadKind::Small, RoadKind::Medium] {
+        keeps_lanes(from);
+    }
+}
+
+fn keeps_lanes(from: RoadKind) {
+    let mut c = two_ways(from);
     let moving = c.trips.iter().filter(|(_, t)| car::on_road(t)).count();
     assert!(moving >= 8, "走っている車が少ない {moving}");
     let before: Vec<(TripId, SidewalkPos, usize)> = c
@@ -138,7 +147,25 @@ fn cars_keep_their_lane_and_arrive_after_the_road_is_upgraded() {
             (id, t.position(), index)
         })
         .collect();
+    if from == RoadKind::Medium {
+        assert!(
+            before.iter().any(|b| b.2 == 1),
+            "2 番めの車線を走る車がいない"
+        );
+    }
+    let shown: Vec<_> = before
+        .iter()
+        .map(|(id, _, _)| c.trips.get(*id).unwrap().shift(&c.net))
+        .collect();
     c.change((0, 0), (30, 0), RoadKind::Large);
+    // 描くずれは、種類を変える直前と同じところから移り始める。
+    for ((id, _, _), shift) in before.iter().zip(shown) {
+        assert_eq!(
+            c.trips.get(*id).unwrap().shift(&c.net),
+            shift,
+            "{id:?} が飛んで見える"
+        );
+    }
     // 位置と、リンクの中の車線の番号は変わらない。
     for (id, pos, index) in before {
         let t = c.trips.get(id).unwrap();
@@ -175,7 +202,19 @@ fn narrowed(check_spread: bool) -> u64 {
             .collect();
         assert_eq!(lanes.len(), 3, "3 車線に並んでいない");
     }
+    // 長く止まっていた車でも、車線が減って待つ車になったら、待ち始めから数え直す。
+    for t in c.trips.rows.iter_mut().flatten() {
+        t.stalled = junction::RESCUE;
+    }
     c.change((0, 0), (40, 0), RoadKind::Small);
+    let waiting: Vec<u32> = c
+        .trips
+        .iter()
+        .filter(|(_, t)| t.waiting)
+        .map(|(_, t)| t.stalled)
+        .collect();
+    assert!(!waiting.is_empty(), "待つ車になった車がいない");
+    assert!(waiting.iter().all(|s| *s == 0), "{waiting:?}");
     let h = state_hash_of(&c.trips);
     c.run_until_empty(600);
     h

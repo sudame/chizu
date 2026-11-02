@@ -789,8 +789,9 @@ impl Network {
     }
 
     /// 見積もった区間の種類を変え、変えた区間の新しい ID を古い ID の順に返す。区間はノードを変えずに
-    /// 作り直すので、区間と車線の ID が変わる。走っている移動は、区間が分かれたときと同じく、
-    /// 経路探索を作り直したあとの [`crate::movement::Trips::reroute`] がいまの位置から探し直す。
+    /// 作り直すので、区間と車線の ID が変わる。走っている移動は、呼ぶ前に
+    /// [`crate::movement::Trips::note_before_change`] で控え、呼んだあとに
+    /// [`crate::movement::Trips::reroute_noted`] でいまの位置から探し直す。
     pub fn change_road_kind(&mut self, change: &KindChange) -> Vec<SegmentId> {
         let ids = change
             .segments

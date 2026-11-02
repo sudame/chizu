@@ -47,7 +47,7 @@ pub use parking::{Lot, PARK_RADIUS, building_spot};
 pub use pos::SidewalkPos;
 
 use crate::id::{Slots, TripId};
-use crate::network::{Dir, LaneId, LaneMode, LinkId, Network};
+use crate::network::{Dir, LaneId, LaneMode, LinkId, Network, SegmentId};
 use crate::routing::{
     AstarRouter, Connector, Graph, Route, RouteRequest, Router, Scratch, Toward, WALK_SPEED,
     one_to_many,
@@ -313,6 +313,10 @@ pub struct Trips {
     /// 直前の `step` と `reroute` で消えた移動の結果。状態ハッシュには入れない。
     finished: BTreeMap<TripId, Finished>,
 }
+
+/// 網を変える前に控えた、主体ごとのリンクの中の車線の番号と描いていたずれ。[`Trips::note_before_change`] で作る。
+#[derive(Clone, Debug, Default)]
+pub struct Noted(BTreeMap<TripId, (Option<usize>, (i64, i64))>);
 
 /// 消えた移動の結果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -695,6 +699,34 @@ impl Trips {
     /// いまの位置か行き先が歩道の上になくなったか、つながらなくなった主体は消し、その ID を返す。
     /// 経路探索が古い網のままなら、先に作り直す。
     pub fn reroute(&mut self, net: &Network, router: &mut AstarRouter) -> Vec<TripId> {
+        self.reroute_noted(net, router, &Noted::default())
+    }
+
+    /// 網から区間 `segments` を消す前に呼ぶ。その区間を残りの経路に持つ主体の、リンクの中の車線の番号と
+    /// 描いていたずれを控える。区間を消したあとの網では、どちらも求められないためである。
+    pub fn note_before_change(&self, net: &Network, segments: &[SegmentId]) -> Noted {
+        let rows = self
+            .iter()
+            .filter(|(_, t)| {
+                t.route.links[t.leg as usize..]
+                    .iter()
+                    .any(|l| segments.contains(&l.segment))
+            })
+            .map(|(id, t)| {
+                let index = net.link_lanes(t.link()).position(|l| l == t.lane);
+                (id, (index, t.shift_on_leg(net, t.leg as usize)))
+            })
+            .collect();
+        Noted(rows)
+    }
+
+    /// [`Trips::reroute`] と同じく探し直す。`noted` に控えた主体は、控えた車線の番号と描いていたずれを使う。
+    pub fn reroute_noted(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        noted: &Noted,
+    ) -> Vec<TripId> {
         router.sync(net);
         self.finished.clear();
         let broken: Vec<(TripId, LaneMode, SidewalkPos, SidewalkPos)> = self
@@ -735,12 +767,17 @@ impl Trips {
                     old.then,
                 );
                 // 探し直す前の、リンクの中の車線の番号。網が変わると車線の ID も変わるので番号で覚える。
-                let index = net
-                    .link_lanes(old.link())
-                    .position(|l| l == old.lane)
-                    .unwrap_or(0);
                 // 探し直す前に描いていたずれ。車線や経路が変わっても、そこから少しずつ移す。
-                let shown = old.shift_on_leg(net, old.leg as usize);
+                // いまのリンクの区間が消えていると、どちらも網からは求められないので、控えた値を使う。
+                let (index, shown) = match noted.0.get(&id) {
+                    Some(&(index, shown)) => (index.unwrap_or(0), shown),
+                    None => (
+                        net.link_lanes(old.link())
+                            .position(|l| l == old.lane)
+                            .unwrap_or(0),
+                        old.shift_on_leg(net, old.leg as usize),
+                    ),
+                };
                 let old_far = old.walk.far;
                 let mut t = make_trip(net, route, ends, dest, departed, jay);
                 (t.speed, t.waiting, t.waited, t.stalled, t.then) =

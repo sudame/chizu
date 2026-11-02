@@ -1535,7 +1535,25 @@ fn upgrading_a_busy_street_keeps_buildings_and_moving_cars() {
         to: line.end(),
         kind: RoadKind::Large,
     };
+    let view = TileRect::from_corners(TilePos::new(-64, -64), TilePos::new(127, 127));
+    let shifts = |w: &World| {
+        w.movers_in(view)
+            .into_iter()
+            .map(|m| (m.id, (m.pos, m.shift)))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let shown = shifts(&world);
     assert_eq!(world.apply(&up), chizu_core::ApplyOutcome::Applied);
+    // 車も歩く人も、種類を変えた直後は直前と同じ所に描く。道路の真ん中へ飛ばない。
+    let now = shifts(&world);
+    let mut compared = 0;
+    for (id, before) in &shown {
+        if let Some(after) = now.get(id) {
+            assert_eq!(after, before, "{id:?} が飛んで見える");
+            compared += 1;
+        }
+    }
+    assert!(compared >= 10, "比べた移動体が少ない {compared}");
     assert_eq!(world.money(), money - cost);
     // 小 250、大 750 の 1 マスあたりの差額を、通りの 140 マスぶん払う。
     assert_eq!(cost, Money(500 * 140));

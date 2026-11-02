@@ -55,8 +55,9 @@ fn car_tick(c: &mut Criterion) {
         b.iter_batched(
             || (net.clone(), router.clone(), trips.clone()),
             |(mut n, mut r, mut t)| {
+                let noted = t.note_before_change(&n, &change.segments);
                 n.change_road_kind(&change);
-                black_box(t.reroute(&n, &mut r))
+                black_box(t.reroute_noted(&n, &mut r, &noted))
             },
             BatchSize::LargeInput,
         );
