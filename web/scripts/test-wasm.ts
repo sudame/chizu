@@ -845,6 +845,20 @@ try {
     `発電所と浄水場を置ける（${plant.text}、${pump.text}）`,
   );
   await waitUnsupplied("zero");
+  // 施設を置いて余裕が戻ると、建たない理由の知らせは消える
+  await page
+    .waitForFunction(
+      () => document.querySelector<HTMLElement>("#growth-notice")?.hidden === true,
+      undefined,
+      {
+        timeout: TIMEOUT_MS,
+      },
+    )
+    .catch(() => undefined);
+  check(
+    !(await growth.isVisible()),
+    `施設を置いて余裕が戻ると、建たない理由の知らせが消える（${await growth.textContent()}）`,
+  );
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
   // 水道のレイヤーも重ねると、各マスの左半分が電気、右半分が水道になる。発電所は電気のレイヤーだけで黄に塗る

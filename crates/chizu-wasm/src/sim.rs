@@ -707,17 +707,41 @@ mod tests {
         assert!(blocked > 0.0, "{o:?}");
         assert_eq!([no_power, no_water], [blocked, blocked], "{o:?}");
         assert!(o[12..].iter().all(|v| *v == 0.0), "{o:?}");
-        // 発電所と浄水場を置くと、止まっている間口がなくなる
-        for (kind, x) in [(ServiceKind::PowerPlant, 16), (ServiceKind::WaterPump, 20)] {
+        // 発電所だけなら水道だけが、浄水場だけなら電気だけが足りない
+        let place = |sim: &mut Sim, kind, x| {
             sim.submit(Command::PlaceBuilding {
                 kind,
                 at: TilePos::new(x, 9),
                 rotation: 2,
             })
             .unwrap();
-        }
-        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+            sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+        };
+        place(&mut sim, ServiceKind::PowerPlant, 16);
+        let o = sim.overview();
+        assert!(o[10] == 0.0 && o[11] > 0.0, "{o:?}");
+        place(&mut sim, ServiceKind::WaterPump, 20);
         assert_eq!(sim.overview()[9], 0.0);
+    }
+
+    #[test]
+    fn overview_shows_power_short_when_only_a_water_pump_stands() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        sim.submit(Command::PlaceBuilding {
+            kind: ServiceKind::WaterPump,
+            at: TilePos::new(20, 9),
+            rotation: 2,
+        })
+        .unwrap();
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 * 2);
+        let o = sim.overview();
+        assert!(o[9] > 0.0 && o[10] > 0.0 && o[11] == 0.0, "{o:?}");
     }
 
     #[test]

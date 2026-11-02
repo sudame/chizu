@@ -215,10 +215,11 @@
         display: none;
       }
       @media (max-width: 900px) {
-        /* 足りない知らせ（下から 104px）の上に積む */
+        /* 足りない知らせと同じ縦の並び（#notices）に積む */
         #milestone-notice {
-          bottom: 240px;
-          max-width: calc(100vw - 32px);
+          position: static;
+          transform: none;
+          max-width: none;
         }
       }
       #demand {
@@ -282,8 +283,8 @@
     <div id="notices">
       <div id="city-shortage" role="status" hidden></div>
       <div id="growth-notice" role="status" hidden></div>
+      <div id="milestone-notice" role="status" hidden></div>
     </div>
-    <div id="milestone-notice" role="status" hidden></div>
     <div id="toolbar">
       <button type="button" data-tool="none" aria-pressed="true">見る</button>
       <button type="button" data-tool="road-Small" aria-pressed="false">道路 小</button>

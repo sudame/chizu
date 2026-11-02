@@ -123,6 +123,7 @@ pub struct GrowthBlock {
     /// 建てる候補の間口の数。
     pub fronts: u64,
     /// 面した道路網に、電気か水道の余裕がなくて建たない間口の数。
+    /// 区画の需要が 0 以下なら、余裕があっても建たないので数えない。
     pub blocked: u64,
     /// そのうち、電気の余裕がない間口の数。
     pub no_power: u64,
@@ -131,13 +132,18 @@ pub struct GrowthBlock {
 }
 
 impl World {
-    /// 区画の種類（[`ZoneKind::index`] の順）ごとに、新築が電気と水道の余裕で止まっている間口を数える。状態は変えない。
+    /// 区画の種類（[`ZoneKind::index`] の順）ごとに、需要があるのに新築が電気と水道の余裕で止まっている間口を数える。状態は変えない。
     pub fn growth_blocks(&self) -> [GrowthBlock; 4] {
         let mut headroom = Headroom::of(&self.network, &self.facilities, &self.buildings);
         let mut out = [GrowthBlock::default(); 4];
+        let demand = demand(&self.city_stats());
         for (front, (zone, d)) in &self.lots.fronts {
             let slot = &mut out[zone.index()];
             slot.fronts += 1;
+            // 新築は需要が正の区画にしか建たない。需要のない区画は、施設を置いても建たない。
+            if demand[zone.index()] <= 0 {
+                continue;
+            }
             // 新築と同じく、1 マスの建物（需要 1）が入らなければ建たない。
             let lacks = self
                 .frontage(*front, FRONT_DIRS[usize::from(*d)])
@@ -1325,6 +1331,43 @@ mod tests {
         assert!(cut_demand <= UNSUPPLIED_ALLOWANCE, "{cut_demand}");
         assert!(cut_off.iter().all(|b| b.supply == Supply::default()));
         assert!(served > cut_off.len(), "{served} 棟");
+    }
+
+    /// 離れた網に片方の施設だけを置くと、足りないほうだけが `growth_blocks` に数えられる。
+    #[test]
+    fn growth_blocks_tell_power_from_water() {
+        for (kind, power_short, water_short) in [
+            (ServiceKind::PowerPlant, false, true),
+            (ServiceKind::WaterPump, true, false),
+        ] {
+            let mut w = served_street();
+            let end = crate::world::highway_line(w.seed()).start.x.max(40);
+            let (x0, x1) = (end + 1, end + 40);
+            street(&mut w, x0, x1);
+            paint(&mut w, (x0, 4), (x1, 9), ZoneKind::Residential);
+            assert_eq!(place(&mut w, kind, (x0 + 5, 9), 2), ApplyOutcome::Applied);
+            run(&mut w, 40 * GROWTH_INTERVAL);
+            let res = w.growth_blocks()[0];
+            assert!(res.blocked > 0, "{kind:?} {res:?}");
+            assert_eq!(res.no_power > 0, power_short, "{kind:?} {res:?}");
+            assert_eq!(res.no_water > 0, water_short, "{kind:?} {res:?}");
+            assert_eq!(res.no_power + res.no_water, res.blocked, "{kind:?} {res:?}");
+        }
+    }
+
+    /// 需要のない区画は、余裕がなくても施設を置いて直る話ではないので、止まっている間口に数えない。
+    #[test]
+    fn growth_blocks_ignore_zones_without_demand() {
+        let mut w = served_street();
+        let end = crate::world::highway_line(w.seed()).start.x.max(40);
+        let (x0, x1) = (end + 1, end + 40);
+        street(&mut w, x0, x1);
+        paint(&mut w, (x0, 4), (x1, 9), ZoneKind::Office);
+        run(&mut w, 5 * GROWTH_INTERVAL);
+        let off = w.growth_blocks()[ZoneKind::Office.index()];
+        assert!(demand(&w.city_stats())[ZoneKind::Office.index()] <= 0);
+        assert!(off.fronts > 0, "{off:?}");
+        assert_eq!(off.blocked, 0, "{off:?}");
     }
 
     /// 道路を 1 マス離して引いた先は施設のない別の網になり、[`UNSUPPLIED_ALLOWANCE`] までしか建たない。
