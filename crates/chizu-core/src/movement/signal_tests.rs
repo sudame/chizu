@@ -1,4 +1,4 @@
-use super::signal::{self, ALL_RED, GREEN, Light, PHASE, YELLOW};
+use super::signal::{self, ALL_RED, Demand, GREEN, Light, PHASE, YELLOW};
 use super::*;
 use crate::command::{NodeId, RoadKind};
 use crate::network::Line;
@@ -28,11 +28,16 @@ fn crossroads(signal: bool) -> (Network, NodeId) {
     (n, node)
 }
 
+/// 車も人もいない交差点の様子。信号は固定の周期のとおりに回る。
+fn quiet() -> Demand {
+    Demand::default()
+}
+
 /// 軸 `axis` が青になった最初の tick。
 fn green_start(n: &Network, node: NodeId, axis: u8) -> u64 {
     (1..1_000)
         .find(|t| {
-            let light = |t| signal::state(n, node, Tick(t)).unwrap().light_for(axis);
+            let light = |t| signal::state(n, node, Tick(t), &quiet()).unwrap().light_for(axis);
             light(*t) == Light::Green && light(*t - 1) != Light::Green
         })
         .unwrap()
@@ -45,13 +50,13 @@ fn each_axis_gets_its_turn_and_never_two_at_once() {
     let cycle = 2 * PHASE;
     let mut count = [[0_u64; 3]; 4];
     for t in 0..cycle {
-        let st = signal::state(&n, node, Tick(t)).unwrap();
+        let st = signal::state(&n, node, Tick(t), &quiet()).unwrap();
         assert!(st.axis == 0 || st.axis == 2, "十字路にない軸 {}", st.axis);
         for axis in 0..4_u8 {
             count[usize::from(axis)][st.light_for(axis) as usize] += 1;
         }
         // 周期で一回りする。
-        assert_eq!(signal::state(&n, node, Tick(t + cycle)), Some(st));
+        assert_eq!(signal::state(&n, node, Tick(t + cycle), &quiet()), Some(st));
     }
     for axis in [0, 2] {
         assert_eq!(
@@ -61,7 +66,7 @@ fn each_axis_gets_its_turn_and_never_two_at_once() {
         );
     }
     // 腕ごとの灯火は、同じ軸の向き合う 2 本で同じになる。
-    let lights = signal::arm_lights(&n, node, Tick(0));
+    let lights = signal::arm_lights(&n, node, Tick(0), &quiet());
     assert_eq!(lights.len(), 4);
     for (step, light) in &lights {
         let opposite = lights
@@ -75,8 +80,8 @@ fn each_axis_gets_its_turn_and_never_two_at_once() {
 #[test]
 fn no_signal_means_no_state() {
     let (n, node) = crossroads(false);
-    assert_eq!(signal::state(&n, node, Tick(0)), None);
-    assert!(signal::arm_lights(&n, node, Tick(0)).is_empty());
+    assert_eq!(signal::state(&n, node, Tick(0), &quiet()), None);
+    assert!(signal::arm_lights(&n, node, Tick(0), &quiet()).is_empty());
 }
 
 struct Cars {
@@ -104,42 +109,66 @@ impl Cars {
     }
 
     fn step(&mut self) -> Vec<TripId> {
+        self.step_lit().0
+    }
+
+    /// 1 tick 進め、着いた車と、その tick の信号を決めた交差点の様子を返す。
+    fn step_lit(&mut self) -> (Vec<TripId>, Demand) {
+        let demand = self.trips.signal_demand(&self.net);
         let arrived = self.trips.step(&self.net, &mut self.router, self.now);
         self.now = self.now.next();
-        arrived
+        (arrived, demand)
     }
 }
 
-#[test]
-fn a_car_stops_on_red_and_goes_on_green() {
+/// 十字路で、y の向きが青になった tick から、東へ向かう x の向きの車を 1 台走らせる。`stream` 台の車を、
+/// 交差点の 3 マス北から南へ続けて走らせる。x の向きの車が交差点に入った tick と、入る前に止まったかを返す。
+fn eastbound_against(stream: usize) -> (Tick, bool, u64) {
     let (n, node) = crossroads(true);
-    // y の向きが青になった tick から始める。東へ向かう x の向きの車は赤で待つ。
     let start = green_start(&n, node, 2);
     let mut c = Cars::new(n, start);
+    let south = (at(10, 7, (0, 1), 0), at(10, 19, (0, 1), 0));
+    let ids = c
+        .trips
+        .spawn_drives(&c.net, &mut c.router, &vec![south; stream], c.now);
+    assert!(ids.iter().all(Option::is_some));
     let id = c.drive(at(6, 10, (1, 0), 0), at(18, 10, (1, 0), 0));
     let first = c.trips.get(id).unwrap().link();
     let mut stopped = false;
     let mut crossed = None;
-    for _ in 0..(2 * PHASE) {
+    for _ in 0..(3 * PHASE) {
         let now = c.now;
-        c.step();
+        let (_, demand) = c.step_lit();
         let Some(t) = c.trips.get(id) else {
             break;
         };
         if t.link() == first {
             stopped |= t.speed() == MmPerTick::ZERO;
         } else if crossed.is_none() {
+            let light = signal::state(&c.net, node, now, &demand)
+                .unwrap()
+                .light_for(0);
+            assert_eq!(light, Light::Green, "青でないのに入った");
             crossed = Some(now);
         }
     }
+    (crossed.expect("青になっても進まない"), stopped, start)
+}
+
+#[test]
+fn a_car_stops_on_red_while_the_green_axis_has_traffic() {
+    // y の向きの車が続くあいだは、x の向きの車は赤で待ち、遅くとも骨組みの周期で x の向きが青になれば入る。
+    let (crossed, stopped, start) = eastbound_against(60);
     assert!(stopped, "赤で止まらない");
-    let crossed = crossed.expect("青になっても進まない");
-    let light = signal::state(&c.net, node, crossed).unwrap().light_for(0);
-    assert_eq!(light, Light::Green, "青でないのに入った");
-    // 赤のあいだは入らない。青になってから、止まった所から走り出して数 tick で入る。
     let green = start + GREEN + YELLOW + ALL_RED;
-    assert!(crossed.0 >= green, "青の前に入った {crossed:?}");
     assert!(crossed.0 <= green + 5, "青になっても待ちすぎた {crossed:?}");
+}
+
+#[test]
+fn a_lone_car_gets_the_green_without_waiting_for_the_cycle() {
+    // 青の向きに車が来ていなければ、赤の向きに来た車へ青を渡す。骨組みの青が終わるのを待たない。
+    let (crossed, _, start) = eastbound_against(0);
+    assert!(crossed.0 < start + GREEN, "空いた向きの青を待った {crossed:?}");
 }
 
 #[test]
@@ -167,8 +196,9 @@ fn signalled_crossroads_lets_cars_in_only_on_green_or_yellow() {
     for _ in 0..1_500 {
         let before: Vec<(TripId, LinkId)> = c.trips.iter().map(|(id, t)| (id, t.link())).collect();
         let now = c.now;
-        arrived += c.step().len();
-        let st = signal::state(&c.net, node, now).unwrap();
+        let (done, demand) = c.step_lit();
+        arrived += done.len();
+        let st = signal::state(&c.net, node, now, &demand).unwrap();
         for (id, link) in before {
             let Some(arm) = incoming.iter().position(|(l, _)| *l == link) else {
                 continue;
@@ -205,7 +235,7 @@ fn signalled(arms: &[(i64, i64)], t: bool) -> (Network, NodeId) {
 
 /// ノード `node` から出ていく腕の向き。
 fn arm_steps(n: &Network, node: NodeId) -> Vec<(i64, i64)> {
-    signal::arm_lights(n, node, Tick(0))
+    signal::arm_lights(n, node, Tick(0), &quiet())
         .into_iter()
         .map(|(s, _)| s)
         .collect()
@@ -250,8 +280,9 @@ fn every_movement(n: Network, node: NodeId, per: usize, ticks: usize) -> usize {
             .map(|(id, t)| (id, t.link()))
             .collect();
         let now = c.now;
-        arrived += c.step().len();
-        let st = signal::state(&c.net, node, now).unwrap();
+        let (done, demand) = c.step_lit();
+        arrived += done.len();
+        let st = signal::state(&c.net, node, now, &demand).unwrap();
         for (id, link) in before {
             if c.trips.get(id).is_some_and(|t| t.link() != link) {
                 entered += 1;
@@ -331,4 +362,54 @@ fn a_car_stuck_inside_a_signalled_junction_is_passed_before_the_rescue() {
     let r = c.trips.rescues();
     assert_eq!(r.teleported, 0);
     assert!(r.passed_stuck >= 1, "{r:?}");
+}
+
+/// 十字路の tick `t` の灯火を、軸ごとの様子 `x` と `y`（x の向きと y の向き）から決める。
+fn lit(n: &Network, node: NodeId, t: u64, x: signal::AxisDemand, y: signal::AxisDemand) -> [Light; 2] {
+    let mut d = Demand::default();
+    d.note(node, 0, |a| *a = x);
+    d.note(node, 2, |a| *a = y);
+    let st = signal::state(n, node, Tick(t), &d).unwrap();
+    [st.light_for(0), st.light_for(2)]
+}
+
+#[test]
+fn the_green_goes_where_the_cars_are() {
+    let (n, node) = crossroads(true);
+    let none = signal::AxisDemand::default();
+    let cars = signal::AxisDemand {
+        cars: true,
+        ..none
+    };
+    let committed = signal::AxisDemand {
+        cars: true,
+        committed: true,
+        walkers: false,
+    };
+    let cars_and_walkers = signal::AxisDemand {
+        walkers: true,
+        ..cars
+    };
+    // y の向きの段階の、青の始めと黄の始め。
+    let g = green_start(&n, node, 2);
+    let yellow = g + GREEN;
+    use Light::{Green, Red, Yellow};
+    // 車も人もいなければ、骨組みのとおりに回る。
+    assert_eq!(lit(&n, node, g, none, none), [Red, Green]);
+    assert_eq!(lit(&n, node, yellow, none, none), [Red, Yellow]);
+    // 青の向きに車がなく、赤の向きに車が来れば、赤の向きへ青を渡す。
+    assert_eq!(lit(&n, node, g, cars, none), [Green, Red]);
+    // 青の向きにも車がいれば、渡さない。
+    assert_eq!(lit(&n, node, g, cars, cars), [Red, Green]);
+    // x の向きの腕を渡ろうと待つ人がいれば、y の向きの青のあいだに渡れるよう、渡さない。
+    assert_eq!(lit(&n, node, g, cars_and_walkers, none), [Red, Green]);
+    // 青を戻すときに、渡していた向きに止まりきれない車がいれば、その tick は黄にする。
+    assert_eq!(lit(&n, node, g, committed, cars), [Yellow, Red]);
+    // 段階の向きにも止まりきれない車がいれば、段階の向きを青のままにする。
+    assert_eq!(lit(&n, node, g, committed, committed), [Red, Green]);
+    // 黄の段階では、止まりきれない車のいる向きを黄で通し、止まれる車だけなら次の向きへ早めに渡す。
+    assert_eq!(lit(&n, node, yellow, cars, committed), [Red, Yellow]);
+    assert_eq!(lit(&n, node, yellow, cars, cars), [Green, Red]);
+    assert_eq!(lit(&n, node, yellow + YELLOW, cars, none), [Green, Red]);
+    assert_eq!(lit(&n, node, yellow + YELLOW, none, none), [Red, Red]);
 }

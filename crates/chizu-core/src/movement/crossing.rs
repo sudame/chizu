@@ -328,6 +328,8 @@ pub(super) enum Occ {
 #[derive(Default)]
 pub(super) struct Gate {
     pub now: Tick,
+    /// 信号の灯火を決める、前の tick の交差点の様子。
+    pub signals: signal::Demand,
     /// 止まりきれない車か交差点の中の車が通っていて、歩く人が渡り始めてはいけない横断歩道（交差点と腕の区間）。
     pub busy: BTreeSet<(NodeId, SegmentId)>,
     /// 交差点の手前まで来た、止まりきれる車が通る横断歩道と、止まって横断歩道の人に譲った車の、譲った tick 数の
@@ -367,7 +369,7 @@ impl Gate {
     /// 信号のない交差点で車が途切れなくても、人は待ちすぎた所で車を止めて渡る。
     pub fn may_cross(&self, net: &Network, node: NodeId, segment: SegmentId) -> bool {
         let at = (node, segment);
-        if self.busy.contains(&at) || !walk_light(net, node, segment, self.now) {
+        if self.busy.contains(&at) || !walk_light(net, node, segment, self.now, &self.signals) {
             return false;
         }
         if self.claimed.contains(&at) {
@@ -375,7 +377,9 @@ impl Gate {
         }
         match self.near.get(&at) {
             None => true,
-            Some(&c) => signal::state(net, node, self.now).is_some() && c < PED_PATIENCE,
+            Some(&c) => {
+                signal::state(net, node, self.now, &self.signals).is_some() && c < PED_PATIENCE
+            }
         }
     }
 
@@ -388,7 +392,7 @@ impl Gate {
             return;
         }
         let c = self.near.get(&at).copied().unwrap_or(0);
-        if waited > c && walk_light(net, at.0, at.1, self.now) {
+        if waited > c && walk_light(net, at.0, at.1, self.now, &self.signals) {
             self.claimed.insert(at);
         }
     }
@@ -459,8 +463,14 @@ pub(super) enum Jaywalk {
 }
 
 /// 信号が、交差点 `node` の区間 `segment` の腕の横断歩道を渡り始めてよいとしているか。信号がなければ `true`。
-fn walk_light(net: &Network, node: NodeId, segment: SegmentId, now: Tick) -> bool {
-    match signal::state(net, node, now) {
+fn walk_light(
+    net: &Network,
+    node: NodeId,
+    segment: SegmentId,
+    now: Tick,
+    signals: &signal::Demand,
+) -> bool {
+    match signal::state(net, node, now, signals) {
         None => true,
         Some(st) => arm_heading(net, node, segment).is_some_and(|h| st.walk(h % 4)),
     }

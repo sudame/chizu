@@ -541,6 +541,7 @@ fn signals_scenario_stops_cars_on_red() {
     for _ in 6..COMMUTE_TICKS {
         // 信号の交差点へ向かうリンクの上の車。進めたあとにリンクが変わっていれば、交差点に入った。
         let now = world.tick();
+        let demand = world.trips().signal_demand(world.network());
         let before: Vec<_> = world
             .trips()
             .iter()
@@ -559,11 +560,12 @@ fn signals_scenario_stops_cars_on_red() {
             }
             entered += 1;
             let axis = signal::axis(net.segment_line(link.segment).unwrap().step);
-            let light = signal::state(net, end_of(net, link), now)
+            let light = signal::state(net, end_of(net, link), now, &demand)
                 .unwrap()
                 .light_for(axis);
             assert_ne!(light, signal::Light::Red, "赤で入った {now:?} {link:?}");
         }
+        let demand = world.trips().signal_demand(net);
         for (_, t) in world.trips().iter() {
             if t.mode() != LaneMode::Car || t.speed().0 != 0 {
                 continue;
@@ -580,7 +582,7 @@ fn signals_scenario_stops_cars_on_red() {
             let at_line = i64::from(t.offset().0) + 7_000 >= line.length().0;
             let red = at_line
                 && lit.contains(&end)
-                && signal::state(net, end, world.tick())
+                && signal::state(net, end, world.tick(), &demand)
                     .is_some_and(|st| st.light_for(axis) != signal::Light::Green);
             waited += usize::from(red);
         }

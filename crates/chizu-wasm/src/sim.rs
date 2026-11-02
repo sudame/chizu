@@ -254,13 +254,14 @@ impl Sim {
     /// 灯火は、次に進める tick の段階を表す。ノードの ID、区間の ID の順に並べる。
     pub fn signal_lights(&self) -> Vec<f64> {
         let (net, now) = (self.world.network(), self.world.tick());
+        let demand = self.world.trips().signal_demand(net);
         let mut out = Vec::new();
         for (id, node) in net.nodes() {
             if node.control != NodeControl::Signal {
                 continue;
             }
             let t = node.tile();
-            for ((dx, dy), light) in signal::arm_lights(net, id, now) {
+            for ((dx, dy), light) in signal::arm_lights(net, id, now, &demand) {
                 out.extend([t.x, t.y, dx, dy].map(|v| v as f64));
                 out.push(f64::from(light as u8));
             }
