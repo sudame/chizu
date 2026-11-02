@@ -434,10 +434,12 @@ fn plan(
                     // 側が違えば、出発の位置で道路を横切る。
                     let (far, far_end) = (e.0.0 != a.0, e.1.0 != b.0);
                     let jay = mode == LaneMode::Sidewalk && r.links.len() == 1 && far != far_end;
+                    // 車では、出発の建物と反対の向きの車線から出るかを `far` に持つ。車から歩きに
+                    // 切り替えるときに、建物の側から歩き出すのに使う。
                     let walk = crossing::Walk {
-                        far: mode == LaneMode::Sidewalk && far,
+                        far,
                         jay: jay.then_some(0),
-                        far_end: mode == LaneMode::Sidewalk && far_end,
+                        far_end,
                     };
                     let key = match mode {
                         LaneMode::Car => driven_ms(net, g, &r, *e)?,
@@ -595,6 +597,11 @@ impl Trips {
         // 車は、出発のリンクの車線のうち車の少ない車線に置く。前の車と重なるなら、その後ろの空いた
         // 位置まで下げる。どの車線にも空きがなければ、空くまで待たせる。
         let mut ix = car::LaneIndex::of(&self.rows, None);
+        let zones = if mode == LaneMode::Car {
+            crossing::jay_zones(net, &self.rows)
+        } else {
+            BTreeMap::new()
+        };
         resolved
             .iter()
             .zip(walks)
@@ -603,7 +610,7 @@ impl Trips {
                 let (route, e, jay) = routes.next().expect("探した経路の数が合わない")?;
                 let id = self.insert(make_trip(net, route, e, *to, now, jay));
                 if mode == LaneMode::Car {
-                    car::place(&mut self.rows, net, &mut ix, id.slot());
+                    car::place(&mut self.rows, net, &mut ix, id.slot(), &zones);
                 }
                 Some(id)
             })
@@ -736,10 +743,11 @@ impl Trips {
                 let mut t = make_trip(net, route, ends, dest, departed, jay);
                 (t.speed, t.waiting, t.waited, t.stalled, t.then) =
                     (speed, waiting, waited, stalled, then);
+                // いまの位置は、いまのリンクと同じ向きのリンクで表してあるので、そのリンクから
+                // 向きを変えたなら、側も入れ替わる。
+                t.walk.far ^= old_far;
                 if mode == LaneMode::Sidewalk {
-                    // いまの位置は、いま歩いているリンクと同じ向きのリンクで表してあるので、そのリンクから
-                    // 向きを変えたなら、側も入れ替わる。渡りかけていた横切りは、歩道の端からやり直す。
-                    t.walk.far ^= old_far;
+                    // 渡りかけていた横切りは、歩道の端からやり直す。
                     let mismatch = t.route.links.len() == 1 && t.walk.far != t.walk.far_end;
                     t.walk.jay = mismatch.then_some(0);
                 }

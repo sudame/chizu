@@ -292,3 +292,143 @@ fn a_nearby_crosswalk_is_used_instead_of_crossing_midblock() {
     assert_eq!(w.walk.jay, None);
     assert!(w.route().links.len() >= 2);
 }
+
+/// (0, 0)〜(20, 0) と (20, 0)〜(60, 0) の 2 本の区間がノード (20, 0) でつながる道路に、区間 2 の始まりから
+/// `at` mm の所で北の側から横切る人を置く。人の行き先は同じリンクの先にあり、横切る予定だけを足す。
+fn crossing_near_the_node(at: u32, started: u32) -> (Town, TripId) {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0));
+    road(&mut n, (20, 0), (60, 0));
+    let mut t = Town::new(n);
+    let walker = t.walk(at_on(20, at), at_on(50, 0));
+    let w = t.trips.rows[walker.slot()].as_mut().unwrap();
+    assert_eq!(w.route().links.len(), 1);
+    w.offset = LaneOffset(at);
+    w.walk.jay = Some(started);
+    (t, walker)
+}
+
+/// マス `x` から東へ `along` mm の、東向きの歩道の位置。
+fn at_on(x: i64, along: u32) -> SidewalkPos {
+    let tiles = i64::from(along / 8_000);
+    at(x + tiles, 0, (1, 0), along % 8_000)
+}
+
+/// 区間の途中を横切っている人と、車の体が同じリンクの上で重ならないことを確かめる。
+fn assert_apart(t: &Town, walker: TripId) {
+    let Some(w) = t.trips.get(walker) else {
+        return;
+    };
+    if !w.walk.jay.is_some_and(|p| p > 0) {
+        return;
+    }
+    let z = w.offset.0;
+    for (_, c) in t.trips.iter().filter(|(_, c)| car::on_road(c)) {
+        if c.link().segment != w.link().segment {
+            continue;
+        }
+        let len = w.link_len.0;
+        let zone = if c.link().dir == w.link().dir { z } else { len - z };
+        let front = c.offset().0;
+        let apart = front + JAY_HALF_MM <= zone || front >= zone + JAY_HALF_MM + CAR_LENGTH;
+        assert!(apart, "横切っている人に車が重なった（人 {zone}、車の前 {front}）");
+    }
+}
+
+/// 区間 2 の始まりから 4m の所で横切ろうとする人と、区間 1 をノードの `before` mm 手前で最高速度で
+/// 走ってくる車を置いて、終わるまで進める。人と車は重ならない。人が車の過ぎる前に横切り始めたかを返す。
+fn car_over_the_node(before: u32) -> bool {
+    let (mut t, walker) = crossing_near_the_node(4_000, 0);
+    let node = t.net.node_at(TilePos::new(20, 0)).unwrap();
+    let car = t.drive(at_on(0, 160_000 - before), at(55, 0, (1, 0), 0));
+    let first = t.trips.get(car).unwrap().link();
+    assert_eq!(t.trips.get(car).unwrap().offset().0, 160_000 - before);
+    let vmax = crate::routing::speed_limit(t.net.segment(first.segment).unwrap().kind);
+    t.trips.rows[car.slot()].as_mut().unwrap().speed = vmax;
+    let mut early = false;
+    for _ in 0..200 {
+        t.step(node);
+        assert_apart(&t, walker);
+        if t.trips.get(car).is_some_and(|c| c.link() == first) {
+            early |= t.trips.get(walker).unwrap().walk.jay != Some(0);
+        }
+    }
+    assert!(t.trips.is_empty(), "残った {}", t.trips.len());
+    early
+}
+
+#[test]
+fn a_car_coming_over_the_node_does_not_run_into_a_walker_crossing_near_it() {
+    car_over_the_node(10_000);
+    // 隣の区間で止まりきれない所まで来ている車がいるあいだは、人は横切り始めない。
+    assert!(!car_over_the_node(18_000), "車が来ているのに横切り始めた");
+    // 止まれる所にいる車の前では横切り始め、車は人の手前で止まる。
+    assert!(car_over_the_node(40_000), "止まれる車の前でも横切らない");
+}
+
+#[test]
+fn a_car_arriving_while_a_walker_already_crosses_near_the_node_waits_at_the_node() {
+    // 人が横切り始めたあとで、止まりきれない速さの車がノードの手前に現れる。車はノードを越えずに待つ。
+    let (mut t, walker) = crossing_near_the_node(4_000, 1_389);
+    let node = t.net.node_at(TilePos::new(20, 0)).unwrap();
+    let car = t.drive(at(19, 0, (1, 0), 4_000), at(55, 0, (1, 0), 0));
+    let vmax = crate::routing::speed_limit(t.net.segment(t.trips.get(car).unwrap().link().segment).unwrap().kind);
+    t.trips.rows[car.slot()].as_mut().unwrap().speed = vmax;
+    for _ in 0..200 {
+        t.step(node);
+        assert_apart(&t, walker);
+    }
+    assert!(t.trips.is_empty(), "残った {}", t.trips.len());
+}
+
+#[test]
+fn a_car_departing_next_to_a_crossing_walker_is_placed_clear_of_it() {
+    // 区間 2 の 20m の所を横切っている人のすぐそばから、車が出発する。
+    let (mut t, walker) = crossing_near_the_node(20_000, 1_389);
+    let node = t.net.node_at(TilePos::new(20, 0)).unwrap();
+    for along in [18_000, 20_000, 22_000, 25_000] {
+        t.drive(at_on(20, along), at(55, 0, (1, 0), 0));
+        assert_apart(&t, walker);
+    }
+    // 次の tick に置かれる、出発を待つ車も重ならない。
+    for _ in 0..200 {
+        t.step(node);
+        assert_apart(&t, walker);
+        let x = at_on(20, 20_000);
+        t.drive(x, at(55, 0, (1, 0), 0));
+        assert_apart(&t, walker);
+        if t.trips.get(walker).is_none() {
+            break;
+        }
+    }
+}
+
+#[test]
+fn walkers_go_round_highway_arms_instead_of_crossing_them() {
+    // (10, 10) で、東西の道路に北から高速道路がつながる。高速道路の腕には横断歩道がない。
+    let mut n = Network::new();
+    n.add_highway(TilePos::new(10, 10), TilePos::new(10, -20));
+    road(&mut n, (0, 10), (20, 10));
+    let node = n.node_at(TilePos::new(10, 10)).unwrap();
+    assert_eq!(n.node(node).unwrap().segments.len(), 3);
+    let highway = n
+        .node(node)
+        .unwrap()
+        .segments
+        .iter()
+        .copied()
+        .find(|s| n.segment(*s).unwrap().kind == crate::network::SegmentKind::Highway)
+        .unwrap();
+    let side = |a, b| link(&n, a, b, LaneMode::Sidewalk);
+    let (w, c, e) = ((9, 10), (10, 10), (11, 10));
+    for from_far in [false, true] {
+        for need in [None, Some(false), Some(true)] {
+            let (_, arms) = crossing::depart(&n, node, (side(w, c), from_far), side(c, e), need);
+            assert!(!arms.contains(&highway), "{from_far} {need:?} {arms:?}");
+        }
+    }
+    // 北の側（東へ歩く人の左）から北の側へ行くなら、高速道路の腕を越えずに、南へ回って西と東の腕を渡る。
+    let (far, arms) = crossing::depart(&n, node, (side(w, c), true), side(c, e), Some(true));
+    assert!(far);
+    assert_eq!(arms.as_slice(), &[side(w, c).segment, side(c, e).segment]);
+}

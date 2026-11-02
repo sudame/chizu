@@ -489,14 +489,16 @@ export function roadLaneGeometry(segments: Float64Array, nodes: Float64Array): G
     geometry.square({ x, y }, crossing ? node.half : node.carriage, asphaltOf(node.kind));
   }
   strips(["center", "divider"]);
-  // 交差点の腕ごとに、交差点の手前の車道を横切る横断歩道の縞を描く
+  // 交差点の腕ごとに、交差点の手前の車道を横切る横断歩道の縞を描く。高速道路の腕には横断歩道がない
   for (const { x, y, node } of nodeList) {
     if (node.arms.length < 3) {
       continue;
     }
     for (const arm of node.arms) {
       const kind = segments[arm.segment * SEGMENT_STRIDE + 4] ?? 0;
-      zebra(geometry, { x, y }, arm, node.half, carriagewayHalfWidth(kind));
+      if (kind !== HIGHWAY_CODE) {
+        zebra(geometry, { x, y }, arm, node.half, carriagewayHalfWidth(kind));
+      }
     }
   }
   return geometry;

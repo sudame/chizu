@@ -136,18 +136,21 @@ pub(super) fn given_up(t: &Trip) -> bool {
     t.mode == LaneMode::Car && t.waiting && t.stalled > junction::RESCUE
 }
 
+/// `jay` は車のリンクごとの、区間の途中の衝突区間の真ん中の位置で、車がその区間にかかる位置には置かない。
 pub(super) fn place(
     rows: &mut [Option<Trip>],
     net: &Network,
     ix: &mut LaneIndex,
     i: usize,
+    jay: &BTreeMap<LinkId, Vec<u32>>,
 ) -> bool {
     let t = rows[i].as_mut().expect("置く車がない");
     let lanes: Vec<LaneId> = net.link_lanes(t.link()).collect();
+    let zones = jay.get(&t.link()).map_or(&[][..], Vec::as_slice);
     let found = ix
         .by_count(&lanes)
         .into_iter()
-        .find_map(|l| Some((l, ix.room_behind(l, t.offset)?)));
+        .find_map(|l| Some((l, room_clear_of(ix, l, t.offset, zones)?)));
     match found {
         Some((lane, at)) => {
             (t.lane, t.offset, t.waiting, t.stalled) = (lane, at, false, 0);
@@ -336,7 +339,7 @@ fn drive(
         .iter()
         .find(|z| **z + crossing::JAY_HALF_MM >= t.offset.0)
     {
-        let line = z.saturating_sub(crossing::JAY_HALF_MM + JAY_STOP_GAP);
+        let line = jay_line(z);
         let at = LaneOffset(line.saturating_add(SPACING));
         let s =
             safe_speed(t.offset, at, MmPerTick::ZERO).min(i64::from(line) - i64::from(t.offset.0));
@@ -362,6 +365,27 @@ fn drive(
 /// 区間の途中の衝突区間の手前で止まる車が、衝突区間とのあいだに空ける距離（mm）。
 const JAY_STOP_GAP: u32 = 1_000;
 
+/// 真ん中が `z` の衝突区間の手前で、車の前の端を止める位置。
+fn jay_line(z: u32) -> u32 {
+    z.saturating_sub(crossing::JAY_HALF_MM + JAY_STOP_GAP)
+}
+
+/// 車線 `lane` で、位置 `at` から後ろへ下げていき、ほかの車とも、衝突区間 `zones` とも重ならない最初の位置。
+fn room_clear_of(ix: &LaneIndex, lane: LaneId, at: LaneOffset, zones: &[u32]) -> Option<LaneOffset> {
+    let mut p = ix.room_behind(lane, at)?;
+    // 下げるたびに前の衝突区間より手前へ移るので、衝突区間の数より多くは回らない。
+    for _ in 0..=zones.len() {
+        let hit = zones.iter().rev().find(|z| {
+            jay_line(**z) < p.0 && z.saturating_add(crossing::JAY_HALF_MM) + CAR_LENGTH > p.0
+        });
+        let Some(z) = hit else {
+            return Some(p);
+        };
+        p = ix.room_behind(lane, LaneOffset(jay_line(*z)))?;
+    }
+    Some(p)
+}
+
 /// 歩く人がこの tick に渡り始めてよいかを決めるための、前の tick の車の様子を集める。
 ///
 /// 横断歩道は、止まりきれずに交差点へ入る車、交差点の中の車、[`crossing::PED_PATIENCE`] tick より長く
@@ -372,9 +396,10 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
         now,
         ..Default::default()
     };
-    // 区間の途中で横切る人のいる区間と、車線の上の車を 1 度に集める。
+    // 区間の途中で横切る人のいる区間と、車の主体を 1 度に集める。
     let mut jay_segments = std::collections::BTreeSet::new();
     let mut cars = Vec::new();
+    let mut waiting = Vec::new();
     let mut walkers = false;
     for t in rows.iter().flatten() {
         if t.mode == LaneMode::Sidewalk {
@@ -382,20 +407,47 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
             if t.walk.jay.is_some() {
                 jay_segments.insert(t.link().segment);
             }
-        } else if !t.waiting {
+        } else if t.waiting {
+            waiting.push(t);
+        } else {
             cars.push(t);
         }
     }
     if !walkers {
         return g;
     }
-    for t in cars {
+    // 出発で置かれる車は、出発の位置に止まった車として数える。
+    for t in waiting {
         let link = t.link();
         if jay_segments.contains(&link.segment) {
             g.cars
                 .entry(link.segment)
                 .or_default()
-                .push((link.dir, t.offset.0, t.speed.0, t.stalled));
+                .push((link.dir, i64::from(t.offset.0), 0, 0));
+        }
+    }
+    for t in cars {
+        let link = t.link();
+        if jay_segments.contains(&link.segment) {
+            g.cars.entry(link.segment).or_default().push((
+                link.dir,
+                i64::from(t.offset.0),
+                t.speed.0,
+                t.stalled,
+            ));
+        }
+        // ノードを越えて横切る区間へ入ってくる車は、次のリンクの始まりより手前にいるものとして数える。
+        if !t.last_leg() && near_end(net, t) {
+            let next = t.route.links[t.leg as usize + 1];
+            if jay_segments.contains(&next.segment) {
+                let behind = i64::from(t.offset.0) - i64::from(t.link_len.0);
+                g.cars.entry(next.segment).or_default().push((
+                    next.dir,
+                    behind,
+                    t.speed.0,
+                    t.stalled,
+                ));
+            }
         }
         if t.leg > 0 && t.offset.0 < JUNCTION_CLEAR {
             let prev = t.route.links[t.leg as usize - 1];
@@ -551,7 +603,7 @@ pub(super) fn step(
     if !waiting.is_empty() {
         let mut ix = LaneIndex::of(rows, None);
         for i in waiting {
-            if !place(rows, net, &mut ix, i) {
+            if !place(rows, net, &mut ix, i, &occupied.jay) {
                 still_waiting.push(i);
             }
         }
@@ -608,7 +660,23 @@ pub(super) fn step(
                 .get(&next_lane?)
                 .map(|(at, v)| (LaneOffset(t.link_len.0.saturating_add(at.0)), *v))
         });
-        let jay = occupied.jay.get(&t.link()).map_or(&[][..], Vec::as_slice);
+        // いまのリンクと、ノードの先の次のリンクの衝突区間。次のリンクの位置は、いまのリンクの始まりから数え直す。
+        let here = occupied.jay.get(&t.link()).map_or(&[][..], Vec::as_slice);
+        let ahead = next_lane
+            .and_then(|_| occupied.jay.get(&t.route.links[t.leg as usize + 1]))
+            .filter(|zs| !zs.is_empty());
+        let both: Vec<u32>;
+        let jay = match ahead {
+            None => here,
+            Some(zs) => {
+                both = here
+                    .iter()
+                    .copied()
+                    .chain(zs.iter().map(|z| z.saturating_add(t.link_len.0)))
+                    .collect();
+                &both
+            }
+        };
         let (v, at) = drive(net, t, leader, held[k] || looks[k].no_room, jay);
         (i, t.speed, v, at, next_lane, held[k])
     };
@@ -670,6 +738,13 @@ pub(super) fn step(
         let room = rear
             .get(&lane)
             .map(|r| (r.0 >= need).then(|| r.0 - SPACING));
+        // 置き先までに、区間の途中を横切る人の衝突区間があれば、ノードを越えずにリンクの終わりで止まる。
+        // 止まりきれない車の来る所では人は横切り始めないので（`gate`）、ここで止まるのは稀である。
+        let jay_ahead = occupied
+            .jay
+            .get(&next)
+            .is_some_and(|zs| zs.iter().any(|z| jay_line(*z) < place.0));
+        let room = if jay_ahead { Some(None) } else { room };
         match room {
             Some(None) => {
                 (t.offset, t.speed) = (t.link_len, MmPerTick::ZERO);

@@ -4,7 +4,7 @@
 //! 歩く人はそのリンクの進む向きの右（`far` なら左）の歩道にいる。建物の出入口は、建物の側の歩道の
 //! 上にある（`lane_shift` と `growth` の側の決め方と同じ）。
 //!
-//! 横断歩道は、CS2 と同じく 3 本以上の区間が集まる交差点のすべての腕に、自動で置く。交差点で
+//! 横断歩道は、CS2 と同じく 3 本以上の区間が集まる交差点の、高速道路でないすべての腕に、自動で置く。交差点で
 //! 腕 A の歩道から腕 B の歩道へ移る人は、交差点のまわりを時計回りか反時計回りに回り、通る腕の
 //! 横断歩道を順に渡る。回る向きは渡る腕の少ないほうで、同じなら時計回り（マスの y は下向きなので、
 //! 向きの角度の増える向き）にする。腕 B のどちらの側へ出るかは、渡る腕の少ないほう（同じなら右）にする。
@@ -33,7 +33,7 @@ use smallvec::SmallVec;
 
 use super::{junction, signal};
 use crate::command::NodeId;
-use crate::network::{Dir, LinkId, Network, SegmentId};
+use crate::network::{Dir, LinkId, Network, SegmentId, SegmentKind};
 use crate::units::Tick;
 
 /// 車線 1 本を渡る距離（mm）。
@@ -100,53 +100,69 @@ pub type Arms = SmallVec<[SegmentId; 4]>;
 /// 時計回りの側を 2i+1 とする。2i から 2i+1 へ回るとき腕 i を渡り、2i+1 から次の腕の 2(i+1) へは
 /// 渡らずに角を回る。
 struct Corners {
-    arms: SmallVec<[SegmentId; 8]>,
+    /// 腕の区間と、高速道路か。
+    arms: SmallVec<[(SegmentId, bool); 8]>,
 }
+
+/// 角から角へ回る道筋。越える高速道路の腕の数と、渡る腕。
+type Way = (usize, Arms);
 
 impl Corners {
     fn of(net: &Network, node: NodeId) -> Option<Corners> {
         let n = net.node(node)?;
-        let mut arms: SmallVec<[(u8, SegmentId); 8]> = n
+        let mut arms: SmallVec<[(u8, SegmentId, bool); 8]> = n
             .segments
             .iter()
-            .filter_map(|s| Some((arm_heading(net, node, *s)?, *s)))
+            .filter_map(|s| {
+                let highway = net.segment(*s)?.kind == SegmentKind::Highway;
+                Some((arm_heading(net, node, *s)?, *s, highway))
+            })
             .collect();
         arms.sort_unstable();
         Some(Corners {
-            arms: arms.into_iter().map(|(_, s)| s).collect(),
+            arms: arms.into_iter().map(|(_, s, h)| (s, h)).collect(),
         })
     }
 
     fn index(&self, s: SegmentId) -> Option<usize> {
-        self.arms.iter().position(|x| *x == s)
+        self.arms.iter().position(|x| x.0 == s)
     }
 
-    /// 角 `p` から角 `q` へ、渡る腕の少ない向きに回るときに渡る腕。
-    fn walk(&self, p: usize, q: usize) -> Arms {
+    /// 角 `p` から角 `q` へ回る道筋のうち、越える高速道路の腕が少なく、次に渡る腕の少ないもの。
+    /// 高速道路の腕には横断歩道がないので、渡る腕には入れない。
+    fn walk(&self, p: usize, q: usize) -> Way {
         let m = 2 * self.arms.len();
-        let mut cw = Arms::new();
-        let mut at = p;
-        while at != q {
-            if at % 2 == 0 {
-                cw.push(self.arms[at / 2]);
+        let way = |forward: bool| {
+            let (mut highways, mut arms) = (0, Arms::new());
+            let mut at = p;
+            while at != q {
+                if at % 2 == usize::from(!forward) {
+                    let (s, highway) = self.arms[at / 2];
+                    if highway {
+                        highways += 1;
+                    } else {
+                        arms.push(s);
+                    }
+                }
+                at = if forward { (at + 1) % m } else { (at + m - 1) % m };
             }
-            at = (at + 1) % m;
+            (highways, arms)
+        };
+        let (cw, ccw) = (way(true), way(false));
+        if (cw.0, cw.1.len()) <= (ccw.0, ccw.1.len()) {
+            cw
+        } else {
+            ccw
         }
-        let mut ccw = Arms::new();
-        let mut at = p;
-        while at != q {
-            if at % 2 == 1 {
-                ccw.push(self.arms[at / 2]);
-            }
-            at = (at + m - 1) % m;
-        }
-        if cw.len() <= ccw.len() { cw } else { ccw }
     }
 }
 
 /// 歩道のリンク `from` の `from_far` の側からノード `node` を通ってリンク `to` へ移る人の、`to` での側と、
-/// 渡る腕。`need` があれば、その側へ出る。なければ渡る腕の少ない側（同じなら右）へ出る。
-/// 3 本より少ない区間のノードでは渡る腕はない。
+/// 渡る腕。`need` があれば、その側へ出る。なければ、越える高速道路の腕が少なく、次に渡る腕の少ない
+/// 側（同じなら右）へ出る。3 本より少ない区間のノードでは渡る腕はない。
+///
+/// 高速道路の腕は渡らずに回る。どちらに回っても高速道路の腕を越えるときだけ、横断歩道なしに越える。
+/// 外部接続の高速道路は買った土地の端の 1 本だけなので、そうなるノードはふつうはできない。
 pub fn depart(
     net: &Network,
     node: NodeId,
@@ -163,8 +179,9 @@ pub fn depart(
         // 腕 i へ入ってくる人の右は反時計回りの側、腕 j から出ていく人の右は時計回りの側である。
         let p = 2 * i + usize::from(from_far);
         let q = |far: bool| 2 * j + usize::from(!far);
-        let side = need.unwrap_or_else(|| c.walk(p, q(true)).len() < c.walk(p, q(false)).len());
-        Some((side, c.walk(p, q(side))))
+        let key = |w: &Way| (w.0, w.1.len());
+        let side = need.unwrap_or_else(|| key(&c.walk(p, q(true))) < key(&c.walk(p, q(false))));
+        Some((side, c.walk(p, q(side)).1))
     });
     let (side, arms) = found.unwrap_or((need.unwrap_or(from_far), Arms::new()));
     if junction {
@@ -190,7 +207,8 @@ pub(super) struct Gate {
     /// 歩く人が渡り始めてはいけない横断歩道（交差点と腕の区間）。
     pub busy: BTreeSet<(NodeId, SegmentId)>,
     /// 区間の途中で横切る人がいる区間の、車線の上の車（向き、前の端の位置、速さ、止まった tick 数）。
-    pub cars: BTreeMap<SegmentId, Vec<(Dir, u32, i32, u32)>>,
+    /// 隣のリンクからノードを越えて入ってくる車は、前の端の位置を負の値で表す。
+    pub cars: BTreeMap<SegmentId, Vec<(Dir, i64, i32, u32)>>,
 }
 
 impl Gate {
@@ -223,7 +241,7 @@ impl Gate {
             } else {
                 len.saturating_sub(at)
             };
-            let (z, front) = (i64::from(z), i64::from(front));
+            let z = i64::from(z);
             let far = z + i64::from(JAY_HALF_MM) + i64::from(super::CAR_LENGTH);
             if front >= far {
                 return false;
@@ -234,6 +252,15 @@ impl Gate {
             near < reach || (v == 0 && stalled >= PED_PATIENCE && near < 3 * JAY_MARGIN_MM)
         })
     }
+}
+
+/// いま区間の途中を横切っている人の、車のリンクごとの衝突区間の真ん中の位置。tick の途中で車を置くときに使う。
+pub(super) fn jay_zones(net: &Network, rows: &[Option<super::Trip>]) -> BTreeMap<LinkId, Vec<u32>> {
+    let occs = rows.iter().flatten().filter_map(|t| {
+        let crossing = t.mode == crate::network::LaneMode::Sidewalk && t.walk.jay.is_some_and(|p| p > 0);
+        crossing.then(|| Occ::Jay(t.link(), t.offset().0))
+    });
+    Occupied::of(net, occs).jay
 }
 
 /// 歩く人がいま渡っている所から作った、車の側から見た衝突区間。

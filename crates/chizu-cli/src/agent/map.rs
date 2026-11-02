@@ -24,7 +24,7 @@ pub const LEGEND: &str = "\
 凡例（重なったときは上のものを出す）
   P W      公共施設（P 発電所、W 浄水場）
   S        信号のある交差点（--layer traffic では混み具合の文字を先に出す）
-  Z        信号のない交差点。どの腕にも横断歩道がある（--layer traffic では混み具合の文字を先に出す）
+  Z        信号のない交差点。高速道路でないどの腕にも横断歩道がある（--layer traffic では混み具合の文字を先に出す）
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
   R C I O  建物（住宅、商業、工業、オフィスの区画に建っている）
   r c i o  建物のない区画（同じ並び）
@@ -324,7 +324,14 @@ pub fn render(
     for (_, n) in world.network().nodes() {
         if let Some(cell) = grid.cell_mut(n.tile()) {
             cell.signal |= n.control == NodeControl::Signal;
-            cell.crosswalk |= n.segments.len() >= 3;
+            // 高速道路の腕には横断歩道がないので、ほかの腕がある交差点だけを数える。
+            let roads = n.segments.iter().filter(|s| {
+                world
+                    .network()
+                    .segment(**s)
+                    .is_some_and(|s| s.kind != SegmentKind::Highway)
+            });
+            cell.crosswalk |= n.segments.len() >= 3 && roads.count() > 0;
         }
     }
 
