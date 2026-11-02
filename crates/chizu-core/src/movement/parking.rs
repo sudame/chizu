@@ -10,6 +10,7 @@
 //! まだ着いていない車のために押さえた空きを、出る車が使ってしまうことはない。
 //! 建物が消えると、その駐車場に停めてあった車も消える。そこへ向かっていた車は、着いたら停めずに消える。
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::{Ends, SidewalkPos, Trip, Trips, car, lane_shift, make_trip, plan};
@@ -25,7 +26,7 @@ use crate::units::Tick;
 pub const PARK_RADIUS: u64 = 16;
 
 /// いまの区切りが終わったあとにすること。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) enum Then {
     /// 移動を終える。
     Arrive,
@@ -69,7 +70,7 @@ impl StateHash for Then {
 }
 
 /// 1 つの駐車場の、停めてある台数と、向かっている車のために押さえた台数。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lot {
     pub parked: u32,
     pub reserved: u32,
@@ -83,7 +84,7 @@ impl StateHash for Lot {
 }
 
 /// 建物ごとの駐車場。どちらの台数も 0 の建物は持たない。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Parking {
     lots: BTreeMap<BuildingId, Lot>,
 }

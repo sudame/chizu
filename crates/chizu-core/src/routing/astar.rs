@@ -5,13 +5,14 @@
 //! 束ねたかや、覚えた結果があったかで経路が変わらない。
 
 use core::cmp::Reverse;
+use serde::{Deserialize, Serialize};
 use std::collections::BinaryHeap;
 
 use super::graph::{Edge, Graph};
 use crate::network::LinkId;
 
 /// 見つけた経路。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Route {
     /// 出発のリンクから着くリンクまで、通る順に並べたリンク。
     pub links: Vec<LinkId>,

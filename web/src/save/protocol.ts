@@ -18,20 +18,27 @@ export type SaveMeta = {
   stateHash: string;
 };
 
-/** IndexedDB の 1 枠に書くもの。commands は記録を encode したもの。 */
+/**
+ * IndexedDB の 1 枠に書くもの。commands は記録を encode したもの。state は街の状態を書き出したもので、
+ * 街の状態を入れる前の保存データにはない。読み込むときは state があればそこから開き、なければ記録を再生する。
+ */
 export type SaveRecord = {
   slot: SlotId;
   /** 保存した日時（Date.now()）。 */
   savedAt: number;
   meta: SaveMeta;
   commands: ArrayBuffer;
+  state?: ArrayBuffer;
 };
+
+/** Worker に渡して読み込む保存データ。 */
+export type SaveBody = { meta: SaveMeta; commands: ArrayBuffer; state: ArrayBuffer | null };
 
 export type SaveToWorker =
   /** save が null なら新しく始める。autoSave が false なら自動保存しない。 */
   | {
       kind: "save:start";
-      save: { meta: SaveMeta; commands: ArrayBuffer } | null;
+      save: SaveBody | null;
       autoSave: boolean;
     }
   | { kind: "save:request"; slot: SlotId };
@@ -44,10 +51,14 @@ export type SaveFromWorker =
   | { kind: "save:load-error"; message: string }
   /**
    * 街ができた。読み込んだときは、作り直した街の meta を添える。rulesChanged は、作り直した街の
-   * 状態ハッシュが保存したときと違う（シミュレーションの規則が変わった）こと。
+   * 状態ハッシュが保存したときと違う（シミュレーションの規則が変わった）こと。fromState は、
+   * 記録を再生せずに街の状態から開いたこと。
    */
-  | { kind: "save:started"; loaded: { meta: SaveMeta; rulesChanged: boolean } | null }
-  | { kind: "save:data"; slot: SlotId; meta: SaveMeta; commands: ArrayBuffer };
+  | {
+      kind: "save:started";
+      loaded: { meta: SaveMeta; rulesChanged: boolean; fromState: boolean } | null;
+    }
+  | { kind: "save:data"; slot: SlotId; meta: SaveMeta; commands: ArrayBuffer; state: ArrayBuffer };
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -82,7 +93,8 @@ export function isSaveRecord(value: unknown): value is SaveRecord {
     isSlotId(value.slot) &&
     Number.isFinite(value.savedAt) &&
     isSaveMeta(value.meta) &&
-    value.commands instanceof ArrayBuffer
+    value.commands instanceof ArrayBuffer &&
+    (value.state === undefined || value.state instanceof ArrayBuffer)
   );
 }
 
@@ -95,7 +107,11 @@ export function isSaveToWorker(value: unknown): value is SaveToWorker {
       const s = value.save;
       return (
         typeof value.autoSave === "boolean" &&
-        (s === null || (isObject(s) && isSaveMeta(s.meta) && s.commands instanceof ArrayBuffer))
+        (s === null ||
+          (isObject(s) &&
+            isSaveMeta(s.meta) &&
+            s.commands instanceof ArrayBuffer &&
+            (s.state === null || s.state instanceof ArrayBuffer)))
       );
     }
     case "save:request":
@@ -121,11 +137,15 @@ export function isSaveFromWorker(value: unknown): value is SaveFromWorker {
         value.loaded === null ||
         (isObject(value.loaded) &&
           isSaveMeta(value.loaded.meta) &&
-          typeof value.loaded.rulesChanged === "boolean")
+          typeof value.loaded.rulesChanged === "boolean" &&
+          typeof value.loaded.fromState === "boolean")
       );
     case "save:data":
       return (
-        isSlotId(value.slot) && isSaveMeta(value.meta) && value.commands instanceof ArrayBuffer
+        isSlotId(value.slot) &&
+        isSaveMeta(value.meta) &&
+        value.commands instanceof ArrayBuffer &&
+        value.state instanceof ArrayBuffer
       );
     default:
       return false;

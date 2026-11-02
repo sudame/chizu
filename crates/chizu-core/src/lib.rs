@@ -16,6 +16,7 @@ pub mod round;
 pub mod routing;
 pub mod schedule;
 pub mod service;
+pub mod snapshot;
 pub mod state_hash;
 pub mod terrain;
 pub mod tile;
@@ -38,6 +39,7 @@ pub use network::{
 pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, SeqGap, replay};
 pub use rng::{Pcg32, RngPurpose, mix_words, rng};
 pub use schedule::{BUCKET_COUNT, DepartureQueue, bucket_at, bucket_of};
+pub use snapshot::{SNAPSHOT_VERSION, SnapshotError};
 pub use state_hash::{StateHash, StateHasher, state_hash_of};
 pub use terrain::{TerrainTiles, is_water, terrain};
 pub use tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, TileRect};

@@ -5,6 +5,7 @@
 //! 連続するので、キャッシュラインを無駄に読まない。添え字は使い回しても変わらないので、住民の組は
 //! 生きているあいだ変わらない。
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 #[cfg(feature = "parallel")]
@@ -44,7 +45,7 @@ pub fn bucket_of(id: CitizenId) -> u32 {
 ///
 /// 住民 1 人が入るのは高々 1 か所で、その tick は住民の予定の `depart_at` と一致する。
 /// この整合は [`Population`] が保つ。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DepartureQueue {
     entries: BTreeSet<(Tick, CitizenId)>,
 }

@@ -13,6 +13,7 @@
 //! 行く先の店が消えたら、店へ向かう移動をやめさせて家に着いたものとし、店へ出るのを待っている住民は寄らずに帰る。
 //! 職場の割り当てや建物の消滅で予定が立て直され、買い物の予定と合わなくなった住民の買い物は消す。
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
@@ -56,7 +57,7 @@ pub const SHOP_CANDIDATES: usize = 8;
 pub const SHOP_SEARCH_TILES: [i64; 2] = [32, 128];
 
 /// 買い物に出る住民の行き先。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Errand {
     shop: BuildingId,
     /// 店に着いて、家へ帰るのを待っているか。
@@ -71,7 +72,7 @@ impl StateHash for Errand {
 }
 
 /// 買い物に出る住民ごとの行き先。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Errands {
     by_citizen: BTreeMap<CitizenId, Errand>,
 }
