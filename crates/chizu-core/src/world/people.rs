@@ -181,6 +181,41 @@ impl World {
         s
     }
 
+    /// 家のある住民の幸福度の平均と、通勤・生活サービス・暮らし向きの点数の平均。端数は切り捨てる。
+    /// 幸福度は [`CityStats::happiness`] と同じく、住民ごとに [`happiness::total`] を出してから平均する。
+    /// 家のある住民がいなければ中立の値である。画面に出すだけで、状態には混ぜない。
+    pub fn happiness_summary(&self) -> (u8, HappinessParts) {
+        let p = &self.population;
+        let (mut sum, mut total, mut housed) = ([0_u64; 3], 0_u64, 0_u64);
+        for id in p.citizen_ids() {
+            let row = p.citizen(id).expect("いる住民の行がない");
+            let home = p.home(row.household).flatten();
+            if home.is_some_and(|b| self.buildings.get(b).is_some()) {
+                let h = row.happiness;
+                sum[0] += u64::from(h.commute);
+                sum[1] += u64::from(h.services);
+                sum[2] += u64::from(h.wealth);
+                total += u64::from(happiness::total(h));
+                housed += 1;
+            }
+        }
+        if housed == 0 {
+            return (
+                happiness::total(HappinessParts::NEUTRAL),
+                HappinessParts::NEUTRAL,
+            );
+        }
+        let avg = |v: u64| (v / housed) as u8;
+        (
+            avg(total),
+            HappinessParts {
+                commute: avg(sum[0]),
+                services: avg(sum[1]),
+                wealth: avg(sum[2]),
+            },
+        )
+    }
+
     /// いま職場にいる住民の数。移動している住民と、帰りに寄った店にいる住民は数えない。
     pub fn citizens_at_work(&self) -> usize {
         let p = &self.population;
@@ -999,6 +1034,46 @@ pub(crate) mod tests {
         let before = w.population().household_count();
         w.emigrate();
         assert_eq!(w.population().household_count(), before);
+    }
+
+    /// 画面に出す幸福度は、要素の平均を通すのでなく、住民ごとの幸福度の平均で、中核の値と一致する。
+    #[test]
+    fn happiness_summary_matches_the_city_stats_with_split_citizens() {
+        let mut w = served_city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 2);
+        let ids: Vec<_> = w.population().citizen_ids().collect();
+        assert!(ids.len() >= 2);
+        for (i, id) in ids.into_iter().enumerate() {
+            let row = w.population().citizen(id).unwrap();
+            let (hi, lo) = (crate::citizens::HAPPINESS_MAX, 0);
+            let parts = if i % 2 == 0 {
+                HappinessParts {
+                    commute: hi,
+                    services: lo,
+                    wealth: hi,
+                }
+            } else {
+                HappinessParts {
+                    commute: lo,
+                    services: hi,
+                    wealth: lo,
+                }
+            };
+            w.population_mut().apply_change(
+                id,
+                crate::citizens::CitizenChange {
+                    schedule: row.schedule,
+                    happiness: parts,
+                },
+            );
+        }
+        let (total, parts) = w.happiness_summary();
+        assert_eq!(total, w.city_stats().happiness);
+        assert_ne!(
+            total,
+            happiness::total(parts),
+            "要素の平均を通した値とは違う"
+        );
     }
 
     /// 電気も水道もない街は、移り住んでもすぐ出ていくので、人口が伸び続けない。
