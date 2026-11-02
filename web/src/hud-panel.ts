@@ -37,7 +37,12 @@ export function setupHudPanel(toggle: HTMLButtonElement, panel: HTMLElement): vo
   const apply = (collapsed: boolean) => {
     panel.hidden = collapsed;
     toggle.setAttribute("aria-expanded", String(!collapsed));
-    toggle.textContent = collapsed ? "詳細 ▸" : "詳細 ▾";
+    // 三角は飾りなので、読み上げの名前に入れない
+    toggle.replaceChildren("詳細");
+    const mark = document.createElement("span");
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = collapsed ? " ▸" : " ▾";
+    toggle.append(mark);
   };
   apply(readCollapsed(storage));
   toggle.addEventListener("click", () => {
@@ -48,15 +53,15 @@ export function setupHudPanel(toggle: HTMLButtonElement, panel: HTMLElement): vo
 }
 
 /**
- * 下の道具の帯の高さを CSS の変数 --toolbar-h に入れる。
- * 帯は幅が狭いと折り返して高くなるので、その上に置くパネルが帯に重ならないよう、この変数を基準に置く。
+ * 要素の高さを CSS の変数に入れる。
+ * 下の道具の帯も上の帯も、幅が狭いと折り返して高くなるので、そのそばに置く部品はこの変数を基準にする。
  */
-export function trackToolbarHeight(toolbar: HTMLElement): void {
+export function trackHeight(el: HTMLElement, variable: string): void {
   const set = () => {
-    document.documentElement.style.setProperty("--toolbar-h", `${toolbar.offsetHeight}px`);
+    document.documentElement.style.setProperty(variable, `${el.offsetHeight}px`);
   };
   set();
   if (typeof ResizeObserver !== "undefined") {
-    new ResizeObserver(set).observe(toolbar);
+    new ResizeObserver(set).observe(el);
   }
 }

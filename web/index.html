@@ -56,9 +56,10 @@
         background: #2d6cdf;
         color: #fff;
       }
+      /* 右上の部品は、上の帯の下に積む。帯は幅が狭いと 2 行になるので、高さは --hudbar-h で測る */
       #feedback-open {
         position: fixed;
-        top: 8px;
+        top: calc(var(--hudbar-h, 30px) + 16px);
         right: 8px;
       }
       #feedback textarea {
@@ -67,9 +68,9 @@
       }
       #dev-tools {
         position: fixed;
-        top: 40px;
+        top: calc(var(--hudbar-h, 30px) + 48px);
         right: 8px;
-        max-width: 20em;
+        max-width: 14em;
         text-align: right;
       }
       #dev-tools button[aria-pressed="true"] {
@@ -120,7 +121,19 @@
         align-items: center;
       }
       #hud {
-        max-width: 100%;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0 14px;
+        margin: 0;
+        font-size: 17px;
+        color: #222;
+        white-space: nowrap;
+      }
+      #hud [hidden] {
+        display: none;
+      }
+      #hud-deficit {
+        color: #b00020;
       }
       #controls {
         display: flex;
@@ -156,6 +169,10 @@
       #city-utilities {
         margin: 0;
       }
+      #city-utilities.short {
+        color: #a31515;
+        font-weight: bold;
+      }
       #city {
         display: flex;
         gap: 12px;
@@ -164,18 +181,18 @@
       }
       #notices {
         position: fixed;
-        top: 52px;
-        left: 50%;
-        transform: translateX(-50%);
+        top: calc(var(--hudbar-h, 30px) + 16px);
+        left: 390px;
         display: flex;
         flex-direction: column;
         gap: 4px;
         width: max-content;
-        max-width: min(24em, calc(100vw - 16px));
+        max-width: min(24em, calc(100vw - 610px));
       }
       #city-shortage,
       #growth-notice,
-      #save-notice {
+      #save-notice,
+      .save-alert {
         margin: 0;
         padding: 4px 8px;
         font-size: 13px;
@@ -197,8 +214,22 @@
           left: 8px;
           width: auto;
           max-width: none;
-          transform: none;
         }
+      }
+      #save-alerts {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .save-alert {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        justify-content: space-between;
+      }
+      #save-alerts button {
+        padding: 0 6px;
+        font-size: 12px;
       }
       #legend {
         position: fixed;
@@ -305,7 +336,12 @@
     <canvas id="map" data-tool="none"></canvas>
     <div id="overlay">
       <div id="hudbar">
-        <canvas id="hud" width="470" height="26"></canvas>
+        <p id="hud">
+          <span id="hud-clock">1 日目 00:00</span>
+          <span id="hud-money">お金 0</span>
+          <span id="hud-deficit" hidden></span>
+          <span id="hud-speed">速度 1 倍</span>
+        </p>
         <div id="controls">
           <button type="button" id="pause">一時停止</button>
           <button type="button" data-speed="0.25">0.25 倍</button>
@@ -315,7 +351,7 @@
           <button type="button" data-speed="16">16 倍</button>
           <button type="button" data-speed="48">48 倍</button>
         </div>
-        <button type="button" id="hud-toggle" aria-controls="hud-details" aria-expanded="false">詳細 ▸</button>
+        <button type="button" id="hud-toggle" aria-controls="hud-details" aria-expanded="false">詳細<span aria-hidden="true"> ▸</span></button>
         <p id="status" data-state="loading">WASM を読み込んでいる</p>
         <p id="dev-flag" hidden>開発用の操作あり：再現不可</p>
       </div>
@@ -448,7 +484,7 @@
       #inspector {
         position: fixed;
         right: 8px;
-        top: 48px;
+        top: calc(var(--hudbar-h, 30px) + 116px);
         min-width: 16em;
         padding: 4px 8px 8px;
         font-size: 14px;
@@ -486,20 +522,6 @@
       </header>
       <dl data-inspector-rows></dl>
     </aside>
-    <style>
-      /* 狭い画面では上の帯が 2 行になって右上まで届くので、右上の部品は帯の下へ逃がす */
-      @media (max-width: 900px) {
-        #feedback-open {
-          top: 88px;
-        }
-        #dev-tools {
-          top: 120px;
-        }
-        #inspector {
-          top: 88px;
-        }
-      }
-    </style>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

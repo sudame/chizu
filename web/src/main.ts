@@ -9,7 +9,7 @@ import {
   setupFinance,
 } from "./finance.ts";
 import { parseGrowthBlocks, renderGrowthNotice } from "./growth-notice.ts";
-import { setupHudPanel, trackToolbarHeight } from "./hud-panel.ts";
+import { setupHudPanel, trackHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
@@ -87,17 +87,17 @@ function element<T extends Element>(selector: string): T {
 }
 
 const status = element<HTMLElement>("#status");
-const canvas = element<HTMLCanvasElement>("#hud");
+const hud = element<HTMLElement>("#hud");
+const hudClock = element<HTMLElement>("#hud-clock");
+const hudMoney = element<HTMLElement>("#hud-money");
+const hudDeficit = element<HTMLElement>("#hud-deficit");
+const hudSpeed = element<HTMLElement>("#hud-speed");
 const mapCanvas = element<HTMLCanvasElement>("#map");
 renderLegend(element<HTMLElement>("#legend-body"));
 const pauseButton = element<HTMLButtonElement>("#pause");
 const toolInfo = element<HTMLElement>("#tool-info");
 const toolMessage = element<HTMLElement>("#tool-message");
 const toolButtons = [...document.querySelectorAll<HTMLButtonElement>("button[data-tool]")];
-const context = canvas.getContext("2d");
-if (context === null) {
-  throw new Error("canvas の 2D の描画を使えない");
-}
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
 setupSaves(worker, element<HTMLElement>("#controls"));
@@ -133,38 +133,30 @@ function describeClock(header: SnapshotHeader): string {
   return `${header.day + 1} 日目 ${pad(hour)}:${pad(minute)}`;
 }
 
-function draw(ctx: CanvasRenderingContext2D, header: SnapshotHeader): void {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = "#222";
-  ctx.font = "17px sans-serif";
-  ctx.textBaseline = "middle";
-  const y = canvas.height / 2;
-  const gap = 14;
-  // 日時、お金、速度を 1 行に左から並べる
-  let x = 4;
-  const put = (text: string) => {
-    ctx.fillText(text, x, y);
-    x += ctx.measureText(text).width + gap;
-  };
-  put(describeClock(header));
-  put(`お金 ${header.money.toLocaleString("ja-JP")}`);
+// 同じ文字なら書き換えない（毎フレーム呼ぶので、レイアウトをやり直させない）
+function setText(el: HTMLElement, text: string): void {
+  if (el.textContent !== text) {
+    el.textContent = text;
+  }
+}
+
+function draw(header: SnapshotHeader): void {
+  setText(hudClock, describeClock(header));
+  setText(hudMoney, `お金 ${header.money.toLocaleString("ja-JP")}`);
   // 収支が赤字のあいだは、所持金の横に知らせる
   const note = deficitNote(finance);
-  if (note !== "") {
-    ctx.fillStyle = "#b00020";
-    put(note);
-    ctx.fillStyle = "#222";
-  }
-  canvas.dataset.deficit = String(note !== "");
+  setText(hudDeficit, note);
+  hudDeficit.hidden = note === "";
   const speed = shownSpeed(header.speed, workerPace);
-  put(header.paused ? "一時停止中" : describeSpeed(speed));
+  setText(hudSpeed, header.paused ? "一時停止中" : describeSpeed(speed));
+  hud.dataset.deficit = String(note !== "");
   // test:wasm が読む
-  canvas.dataset.tick = String(header.tick);
-  canvas.dataset.speed = String(speed);
-  canvas.dataset.paused = String(header.paused);
-  canvas.dataset.day = String(header.day);
-  canvas.dataset.secondOfDay = String(header.secondOfDay);
-  canvas.dataset.money = String(header.money);
+  hud.dataset.tick = String(header.tick);
+  hud.dataset.speed = String(speed);
+  hud.dataset.paused = String(header.paused);
+  hud.dataset.day = String(header.day);
+  hud.dataset.secondOfDay = String(header.secondOfDay);
+  hud.dataset.money = String(header.money);
   money = header.money;
 }
 
@@ -197,7 +189,8 @@ let buildings: Geometry | null = null;
 let signals: Geometry | null = null;
 let activeLayers: number[] = [];
 setupHudPanel(element<HTMLButtonElement>("#hud-toggle"), element<HTMLElement>("#hud-details"));
-trackToolbarHeight(element<HTMLElement>("#toolbar"));
+trackHeight(element<HTMLElement>("#toolbar"), "--toolbar-h");
+trackHeight(element<HTMLElement>("#hudbar"), "--hudbar-h");
 setupLayerPanel(element<HTMLElement>("#layers"), (active) => {
   activeLayers = active;
   renderer?.layers.setActive(active);
@@ -296,11 +289,11 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   mapCanvas.dataset.zoom = String(camera.zoom);
 }
 
-function startDrawing(reader: SnapshotReader, ctx: CanvasRenderingContext2D): void {
+function startDrawing(reader: SnapshotReader): void {
   const frame = () => {
     const header = reader.acquire();
     if (header !== null) {
-      draw(ctx, header);
+      draw(header);
     }
     drawMap(reader, header);
     requestAnimationFrame(frame);
@@ -850,7 +843,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   status.dataset.sum = String(message.sum);
   status.dataset.threads = String(message.threads);
   status.dataset.workerIsolated = String(message.crossOriginIsolated);
-  startDrawing(reader, context);
+  startDrawing(reader);
 });
 
 worker.addEventListener("error", (event) => {

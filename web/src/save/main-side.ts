@@ -45,8 +45,11 @@ function make<K extends keyof HTMLElementTagNameMap>(
   return el;
 }
 
-/** 保存の知らせを出しておく長さ。 */
+/** うまくいった知らせを出しておく長さ。 */
 const NOTICE_MS = 8000;
+
+/** 消える知らせ（うまくいったこと）か、閉じるまで残る知らせ（続く状態、失敗、規則の変化）か。 */
+type NoticeKind = "transient" | "sticky";
 
 export function setupSaves(worker: Worker, controls: HTMLElement): void {
   const send = (message: SaveToWorker, transfer: Transferable[] = []) =>
@@ -87,12 +90,28 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
     saveDialog.showModal();
   });
   controls.append(saveButton);
-  // 保存の知らせは、地図を覆い続けないよう、数秒で消す。要素は残すので、文面は消えるまで読める
+  // うまくいったことの知らせ（保存した、読み込んだ）は、地図を覆い続けないよう数秒で消す。要素は残すので、文面は消えるまで読める
   const noticeEl = make("p", "", { id: "save-notice", "aria-live": "polite", role: "status" });
   noticeEl.hidden = true;
-  (document.querySelector("#notices") ?? controls).append(noticeEl);
+  // 続いている状態や、気づかないと困る失敗の知らせは、閉じるまで残す
+  const alertsEl = make("div", "", { id: "save-alerts" });
+  const noticeHost = document.querySelector("#notices") ?? controls;
+  noticeHost.append(noticeEl, alertsEl);
   let noticeTimer: ReturnType<typeof setTimeout> | undefined;
-  const showNotice = (text: string) => {
+  const showNotice = (text: string, kind: NoticeKind = "transient") => {
+    if (kind === "sticky") {
+      for (const item of alertsEl.children) {
+        if (item.firstElementChild?.textContent === text) {
+          return;
+        }
+      }
+      const item = make("div", "", { class: "save-alert", role: "status" });
+      const close = make("button", "×", { type: "button", "aria-label": "閉じる" });
+      close.addEventListener("click", () => item.remove());
+      item.append(make("span", text), close);
+      alertsEl.append(item);
+      return;
+    }
     noticeEl.textContent = text;
     noticeEl.hidden = false;
     clearTimeout(noticeTimer);
@@ -208,7 +227,7 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
     try {
       autoSave = await lockPromise;
       if (!autoSave) {
-        showNotice("別のタブで遊んでいるので、このタブでは自動保存しない");
+        showNotice("別のタブで遊んでいるので、このタブでは自動保存しない", "sticky");
       }
       try {
         ({ records, broken } = await (await storePromise).list());
@@ -249,7 +268,7 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
       await (await storePromise).put(record);
     } catch (error) {
       const text = `${SLOT_NAMES[message.slot]}に保存できなかった：${String(error)}`;
-      showNotice(text);
+      showNotice(text, "sticky");
       saveResult.textContent = text;
       return;
     }
@@ -299,11 +318,14 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
           saveButton.dataset.fromState = String(loaded.fromState);
           saveButton.dataset.loadedHash = loaded.meta.stateHash;
           saveButton.dataset.loadedMoney = loaded.meta.money;
-          showNotice(
-            loaded.rulesChanged
-              ? `${SLOT_NAMES[loading.slot]}を読み込んだが、シミュレーションの規則が変わったので、保存したときと違う街になった`
-              : `${SLOT_NAMES[loading.slot]}を読み込んだ`,
-          );
+          if (loaded.rulesChanged) {
+            showNotice(
+              `${SLOT_NAMES[loading.slot]}を読み込んだが、シミュレーションの規則が変わったので、保存したときと違う街になった`,
+              "sticky",
+            );
+          } else {
+            showNotice(`${SLOT_NAMES[loading.slot]}を読み込んだ`);
+          }
         }
         break;
       }

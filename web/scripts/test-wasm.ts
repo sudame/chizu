@@ -103,18 +103,57 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   const size = page.viewportSize() ?? { width: 1280, height: 720 };
   const share = closedArea / (size.width * size.height);
   check(share < 0.06, `たたんだ帯が覆う広さは画面の 6% に満たない（${(share * 100).toFixed(1)}%）`);
-  // 狭い画面でも、帯は画面の幅に収まり、道具の帯の上に出ない
-  await page.setViewportSize({ width: 500, height: 800 });
-  await page.waitForTimeout(200);
-  const narrow = await page.evaluate(() => {
-    const bar = document.querySelector("#hudbar")?.getBoundingClientRect();
-    const tool = document.querySelector("#toolbar")?.getBoundingClientRect();
-    return { right: bar?.right ?? 0, bottom: bar?.bottom ?? 0, toolTop: tool?.top ?? 0 };
-  });
-  check(
-    narrow.right <= 500 && narrow.bottom < 120 && narrow.bottom < narrow.toolTop,
-    `幅 500 でも帯は画面に収まり、地図の上の端に寄る（右 ${narrow.right}、下 ${narrow.bottom}）`,
-  );
+  // どの幅でも、帯のボタンは覆われず、帯と欄、知らせ、右上の部品が重ならない
+  await toggle.click();
+  for (const width of [1280, 1000, 900, 500]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.waitForTimeout(300);
+    const layout = await page.evaluate(() => {
+      const notice = document.querySelector<HTMLElement>("#save-notice");
+      if (notice !== null) {
+        notice.textContent = "確かめ用の知らせ";
+        notice.hidden = false;
+      }
+      const box = (sel: string) => {
+        const el = document.querySelector(sel);
+        const r = el?.getBoundingClientRect();
+        // hidden の部品は大きさが 0 なので、重なりの確かめから外す
+        return r === undefined || r.width === 0 || r.height === 0 ? null : r;
+      };
+      const covered = [...document.querySelectorAll<HTMLElement>("#hudbar button")]
+        .filter((b) => {
+          const r = b.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+          return hit !== b && !b.contains(hit);
+        })
+        .map((b) => b.textContent);
+      const overlaps = (a: DOMRect, b: DOMRect) =>
+        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+      const bar = box("#hudbar");
+      const others = ["#hud-details", "#notices", "#feedback-open", "#dev-tools", "#toolbar"];
+      const hits = others.filter((sel) => {
+        const o = box(sel);
+        return bar !== null && o !== null && overlaps(bar, o);
+      });
+      const pairs = [
+        ["#hud-details", "#notices"],
+        ["#hud-details", "#feedback-open"],
+        ["#hud-details", "#dev-tools"],
+        ["#notices", "#feedback-open"],
+        ["#notices", "#dev-tools"],
+      ].filter(([x, y]) => {
+        const rx = box(x ?? "");
+        const ry = box(y ?? "");
+        return rx !== null && ry !== null && overlaps(rx, ry);
+      });
+      return { covered, hits, pairs, right: bar?.right ?? 0 };
+    });
+    check(
+      layout.covered.length === 0 && layout.hits.length === 0 && layout.pairs.length === 0,
+      `幅 ${width} で、帯のボタンは覆われず、帯と欄、知らせ、右上の部品が重ならない（覆われた ${layout.covered.join(",")}、帯と重なる ${layout.hits.join(",")}、ほかの重なり ${layout.pairs.join(",")}）`,
+    );
+    check(layout.right <= width, `幅 ${width} で帯は画面に収まる（右 ${layout.right}）`);
+  }
   await page.close();
 }
 
