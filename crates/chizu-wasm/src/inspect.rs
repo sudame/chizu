@@ -137,10 +137,12 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
     };
     if b.zone != ZoneKind::Residential {
         info.capacity = b.workplaces_at(world.tax_permille(b.zone));
-        info.occupied = pop
+        // 税率を上げた直後は、職の割り当て直しまで勤め人が枠を超えている。枠で頭打ちにして出す。
+        info.occupied = (pop
             .citizen_ids()
             .filter(|c| pop.citizen(*c).and_then(|r| r.workplace) == Some(id))
-            .count() as u64;
+            .count() as u64)
+            .min(info.capacity);
         return Some(info);
     }
     info.capacity = b.households();

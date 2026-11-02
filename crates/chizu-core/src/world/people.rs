@@ -1004,12 +1004,11 @@ pub(crate) mod tests {
         }
         let peak = counts.iter().copied().max().unwrap();
         assert!(counts[counts.len() - 1] * 4 < peak, "{counts:?}");
-        // 減り始めてからも、どの 1 段でもその時点の人口の 3 分の 2 より多くは減らず、何段にも分かれて減る。
+        // 減り始めてからも、どの 1 段でもその時点の人口の半分より多くは減らず、何段にも分かれて減る。
         let mut falling = 0;
         for pair in counts.windows(2) {
             let drop = pair[0].saturating_sub(pair[1]);
-            // ほとんどいなくなったあとは、数人の差が大きな割合になるので見ない。
-            assert!(pair[0] < 100 || drop * 3 <= pair[0] * 2, "{counts:?}");
+            assert!(drop * 2 <= pair[0], "{counts:?}");
             falling += usize::from(drop * 10 > pair[0]);
         }
         assert!(falling >= 3, "{counts:?}");
@@ -1038,7 +1037,7 @@ pub(crate) mod tests {
         // 標準の税率の街は、ここで落ち着いている。
         let later = run_with_taxes(crate::world::INITIAL_TAX_PERMILLE, 12);
         assert!(later.0 * 20 >= pop * 19, "{standard:?} → {later:?}");
-        // 上げた直後は、まだ人も職も残っていて、収入は標準より多い。
+        // 上げた直後は、まだ人も職も残っていて（職の割り当て直しは 5 分ごとで、1 日たつと収支は逆転している）、収入は標準より多い。
         let (base, soon) = (
             run_with_taxes(crate::world::INITIAL_TAX_PERMILLE, 0),
             run_with_taxes(150, 0),
@@ -1058,6 +1057,38 @@ pub(crate) mod tests {
             );
             assert!(high.1 < net, "{permille}‰：{high:?}、標準 {standard:?}");
         }
+    }
+
+    /// 高い税で職場の大半を雇えない街では、建物の段階が上がらない。
+    #[test]
+    fn a_high_tax_stops_buildings_from_growing() {
+        let mut w = served_city(&[
+            ZoneKind::Residential,
+            ZoneKind::Commercial,
+            ZoneKind::Industrial,
+        ]);
+        for zone in ZoneKind::ALL {
+            apply(
+                &mut w,
+                Command::SetTaxRate {
+                    zone,
+                    permille: 300,
+                },
+            );
+        }
+        run_days(&mut w, 5);
+        assert!(!w.buildings().is_empty());
+        for (_, b) in w.buildings().iter() {
+            assert!(b.level == 1, "{b:?}");
+        }
+        // 標準の税率の同じ街は、段階が上がる。
+        let mut base = served_city(&[
+            ZoneKind::Residential,
+            ZoneKind::Commercial,
+            ZoneKind::Industrial,
+        ]);
+        run_days(&mut base, 5);
+        assert!(base.buildings().iter().any(|(_, b)| b.level > 1));
     }
 
     /// 標準の税率より少し高いところで、長い目で見た収入が最も大きい。低すぎても高すぎても下がる。

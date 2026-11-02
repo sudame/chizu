@@ -308,7 +308,7 @@ impl World {
         if !tick.0.is_multiple_of(GROWTH_INTERVAL) {
             return;
         }
-        // 電気と水道が届き、住む世帯か働く住民で埋まり、その区画に需要があり、網に余りのある建物だけが、段階を上げる。
+        // 電気と水道が届き、住む世帯か働く住民で埋まり（職場は税で雇えない分も埋まる必要があるので、高い税では育たない）、その区画に需要があり、網に余りのある建物だけが、段階を上げる。
         let occupants = self.occupants();
         let mut stats = self.city_stats();
         let ids: Vec<BuildingId> = self.buildings.iter().map(|(id, _)| id).collect();
@@ -317,8 +317,7 @@ impl World {
         for id in ids {
             let b = *self.buildings.get(id).expect("建物がない");
             let supplied = b.supply.power && b.supply.water;
-            let full = occupants.get(&id).copied().unwrap_or(0)
-                >= b.households() + b.workplaces_at(self.tax_permille[b.zone.index()]);
+            let full = occupants.get(&id).copied().unwrap_or(0) >= b.households() + b.workplaces();
             let wanted = demand(&stats)[b.zone.index()] > 0;
             if supplied
                 && full

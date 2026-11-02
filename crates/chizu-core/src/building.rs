@@ -76,10 +76,23 @@ impl Building {
     }
 
     /// 税率 `tax_permille` のもとで実際に働き手を雇える職場の数。基準の税率までは [`Building::workplaces`] のままで、
-    /// それより高いと [`jobs_kept_permille`] の割合まで減る。端数は四捨五入する。
+    /// それより高いと [`jobs_kept_permille`] の割合まで減る。
+    ///
+    /// 端数は、建物の出入口のマスから決まる値で切り上げるか切り捨てるかを決める。職場の少ない建物が
+    /// 四捨五入で同じ向きにそろってずれないよう、街全体の合計が式に近くなる。同じ建物には同じ値を返す。
     pub fn workplaces_at(&self, tax_permille: u16) -> u64 {
-        let kept = jobs_kept_permille(tax_permille);
-        (self.workplaces() * kept + 500) / 1_000
+        let scaled = self.workplaces() * jobs_kept_permille(tax_permille);
+        let (whole, rest) = (scaled / 1_000, scaled % 1_000);
+        whole + u64::from(rest > self.rounding_threshold())
+    }
+
+    /// `0..1000` の値で、建物ごとに決まる。出入口のマスの座標を混ぜて作る。
+    fn rounding_threshold(&self) -> u64 {
+        let x = self.front.x as u64;
+        let y = self.front.y as u64;
+        let h = x.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ y.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        let h = (h ^ (h >> 29)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        (h >> 32) % 1_000
     }
 
     /// 駐車場の台数。1 マスに段階の数だけ停められる。
@@ -386,6 +399,9 @@ pub fn demand(s: &CityStats) -> [i64; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::Supply;
+    use crate::tile::{TilePos, TileRect};
+    use crate::units::Tick;
 
     fn stats(zoned: [bool; 4]) -> CityStats {
         CityStats {
@@ -395,6 +411,57 @@ mod tests {
             happiness: 50,
             ..CityStats::default()
         }
+    }
+
+    /// 職場が 1〜2 の小さな建物ばかりの街でも、雇える数の合計は式どおりに減る。
+    #[test]
+    fn rounding_keeps_the_total_close_to_the_formula() {
+        use crate::network::{Dir, LaneMode, LinkId, SegmentId};
+        use crate::units::LaneOffset;
+        let shop = |x: i64, y: i64, tiles: i64| Building {
+            zone: ZoneKind::Commercial,
+            area: TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + tiles - 1, y)),
+            front: TilePos::new(x, y),
+            toward_road: (0, -1),
+            entrance: LinkId {
+                segment: SegmentId {
+                    index: 0,
+                    generation: 0,
+                },
+                dir: Dir::Forward,
+                mode: LaneMode::Sidewalk,
+            },
+            entrance_at: LaneOffset(0),
+            level: 1,
+            leveled_at: Tick(0),
+            supply: Supply::default(),
+        };
+        // 職場が 1 つの建物（1 マス）と 2 つの建物（4 マス）を並べる。
+        let shops: Vec<Building> = (0..400)
+            .map(|i| shop(i * 3, 10 + i % 7, if i % 2 == 0 { 1 } else { 4 }))
+            .collect();
+        let nominal: u64 = shops.iter().map(Building::workplaces).sum();
+        assert_eq!(nominal, 600);
+        for tax in [100, 105, 130, 150, 186, 250, 300] {
+            let slots: u64 = shops.iter().map(|b| b.workplaces_at(tax)).sum();
+            let expected = nominal * jobs_kept_permille(tax) / 1_000;
+            assert!(
+                slots.abs_diff(expected) * 10 <= nominal,
+                "{tax}‰：{slots} と {expected}"
+            );
+        }
+        // 足し引きが合う。
+        let stats = CityStats {
+            tax_permille: [150; 4],
+            ..CityStats::default()
+        };
+        let with: CityStats = shops.iter().fold(stats, |s, b| s.with(b));
+        assert_eq!(
+            with.job_slots[ZoneKind::Commercial.index()],
+            shops.iter().map(|b| b.workplaces_at(150)).sum::<u64>()
+        );
+        let without = shops.iter().fold(with, |s, b| s.without(b));
+        assert_eq!(without.job_slots, [0; 4]);
     }
 
     #[test]

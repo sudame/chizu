@@ -378,7 +378,7 @@ impl Sim {
         out
     }
 
-    /// 街の数字を次の 16 個の数で返す。建物の数、世帯の上限、職場の上限、
+    /// 街の数字を次の 16 個の数で返す。建物の数、世帯の上限、雇える職場の数（税率が高いと建物の上限より少ない）、
     /// 住宅・商業・工業・オフィスの需要、電気の供給量、水道の供給量、電気と水道の需要、
     /// 電気と水道のそれぞれで供給量が需要に足りない網の数、
     /// 電気と水道のそれぞれで施設のない網の数、電気と水道のそれぞれの不足量。
@@ -389,7 +389,10 @@ impl Sim {
         let mut out = vec![
             buildings.len() as f64,
             capacity.households as f64,
-            capacity.workplaces.iter().sum::<u64>() as f64,
+            buildings
+                .job_slots(chizu_core::ZoneKind::ALL.map(|z| self.world.tax_permille(z)))
+                .iter()
+                .sum::<u64>() as f64,
         ];
         out.extend(demand(&self.world.city_stats()).map(|d| d as f64));
         let [power, water, power_short, water_short] = crate::layers::utility_totals(&self.world);

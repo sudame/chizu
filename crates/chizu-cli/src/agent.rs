@@ -57,7 +57,7 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
 
 observe の税の影響（税率を上げたときの代償）:
   税率は基準の 10% までは影響がなく、それを超えると次の 3 つが効く。
-  jobs.keptPermille  区画の種類ごとの、職場のうち雇える割合（‰）。基準を超えた分が 9% のとき半分になり、なだらかに 0 へ近づく（15% で約 63%、20% で約 47%）。
+  jobs.keptPermille  区画の種類ごとの、職場のうち雇える割合（‰）。基準を超えた分が 8.5%（税率 18.5%）のとき半分になり、なだらかに 0 へ近づく（15% で約 63%、20% で約 46%）。住宅は職場を持たないので出さない。
                      jobs.slots が雇える職場の数で、workplaces（建物の上限）より少なければ、税で人を雇えなくなっている。
                      雇えない分だけ職のない住民が増え、税収と幸福度が下がる。商業・工業・オフィスの demand もこの割合だけ小さくなる。
   taxEffect.residentialDemandShift  住宅の demand に足される税率の分。基準より高ければ負で、2‰ ごとに 1 減る。
@@ -397,6 +397,21 @@ fn by_zone<T: Into<Value>>(f: impl Fn(ZoneKind) -> T) -> Value {
     Value::Object(map)
 }
 
+/// 職場を持つ区画だけの、雇える割合（‰）。住宅は職場を持たないので出さない。
+fn jobs_kept_by_zone(tax_permille: &[u16; 4]) -> Value {
+    let map: Map<String, Value> = ZoneKind::ALL
+        .into_iter()
+        .filter(|z| *z != ZoneKind::Residential)
+        .map(|z| {
+            (
+                format!("{z:?}"),
+                jobs_kept_permille(tax_permille[z.index()]).into(),
+            )
+        })
+        .collect();
+    Value::Object(map)
+}
+
 fn by_service<T: Into<Value>>(f: impl Fn(ServiceKind) -> T) -> Value {
     let map: Map<String, Value> = ServiceKind::ALL
         .into_iter()
@@ -623,7 +638,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "workplaces": by_zone(|z| workplaces[z.index()]),
             "filled": by_zone(|z| filled[z.index()]),
             "slots": by_zone(|z| job_slots[z.index()]),
-            "keptPermille": by_zone(|z| jobs_kept_permille(tax_permille[z.index()])),
+            "keptPermille": jobs_kept_by_zone(&tax_permille),
         },
         "taxEffect": {
             "residentialDemandShift": residential_tax_pull(tax_permille[ZoneKind::Residential.index()]),
