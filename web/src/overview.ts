@@ -133,6 +133,7 @@ export function renderOverview(o: Overview): void {
     }
   };
   set("#overview-population", formatPopulation(o));
+  set("#hud-population", formatPopulation(o));
   set("#overview-happiness", formatHappiness(o));
   set("#overview-remaining", formatRemaining(o));
   set("#overview-next", formatNextMilestone(o));

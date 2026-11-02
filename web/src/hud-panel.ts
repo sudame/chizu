@@ -1,4 +1,4 @@
-// 左上の帯の下にある、たためる欄。たたんだかどうかは localStorage に覚える。
+// 左上の帯の「⋯」で開く、たためる欄。たたんだかどうかは localStorage に覚える。
 // localStorage は使えないことがある（プライベートウィンドウ、サイトデータの遮断）ので、読み書きは握りつぶして動き続ける。
 
 /** 保存先の鍵。 */
@@ -37,12 +37,6 @@ export function setupHudPanel(toggle: HTMLButtonElement, panel: HTMLElement): vo
   const apply = (collapsed: boolean) => {
     panel.hidden = collapsed;
     toggle.setAttribute("aria-expanded", String(!collapsed));
-    // 三角は飾りなので、読み上げの名前に入れない
-    toggle.replaceChildren("詳細");
-    const mark = document.createElement("span");
-    mark.setAttribute("aria-hidden", "true");
-    mark.textContent = collapsed ? " ▸" : " ▾";
-    toggle.append(mark);
   };
   apply(readCollapsed(storage));
   toggle.addEventListener("click", () => {

@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright-core";
 import { preview } from "vite";
+import { chooseLayer, pickSpeed, pickTool } from "./ui.ts";
 
 const TIMEOUT_MS = 30_000;
 const MIN_THREADS = 2;
@@ -68,8 +69,8 @@ const url = givenUrl ?? server?.resolvedUrls?.local[0];
 if (url === undefined) {
   throw new Error("preview の URL が分からない");
 }
-// 左上の帯：日時、お金、速度はたたんでも見え、たためる欄は閉じて始まり、開閉が覚えられる。
-// 幅 1280 と 500 で、帯と欄が地図の広い範囲を覆わないことも見る
+// 上の帯：日時、お金と収支、人口、速度はたたんでも見え、たためる欄は閉じて始まり、開閉が覚えられる。
+// 収支の欄はお金を押して開く。幅 1280 と 500 で、帯と欄が地図の広い範囲を覆わないことも見る
 async function checkHudPanel(page: Page, at: string): Promise<void> {
   await page.goto(at);
   await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
@@ -77,11 +78,22 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
   const details = page.locator("#hud-details");
   const toggle = page.locator("#hud-toggle");
+  const finance = page.locator("#finance");
+  const financeToggle = page.locator("#finance-toggle");
   check(
     (await hud.isVisible()) &&
       (await page.locator("#pause").isVisible()) &&
-      !(await details.isVisible()),
-    "日時、お金、速度の帯は見え、たためる欄は閉じて始まる",
+      (await page.locator("#hud-population").isVisible()) &&
+      !(await details.isVisible()) &&
+      !(await finance.isVisible()),
+    "日時、お金、人口、速度の帯は見え、たためる欄と収支の欄は閉じて始まる",
+  );
+  const speedLabels = await page.locator("#speeds button[data-speed]").allTextContents();
+  check(
+    speedLabels.join(",") === "1 倍,4 倍,16 倍" &&
+      (await page.locator('#speeds button[data-speed="1"]').getAttribute("aria-pressed")) ===
+        "true",
+    `帯の速度は 1、4、16 倍で、いまの速度が押した状態で出る（${speedLabels.join(",")}）`,
   );
   const covered = async () =>
     page.evaluate(() => {
@@ -94,8 +106,10 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
     (await details.isVisible()) &&
       (await page.locator("#city-numbers").isVisible()) &&
       (await page.locator("#demand").isVisible()) &&
-      (await page.locator("#overview").isVisible()),
-    "「詳細」を押すと、建物、電気と水道、需要、人口と幸福度が出る",
+      (await page.locator("#overview").isVisible()) &&
+      (await page.locator('#controls button[data-speed="48"]').isVisible()) &&
+      (await page.locator("#save-open").isVisible()),
+    "「⋯」を押すと、建物、電気と水道、需要、人口と幸福度、ほかの速度と保存が出る",
   );
   await page.reload();
   await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
@@ -107,56 +121,151 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   const size = page.viewportSize() ?? { width: 1280, height: 720 };
   const share = closedArea / (size.width * size.height);
   check(share < 0.06, `たたんだ帯が覆う広さは画面の 6% に満たない（${(share * 100).toFixed(1)}%）`);
-  // どの幅でも、帯のボタンは覆われず、帯と欄、知らせ、右上の部品が重ならない
-  await toggle.click();
-  for (const width of [1280, 1000, 900, 500]) {
-    await page.setViewportSize({ width, height: 800 });
-    await page.waitForTimeout(300);
-    const layout = await page.evaluate(() => {
-      const notice = document.querySelector<HTMLElement>("#save-notice");
-      if (notice !== null) {
-        notice.textContent = "確かめ用の知らせ";
-        notice.hidden = false;
+
+  // お金を押すと収支の欄が開き、もう一度押すか、欄の外を押すか、Esc で閉じる
+  await financeToggle.click();
+  check(
+    (await finance.isVisible()) &&
+      (await financeToggle.getAttribute("aria-expanded")) === "true" &&
+      (await page.locator("#finance .finance-net").isVisible()),
+    "お金を押すと収支の欄が開く",
+  );
+  await financeToggle.click();
+  check(!(await finance.isVisible()), "お金をもう一度押すと収支の欄が閉じる");
+  await financeToggle.click();
+  await page.mouse.click(size.width / 2, size.height / 2);
+  check(!(await finance.isVisible()), "欄の外（地図）を押すと収支の欄が閉じる");
+  await financeToggle.click();
+  await page.keyboard.press("Escape");
+  check(!(await finance.isVisible()), "Esc で収支の欄が閉じる");
+
+  // どの幅でも、帯と地図の部品のボタンは覆われず、帯と欄、知らせ、右上と四隅の部品が重ならない。
+  // 欄は、詳細を開いたときと、収支を開いたときに分けて見る
+  const showInspector = (visible: boolean) =>
+    page.evaluate((on) => {
+      const el = document.querySelector<HTMLElement>("#inspector");
+      if (el === null) {
+        return;
       }
-      const box = (sel: string) => {
-        const el = document.querySelector(sel);
-        const r = el?.getBoundingClientRect();
-        // hidden の部品は大きさが 0 なので、重なりの確かめから外す
-        return r === undefined || r.width === 0 || r.height === 0 ? null : r;
-      };
-      const covered = [...document.querySelectorAll<HTMLElement>("#hudbar button")]
-        .filter((b) => {
-          const r = b.getBoundingClientRect();
-          const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-          return hit !== b && !b.contains(hit);
-        })
-        .map((b) => b.textContent);
-      const overlaps = (a: DOMRect, b: DOMRect) =>
-        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
-      const bar = box("#hudbar");
-      const others = ["#hud-details", "#notices", "#feedback-open", "#dev-tools", "#toolbar"];
-      const hits = others.filter((sel) => {
-        const o = box(sel);
-        return bar !== null && o !== null && overlaps(bar, o);
+      el.hidden = !on;
+      const title = el.querySelector("[data-inspector-title]");
+      const rows = el.querySelector("[data-inspector-rows]");
+      if (on && title !== null && rows !== null) {
+        title.textContent = "確かめ用の建物";
+        rows.innerHTML = "<dt>人口</dt><dd>4</dd><dt>電気</dt><dd>届いている</dd>";
+      }
+    }, visible);
+  const roadToggle = page.locator('button[data-menu="road"]');
+  const zoneToggle = page.locator('button[data-menu="zone"]');
+  const layerToggle = page.locator("#layers-open");
+  const states: { open: () => Promise<void>; close: () => Promise<void> }[] = [
+    { open: () => toggle.click(), close: () => toggle.click() },
+    { open: () => financeToggle.click(), close: () => financeToggle.click() },
+    // 道具の 2 段目とレイヤーのパネルは、開いているあいだ隅の部品と重ならない
+    { open: () => roadToggle.click(), close: () => page.keyboard.press("Escape") },
+    { open: () => zoneToggle.click(), close: () => page.keyboard.press("Escape") },
+    // 信号の 2 段目には、横断歩道を外す、戻す道具も入るので、いちばん幅が広い
+    {
+      open: () => page.locator('button[data-menu="signal"]').click(),
+      close: () => page.keyboard.press("Escape"),
+    },
+    { open: () => layerToggle.click(), close: () => page.keyboard.press("Escape") },
+    // 建物の情報は、詳細や収支を開いたときも含めて、ほかの欄と重ならない
+    { open: () => showInspector(true), close: () => showInspector(false) },
+    {
+      open: async () => {
+        await toggle.click();
+        await showInspector(true);
+      },
+      close: async () => {
+        await showInspector(false);
+        await toggle.click();
+      },
+    },
+    {
+      open: async () => {
+        await financeToggle.click();
+        await showInspector(true);
+      },
+      close: async () => {
+        await showInspector(false);
+        await financeToggle.click();
+      },
+    },
+  ];
+  for (const [index, { open, close }] of states.entries()) {
+    await open();
+    for (const width of [1280, 1000, 900, 860, 780, 640, 500, 390]) {
+      await page.setViewportSize({ width, height: 800 });
+      await page.waitForTimeout(300);
+      const layout = await page.evaluate(() => {
+        const notice = document.querySelector<HTMLElement>("#save-notice");
+        if (notice !== null) {
+          notice.textContent = "確かめ用の知らせ";
+          notice.hidden = false;
+        }
+        const box = (sel: string) => {
+          const el = document.querySelector(sel);
+          const r = el?.getBoundingClientRect();
+          // hidden の部品は大きさが 0 なので、重なりの確かめから外す
+          return r === undefined ||
+            r.width === 0 ||
+            r.height === 0 ||
+            (el !== null && getComputedStyle(el).visibility === "hidden")
+            ? null
+            : r;
+        };
+        const covered = [
+          ...document.querySelectorAll<HTMLElement>(
+            "#hudbar button, #toolbar button, #map-controls button, #feedback-open, .tool-menu button, #layer-panel button",
+          ),
+        ]
+          .filter((b) => {
+            const r = b.getBoundingClientRect();
+            // 隠した部品は、押せない代わりに覆いも起こさない
+            if (r.width === 0 || getComputedStyle(b).visibility === "hidden") {
+              return false;
+            }
+            const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+            return hit !== b && !b.contains(hit);
+          })
+          .map((b) => b.id || b.dataset.tool || b.dataset.menu || b.textContent);
+        const overlaps = (a: DOMRect, b: DOMRect) =>
+          a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+        const parts = [
+          "#hudbar",
+          "#hud-details",
+          "#finance",
+          "#inspector",
+          "#layer-panel",
+          "#notices",
+          "#feedback-open",
+          "#toolstack",
+          "#map-controls",
+          "#map-meta",
+        ];
+        const pairs: string[] = [];
+        for (const [i, x] of parts.entries()) {
+          for (const y of parts.slice(i + 1)) {
+            const rx = box(x);
+            const ry = box(y);
+            if (rx !== null && ry !== null && overlaps(rx, ry)) {
+              pairs.push(`${x}と${y}`);
+            }
+          }
+        }
+        const bar = box("#hudbar");
+        return { covered, pairs, right: bar?.right ?? 0, bottom: box("#toolstack")?.bottom ?? 0 };
       });
-      const pairs = [
-        ["#hud-details", "#notices"],
-        ["#hud-details", "#feedback-open"],
-        ["#hud-details", "#dev-tools"],
-        ["#notices", "#feedback-open"],
-        ["#notices", "#dev-tools"],
-      ].filter(([x, y]) => {
-        const rx = box(x ?? "");
-        const ry = box(y ?? "");
-        return rx !== null && ry !== null && overlaps(rx, ry);
-      });
-      return { covered, hits, pairs, right: bar?.right ?? 0 };
-    });
-    check(
-      layout.covered.length === 0 && layout.hits.length === 0 && layout.pairs.length === 0,
-      `幅 ${width} で、帯のボタンは覆われず、帯と欄、知らせ、右上の部品が重ならない（覆われた ${layout.covered.join(",")}、帯と重なる ${layout.hits.join(",")}、ほかの重なり ${layout.pairs.join(",")}）`,
-    );
-    check(layout.right <= width, `幅 ${width} で帯は画面に収まる（右 ${layout.right}）`);
+      check(
+        layout.covered.length === 0 && layout.pairs.length === 0,
+        `幅 ${width}（状態 ${index}）で、帯と部品のボタンは覆われず、部品どうしが重ならない（覆われた ${layout.covered.join(",")}、重なり ${layout.pairs.join(",")}）`,
+      );
+      check(layout.right <= width, `幅 ${width} で帯は画面に収まる（右 ${layout.right}）`);
+      check(layout.bottom <= 800, `幅 ${width} で道具の帯は画面に収まる（下 ${layout.bottom}）`);
+    }
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await close();
   }
   await page.close();
 }
@@ -179,7 +288,7 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
       { timeout: TIMEOUT_MS },
     );
   const setSpeed = async (speed: number) => {
-    await page.locator(`button[data-speed="${speed}"]`).click();
+    await pickSpeed(page, speed);
     await hud.and(page.locator(`[data-speed="${speed}"]`)).waitFor({ timeout: TIMEOUT_MS });
   };
   const pause = async (paused: boolean) => {
@@ -209,7 +318,7 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   await setSpeed(1);
   await pause(true);
   const segments = d0.roadSegments ?? "0";
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
   const [from, to] = [tileCenter(12, 32), tileCenter(52, 32)];
   await page.mouse.click(from.x, from.y);
   await page.mouse.click(to.x, to.y);
@@ -323,6 +432,10 @@ try {
 
   const hud = page.locator("#hud");
   await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  check(
+    (await page.locator("#layers").getAttribute("data-active")) === "",
+    "レイヤーは初めに「なし」を選んでいる",
+  );
   const tick = async () => Number(await hud.getAttribute("data-tick"));
   const ticksIn = async (ms: number) => {
     const before = await tick();
@@ -336,7 +449,7 @@ try {
     `等速で 2 秒待つと時計が 60 tick ほど進む（${normal} tick）`,
   );
 
-  await page.locator('button[data-speed="0.5"]').click();
+  await pickSpeed(page, 0.5);
   await hud.and(page.locator('[data-speed="0.5"]')).waitFor({ timeout: TIMEOUT_MS });
   const half = await ticksIn(2_000);
   check(
@@ -344,7 +457,7 @@ try {
     `0.5 倍にすると等速の半分ほど進む（${half} tick、等速は ${normal} tick）`,
   );
 
-  await page.locator('button[data-speed="0.25"]').click();
+  await pickSpeed(page, 0.25);
   await hud.and(page.locator('[data-speed="0.25"]')).waitFor({ timeout: TIMEOUT_MS });
   const quarter = await ticksIn(2_000);
   check(
@@ -352,7 +465,7 @@ try {
     `0.25 倍にすると等速の 4 分の 1 ほど進む（${quarter} tick、等速は ${normal} tick）`,
   );
 
-  await page.locator(`button[data-speed="${FAST_SPEED}"]`).click();
+  await pickSpeed(page, FAST_SPEED);
   await hud.and(page.locator(`[data-speed="${FAST_SPEED}"]`)).waitFor({ timeout: TIMEOUT_MS });
   const fast = await ticksIn(2_000);
   check(fast >= normal * 10, `${FAST_SPEED} 倍にすると等速より速く進む（${fast} tick）`);
@@ -490,7 +603,7 @@ try {
       { expected, since, upkeepPerHour },
       { timeout: TIMEOUT_MS },
     );
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
   const tickBefore = await tick();
   const moneyBefore = await moneyNow();
   const built = await drawRoad();
@@ -590,7 +703,7 @@ try {
       { timeout: TIMEOUT_MS },
     );
   const junction = tileCenter(30, 32);
-  await page.locator('button[data-tool="signal-on"]').click();
+  await pickTool(page, "signal-on");
   const beforeSignal = await outcomeCount();
   await page.mouse.click(junction.x, junction.y);
   const signalled = await nextOutcome(beforeSignal);
@@ -608,7 +721,7 @@ try {
     refused.outcome === "Rejected" && (refused.text ?? "").includes("交差点がない"),
     `交差点のないマスには置けない（${refused.text}）`,
   );
-  await page.locator('button[data-tool="signal-off"]').click();
+  await pickTool(page, "signal-off");
   const beforeOff = await outcomeCount();
   await page.mouse.click(junction.x, junction.y);
   const removed = await nextOutcome(beforeOff);
@@ -631,7 +744,7 @@ try {
     x: junction.x + (above.x - junction.x) * 0.38,
     y: junction.y + (above.y - junction.y) * 0.38,
   };
-  await page.locator('button[data-tool="crosswalk-off"]').click();
+  await pickTool(page, "crosswalk-off");
   await page.mouse.move(zebraAt.x, zebraAt.y, { steps: 2 });
   const beforeCrosswalk = await outcomeCount();
   await page.mouse.click(zebraAt.x, zebraAt.y);
@@ -642,14 +755,14 @@ try {
   );
   await waitRemovedCrosswalks(1);
   check(true, "外した腕は道路網に載り、縞が描かれなくなる");
-  await page.locator('button[data-tool="crosswalk-on"]').click();
+  await pickTool(page, "crosswalk-on");
   const beforeBack = await outcomeCount();
   await page.mouse.click(zebraAt.x, zebraAt.y);
   const crosswalkOn = await nextOutcome(beforeBack);
   check(crosswalkOn.outcome === "Applied", `外した横断歩道を戻せる（${crosswalkOn.text}）`);
   await waitRemovedCrosswalks(0);
   check(true, "戻した腕には縞がまた描かれる");
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
 
   const again = await drawRoad();
   check(
@@ -674,7 +787,7 @@ try {
   // CS2 と同じく、一時停止したままでも建てられる
   await page.locator("#pause").click();
   await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
   const pausedAt = await tick();
   const pausedBuild = await drawRoad();
   await waitSegments(initialSegments + 1);
@@ -775,7 +888,7 @@ try {
   );
 
   // 区画の道具。(12, 32) から (52, 32) の道路の下側に商業の区画を塗る
-  await page.locator('button[data-tool="zone-Commercial"]').click();
+  await pickTool(page, "zone-Commercial");
   const tilePoint = (x: number, y: number) => ({
     x: cx + (x + 0.5 - view.x) * view.zoom,
     y: cy + (y + 0.5 - view.y) * view.zoom,
@@ -849,7 +962,7 @@ try {
   );
 
   // 道路の上側に住宅の区画を塗り、時間を進めて建物が建つのを待つ
-  await page.locator('button[data-tool="zone-Residential"]').click();
+  await pickTool(page, "zone-Residential");
   const r0 = tilePoint(14, 26);
   const r1 = tilePoint(30, 31);
   await page.mouse.move(r0.x, r0.y);
@@ -1013,14 +1126,14 @@ try {
     }
     return c;
   };
-  await page.locator('#layers button[data-layer="1"]').click();
+  await chooseLayer(page, "1");
   const layerOff = await waitColor(isRed);
   check(
     isRed(layerOff) && (await page.locator("#layers").getAttribute("data-active")) === "1",
     `電気のレイヤーでは、届いていない建物が赤で塗られる（${layerOff.join(", ")}）`,
   );
   // 道路を (52, 32) から (60, 32) へ延ばし、その下に発電所と浄水場を置く
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
   for (const [x, y] of [
     [52, 32],
     [60, 32],
@@ -1031,7 +1144,7 @@ try {
   await page.keyboard.press("Escape");
   // カーソルのマスで中核に置けるかを問い合わせ、答えが届くまで待つ
   const hoverService = async (service: string, x: number, y: number) => {
-    await page.locator(`button[data-tool="service-${service}"]`).click();
+    await pickTool(page, `service-${service}`);
     const p = tilePoint(x, y);
     await page.mouse.move(p.x - 8, p.y);
     await page.mouse.move(p.x, p.y);
@@ -1086,31 +1199,41 @@ try {
   );
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
-  // 水道のレイヤーも重ねると、各マスの左半分が電気、右半分が水道になる。発電所は電気のレイヤーだけで黄に塗る
-  await page.locator('#layers button[data-layer="2"]').click();
-  const halfOf = (x: number, y: number, dx: number) => {
-    const p = tilePoint(x, y);
-    return pixel(p.x + (dx - 0.5) * view.zoom, p.y);
+  // 発電所は電気のレイヤーで黄に塗る。水道を選ぶと電気は外れ（一度に 1 つだけ）、発電所の黄が消える
+  const plantPixel = () => {
+    const p = tilePoint(54, 34);
+    return pixel(p.x, p.y);
   };
-  let plantLeft = await halfOf(54, 34, 0.25);
-  let plantRight = await halfOf(54, 34, 0.75);
-  for (let i = 0; i < 100 && (!isYellow(plantLeft) || isYellow(plantRight)); i++) {
+  let plantElectric = await plantPixel();
+  for (let i = 0; i < 100 && !isYellow(plantElectric); i++) {
     await page.waitForTimeout(100);
-    plantLeft = await halfOf(54, 34, 0.25);
-    plantRight = await halfOf(54, 34, 0.75);
+    plantElectric = await plantPixel();
   }
   check(
-    isYellow(plantLeft) && !isYellow(plantRight),
-    `電気と水道を重ねると、マスの左右に分けて塗る（左 ${plantLeft.join(", ")}、右 ${plantRight.join(", ")}）`,
+    isYellow(plantElectric),
+    `電気のレイヤーでは、発電所が黄に塗られる（${plantElectric.join(", ")}）`,
   );
-  // 交通のレイヤーをオンにすると、車のいない道路は「空いている」の緑に塗られる
-  await page.locator('#layers button[data-layer="none"]').click();
+  await chooseLayer(page, "2");
+  let plantWater = await plantPixel();
+  for (let i = 0; i < 100 && isYellow(plantWater); i++) {
+    await page.waitForTimeout(100);
+    plantWater = await plantPixel();
+  }
+  check(
+    !isYellow(plantWater) &&
+      (await page.locator("#layers").getAttribute("data-active")) === "2" &&
+      (await page.locator('#layers button[data-layer="1"]').getAttribute("aria-pressed")) ===
+        "false",
+    `水道を選ぶと電気は外れ、一度に 1 つだけ出る（発電所 ${plantWater.join(", ")}）`,
+  );
+  // 交通のレイヤーを選ぶと、車のいない道路は「空いている」の緑に塗られる
+  await chooseLayer(page, "none");
   const roadPoint = tilePoint(56, 32);
   const roadPixel = () => pixel(roadPoint.x, roadPoint.y);
   // 電気のレイヤーの青い道路と見分けるため、青が弱い緑だけを数える
   const isTrafficGreen = (c: number[]) =>
     isGreen(c) && (c[1] ?? 0) > (c[0] ?? 0) + 100 && (c[1] ?? 0) > (c[2] ?? 0) + 60;
-  await page.locator('#layers button[data-layer="3"]').click();
+  await chooseLayer(page, "3");
   const untilRoad = Date.now() + TIMEOUT_MS;
   let roadColor = await roadPixel();
   while (!isTrafficGreen(roadColor) && Date.now() < untilRoad) {
@@ -1122,7 +1245,7 @@ try {
       (await page.locator("#layers").getAttribute("data-active")) === "3",
     `交通のレイヤーでは、道路が混み具合の色（空いていれば緑）で塗られる（${roadColor.join(", ")}）`,
   );
-  await page.locator('#layers button[data-layer="none"]').click();
+  await chooseLayer(page, "none");
   await page.waitForTimeout(100);
   const markAfter = await markPixels();
   const plantColor = await colorOfTile(54, 34);
@@ -1185,6 +1308,16 @@ try {
   await waitAllDrawn();
   const out = await mapState();
   check(out.zoom === MIN_ZOOM, `縮小は下限 ${MIN_ZOOM} で止まる（${out.zoom}）`);
+  // 倍率 1 では 1 ピクセルが 8m なので、140px に収まる 1、2、5 の長さは 1 km になる
+  const scale = page.locator("#scale");
+  check(
+    (await scale.getAttribute("data-meters")) === "1000" &&
+      (await scale.getAttribute("data-px")) === "125" &&
+      ((await scale.locator("[data-scale-label]").textContent()) ?? "") === "1 km" &&
+      (await page.locator("#zoom-out").isDisabled()) &&
+      !(await page.locator("#zoom-in").isDisabled()),
+    "下限では、縮尺の物差しが 1 km（125px）を示し、縮小のボタンだけが押せない",
+  );
   check(
     out.drawn > first.drawn,
     `縮小すると、まわりのチャンクも届いて描かれる（${first.drawn} 枚から ${out.drawn} 枚）`,
@@ -1242,12 +1375,55 @@ try {
     { timeout: TIMEOUT_MS },
   );
   check((await mapState()).zoom === MAX_ZOOM, `拡大は上限 ${MAX_ZOOM} で止まる`);
+  // 拡大縮小のボタンは、画面の真ん中を動かさずに 1.5 倍ずつ変え、物差しも追う
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "20",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const atMax = await mapState();
+  check(
+    (await page.locator("#zoom-in").isDisabled()) &&
+      !(await page.locator("#zoom-out").isDisabled()) &&
+      (await scale.getAttribute("data-px")) === "80",
+    "上限では、拡大のボタンだけが押せず、物差しは 20 m（80px）を示す",
+  );
+  await page.locator("#zoom-out").click();
+  await page.waitForFunction(
+    (max) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) < max,
+    MAX_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  const smaller = await mapState();
+  check(
+    Math.abs(smaller.zoom - MAX_ZOOM / 1.5) < 0.01 &&
+      Math.abs(smaller.x - atMax.x) < 0.01 &&
+      Math.abs(smaller.y - atMax.y) < 0.01,
+    `縮小のボタンで画面の真ん中を動かさずに 1.5 分の 1 になる（${smaller.zoom.toFixed(2)}）`,
+  );
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "50",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(
+    (await scale.getAttribute("data-px")) === "133" &&
+      ((await scale.locator("[data-scale-label]").textContent()) ?? "") === "50 m",
+    "倍率が下がると、物差しは 50 m（133px）に変わる",
+  );
+  await page.locator("#zoom-in").click();
+  await page.waitForFunction(
+    (max) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) === max,
+    MAX_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, "拡大のボタンで上限まで戻る");
 
   // 収支のパネルは閉じていて、開くと税率を変えられる。変えた税率は記録に入り、下の再生でも同じ状態になる
   const finance = page.locator("#finance");
   await finance.and(page.locator("[data-net]")).waitFor({ state: "attached", timeout: TIMEOUT_MS });
-  check((await finance.getAttribute("open")) === null, "収支のパネルは閉じて始まる");
-  await finance.locator("summary").click();
+  check(!(await finance.isVisible()), "収支のパネルは閉じて始まる");
+  await page.locator("#finance-toggle").click();
   const resRow = finance.locator('[data-zone="Residential"]');
   check((await resRow.getAttribute("data-permille")) === "100", "住宅の税率は 10% で始まる");
   const netBefore = Number(await finance.getAttribute("data-net"));
@@ -1280,6 +1456,59 @@ try {
     { timeout: TIMEOUT_MS },
   );
   check(true, "税率を下げると 11% に戻る");
+
+  // 道具の帯は 7 つのボタンで、道路などの種類は押すと開く 2 段目で選ぶ
+  const toolLabels = await page.locator("#toolbar .tool").allTextContents();
+  check(
+    toolLabels.join(",") === "見る,道路,区画,施設,信号,土地,取り壊す",
+    `道具の帯は 7 つのボタンが並ぶ（${toolLabels.join(",")}）`,
+  );
+  const roadMenu = page.locator("#menu-road");
+  check(!(await roadMenu.isVisible()), "道路の 2 段目は閉じて始まる");
+  await page.locator('button[data-menu="road"]').click();
+  check(
+    (await roadMenu.isVisible()) &&
+      (await page.locator('button[data-menu="road"]').getAttribute("aria-expanded")) === "true" &&
+      (await page.locator('#menu-road button[data-tool^="road-"]').count()) === 3 &&
+      (await page.locator('#menu-road button[data-tool^="upgrade-"]').count()) === 3,
+    "「道路」を押すと、道路の種類と、種類を変える道具の 2 段目が開く",
+  );
+  await page.locator('button[data-tool="upgrade-Large"]').click();
+  check(
+    (await map.getAttribute("data-tool")) === "upgrade-Large" &&
+      (await page.locator('button[data-menu="road"]').getAttribute("aria-pressed")) === "true" &&
+      (await page.locator('button[data-tool="none"]').getAttribute("aria-pressed")) === "false",
+    "2 段目で選ぶと、帯の「道路」が押した状態になる",
+  );
+  await page.keyboard.press("Escape");
+  check(!(await roadMenu.isVisible()), "Esc で 2 段目が閉じる");
+  await page.locator('button[data-tool="none"]').click();
+  check(
+    (await page.locator('button[data-menu="road"]').getAttribute("aria-pressed")) === "false",
+    "「見る」に戻すと、帯の「道路」の押した状態が外れる",
+  );
+  // キーボードで開くと、フォーカスが 2 段目の中へ動き、Esc で入口のボタンへ戻る
+  await page.locator('button[data-menu="zone"]').focus();
+  await page.keyboard.press("Enter");
+  check(
+    await page.evaluate(() => document.activeElement?.closest("#menu-zone") !== null),
+    "キーボードで 2 段目を開くと、フォーカスが中のボタンへ動く",
+  );
+  await page.keyboard.press("Escape");
+  check(
+    (await page.evaluate(() => document.activeElement?.getAttribute("data-menu"))) === "zone",
+    "Esc で閉じると、フォーカスが入口のボタンへ戻る",
+  );
+  // レイヤーのパネルも、ボタンで開いて Esc か外を押して閉じる
+  await page.locator("#layers-open").click();
+  check(
+    (await page.locator("#layer-panel").isVisible()) &&
+      (await page.locator("#layers button").count()) === 4 &&
+      (await page.locator("#layer-panel #legend").count()) === 1,
+    "レイヤーのボタンで、なし、電気、水道、交通を選ぶパネルが開き、凡例も中にある",
+  );
+  await page.mouse.click(cx, cy);
+  check(!(await page.locator("#layer-panel").isVisible()), "パネルの外（地図）を押すと閉じる");
 
   // フィードバックを送り、保存した記録を chizu-cli で再生する
   await page.locator("#feedback-open").click();
