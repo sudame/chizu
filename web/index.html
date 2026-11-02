@@ -100,14 +100,8 @@
       }
       #status,
       #city-numbers,
-      #city-utilities,
-      #growth-notice {
+      #city-utilities {
         margin: 0;
-      }
-      #growth-notice {
-        max-width: 22em;
-        font-size: 13px;
-        color: #a31515;
       }
       #city {
         display: flex;
@@ -119,20 +113,31 @@
         color: #a31515;
         font-weight: bold;
       }
-      #city-shortage {
+      #notices {
         position: fixed;
         top: 8px;
         left: 520px;
-        padding: 4px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
         max-width: 24em;
+      }
+      #city-shortage,
+      #growth-notice {
+        margin: 0;
+        padding: 4px 8px;
         font-size: 13px;
         color: #7a1010;
         background: #ffe3a3;
         border: 1px solid #d49a00;
         border-radius: 4px;
       }
+      #city-shortage[hidden],
+      #growth-notice[hidden] {
+        display: none;
+      }
       @media (max-width: 900px) {
-        #city-shortage {
+        #notices {
           top: auto;
           right: 8px;
           bottom: 104px;
@@ -250,7 +255,6 @@
         <div>
           <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
           <p id="city-utilities">電気 0 / 需要 0・水道 0 / 需要 0</p>
-          <p id="growth-notice" role="status" hidden></p>
         </div>
         <div id="demand" title="区画の種類ごとの需要">
           <div><div class="slot"><div class="bar" style="background: #26f226"></div></div><div class="label">住</div></div>
@@ -275,7 +279,10 @@
       </div>
       <div id="layers" title="データレイヤー"></div>
     </div>
-    <div id="city-shortage" role="status" hidden></div>
+    <div id="notices">
+      <div id="city-shortage" role="status" hidden></div>
+      <div id="growth-notice" role="status" hidden></div>
+    </div>
     <div id="milestone-notice" role="status" hidden></div>
     <div id="toolbar">
       <button type="button" data-tool="none" aria-pressed="true">見る</button>

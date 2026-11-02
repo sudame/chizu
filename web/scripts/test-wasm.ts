@@ -754,6 +754,22 @@ try {
       /足りない|つながっていない/.test((await shortage.textContent()) ?? ""),
     `届いていない建物の数と理由が欄に出る（${await shortage.textContent()}）`,
   );
+  // 施設のない網に塗った区画が建たない理由は、500 ミリ秒ごとの overview で届く
+  const growth = page.locator("#growth-notice");
+  await page
+    .waitForFunction(
+      () => document.querySelector<HTMLElement>("#growth-notice")?.hidden === false,
+      undefined,
+      {
+        timeout: TIMEOUT_MS,
+      },
+    )
+    .catch(() => undefined);
+  check(
+    (await growth.isVisible()) &&
+      /余裕がなく.*新築が止まっている/.test((await growth.textContent()) ?? ""),
+    `施設のない網の区画が建たない理由が出る（${await growth.textContent()}）`,
+  );
   check(
     (await page.locator("#legend-body li").count()) >= 10,
     "凡例に区画・建物の段階・印・施設が並ぶ",
