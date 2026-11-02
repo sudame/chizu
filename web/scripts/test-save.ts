@@ -12,6 +12,8 @@ import { preview } from "vite";
 
 const TIMEOUT_MS = 30_000;
 const FAST_SPEED = 48;
+// 保存の知らせが消えるまでの時間（main-side.ts の NOTICE_MS）に少し足した長さ
+const NOTICE_FADE_MS = 9_000;
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -199,14 +201,21 @@ try {
   // 2 つ目のタブは自動保存の枠に書かない
   const second = await context.newPage();
   await second.goto(url);
-  await second
-    .locator("#save-notice", { hasText: "別のタブ" })
+  const alert = second.locator("#save-alerts .save-alert", { hasText: "別のタブ" });
+  await alert
     .waitFor({ timeout: TIMEOUT_MS })
     .then(
       () => true,
       () => false,
     )
     .then((ok) => check(ok, "2 つ目のタブでは、自動保存しないと示される"));
+  // うまくいった知らせ（読み込んだ）は数秒で消え、続く状態の知らせは閉じるまで残る
+  await second.waitForTimeout(NOTICE_FADE_MS);
+  check(await alert.isVisible(), "自動保存しない知らせは、数秒たっても残る");
+  check(await page.locator("#save-notice").isHidden(), "読み込んだ知らせは、数秒で消える");
+  // 選ぶ画面が前に出ているので、押した操作を直接送る
+  await alert.locator("button").dispatchEvent("click");
+  check(await alert.isHidden(), "自動保存しない知らせは、閉じるボタンで閉じる");
   await second.close();
 
   // 街の状態を除いた保存 1 の写しを保存 2 に書き、状態を入れる前の保存データとして読む
@@ -276,7 +285,7 @@ try {
     (await saveButton.getAttribute("data-rules-changed")) === "true" &&
       (await saveButton.getAttribute("data-from-state")) === "false" &&
       (await saveButton.getAttribute("data-loaded-hash")) === savedHash &&
-      ((await page.locator("#save-notice").textContent()) ?? "").includes("規則が変わった"),
+      ((await page.locator("#save-alerts").textContent()) ?? "").includes("規則が変わった"),
     "状態ハッシュが食い違っても読み込み、規則が変わったと示す",
   );
 

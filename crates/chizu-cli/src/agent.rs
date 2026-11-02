@@ -15,6 +15,7 @@ use chizu_core::building::{Building, CityStats, demand, jobs_kept_permille, resi
 use chizu_core::movement::signal;
 use chizu_core::service::supply_balance;
 use chizu_core::world::economy::Finances;
+use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
@@ -52,6 +53,11 @@ observe の utilities（power と water）:
   headroomPermille 供給量に対する余りの千分率（供給量 0 なら null）、lowHeadroom 余りが 0 以上 1 割未満（画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）。
   shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at
   （網の中で需要が最も大きい建物の道路に面したマス）。at を map で見れば、どの網かが分かる。
+
+observe の growth（新築が電気か水道の余裕で止まっている間口）:
+  区画の種類ごとに fronts 候補の間口、blocked 止まっている数、noPower と noWater そのうち電気、水道の余裕がない数。
+  stalledAt 止まっている道路網ごとの at（止まっている間口のうち座標が最小のマス）と、noPower、noWater（その網に足りないもの）。
+  画面の知らせを押したときに映る場所と同じ。止まっている網がなければ空の配列。at を map で見れば、どの網かが分かる。
 
 observe の人と車の欄（原因が交通にあるかを見分けるためのもの）:
   citizenPlaces  住民のいまの居場所ごとの人数。atHome 家、atWork 職場か学校、atShop 帰りに寄った店、
@@ -110,6 +116,13 @@ observe の signals:
 コマンド（type で種類を選ぶ）:
   {"type":"BuildRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
       道路を引く。縦か横か 45 度の斜めの直線だけで、1 マスあたり 250、450、750 かかる。
+      既存の道路に重ねると Denied（Overlap）になる。種類を変えるときは UpgradeRoad を使う。
+  {"type":"UpgradeRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
+      直線と同じ 1 歩を通る既存の道路の区間を、区間ごと kind に変える（上げるのにも下げるのにも使う）。
+      直線の形は BuildRoad と同じ決まりで、直線が区間の一部しか通らなくても、ノードからノードまでの区間全体が変わる。
+      形、ノード、信号、区画、建物はそのままで、走っている車と歩く人は、いまの位置から経路を探し直す。
+      費用は区間ごとの建設費の差額で、上げるときだけかかり、下げても払い戻さない。高速道路は変えない。
+      変える道路がなければ Denied（NoRoadToChange）、どれもすでに kind なら Denied（RoadKindUnchanged）。
   {"type":"Bulldoze","area":[[x,y],[x,y]]}
       範囲の道路、施設、建物を取り壊す。
   {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"Commercial"|"Industrial"|"Office"|null}
@@ -640,6 +653,33 @@ fn migration(m: MigrationOutlook) -> Value {
     })
 }
 
+/// 区画の種類ごとの止まっている間口の数に、止まっている道路網の一覧 `stalledAt` を添える。
+fn growth_json(growth: &[GrowthBlock; 4], stalled: &[StalledNetwork]) -> Value {
+    let mut out = by_zone(|z| {
+        let g = growth[z.index()];
+        json!({
+            "fronts": g.fronts,
+            "blocked": g.blocked,
+            "noPower": g.no_power,
+            "noWater": g.no_water,
+        })
+    });
+    let stalled_at: Vec<Value> = stalled
+        .iter()
+        .map(|n| {
+            json!({
+                "at": [n.at.x, n.at.y],
+                "noPower": n.no_power,
+                "noWater": n.no_water,
+            })
+        })
+        .collect();
+    if let Value::Object(map) = &mut out {
+        map.insert("stalledAt".to_string(), Value::Array(stalled_at));
+    }
+    out
+}
+
 /// 街の様子。`World` の公開の読み出し口から取れるものをそのまま並べる。
 /// `before` は、止まっている車を見分けるための、少し前の車の位置である。
 fn observe(world: &World, before: &CarSample) -> Value {
@@ -695,7 +735,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "shortAt": short,
         })
     };
-    let growth = world.growth_blocks();
+    let (growth, stalled) = world.growth_report();
     let facilities = by_service(|k| world.facilities().iter().filter(|f| f.kind == k).count());
     let finances = world.finances();
     let Finances {
@@ -779,15 +819,9 @@ fn observe(world: &World, before: &CarSample) -> Value {
         // 需要があるのに建たないとき、新築の候補の間口のうち、電気か水道の余裕がなくて建たないものの数。
         // その網の電気か水道の余裕が足りない。区画の需要が 0 以下なら、余裕の有無にかかわらず数えない。施設を足すか、施設のある網へ道路でつなぐ。
         // 施設のない網（道路が 1 マス離れているなど）かどうかは、utilities の networksWithoutFacility で見分ける。
-        "growth": by_zone(|z| {
-            let g = growth[z.index()];
-            json!({
-                "fronts": g.fronts,
-                "blocked": g.blocked,
-                "noPower": g.no_power,
-                "noWater": g.no_water,
-            })
-        }),
+        // stalledAt は、新築が止まっている道路網ごとの、止まっている間口のうち座標が最小のマス at と、足りないもの。
+        // 画面の「建たない理由」の知らせを押したときに映る場所と同じ。at を map で見れば、どの網かが分かる。
+        "growth": growth_json(&growth, &stalled),
         "land": {
             "chunkSide": CHUNK_SIDE,
             "ownedChunks": owned,
@@ -1164,8 +1198,24 @@ mod tests {
 
         // 時間を進めてから、もう一度 act する。
         replay(&mut world, &log, 300);
-        let more = [json!({"type":"BuildRoad","from":[30,10],"to":[30,40],"kind":"Medium"})];
-        act(&mut world, &mut log, &more, false);
+        let more = [
+            json!({"type":"BuildRoad","from":[30,10],"to":[30,40],"kind":"Medium"}),
+            json!({"type":"UpgradeRoad","from":[0,10],"to":[30,10],"kind":"Large"}),
+            json!({"type":"UpgradeRoad","from":[0,10],"to":[30,10],"kind":"Large"}),
+        ];
+        let results = act(&mut world, &mut log, &more, false);
+        let outcomes: Vec<(&str, Option<&str>)> = results
+            .iter()
+            .map(|r| (r["outcome"].as_str().unwrap(), r["reason"].as_str()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [
+                ("Applied", None),
+                ("Applied", None),
+                ("Denied", Some("RoadKindUnchanged"))
+            ]
+        );
         replay(&mut world, &log, 200);
 
         let log = CommandLog::decode(&log.encode()).unwrap();

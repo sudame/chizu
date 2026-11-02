@@ -37,8 +37,10 @@
 //! | 6 | `BuyChunk` | cx `i32`、cy `i32` |
 //! | 7 | `SetTaxRate` | zone `u8`、permille `u16` |
 //! | 8 | `SetSimSpeed` | 倍率 `u16` |
+//! | 9 | `UpgradeRoad` | from `TilePos`、to `TilePos`、kind `u8` |
 //!
-//! 形式を変えるときは版を上げる。種類の番号は使い回さない。
+//! 形式を変えるときは版を上げる。種類の番号は使い回さない。種類を足すだけなら、古い記録はそのまま
+//! 読めるので版は上げない。
 
 use core::fmt;
 
@@ -420,6 +422,12 @@ fn encode_command(w: &mut Writer, c: &Command) {
             w.u8(8);
             w.u16(speed.multiplier());
         }
+        Command::UpgradeRoad { from, to, kind } => {
+            w.u8(9);
+            w.tile(from);
+            w.tile(to);
+            w.u8(kind as u8);
+        }
     }
 }
 
@@ -466,6 +474,11 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
             })?;
             Command::SetSimSpeed { speed }
         }
+        9 => Command::UpgradeRoad {
+            from: r.tile()?,
+            to: r.tile()?,
+            kind: r.code("RoadKind", RoadKind::from_code)?,
+        },
         other => return Err(DecodeError::UnknownCommand(other)),
     };
     Ok(c)
@@ -562,6 +575,12 @@ mod tests {
             },
             Command::SetSimSpeed {
                 speed: SimSpeed::MAX,
+            },
+            // 最初に引いた中の道路を、大に上げる。
+            Command::UpgradeRoad {
+                from: TilePos::new(-3, 4),
+                to: TilePos::new(5, -4),
+                kind: RoadKind::Large,
             },
         ]
     }
@@ -670,8 +689,8 @@ mod tests {
         rect.extend_from_slice(&0_i64.to_le_bytes());
         assert!(invalid_command(&rect));
         assert_eq!(
-            CommandLog::decode(&single(0, 0, &[9])),
-            Err(DecodeError::UnknownCommand(9))
+            CommandLog::decode(&single(0, 0, &[10])),
+            Err(DecodeError::UnknownCommand(10))
         );
     }
 
@@ -873,7 +892,7 @@ mod tests {
         assert_eq!(
             stats,
             ReplayStats {
-                applied: 5,
+                applied: 6,
                 not_implemented: 0,
                 rejected: 0,
                 denied: 4,
@@ -955,6 +974,21 @@ mod tests {
             (1_u16..=48).prop_map(|m| Command::SetSimSpeed {
                 speed: SimSpeed::new(m).unwrap(),
             }),
+            (
+                coord.clone(),
+                coord,
+                -1_i64..=1,
+                -1_i64..=1,
+                1_i64..=1_024,
+                1_u8..=3
+            )
+                .prop_filter("向きがない", |(_, _, sx, sy, _, _)| (*sx, *sy)
+                    != (0, 0))
+                .prop_map(|(x, y, sx, sy, n, k)| Command::UpgradeRoad {
+                    from: TilePos::new(x, y),
+                    to: TilePos::new(x.saturating_add(sx * n), y.saturating_add(sy * n)),
+                    kind: RoadKind::from_code(k).unwrap(),
+                }),
         ]
     }
 

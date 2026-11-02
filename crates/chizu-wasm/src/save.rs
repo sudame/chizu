@@ -528,6 +528,27 @@ mod tests {
         }
     }
 
+    /// 検査の値を通ったまま道路網が崩れた状態は、`SnapshotError::Network` で断り、記録の再生に戻る。
+    #[test]
+    fn a_state_with_a_broken_network_falls_back_to_the_record() {
+        let mut sim = Sim::new(3);
+        build_city(&mut sim);
+        let (broken, broken_hash) = sim.world().to_snapshot_with_broken_network();
+        assert!(matches!(
+            World::from_snapshot(&broken),
+            Err(chizu_core::SnapshotError::Network(_))
+        ));
+        // ほかの欄とは食い違わないので、断るのは道路網の検査になる。
+        let data = SaveData {
+            state: Some(broken),
+            state_hash: broken_hash,
+            ..SaveData::of(&sim)
+        };
+        let restored = restore(&data, 1_000);
+        assert!(!restored.from_state);
+        assert_eq!(restored.sim.world().state_hash(), sim.world().state_hash());
+    }
+
     #[test]
     fn commands_recorded_while_paused_are_restored() {
         let mut sim = Sim::new(5);

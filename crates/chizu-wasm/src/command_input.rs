@@ -87,17 +87,26 @@ pub fn parse(
             .ok_or(InputError::BadSpeed)?;
             Ok(Command::SetSimSpeed { speed })
         }
-        "BuildRoad" => {
-            let kind = match field("road") {
+        "BuildRoad" | "UpgradeRoad" => {
+            let road = match field("road") {
                 Field::Text(t) if t == "Small" => RoadKind::Small,
                 Field::Text(t) if t == "Medium" => RoadKind::Medium,
                 Field::Text(t) if t == "Large" => RoadKind::Large,
                 _ => return Err(InputError::BadRoadKind),
             };
-            Ok(Command::BuildRoad {
-                from: tile(&field, "fromX", "fromY")?,
-                to: tile(&field, "toX", "toY")?,
-                kind,
+            let (from, to) = (tile(&field, "fromX", "fromY")?, tile(&field, "toX", "toY")?);
+            Ok(if kind == "BuildRoad" {
+                Command::BuildRoad {
+                    from,
+                    to,
+                    kind: road,
+                }
+            } else {
+                Command::UpgradeRoad {
+                    from,
+                    to,
+                    kind: road,
+                }
             })
         }
         "PaintZone" => {
@@ -327,6 +336,15 @@ mod tests {
         assert_eq!(
             object(&fields),
             Ok(Command::BuildRoad {
+                from: TilePos::new(-3, 4),
+                to: TilePos::new(5, 4),
+                kind: RoadKind::Medium,
+            })
+        );
+        fields[0].1 = Field::Text("UpgradeRoad".into());
+        assert_eq!(
+            object(&fields),
+            Ok(Command::UpgradeRoad {
                 from: TilePos::new(-3, 4),
                 to: TilePos::new(5, 4),
                 kind: RoadKind::Medium,

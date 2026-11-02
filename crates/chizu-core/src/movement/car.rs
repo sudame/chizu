@@ -166,7 +166,8 @@ pub(super) fn place(
 }
 
 /// 探し直した行 `i` の車の車線を決める。前と同じ番号の車線に重ならずにいられればそこに、だめなら
-/// 重ならない車線のうち車の少ない車線に置く。どこも重なるなら、前と同じ番号の車線のままにする。
+/// 重ならない車線のうち車の少ない車線に置く。どこも重なるなら（道路の種類を下げて車線が減ったときなど）、
+/// 止めて出発を待つ車にし、空いたら `place` で置き直す。
 pub(super) fn keep_lane(rows: &mut [Option<Trip>], net: &Network, i: usize, index: usize) {
     let ix = LaneIndex::of(rows, Some(i));
     let t = rows[i].as_ref().expect("置く車がない");
@@ -174,11 +175,15 @@ pub(super) fn keep_lane(rows: &mut [Option<Trip>], net: &Network, i: usize, inde
     let same = lanes[index.min(lanes.len() - 1)];
     let fits = |l: LaneId| ix.room_behind(l, t.offset) == Some(t.offset);
     let others: Vec<LaneId> = lanes.iter().copied().filter(|l| *l != same).collect();
-    let lane = std::iter::once(same)
+    let found = std::iter::once(same)
         .chain(ix.by_count(&others))
-        .find(|l| fits(*l))
-        .unwrap_or(same);
-    rows[i].as_mut().expect("置く車がない").lane = lane;
+        .find(|l| fits(*l));
+    let t = rows[i].as_mut().expect("置く車がない");
+    match found {
+        Some(lane) => t.lane = lane,
+        // 待ち始めから数え直す。引き継いだまま待たせると、すぐ歩きに切り替わってしまう。
+        None => (t.lane, t.speed, t.waiting, t.stalled) = (same, MmPerTick::ZERO, true, 0),
+    }
 }
 
 /// 車線ごとの、いまの車の数と最後尾（位置と速さ）。

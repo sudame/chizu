@@ -1,7 +1,9 @@
 //! 経路探索のグラフ。リンクを頂点、ノードでのつながりを辺にする。
 
+use core::fmt;
+
 use crate::command::{NodeId, RoadKind};
-use crate::network::{Dir, LaneId, LaneMode, LinkId, Network, SegmentKind};
+use crate::network::{Dir, LaneId, LaneMode, Line, LinkId, Network, SegmentId, SegmentKind};
 use crate::tile::TilePos;
 use crate::units::MmPerTick;
 
@@ -19,12 +21,85 @@ pub fn speed_limit(kind: SegmentKind) -> MmPerTick {
     }
 }
 
-/// 長さ `mm` を速さ `speed` で進む時間（ms）。端数は切り上げる。
-pub(crate) fn travel_ms(mm: u64, speed: MmPerTick) -> u64 {
-    let speed = u64::try_from(speed.0).expect("速さが負");
-    mm.checked_mul(1_000)
-        .expect("所要時間があふれた")
-        .div_ceil(speed)
+/// 長さ `mm` を速さ `speed` で進む時間（ms）。端数は切り上げる。あふれたら `None` を返す。
+fn travel_ms(mm: u64, speed: MmPerTick) -> Option<u64> {
+    let speed = u64::try_from(speed.0).ok().filter(|s| *s > 0)?;
+    Some(mm.checked_mul(1_000)?.div_ceil(speed))
+}
+
+/// 網の中身が食い違っていて、グラフを作れない理由。
+///
+/// 道路を引く・消すコマンドで変えた網では起きない。読み戻した街の状態が、検査の値を通ったまま
+/// 中身の整合を崩していたときに返す。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GraphError {
+    /// ノードかリンクが指すノードがない。
+    MissingNode(NodeId),
+    /// ノードかリンクが指す区間がない。
+    MissingSegment(SegmentId),
+    /// 区間が指す車線がない。
+    MissingLane(LaneId),
+    /// ノードが、そのノードを端に持たない区間を指す。
+    NodeNotOnSegment { node: NodeId, segment: SegmentId },
+    /// 区間の両端が 8 方向の直線で結べない。
+    NotStraight(SegmentId),
+    /// 長さや所要時間、頂点や辺の数が収まらない。
+    Overflow,
+}
+
+impl fmt::Display for GraphError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GraphError::MissingNode(n) => write!(f, "ノード {n:?} がない"),
+            GraphError::MissingSegment(s) => write!(f, "区間 {s:?} がない"),
+            GraphError::MissingLane(l) => write!(f, "車線 {l:?} がない"),
+            GraphError::NodeNotOnSegment { node, segment } => {
+                write!(f, "ノード {node:?} は区間 {segment:?} の端でない")
+            }
+            GraphError::NotStraight(s) => write!(f, "区間 {s:?} の両端が 8 方向の直線で結べない"),
+            GraphError::Overflow => write!(f, "グラフの大きさか費用があふれた"),
+        }
+    }
+}
+
+/// グラフを作る前に、[`Network`] の読み出しが panic しない網かを確かめる。
+///
+/// [`Network::links`] や [`Network::segment_line`] は網の整合を前提にしているので、
+/// 先に区間の端のノード、区間の車線、ノードの区間を見ておく。
+fn check(net: &Network) -> Result<(), GraphError> {
+    for (id, seg) in net.segments() {
+        segment_line(net, id)?;
+        for l in &seg.lanes {
+            net.lane(*l).ok_or(GraphError::MissingLane(*l))?;
+        }
+    }
+    for (id, node) in net.nodes() {
+        for s in &node.segments {
+            let seg = net.segment(*s).ok_or(GraphError::MissingSegment(*s))?;
+            if seg.a != id && seg.b != id {
+                return Err(GraphError::NodeNotOnSegment {
+                    node: id,
+                    segment: *s,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 区間の直線。[`Network::segment_line`] と同じだが、食い違いを `Err` で返す。
+fn segment_line(net: &Network, id: SegmentId) -> Result<Line, GraphError> {
+    let s = net.segment(id).ok_or(GraphError::MissingSegment(id))?;
+    let tile = |n: NodeId| {
+        net.node(n)
+            .map(|n| n.tile())
+            .ok_or(GraphError::MissingNode(n))
+    };
+    Line::straight(tile(s.a)?, tile(s.b)?).map_err(|_| GraphError::NotStraight(id))
+}
+
+fn to_u32(v: usize) -> Result<u32, GraphError> {
+    u32::try_from(v).map_err(|_| GraphError::Overflow)
 }
 
 /// ノードでの車線どうしのつながり。
@@ -64,85 +139,105 @@ pub struct Graph {
 }
 
 /// リンクの始まりと終わりのノード。
-fn link_ends(net: &Network, link: LinkId) -> (NodeId, NodeId) {
-    let s = net.segment(link.segment).expect("リンクの区間がない");
-    match link.dir {
+fn link_ends(net: &Network, link: LinkId) -> Result<(NodeId, NodeId), GraphError> {
+    let s = net
+        .segment(link.segment)
+        .ok_or(GraphError::MissingSegment(link.segment))?;
+    Ok(match link.dir {
         Dir::Forward => (s.a, s.b),
         Dir::Backward => (s.b, s.a),
-    }
+    })
 }
 
 /// ノード `n` から出る、手段 `mode` のリンク。区間の ID の順に並ぶ。
-fn departures(net: &Network, n: NodeId, mode: LaneMode) -> Vec<LinkId> {
-    let node = net.node(n).expect("ノードがない");
-    node.segments
-        .iter()
-        .filter_map(|s| {
-            let seg = net.segment(*s).expect("ノードの区間がない");
-            let dir = if seg.a == n {
-                Dir::Forward
-            } else {
-                Dir::Backward
-            };
-            let link = LinkId {
-                segment: *s,
-                dir,
-                mode,
-            };
-            net.link_lanes(link).next().is_some().then_some(link)
-        })
-        .collect()
+fn departures(net: &Network, n: NodeId, mode: LaneMode) -> Result<Vec<LinkId>, GraphError> {
+    let node = net.node(n).ok_or(GraphError::MissingNode(n))?;
+    let mut out = Vec::new();
+    for s in &node.segments {
+        let seg = net.segment(*s).ok_or(GraphError::MissingSegment(*s))?;
+        let dir = if seg.a == n {
+            Dir::Forward
+        } else {
+            Dir::Backward
+        };
+        let link = LinkId {
+            segment: *s,
+            dir,
+            mode,
+        };
+        if net.link_lanes(link).next().is_some() {
+            out.push(link);
+        }
+    }
+    Ok(out)
 }
 
 /// ノード `n` で、`from` から曲がり先 `to` に進めるか。車は行き止まりでだけ折り返せる。
 /// ただし「外の世界」ノードは出入りする所なので、車はそこで折り返さない。歩行者はどこでも折り返せる。
-fn may_turn(net: &Network, n: NodeId, from: LinkId, to: LinkId, out_count: usize) -> bool {
-    let dead_end = out_count == 1 && !net.node(n).expect("ノードがない").outside;
-    from.segment != to.segment || from.mode == LaneMode::Sidewalk || dead_end
+fn may_turn(
+    net: &Network,
+    n: NodeId,
+    from: LinkId,
+    to: LinkId,
+    out_count: usize,
+) -> Result<bool, GraphError> {
+    let outside = net.node(n).ok_or(GraphError::MissingNode(n))?.outside;
+    let dead_end = out_count == 1 && !outside;
+    Ok(from.segment != to.segment || from.mode == LaneMode::Sidewalk || dead_end)
 }
 
 impl Graph {
-    /// 網から手段 `mode` のグラフを作る。
+    /// 網から手段 `mode` のグラフを作る。網の中身が食い違っていたら panic する。
+    /// 道路を引く・消すコマンドで変えた網は食い違わないので、ふだんはこちらを使う。
     pub fn build(net: &Network, mode: LaneMode) -> Graph {
+        Graph::try_build(net, mode).expect("網の中身が食い違っている")
+    }
+
+    /// 網から手段 `mode` のグラフを作る。網の中身が食い違っていたら `Err` を返す。
+    pub fn try_build(net: &Network, mode: LaneMode) -> Result<Graph, GraphError> {
+        check(net)?;
         let links: Vec<LinkId> = net.links().filter(|l| l.mode == mode).collect();
         let mut cost = Vec::with_capacity(links.len());
         let mut end_tile = Vec::with_capacity(links.len());
         let mut max_speed = MmPerTick(1);
         for l in &links {
-            let seg = net.segment(l.segment).expect("リンクの区間がない");
+            let seg = net
+                .segment(l.segment)
+                .ok_or(GraphError::MissingSegment(l.segment))?;
             let speed = match mode {
                 LaneMode::Car => speed_limit(seg.kind),
                 LaneMode::Sidewalk => WALK_SPEED,
             };
             max_speed = max_speed.max(speed);
-            let length = net
-                .segment_line(l.segment)
-                .expect("リンクの区間がない")
-                .length();
-            let length = u64::try_from(length.0).expect("長さが負");
-            cost.push(travel_ms(length, speed));
-            let end = link_ends(net, *l).1;
-            end_tile.push(net.node(end).expect("ノードがない").tile());
+            let length = segment_line(net, l.segment)?
+                .checked_length()
+                .and_then(|m| u64::try_from(m.0).ok())
+                .ok_or(GraphError::Overflow)?;
+            cost.push(travel_ms(length, speed).ok_or(GraphError::Overflow)?);
+            let end = link_ends(net, *l)?.1;
+            end_tile.push(net.node(end).ok_or(GraphError::MissingNode(end))?.tile());
         }
         let mut edge_start = Vec::with_capacity(links.len() + 1);
         let mut edges = Vec::new();
         edge_start.push(0);
         for l in &links {
-            let node = link_ends(net, *l).1;
-            let out = departures(net, node, mode);
+            let node = link_ends(net, *l)?.1;
+            let out = departures(net, node, mode)?;
             for to in &out {
-                if may_turn(net, node, *l, *to, out.len()) {
-                    let to = links.binary_search(to).expect("グラフにないリンク");
+                if may_turn(net, node, *l, *to, out.len())? {
+                    let to = links
+                        .binary_search(to)
+                        .map_err(|_| GraphError::MissingSegment(to.segment))?;
                     edges.push(Edge {
-                        to: u32::try_from(to).expect("頂点が u32 に収まらない"),
+                        to: to_u32(to)?,
                         cost: 0,
                     });
                 }
             }
-            edge_start.push(u32::try_from(edges.len()).expect("辺が u32 に収まらない"));
+            edge_start.push(to_u32(edges.len())?);
         }
         let (rev_start, rev_edges) = reverse(&edge_start, &edges);
-        Graph {
+        Ok(Graph {
             mode,
             links,
             cost,
@@ -152,7 +247,7 @@ impl Graph {
             rev_start,
             rev_edges,
             max_speed,
-        }
+        })
     }
 
     pub fn mode(&self) -> LaneMode {
@@ -243,17 +338,24 @@ fn reverse(start: &[u32], edges: &[Edge]) -> (Vec<u32>, Vec<Edge>) {
 ///
 /// リンクの車線は区間に並べた順に番号を振り、先の車線 `j` には元の車線 `min(j, 元の数 - 1)` を、
 /// 先の車線より多い元の車線には先の最後の車線をつなぐ。どの車線も 1 本以上につながる。
+/// 網の中身が食い違っていたら panic する。
 pub fn connectors(net: &Network) -> Vec<Connector> {
+    try_connectors(net).expect("網の中身が食い違っている")
+}
+
+/// [`connectors`] と同じだが、網の中身が食い違っていたら `Err` を返す。
+pub fn try_connectors(net: &Network) -> Result<Vec<Connector>, GraphError> {
+    check(net)?;
     let mut out = Vec::new();
     for mode in [LaneMode::Car, LaneMode::Sidewalk] {
         for from in net.links().filter(|l| l.mode == mode) {
-            let node = link_ends(net, from).1;
-            let next = departures(net, node, mode);
+            let node = link_ends(net, from)?.1;
+            let next = departures(net, node, mode)?;
             let from_lanes: Vec<LaneId> = net.link_lanes(from).collect();
-            for to in next
-                .iter()
-                .filter(|t| may_turn(net, node, from, **t, next.len()))
-            {
+            for to in &next {
+                if !may_turn(net, node, from, *to, next.len())? {
+                    continue;
+                }
                 let to_lanes: Vec<LaneId> = net.link_lanes(*to).collect();
                 let last_from = from_lanes.len() - 1;
                 let last_to = to_lanes.len() - 1;
@@ -270,5 +372,5 @@ pub fn connectors(net: &Network) -> Vec<Connector> {
         }
     }
     out.sort();
-    out
+    Ok(out)
 }

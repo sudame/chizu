@@ -17,6 +17,8 @@ import {
   serviceFootprint,
   signalCommand,
   snapToEightDirections,
+  upgradePlan,
+  upgradeRoadCommand,
 } from "./tools.ts";
 
 const viewport = { width: 800, height: 600 };
@@ -77,7 +79,53 @@ describe("roadCost", () => {
   });
 });
 
+describe("upgradePlan", () => {
+  const table = parseRoadCostTable([250, 450, 750, 8000, 11314]);
+  // 小の横の道路 2 本（0〜10 と 10〜20）、それにつながる中の縦の道路、大の斜めの道路、高速道路
+  const segments = [
+    0, 0, 10, 0, 1, 10, 0, 20, 0, 1, 10, 0, 10, 10, 2, 20, 0, 23, 3, 3, 20, 0, 40, 0, 4,
+  ];
+  const plan = (kind: "Small" | "Medium" | "Large", a: [number, number], b: [number, number]) =>
+    upgradePlan(segments, table, kind, { x: a[0], y: a[1] }, { x: b[0], y: b[1] });
+
+  test("なぞった直線が通る区間を、区間ごと変え、上げるときだけ差額を払う", () => {
+    // 一部だけなぞっても区間の全体が変わる。縦の道路は交差点で触れるだけなので変えない。
+    const p = plan("Large", [12, 0], [3, 0]);
+    expect(p.roads).toBe(2);
+    expect(p.segments).toEqual([
+      { from: { x: 0, y: 0 }, to: { x: 10, y: 0 } },
+      { from: { x: 10, y: 0 }, to: { x: 20, y: 0 } },
+    ]);
+    expect(p.cost).toBe(2 * 10 * 500);
+    expect(plan("Small", [10, 2], [10, 8]).cost).toBe(0);
+    // 斜めの区間は、中核と同じく長さに比例させて端数を切り上げた建設費の差額になる
+    expect(plan("Medium", [20, 0], [22, 2]).cost).toBe(0);
+    expect(plan("Large", [10, 5], [10, 6]).cost).toBe(3000);
+  });
+
+  test("高速道路と、すでにその種類の道路は変えない", () => {
+    expect(plan("Large", [25, 0], [35, 0])).toEqual({ segments: [], cost: 0, roads: 0 });
+    const same = plan("Small", [0, 0], [5, 0]);
+    expect([same.roads, same.segments.length]).toEqual([1, 0]);
+    // 横切るだけの直線と、同じ向きでも隣の列の直線は通らない
+    expect(plan("Large", [5, -3], [5, 3]).roads).toBe(0);
+    expect(plan("Large", [0, 1], [10, 1]).roads).toBe(0);
+    expect(plan("Large", [3, 0], [3, 0]).roads).toBe(0);
+  });
+});
+
 describe("コマンドの組み立て", () => {
+  test("種類を変える道具は、道路と同じく始点と終点と種類を送る", () => {
+    expect(upgradeRoadCommand("Medium", { x: 1, y: 2 }, { x: 1, y: 9 })).toEqual({
+      kind: "UpgradeRoad",
+      road: "Medium",
+      fromX: 1,
+      fromY: 2,
+      toX: 1,
+      toY: 9,
+    });
+  });
+
   test("道路は始点と終点と種類を送る", () => {
     expect(buildRoadCommand("Large", { x: -1, y: 2 }, { x: 3, y: 2 })).toEqual({
       kind: "BuildRoad",

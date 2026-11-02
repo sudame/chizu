@@ -15,7 +15,7 @@ use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
 use crate::rng::{RngPurpose, mix_words};
-use crate::routing::AstarRouter;
+use crate::routing::{AstarRouter, GraphError};
 use crate::schedule::bucket_at;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_SIDE, ChunkCoord, TilePos, TileRect, WORLD_LIMIT, local_index};
@@ -90,10 +90,14 @@ pub enum DenyReason {
     NotJunction = 14,
     /// 信号がもう置いてあるか、外す信号がない。
     SignalUnchanged = 15,
+    /// 種類を変える直線が、高速道路でない道路の区間を通らない。
+    NoRoadToChange = 16,
+    /// 直線が通る道路が、どれもすでにその種類である。
+    RoadKindUnchanged = 17,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 16] = [
+    pub const ALL: [DenyReason; 18] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -110,6 +114,8 @@ impl DenyReason {
         DenyReason::NoChunkSlot,
         DenyReason::NotJunction,
         DenyReason::SignalUnchanged,
+        DenyReason::NoRoadToChange,
+        DenyReason::RoadKindUnchanged,
     ];
 
     pub fn index(self) -> usize {
@@ -458,6 +464,35 @@ impl World {
         ApplyOutcome::Applied
     }
 
+    /// 直線と同じ 1 歩を通る道路の区間を、区間ごと `kind` に変える。費用は区間ごとの建設費の差額で、
+    /// 下げるときは払い戻さない。通るマスは変わらないので、区画、間口、建物はそのまま残る。
+    /// 建物と施設の出入口は区間の ID を指しているので、付け直す。
+    fn upgrade_road(&mut self, from: TilePos, to: TilePos, kind: RoadKind) -> ApplyOutcome {
+        let Ok(line) = Line::between(from, to) else {
+            return ApplyOutcome::Rejected;
+        };
+        let change = match self.network.plan_road_kind(&line, kind) {
+            Ok(change) => change,
+            Err(reason) => return ApplyOutcome::Denied(reason),
+        };
+        // 下げるだけなら費用がかからないので、借金があっても下げられる。
+        if change.cost > Money::ZERO && self.money < change.cost {
+            return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
+        }
+        self.money = self.money - change.cost;
+        // 区間を消す前に、その区間を通る移動の車線の番号と描いていたずれを控え、その場で探し直す。
+        let noted = self
+            .trips
+            .note_before_change(&self.network, &change.segments);
+        self.network.change_road_kind(&change);
+        self.refresh_buildings();
+        let lost = self
+            .trips
+            .reroute_noted(&self.network, &mut self.router.router, &noted);
+        self.end_commutes(lost);
+        ApplyOutcome::Applied
+    }
+
     // 消した道路の建設費は払い戻さない。
     // 施設と建物も道路と同じく、長方形にかかれば取り除く。建物の下の区画は残すので、需要があればまた建つ。
     fn bulldoze(&mut self, area: TileRect) -> ApplyOutcome {
@@ -571,6 +606,11 @@ impl World {
         &self.population
     }
 
+    #[cfg(any(test, feature = "test-util"))]
+    pub(crate) fn network_mut(&mut self) -> &mut Network {
+        &mut self.network
+    }
+
     #[cfg(test)]
     pub(crate) fn population_mut(&mut self) -> &mut Population {
         &mut self.population
@@ -659,6 +699,7 @@ impl World {
             }
             Command::BuyChunk { coord } => self.buy_chunk(coord),
             Command::BuildRoad { from, to, kind } => self.build_road(from, to, kind),
+            Command::UpgradeRoad { from, to, kind } => self.upgrade_road(from, to, kind),
             Command::Bulldoze { area } => self.bulldoze(area),
             Command::PaintZone { area, zone } => self.paint_zone(area, zone),
             Command::PlaceBuilding { kind, at, rotation } => self.place_service(kind, at, rotation),
@@ -704,9 +745,11 @@ impl World {
     }
 
     /// 読み戻した街の経路探索を、網から作り直す。グラフを作ったときの網の版は書き出したときのままにする。
-    pub(crate) fn rebuild_router(&mut self) {
+    /// 網の中身が食い違っていたら、経路探索を変えずに `Err` を返す。
+    pub(crate) fn rebuild_router(&mut self) -> Result<(), GraphError> {
         let version = self.router.router.version();
-        self.router.router = AstarRouter::new(&self.network).with_version(version);
+        self.router.router = AstarRouter::try_new(&self.network)?.with_version(version);
+        Ok(())
     }
 
     /// 状態ハッシュ。表は決まった順番で書き出す。
@@ -766,10 +809,12 @@ mod tests {
             | DenyReason::NoRoadAccess
             | DenyReason::NoChunkSlot
             | DenyReason::NotJunction
-            | DenyReason::SignalUnchanged => DenyReason::ALL.contains(&r),
+            | DenyReason::SignalUnchanged
+            | DenyReason::NoRoadToChange
+            | DenyReason::RoadKindUnchanged => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 16);
+        assert_eq!(DenyReason::ALL.len(), 18);
     }
     use crate::command::MAX_TAX_PERMILLE;
 
@@ -920,6 +965,85 @@ mod tests {
         );
         assert_eq!(w.network().version(), version + 1);
         assert_eq!(w.money(), INITIAL_MONEY - Money(2_500));
+    }
+
+    fn upgrade(w: &mut World, from: (i64, i64), to: (i64, i64), kind: RoadKind) -> ApplyOutcome {
+        w.apply(&Command::UpgradeRoad {
+            from: TilePos::new(from.0, from.1),
+            to: TilePos::new(to.0, to.1),
+            kind,
+        })
+    }
+
+    #[test]
+    fn upgrading_a_road_pays_the_difference_and_keeps_the_zones() {
+        let mut w = World::new(0);
+        road(&mut w, (0, 0), (10, 0), RoadKind::Small);
+        let res = Some(ZoneKind::Residential);
+        assert_eq!(paint(&mut w, (0, -6), (10, 6), res), ApplyOutcome::Applied);
+        let zones: Vec<_> = tiles_of(TileRect::from_corners(
+            TilePos::new(-2, -8),
+            TilePos::new(12, 8),
+        ))
+        .map(|t| w.zone_at(t))
+        .collect();
+        let lots = w.lots.clone();
+        let money = w.money();
+        assert_eq!(
+            upgrade(&mut w, (0, 0), (10, 0), RoadKind::Large),
+            ApplyOutcome::Applied
+        );
+        // 小 250、大 750 の 1 マスあたりの差額を 10 マスぶん払う。
+        assert_eq!(w.money(), money - Money(5_000));
+        let after: Vec<_> = tiles_of(TileRect::from_corners(
+            TilePos::new(-2, -8),
+            TilePos::new(12, 8),
+        ))
+        .map(|t| w.zone_at(t))
+        .collect();
+        assert_eq!(after, zones);
+        assert_eq!(w.lots, lots);
+        assert_eq!(
+            upgrade(&mut w, (0, 0), (10, 0), RoadKind::Large),
+            ApplyOutcome::Denied(DenyReason::RoadKindUnchanged)
+        );
+        // 下げても払い戻さない。
+        let money = w.money();
+        assert_eq!(
+            upgrade(&mut w, (3, 0), (4, 0), RoadKind::Small),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(w.money(), money);
+        // 所持金が足りなければ、何も変えない。
+        w.money = Money(4_999);
+        let before = w.clone();
+        assert_eq!(
+            upgrade(&mut w, (0, 0), (10, 0), RoadKind::Large),
+            ApplyOutcome::Denied(DenyReason::NotEnoughMoney)
+        );
+        assert_eq!(w, before);
+        // 借金があっても、費用のかからない下げる操作はできる。
+        w.money = Money(5_000);
+        assert_eq!(
+            upgrade(&mut w, (0, 0), (10, 0), RoadKind::Large),
+            ApplyOutcome::Applied
+        );
+        w.money = Money(-100);
+        assert_eq!(
+            upgrade(&mut w, (0, 0), (10, 0), RoadKind::Medium),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(w.money(), Money(-100));
+        let highway = highway_line(0);
+        assert_eq!(
+            upgrade(
+                &mut w,
+                (highway.start.x, highway.start.y),
+                (highway.tile(5).x, highway.tile(5).y),
+                RoadKind::Large
+            ),
+            ApplyOutcome::Denied(DenyReason::NoRoadToChange)
+        );
     }
 
     fn tile_use(w: &World, x: i64, y: i64) -> TileUse {

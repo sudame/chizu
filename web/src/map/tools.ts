@@ -18,6 +18,8 @@ export const MAX_ROAD_TILES = 1024;
 export type Tool =
   | { kind: "none" }
   | { kind: "road"; road: RoadKindName }
+  /** なぞった直線が通る既存の道路を、区間ごと road の種類に変える。 */
+  | { kind: "upgrade"; road: RoadKindName }
   | { kind: "bulldoze" }
   | { kind: "zone"; zone: ZoneName }
   | { kind: "service"; service: ServiceName }
@@ -87,6 +89,77 @@ export function roadCost(table: RoadCostTable, kind: RoadKindName, from: Tile, t
 
 export function buildRoadCommand(kind: RoadKindName, from: Tile, to: Tile): CommandMessage {
   return { kind: "BuildRoad", road: kind, fromX: from.x, fromY: from.y, toX: to.x, toY: to.y };
+}
+
+export function upgradeRoadCommand(kind: RoadKindName, from: Tile, to: Tile): CommandMessage {
+  return { kind: "UpgradeRoad", road: kind, fromX: from.x, fromY: from.y, toX: to.x, toY: to.y };
+}
+
+// chizu-wasm の segment_kind_code の番号の道路の種類。4 の高速道路は種類を変えない
+const ROAD_KIND_BY_CODE: Record<number, RoadKindName | undefined> = {
+  1: "Small",
+  2: "Medium",
+  3: "Large",
+};
+
+/** 道路の種類を変える見積もり。segments は変わる区間の両端で、cost はその費用の合計。 */
+export type UpgradePlan = {
+  segments: { from: Tile; to: Tile }[];
+  cost: number;
+  /** 直線と同じ 1 歩を通る、高速道路でない道路の区間の数。変わらない区間も数える。 */
+  roads: number;
+};
+
+/** 直線上の位置。直線の始点から 1 歩ごとに 1 増える。 */
+function along(from: Tile, step: [number, number], t: Tile): number {
+  return step[0] !== 0 ? (t.x - from.x) * step[0] : (t.y - from.y) * step[1];
+}
+
+/**
+ * 直線 from → to と同じ 1 歩を通る道路の区間を、区間ごと kind に変える見積もり。
+ * 中核の plan_road_kind と同じく、高速道路は変えず、上げるときだけ建設費の差額を払う。
+ * segments は chizu-wasm の road_segments（1 本につき両端と種類の 5 つの数）である。
+ */
+export function upgradePlan(
+  segments: ArrayLike<number>,
+  table: RoadCostTable,
+  kind: RoadKindName,
+  from: Tile,
+  to: Tile,
+): UpgradePlan {
+  const plan: UpgradePlan = { segments: [], cost: 0, roads: 0 };
+  const len = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y));
+  if (len === 0) {
+    return plan;
+  }
+  const step: [number, number] = [Math.sign(to.x - from.x), Math.sign(to.y - from.y)];
+  for (let i = 0; i + 4 < segments.length; i += 5) {
+    const a = { x: segments[i] ?? 0, y: segments[i + 1] ?? 0 };
+    const b = { x: segments[i + 2] ?? 0, y: segments[i + 3] ?? 0 };
+    const old = ROAD_KIND_BY_CODE[segments[i + 4] ?? 0];
+    if (old === undefined) {
+      continue;
+    }
+    // 区間が直線と同じ向きの線の上にあり、1 歩以上重なるか
+    const sx = Math.sign(b.x - a.x);
+    const sy = Math.sign(b.y - a.y);
+    const parallel = (sx === step[0] && sy === step[1]) || (sx === -step[0] && sy === -step[1]);
+    const onLine = (a.x - from.x) * step[1] - (a.y - from.y) * step[0] === 0;
+    if (!parallel || !onLine) {
+      continue;
+    }
+    const ta = along(from, step, a);
+    const tb = along(from, step, b);
+    if (Math.min(Math.max(ta, tb), len) - Math.max(Math.min(ta, tb), 0) < 1) {
+      continue;
+    }
+    plan.roads += 1;
+    if (old !== kind) {
+      plan.segments.push({ from: a, to: b });
+      plan.cost += Math.max(0, roadCost(table, kind, a, b) - roadCost(table, old, a, b));
+    }
+  }
+  return plan;
 }
 
 /** 2 つの角のマスを両端に含む長方形を消す。角の順番は問わない。 */

@@ -598,6 +598,13 @@ fn observe_shows_why_growth_is_blocked() {
     assert_eq!(res["blocked"], res["fronts"], "{res}");
     assert_eq!(res["noPower"], res["fronts"], "{res}");
     assert_eq!(res["noWater"], res["fronts"], "{res}");
+    let stalled = obs["growth"]["stalledAt"].as_array().unwrap();
+    assert!(!stalled.is_empty(), "{obs}");
+    for n in stalled {
+        assert!(n["at"][0].is_i64() && n["at"][1].is_i64(), "{n}");
+        assert_eq!(n["noPower"], true, "{n}");
+        assert_eq!(n["noWater"], true, "{n}");
+    }
     assert!(
         obs["utilities"]["power"]["networksWithoutFacility"]
             .as_u64()

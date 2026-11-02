@@ -105,6 +105,11 @@ enum CommandJson {
     SetSimSpeed {
         speed: u16,
     },
+    UpgradeRoad {
+        from: [i64; 2],
+        to: [i64; 2],
+        kind: RoadKindJson,
+    },
 }
 
 /// `SetSignal` をマス `at` で書いたものを、そのマスのノードの ID で書いた形に直す。ほかのコマンドはそのまま返す。
@@ -189,6 +194,11 @@ impl From<Command> for CommandJson {
             Command::SetSimSpeed { speed } => CommandJson::SetSimSpeed {
                 speed: speed.multiplier(),
             },
+            Command::UpgradeRoad { from, to, kind } => CommandJson::UpgradeRoad {
+                from: tile_json(from),
+                to: tile_json(to),
+                kind: kind.into(),
+            },
         }
     }
 }
@@ -235,6 +245,11 @@ impl CommandJson {
                     )
                 })?,
             },
+            CommandJson::UpgradeRoad { from, to, kind } => Command::UpgradeRoad {
+                from: tile(from),
+                to: tile(to),
+                kind: kind.into(),
+            },
         })
     }
 }
@@ -269,6 +284,7 @@ mod tests {
             json!({"type":"BuyChunk","chunk":[2,-1]}),
             json!({"type":"SetTaxRate","zone":"Commercial","permille":120}),
             json!({"type":"SetSimSpeed","speed":4}),
+            json!({"type":"UpgradeRoad","from":[0,1],"to":[5,1],"kind":"Large"}),
         ];
         for c in &cases {
             assert!(parse(c).is_ok(), "{c}");
@@ -346,6 +362,11 @@ mod tests {
             Command::SetSimSpeed {
                 speed: SimSpeed::MAX,
             },
+            Command::UpgradeRoad {
+                from: t(-5, 1),
+                to: t(5, 1),
+                kind: RoadKind::Medium,
+            },
         ];
         // 種類ごとに 1 つはあることを、ワイルドカードなしの match で確かめる。
         #[deny(clippy::wildcard_enum_match_arm)]
@@ -359,9 +380,10 @@ mod tests {
                 Command::BuyChunk { .. } => 5,
                 Command::SetTaxRate { .. } => 6,
                 Command::SetSimSpeed { .. } => 7,
+                Command::UpgradeRoad { .. } => 8,
             }
         }
-        let mut seen = [false; 8];
+        let mut seen = [false; 9];
         for c in commands {
             seen[kind(&c)] = true;
             let json = to_json(c);

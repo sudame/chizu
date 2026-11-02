@@ -24,6 +24,15 @@ export type CommandMessage =
       toX: number;
       toY: number;
     }
+  /** 直線と同じ 1 歩を通る既存の道路の区間を、区間ごと road の種類に変える。 */
+  | {
+      kind: "UpgradeRoad";
+      road: RoadKindName;
+      fromX: number;
+      fromY: number;
+      toX: number;
+      toY: number;
+    }
   | { kind: "Bulldoze"; minX: number; minY: number; maxX: number; maxY: number }
   | {
       kind: "PaintZone";
@@ -185,8 +194,11 @@ export type WorkerToMain =
    * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並ぶ。
    */
   | { kind: "buildings"; buildings: Float64Array; facilities: Float64Array; stats: number[] }
-  /** 人口と幸福度とマイルストーン。overview は chizu-wasm の overview で、数の並びは overview.ts にある。 */
-  | { kind: "overview"; overview: number[] }
+  /**
+   * 人口と幸福度とマイルストーン。overview は chizu-wasm の overview で、数の並びは overview.ts にある。
+   * stalls は chizu-wasm の growth_stalls で、新築が止まっている道路網ごとに [x, y, 足りない資源] が並ぶ。
+   */
+  | { kind: "overview"; overview: number[]; stalls: number[] }
   /**
    * id は画面が振ったコマンドの番号、seq は記録の通し番号。
    * 記録する前に受け付けなかったコマンドには seq がない。
@@ -273,7 +285,10 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       return (
         Array.isArray(v.overview) &&
         v.overview.length === OVERVIEW_LENGTH &&
-        v.overview.every((x) => typeof x === "number")
+        v.overview.every((x) => typeof x === "number") &&
+        Array.isArray(v.stalls) &&
+        v.stalls.length % 3 === 0 &&
+        v.stalls.every((x) => typeof x === "number")
       );
     case "outcome":
       return (
