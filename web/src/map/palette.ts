@@ -31,6 +31,12 @@ export const UNOWNED_HATCH_COLOR = hexRgb("#d9d5ca");
 export const WATER_COLOR = hexRgb("#a8cde5");
 /** 水と陸の境目の線。 */
 export const SHORE_COLOR = hexRgb("#8fbcd9");
+/** 買っていない水。買った水を、買っていない土地と同じ 0.94 倍ほど暗くする。 */
+export const UNOWNED_WATER_COLOR = hexRgb("#9ec1d7");
+/** 買っていない水の斜線。岸の線の色である。 */
+export const UNOWNED_WATER_HATCH_COLOR = SHORE_COLOR;
+/** 買っていない水の岸の線。岸の線を 0.94 倍ほど暗くする。 */
+export const UNOWNED_SHORE_COLOR = hexRgb("#86b1cc");
 /** チャンクがまだない所（画面の外）。 */
 export const OUTSIDE_COLOR = UNOWNED_COLOR;
 

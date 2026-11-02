@@ -18,6 +18,9 @@ import {
   SHORE_COLOR,
   UNOWNED_COLOR,
   UNOWNED_HATCH_COLOR,
+  UNOWNED_SHORE_COLOR,
+  UNOWNED_WATER_COLOR,
+  UNOWNED_WATER_HATCH_COLOR,
   WATER_COLOR,
   ZONABLE_COLOR,
   ZONABLE_MIX,
@@ -104,9 +107,13 @@ void main() {
   vec3 c;
   if ((tile & ${TILE_WATER}u) != 0u) {
     c = ${vec3(WATER_COLOR)};
-    // 買っていない水は、買った水と見分けられるよう暗くする
+    // 買っていない水は、買っていない土地と同じく少し暗くして斜線を引く
     if (!u_owned) {
-      c *= 0.55;
+      c = ${vec3(UNOWNED_WATER_COLOR)};
+      highp float sw = u_hatch + (v_uv.x + v_uv.y) * u_size;
+      if (mod(sw, ${HATCH_PERIOD}) < ${HATCH_WIDTH}) {
+        c = ${vec3(UNOWNED_WATER_HATCH_COLOR)};
+      }
     }
     // 水と陸の境目のマスの辺に、1 ピクセルの岸の線を引く（チャンクの端は陸があるかを調べない）
     float px = u_size / ${CHUNK_SIDE}.0;
@@ -117,7 +124,7 @@ void main() {
       || (f.y < 1.0 && !isWater(t + ivec2(0, -1)))
       || (g.y < 1.0 && !isWater(t + ivec2(0, 1)));
     if (shore) {
-      c = ${vec3(SHORE_COLOR)} * (u_owned ? 1.0 : 0.55);
+      c = u_owned ? ${vec3(SHORE_COLOR)} : ${vec3(UNOWNED_SHORE_COLOR)};
     }
   } else if (!u_owned) {
     // 買っていない土地は、色の差がなくても分かるよう斜線を引く
