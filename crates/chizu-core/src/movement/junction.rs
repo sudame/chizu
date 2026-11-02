@@ -42,7 +42,9 @@
 //! 入口は少し進めた所、出口は少し戻した所に置く。2 つの動きの弦の端が円の上で互い違いに
 //! 並べば、道筋が交わる。
 //!
-//! 入ってくる腕か出ていく腕の横断歩道を人が渡っている候補は、止まりきれない車を除いて止める（`crossing`）。
+//! 入ってくる腕か出ていく腕の横断歩道を人が渡っているか、長く待った人が渡ろうとしている候補は、
+//! 止まりきれない車を除いて止める（`crossing`）。そのうち、横断歩道の人がいなければ入れた候補は、
+//! 人に譲った候補として返し、人に譲った tick 数を数えさせる。
 //!
 //! 信号（`signal`）のある交差点では、先に黄と赤の腕から来た候補を、止まりきれない車を除いて
 //! ノードの手前で止め、残りの候補をこの順で決める。止めた候補は動きを置かないので、青の腕の車を
@@ -185,12 +187,15 @@ pub(super) struct Inside {
 pub(super) struct Held {
     /// ノードの手前で止める候補の `id`。小さい順に並ぶ。
     pub ids: Vec<usize>,
+    /// 止める候補のうち、横断歩道の人がいなければ入れた候補の `id`。小さい順に並ぶ。
+    pub yielded: Vec<usize>,
     /// 交差点の中で止まった車を無視して入れた候補の数。
     pub passed: u64,
 }
 
 /// 交差点ごとに候補を優先の順に見て、tick `now` にノードの手前で止める候補を決める。
-/// `walks` は人のいる横断歩道（交差点と腕の区間）で、入ってくる腕か出ていく腕の横断歩道に人がいる候補は止める。
+/// `walks` は人のいる横断歩道と、長く待った人のいる横断歩道（交差点と腕の区間）で、入ってくる腕か
+/// 出ていく腕がそこにかかる候補は止める。
 pub(super) fn holds(
     net: &Network,
     mut cands: Vec<Approach>,
@@ -203,6 +208,7 @@ pub(super) fn holds(
     // 同じノードの中の並びは結果に効かない。
     inside.sort_unstable_by_key(|x| x.node);
     let mut held = Vec::new();
+    let mut yielded = Vec::new();
     let mut group: Vec<(Approach, Move)> = Vec::new();
     // 置いた動きと、それが交差点の中で止まった車のものか。
     let mut placed: Vec<(Move, bool)> = Vec::new();
@@ -236,6 +242,9 @@ pub(super) fn holds(
                 && !(c.committed || (c.room && !peds(c)))
             {
                 held.push(c.id);
+                if c.room {
+                    yielded.push(c.id);
+                }
             }
             continue;
         }
@@ -263,9 +272,13 @@ pub(super) fn holds(
                     .any(|(m, _)| m.conflicts(mv))
             };
             // 待ちすぎた車は、交差点の中で止まった車の脇をすり抜けて入る。
-            let free = c.room && !blocked(c.waited >= GIVE_UP) && !peds(c);
+            let clear = c.room && !blocked(c.waited >= GIVE_UP);
+            let free = clear && !peds(c);
             if !(c.committed || free) {
                 held.push(c.id);
+                if clear {
+                    yielded.push(c.id);
+                }
             } else if !c.committed && blocked(false) {
                 passed = passed.saturating_add(1);
             }
@@ -276,7 +289,12 @@ pub(super) fn holds(
         }
     }
     held.sort_unstable();
-    Held { ids: held, passed }
+    yielded.sort_unstable();
+    Held {
+        ids: held,
+        yielded,
+        passed,
+    }
 }
 
 /// 詰まりをほどく救済が働いた回数。状態には入れず、状態ハッシュにも含めない。

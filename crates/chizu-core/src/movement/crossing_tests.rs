@@ -444,3 +444,158 @@ fn walkers_go_round_highway_arms_instead_of_crossing_them() {
     assert!(far);
     assert_eq!(arms.as_slice(), &[side(w, c).segment, side(c, e).segment]);
 }
+
+/// 北から南へ交差点を直進する車を `every` tick ごとに出し、西の腕の南の歩道から東へ歩いて南の腕の横断歩道を
+/// 渡る人を毎 tick 出して、`ticks` tick 進める。人と車は重ならないことを確かめる。
+/// 車と人それぞれの、着いた数と、着くまでにかかったいちばん長い tick 数を返す。終わりに残ったものは、
+/// 終わりまでの tick 数で数える。
+fn cars_and_walkers(every: u64, ticks: u64) -> ([usize; 2], [u64; 2]) {
+    let (n, node) = crossroads();
+    let mut t = Town::new(n);
+    let mut out: BTreeMap<TripId, (usize, u64)> = BTreeMap::new();
+    let (mut gone, mut longest) = ([0; 2], [0; 2]);
+    for k in 0..ticks {
+        if k % every == 0 {
+            out.insert(t.drive(at(10, 1, (0, 1), 0), at(10, 19, (0, 1), 0)), (0, k));
+        }
+        out.insert(t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0)), (1, k));
+        for id in t.step(node) {
+            // 車を降りる主体はないので、消えた主体は着いた主体である。
+            if let Some((kind, from)) = out.remove(&id) {
+                gone[kind] += 1;
+                longest[kind] = longest[kind].max(k - from);
+            }
+        }
+    }
+    for (kind, from) in out.into_values() {
+        longest[kind] = longest[kind].max(ticks - from);
+    }
+    (gone, longest)
+}
+
+#[test]
+fn a_walker_gets_across_a_steady_stream_of_cars() {
+    // 車が 2 tick ごとに途切れずに来て、止まりきれない車か交差点の中の車がいつもいる。それでも、歩く人は
+    // 待ちすぎた所で車を止めて渡る。
+    let (n, node) = crossroads();
+    let mut t = Town::new(n);
+    let mut walker = None;
+    let mut gone = None;
+    for k in 0..600_u64 {
+        if k % 2 == 0 {
+            t.drive(at(10, 1, (0, 1), 0), at(10, 19, (0, 1), 0));
+        }
+        if k == 100 {
+            walker = Some(t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0)));
+        }
+        t.step(node);
+        if gone.is_none() && walker.is_some_and(|w| t.trips.get(w).is_none()) {
+            gone = Some(k);
+        }
+    }
+    // 歩くのに約 60 tick かかる。待つのは、待ちすぎるまでと、交差点の車が抜けるまでである。
+    let gone = gone.expect("歩く人が渡れない");
+    assert!(
+        gone < 100 + 60 + u64::from(crossing::PED_WAIT) + 20,
+        "待ちすぎた {gone}"
+    );
+}
+
+#[test]
+fn walkers_and_cars_take_turns_when_neither_stops_coming() {
+    // 人も車も途切れずに来る交差点で、どちらも待ち続けず、車は 1 回に何台かまとめて通る。
+    let (every, ticks) = (3, 2_000);
+    let ([cars, walkers], [car, walker]) = cars_and_walkers(every, ticks);
+    // 人が渡り終えるたびに 1 台しか通れなければ、車の列が伸び続け、着く車が出した車の 9 割に届かない。
+    assert!(
+        cars as u64 > ticks / every * 9 / 10,
+        "着いた車が少ない {cars}"
+    );
+    assert!(
+        walkers as u64 > ticks * 9 / 10,
+        "着いた人が少ない {walkers}"
+    );
+    // 走るのに約 20 tick、歩くのに約 60 tick かかる。待つのは、交互に回る 1 周ぶんほどにとどまる。
+    assert!(car < 20 + 60, "車が待ちすぎた {car}");
+    assert!(walker < 60 + 80, "人が待ちすぎた {walker}");
+}
+
+#[test]
+fn a_car_stuck_behind_a_blocked_exit_does_not_keep_walkers_waiting() {
+    // 南の腕の出口に動かない車があり、北から来た車が交差点の手前で先の車線の空きを待ち続ける。
+    // この車は横断歩道の人に譲って待っているのではないので、人は待ちすぎた所で渡る。
+    let (n, node) = crossroads();
+    let mut t = Town::new(n);
+    let block = t.drive(at(10, 11, (0, 1), 2_000), at(10, 19, (0, 1), 0));
+    let stuck = t.drive(at(10, 2, (0, 1), 0), at(10, 19, (0, 1), 0));
+    let hold = |t: &mut Town| {
+        // 交差点を抜けた所より先にいるが、後ろの車が交差点を抜けきるだけの空きはない。
+        let b = t.trips.rows[block.slot()].as_mut().unwrap();
+        (b.offset, b.speed, b.stalled) = (LaneOffset(10_000), MmPerTick::ZERO, 0);
+    };
+    hold(&mut t);
+    let mut walker = None;
+    let mut gone = None;
+    for k in 0..300_u64 {
+        if k == 100 {
+            walker = Some(t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0)));
+        }
+        t.step(node);
+        hold(&mut t);
+        if walker.is_some_and(|w| t.trips.get(w).is_none()) {
+            gone = Some(k);
+            break;
+        }
+    }
+    let gone = gone.expect("歩く人が渡れない");
+    let c = t.trips.get(stuck).expect("待っている車がない");
+    assert!(
+        c.speed() == MmPerTick::ZERO && c.waited > 100,
+        "車が空きを待っていない"
+    );
+    // 歩くのに約 60 tick かかる。待つのは、待ちすぎるまでである。
+    assert!(
+        gone < 100 + 60 + u64::from(crossing::PED_WAIT) + 20,
+        "待ちすぎた {gone}"
+    );
+}
+
+#[test]
+fn a_walker_crossing_midblock_gets_through_a_creeping_queue() {
+    // 長い道路の真ん中で横切る人の前を、1 tick に 1m ずつ進む先頭の車に続いて、車の列が隙間なく這う。
+    // 人は待ちすぎた所で、車に前を空けさせて渡る。
+    let mut n = Network::new();
+    let line = Line::between(TilePos::new(0, 0), TilePos::new(60, 0)).unwrap();
+    n.build_road(&line, RoadKind::Small).unwrap();
+    let mut t = Town::new(n);
+    let node = t.net.node_at(TilePos::new(0, 0)).unwrap();
+    let lead = t.drive(at(32, 0, (1, 0), 0), at(59, 0, (1, 0), 0));
+    let creep = |t: &mut Town, k: u32| {
+        let c = t.trips.rows[lead.slot()].as_mut().unwrap();
+        (c.offset, c.speed, c.stalled) = (LaneOffset(256_000 + k * 1_000), MmPerTick(1_000), 0);
+    };
+    creep(&mut t, 0);
+    let mut walker = None;
+    let mut gone = None;
+    for k in 0..200_u32 {
+        if k % 3 == 0 {
+            t.drive(at(1, 0, (1, 0), 0), at(58, 0, (1, 0), 0));
+        }
+        if k == 60 {
+            let w = t.walk(at(30, 0, (1, 0), 0), at(30, 0, (-1, 0), 7_000));
+            assert_eq!(t.trips.get(w).unwrap().walk.jay, Some(0));
+            walker = Some(w);
+        }
+        t.step(node);
+        creep(&mut t, k + 1);
+        if let Some(w) = walker {
+            assert_apart(&t, w);
+            if gone.is_none() && t.trips.get(w).is_none() {
+                gone = Some(k);
+            }
+        }
+    }
+    // 横切るのに 5 tick かかる。待つのは、待ちすぎるまでと、前にいた車が過ぎるまでである。
+    let gone = gone.expect("歩く人が横切れない");
+    assert!(gone < 60 + crossing::PED_WAIT + 30, "待ちすぎた {gone}");
+}
