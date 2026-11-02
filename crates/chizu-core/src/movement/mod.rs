@@ -28,7 +28,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
-pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM};
+pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, OWNER_DRIVE_MIN_MM};
 pub use parking::{Lot, PARK_RADIUS, building_spot};
 pub use pos::SidewalkPos;
 
@@ -490,6 +490,10 @@ impl Trips {
         self.finished.clear();
         let done = self.advance(net, router.connectors());
         let mut ended = self.next_legs(net, router, done);
+        let give_up: Vec<usize> = (0..self.rows.len())
+            .filter(|i| self.rows[*i].as_ref().is_some_and(car::given_up))
+            .collect();
+        self.walk_instead(net, router, give_up, &mut ended);
         ended.sort_unstable();
         ended
             .into_iter()

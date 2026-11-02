@@ -9,6 +9,10 @@ use super::World;
 use crate::citizens::Activity;
 use crate::id::{CitizenId, HouseholdId, TripId};
 use crate::movement::{CommuteRequest, Commuter};
+use crate::rng::{RngPurpose, mix_words};
+
+/// 車を持つ世帯の割合（百分率）。
+pub const CAR_OWNERSHIP_PERCENT: u64 = 70;
 
 impl World {
     /// 住民 `due` の移動を始める。移動を作れなかった住民を ID の順に返す。
@@ -40,6 +44,7 @@ impl World {
                     },
                     from,
                     to,
+                    owns_car: self.owns_car(row.household),
                 }),
                 None => stuck.push(id),
             }
@@ -61,6 +66,12 @@ impl World {
         self.tally_no_route(no_route);
         stuck.sort_unstable();
         stuck
+    }
+
+    /// 世帯 `h` が車を持つか。種と世帯の ID だけで決まり、状態には持たない。
+    fn owns_car(&self, h: HouseholdId) -> bool {
+        let words = [u64::from(h.index), u64::from(h.generation)];
+        mix_words(self.seed, RngPurpose::CarOwnership, &words) % 100 < CAR_OWNERSHIP_PERCENT
     }
 
     /// 世帯を街から出す。移動している住民の移動をやめさせ、停めてある車も駐車場から外す。
@@ -138,5 +149,26 @@ mod tests {
         assert!(moving > 0, "朝に誰も移動していない");
         assert_eq!(morning(4).0, one);
         assert_eq!(morning(8).0, one);
+    }
+}
+
+#[cfg(test)]
+mod car_tests {
+    use super::CAR_OWNERSHIP_PERCENT;
+    use crate::command::ZoneKind;
+    use crate::world::people::tests::{city, run_days};
+
+    #[test]
+    fn about_the_set_share_of_households_own_a_car() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 3);
+        let ids: Vec<_> = w.population().household_ids().collect();
+        assert!(ids.len() > 20, "世帯が少なすぎる: {}", ids.len());
+        let owners = ids.iter().filter(|h| w.owns_car(**h)).count() as u64;
+        let percent = owners * 100 / ids.len() as u64;
+        assert!(
+            percent.abs_diff(CAR_OWNERSHIP_PERCENT) <= 20,
+            "車を持つ世帯が {percent}%"
+        );
     }
 }

@@ -244,4 +244,6 @@ pub struct Rescues {
     pub passed_stuck: u64,
     /// `RESCUE` を越えて止まったままの車を、行き先に着いたことにした回数。
     pub teleported: u64,
+    /// 車線に出られないまま `RESCUE` を越えて待った車を、出発の建物から歩く移動に切り替えた回数。
+    pub walked_instead: u64,
 }

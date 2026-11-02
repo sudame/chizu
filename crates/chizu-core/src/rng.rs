@@ -31,6 +31,8 @@ pub enum RngPurpose {
     Emigration = 7,
     /// 買い物の外出。
     Errand = 8,
+    /// 世帯が車を持つか。
+    CarOwnership = 9,
 }
 
 const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;

@@ -390,3 +390,36 @@ fn the_drawn_shift_slides_between_the_sidewalk_and_either_lane() {
         );
     }
 }
+
+#[test]
+fn between_150_and_500_m_only_households_with_a_car_drive() {
+    use crate::citizens::Activity;
+    use crate::id::CitizenId;
+    use crate::movement::parking::Then;
+    // 30 マスは 240m である。
+    let (mut s, ids) = Street::new(&[0, 30]);
+    let who = |index| Commuter {
+        citizen: CitizenId {
+            index,
+            generation: 0,
+        },
+        to: Activity::Work,
+    };
+    let request = |index, owns_car| CommuteRequest {
+        who: who(index),
+        from: ids[0],
+        to: ids[1],
+        owns_car,
+    };
+    let requests = [request(0, true), request(1, false)];
+    let (net, router) = (&s.net, &mut s.router);
+    let out = s
+        .trips
+        .start_commutes(net, router, &s.buildings, &requests, Tick::ZERO);
+    let drives = |i: usize| {
+        let t = s.trips.get(out[i].unwrap()).unwrap();
+        matches!(t.then, Then::Drive { .. })
+    };
+    assert!(drives(0), "車を持つ世帯が歩いた");
+    assert!(!drives(1), "車を持たない世帯が車に乗った");
+}
