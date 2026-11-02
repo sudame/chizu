@@ -3,6 +3,7 @@
 //! 建物は区画の上に、需要に応じて自然に建ち、時間がたつと段階が上がる。建つ・育つ処理は
 //! `world::growth` にある。ここには表と、大きさと段階から決まる値だけを置く。
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 use crate::command::ZoneKind;
@@ -23,7 +24,7 @@ pub const MAX_LOT_SIDE: u64 = 4;
 /// 階段状に並べる。2 マスまでにすると、2×2 と 1×1 が交互に並んで隙間なく埋まる。
 pub const DIAGONAL_LOT_SIDE: u64 = 2;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Building {
     pub zone: ZoneKind,
     /// 建物が占めるマス。
@@ -100,7 +101,7 @@ impl StateHash for Building {
 }
 
 /// 建物の表。行は ID の添え字の順に並ぶ。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Buildings {
     slots: Slots,
     rows: Vec<Option<Building>>,

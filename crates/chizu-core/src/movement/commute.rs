@@ -8,6 +8,7 @@
 //! 住民ごとに自分の車を停めた駐車場も覚え、次に車で出るときはそこから車を出す。満車で別の建物に
 //! 停めた車も、持ち主が乗って出るので、停めてある台数は住民の数を超えて増えない。
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use super::{Trips, building_spot};
@@ -27,7 +28,7 @@ pub const DRIVE_MIN_MM: i64 = 500_000;
 pub const OWNER_DRIVE_MIN_MM: i64 = 150_000;
 
 /// 移動している住民と、その行き先。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Commuter {
     pub citizen: CitizenId,
     pub to: Activity,
@@ -41,7 +42,7 @@ impl StateHash for Commuter {
 }
 
 /// 移動の主体ごとの、移動している住民と、住民ごとの車を停めた駐車場。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Commuters {
     by_trip: BTreeMap<TripId, Commuter>,
     /// 住民が自分の車を停めた駐車場。次に車で出るときは、ここから車を出す。

@@ -2,6 +2,8 @@
 //!
 //! 1 マスは 8m 四方、1 チャンクは 64×64 マスである。
 
+use serde::{Deserialize, Serialize};
+
 /// チャンクの 1 辺のマス数。
 pub const CHUNK_SIDE: usize = 64;
 
@@ -23,7 +25,7 @@ pub fn local_index(lx: usize, ly: usize) -> usize {
 pub const WORLD_LIMIT: i64 = 1 << 31;
 
 /// マスの座標。チャンク座標（`i32`）に 64 を掛けた範囲を表せるよう `i64` で持つ。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TilePos {
     pub x: i64,
     pub y: i64,
@@ -59,7 +61,7 @@ impl TilePos {
 }
 
 /// マスの長方形。`min` と `max` の両端を含む。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct TileRect {
     pub min: TilePos,
     pub max: TilePos,
@@ -86,7 +88,7 @@ impl TileRect {
 }
 
 /// チャンクの座標。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ChunkCoord {
     pub cx: i32,
     pub cy: i32,

@@ -1305,6 +1305,33 @@ fn walking_golden() {
     compare_golden("walking", &got);
 }
 
+/// 街の状態の書き出しの形が変わっていないかを見る。`growth` の街を書き出したバイト列のハッシュを固定する。
+#[test]
+fn snapshot_bytes_match_the_golden() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "growth")
+        .unwrap();
+    let mut world = s.start();
+    replay(&mut world, &s.log, s.ticks);
+    let mut h = StateHasher::new();
+    h.write_bytes(&world.to_snapshot());
+    let got = format!("{:016x}\n", h.finish());
+    let path = golden_dir().join("snapshot.hash");
+    if updating() {
+        std::fs::write(&path, &got).unwrap();
+        return;
+    }
+    let expected = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} を読めない: {e}", path.display()));
+    assert_eq!(
+        expected, got,
+        "街の状態を書き出したバイト列が変わった。World の欄を足したり、型や順番を変えたりしたなら、\
+         chizu_core::SNAPSHOT_VERSION を上げる。そのうえで（シミュレーションの規則だけを変えたときも）\
+         CHIZU_UPDATE_GOLDEN=1 cargo test -p chizu-core --test golden で書き直す"
+    );
+}
+
 fn compare_golden(name: &str, got: &str) {
     let path = golden_dir().join(format!("{name}.hash"));
     if updating() {

@@ -8,6 +8,7 @@
 //! 車線の番号は `Network::link_lanes` の並びの順で、0 が道路の端にいちばん近い。
 
 use crate::network::{LaneMode, LinkId, Network};
+use serde::{Deserialize, Serialize};
 
 /// 新しいリンクに入ってから、前のずれから今のずれへ移りきるまでの距離（mm）。
 /// 交差点で曲がる車や車線を移る車が、横に飛ばないようにする。
@@ -15,7 +16,7 @@ pub const BLEND_MM: i64 = 3_000;
 
 /// 車線や歩道が変わったときの、変わる前のずれと、変わった位置のリンクの中での距離。
 /// 描画のためだけの値で、状態ハッシュには入れない。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Blend {
     pub from: (i64, i64),
     pub start: u32,

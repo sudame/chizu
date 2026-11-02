@@ -1,6 +1,7 @@
 // ビルドしたページを vite preview で配信し、ヘッドレスの Chrome で保存と読み込みを確かめる。
 // 道路と区画を作って手動で保存し、ページを読み直してから読み込むと、同じ状態ハッシュと所持金になるか。
 // ゲーム内の日が変わると自動保存されるか。記録の形式の版が違う保存データは読めないと示されるか。
+// 街の状態があれば状態から開き、ない保存データは記録を再生して同じ街になるか。
 // Chrome は mise の tools で入れた chrome-headless-shell を PATH から探す。
 
 import { accessSync, constants } from "node:fs";
@@ -182,8 +183,10 @@ try {
     loadedHash === savedHash && loadedMoney === savedMoney,
     `読み込むと同じ状態ハッシュと所持金になる（${loadedHash} と ${savedHash}、${loadedMoney} と ${savedMoney}）`,
   );
-  const reports = Number(await page.locator("#save-progress").getAttribute("data-reports"));
-  check(reports >= 2, `読み込みのあいだ進み具合が届く（${reports} 回）`);
+  check(
+    (await saveButton.getAttribute("data-from-state")) === "true",
+    "街の状態があれば、記録を再生せずに状態から開く",
+  );
   await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
   const tickAfter = Number(await hud.getAttribute("data-tick"));
   check(tickAfter >= savedTick, `読み込んだ tick から続く（${savedTick} → ${tickAfter}）`);
@@ -205,6 +208,42 @@ try {
     )
     .then((ok) => check(ok, "2 つ目のタブでは、自動保存しないと示される"));
   await second.close();
+
+  // 街の状態を除いた保存 1 の写しを保存 2 に書き、状態を入れる前の保存データとして読む
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        const open = indexedDB.open("chizu");
+        open.onsuccess = () => {
+          const store = open.result.transaction("saves", "readwrite").objectStore("saves");
+          const get = store.get("manual-1");
+          get.onsuccess = () => {
+            const copy = get.result;
+            copy.slot = "manual-2";
+            delete copy.state;
+            const put = store.put(copy);
+            put.onsuccess = () => resolve();
+            put.onerror = () => reject(put.error);
+          };
+        };
+        open.onerror = () => reject(open.error);
+      }),
+  );
+  await page.reload();
+  await start.and(page.locator("[open]")).waitFor({ timeout: TIMEOUT_MS });
+  await start.locator('button[data-load="manual-2"]').click();
+  await running();
+  await waitFor(
+    () => document.querySelector<HTMLElement>("#save-open")?.dataset.loadedHash !== undefined,
+  );
+  check(
+    (await saveButton.getAttribute("data-from-state")) === "false" &&
+      (await saveButton.getAttribute("data-rules-changed")) === "false" &&
+      (await saveButton.getAttribute("data-loaded-hash")) === savedHash,
+    "街の状態のない保存データは、記録を再生して同じ状態ハッシュになる",
+  );
+  const reports = Number(await page.locator("#save-progress").getAttribute("data-reports"));
+  check(reports >= 2, `記録を再生するあいだ進み具合が届く（${reports} 回）`);
 
   // 状態ハッシュだけを変えた保存 1 の写しを保存 3 に書き、規則が変わったときの表示を確かめる
   await page.evaluate(
@@ -235,6 +274,7 @@ try {
   );
   check(
     (await saveButton.getAttribute("data-rules-changed")) === "true" &&
+      (await saveButton.getAttribute("data-from-state")) === "false" &&
       (await saveButton.getAttribute("data-loaded-hash")) === savedHash &&
       ((await page.locator("#save-notice").textContent()) ?? "").includes("規則が変わった"),
     "状態ハッシュが食い違っても読み込み、規則が変わったと示す",

@@ -10,6 +10,7 @@
 //! - 斜めの区間どうしがマスの角で交わることはない。
 //! - どの区間にもつながっていないノードは残さない。
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
@@ -42,14 +43,14 @@ pub fn road_cost_per_tile(kind: RoadKind) -> Money {
 }
 
 /// 区間の ID。添え字と、使い回したことを見分ける世代の組である。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SegmentId {
     pub index: u32,
     pub generation: u16,
 }
 
 /// 車線の ID。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LaneId {
     pub index: u32,
     pub generation: u16,
@@ -86,7 +87,7 @@ macro_rules! impl_arena_id {
 impl_arena_id!(NodeId, SegmentId, LaneId);
 
 /// 世代つきの添え字で引く表。空き番号は後入れ先出しで使い回す。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Arena<I, T> {
     slots: Vec<(u16, Option<T>)>,
     free: Vec<u32>,
@@ -159,7 +160,7 @@ impl<I, T: StateHash> StateHash for Arena<I, T> {
 }
 
 /// 区間の向き。`Forward` はノード `a` から `b` へ向かう。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Dir {
     Forward = 0,
@@ -167,7 +168,7 @@ pub enum Dir {
 }
 
 /// 車線を使うもの。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum LaneMode {
     Car = 0,
@@ -175,7 +176,7 @@ pub enum LaneMode {
 }
 
 /// ノードでの交通の整理。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum NodeControl {
     #[default]
@@ -185,7 +186,7 @@ pub enum NodeControl {
 }
 
 /// 区間の種類。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SegmentKind {
     Road(RoadKind),
     /// 外部接続の高速道路。歩道はない。
@@ -230,7 +231,7 @@ impl SegmentKind {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     /// マスの中心のワールド座標。
     pub pos: WorldPos,
@@ -251,7 +252,7 @@ impl Node {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Segment {
     pub a: NodeId,
     pub b: NodeId,
@@ -260,7 +261,7 @@ pub struct Segment {
     pub lanes: Vec<LaneId>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lane {
     pub segment: SegmentId,
     pub dir: Dir,
@@ -269,7 +270,7 @@ pub struct Lane {
 }
 
 /// 区間の片側の、同じものが使う車線をまとめた「向きつき区間」。経路探索の単位にする。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LinkId {
     pub segment: SegmentId,
     pub dir: Dir,
@@ -386,7 +387,7 @@ pub fn road_cost(kind: RoadKind, line: &Line) -> Money {
 }
 
 /// 道路と歩道の網。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Network {
     nodes: Arena<NodeId, Node>,
     segments: Arena<SegmentId, Segment>,

@@ -8,13 +8,14 @@
 //! 読めなくなるので、足すときは新しい値を使う。
 
 use core::fmt;
+use serde::{Deserialize, Serialize};
 
 use crate::network::{Line, MAX_ROAD_TILES};
 use crate::tile::{ChunkCoord, TilePos, TileRect, WORLD_LIMIT};
 use crate::zone::{MAX_ZONE_SIDE, rect_size};
 
 /// 道路の種類。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum RoadKind {
     /// 片側 1 車線。
@@ -37,7 +38,7 @@ impl RoadKind {
 }
 
 /// 区画の種類。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ZoneKind {
     Residential = 1,
@@ -71,7 +72,7 @@ impl ZoneKind {
 }
 
 /// プレイヤーが置く公共の建物の種類。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ServiceKind {
     PowerPlant = 1,
@@ -89,7 +90,7 @@ impl ServiceKind {
 }
 
 /// 道路網のノードの ID。添え字と、使い回したことを見分ける世代の組である。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct NodeId {
     pub index: u32,
     pub generation: u16,
@@ -98,7 +99,7 @@ pub struct NodeId {
 /// シミュレーションの速度。等速の何倍で回すかを表す。
 ///
 /// 一時停止は tick を進めないだけなので、速度には含めない。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SimSpeed(u16);
 
 impl SimSpeed {

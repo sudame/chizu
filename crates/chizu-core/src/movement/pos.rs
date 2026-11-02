@@ -4,6 +4,7 @@ use crate::network::{DIAGONAL_TILE_MM, Dir, LaneMode, LinkId, Network, TILE_MM};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::TilePos;
 use crate::units::{LaneOffset, Mm, WorldPos};
+use serde::{Deserialize, Serialize};
 
 /// 歩道の上の位置。網の区間を分けたり消したりしても意味が変わらないよう、リンクではなく
 /// マスと歩く向きで持つ。
@@ -11,7 +12,7 @@ use crate::units::{LaneOffset, Mm, WorldPos};
 /// 区間の片側の歩道は、その区間を一方の向きに歩く。マス `tile` から `step` の向きに 1 歩進む
 /// あいだの、`along` だけ進んだ所を指す。歩く向きが区間の `a` から `b` なら `Forward` の歩道、
 /// 逆なら `Backward` の歩道の上である。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SidewalkPos {
     pub tile: TilePos,
     pub step: (i8, i8),

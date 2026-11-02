@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 use crate::building::Buildings;
 use crate::service::Facility;
 
@@ -120,7 +122,7 @@ impl DenyReason {
 /// 状態を変えるのは [`World::apply`] と [`World::step`] だけである。
 /// tick T の状態は、tick が T 以下のコマンドを番号順に適用し、`step` を T 回済ませたものである。
 /// 記録したコマンドは [`World::apply_recorded`] で適用し、どの番号まで適用したかを状態に残す。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct World {
     seed: u64,
     /// 次に進める tick。tick 0 から始め、`step` のたびに 1 増える。
@@ -165,9 +167,28 @@ mod traffic;
 pub use traffic::{CarSample, CitizenPlaces, DayTraffic, Traffic};
 
 /// 網から作り直せる経路探索。状態に入れず、`World` どうしを比べるときも見ない。
+///
+/// 書き出すのはグラフを作ったときの網の版だけである。網を変えてからまだ作り直していないときに、
+/// 読み戻した街でも次の `sync` で作り直し、通れなくなった移動を探し直すためである。
+/// 読み戻したら [`World::rebuild_router`] でグラフを作る。
 #[derive(Clone, Debug)]
 struct RouterSlot {
     router: AstarRouter,
+}
+
+impl Serialize for RouterSlot {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.router.version().serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for RouterSlot {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<RouterSlot, D::Error> {
+        let version = u64::deserialize(d)?;
+        Ok(RouterSlot {
+            router: AstarRouter::new(&Network::new()).with_version(version),
+        })
+    }
 }
 
 impl PartialEq for RouterSlot {
@@ -680,6 +701,12 @@ impl World {
         self.grow_buildings();
         self.update_economy();
         self.tick = tick.next();
+    }
+
+    /// 読み戻した街の経路探索を、網から作り直す。グラフを作ったときの網の版は書き出したときのままにする。
+    pub(crate) fn rebuild_router(&mut self) {
+        let version = self.router.router.version();
+        self.router.router = AstarRouter::new(&self.network).with_version(version);
     }
 
     /// 状態ハッシュ。表は決まった順番で書き出す。

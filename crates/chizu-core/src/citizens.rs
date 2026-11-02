@@ -3,6 +3,7 @@
 //! 住民と世帯は列ごとの `Vec`（SoA）で持ち、行の添え字は [`crate::id::Slots`] で割り当てる。
 //! 消した行の列は [`CitizenRow::VACANT`] などの決まった値に戻すので、状態ハッシュは列をそのままなめればよい。
 
+use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 
 use crate::id::{BuildingId, CitizenId, HouseholdId, Slots, TripId};
@@ -32,7 +33,7 @@ pub fn draw_household(r: &mut Pcg32, limit: u32) -> (Money, SmallVec<[u8; 4]>) {
 pub const HAPPINESS_MAX: u8 = 100;
 
 /// 住民が次に向かう先。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Activity {
     #[default]
@@ -43,7 +44,7 @@ pub enum Activity {
 }
 
 /// 住民の予定の状態。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduleState {
     pub next: Activity,
     /// 出発を待っているなら、出発する tick。出発の待ち行列にも同じ値が入っている。
@@ -51,7 +52,7 @@ pub struct ScheduleState {
 }
 
 /// 幸福度の 3 つの要素。重みを付けて足すのは世帯の属性が要るので、ここでは要素の点数だけを持つ。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HappinessParts {
     pub commute: u8,
     pub services: u8,
@@ -104,7 +105,7 @@ pub struct CitizenChange {
 }
 
 /// 住民の表。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Citizens {
     pub(crate) slots: Slots,
     household: Vec<HouseholdId>,
@@ -153,7 +154,7 @@ impl Citizens {
 }
 
 /// 世帯の表。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Households {
     slots: Slots,
     /// 住んでいる建物。建物の表ができるまでは、どの世帯も `None` である。
@@ -166,7 +167,7 @@ pub struct Households {
 }
 
 /// 住民データ層。住民と世帯の表と、出発の待ち行列をまとめて持ち、互いの整合を保つ。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Population {
     pub(crate) citizens: Citizens,
     households: Households,

@@ -23,6 +23,7 @@ use crate::rng::{RngPurpose, mix_words};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, local_index};
 use crate::world::{START_CHUNK_RADIUS, highway_line};
+use serde::{Deserialize, Serialize};
 
 /// 開始地点のまわりで水辺を抑える幅（マス）。
 pub const START_MARGIN: u64 = 64;
@@ -174,11 +175,13 @@ fn distance_from_start(tile: TilePos) -> u64 {
 }
 
 /// 1 つのチャンクの地形。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerrainTiles {
     /// マスごとの標高。いまは平らな地図なので、すべて 0 である。
+    #[serde(with = "crate::snapshot::big_array::boxed")]
     elevation: Box<[u16; CHUNK_AREA]>,
     /// 行 `ly` のビット `lx` が、マス `(lx, ly)` が水辺かどうかを表す。
+    #[serde(with = "crate::snapshot::big_array")]
     water: [u64; CHUNK_SIDE],
 }
 

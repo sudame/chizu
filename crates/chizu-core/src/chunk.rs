@@ -4,9 +4,10 @@ use crate::command::ZoneKind;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::terrain::{TerrainTiles, terrain};
 use crate::tile::{CHUNK_AREA, ChunkCoord};
+use serde::{Deserialize, Serialize};
 
 /// 高さごとの層。値は [`Chunk`] の層の配列の添え字である。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Layer {
     Ground = 0,
@@ -23,7 +24,7 @@ impl Layer {
 }
 
 /// マスを何が使っているか。値は状態ハッシュに書く番号である。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum TileUse {
     #[default]
@@ -37,10 +38,12 @@ pub enum TileUse {
 }
 
 /// 1 つの層のマスの表。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LayerTiles {
+    #[serde(with = "crate::snapshot::big_array")]
     pub occupancy: [TileUse; CHUNK_AREA],
     /// 地上の層だけが意味を持つ。
+    #[serde(with = "crate::snapshot::big_array")]
     pub zone: [Option<ZoneKind>; CHUNK_AREA],
 }
 
@@ -71,7 +74,7 @@ impl StateHash for LayerTiles {
 /// 64×64 マスのチャンク。
 ///
 /// 表を書き換えられるのは [`Chunk::edit_layer`] だけで、そこで版を上げる。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chunk {
     coord: ChunkCoord,
     owned: bool,

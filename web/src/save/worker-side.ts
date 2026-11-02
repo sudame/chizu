@@ -4,6 +4,7 @@
 import { Restoring, record_format_version, Simulation } from "../../wasm/chizu_wasm.js";
 import {
   isSaveToWorker,
+  type SaveBody,
   type SaveFromWorker,
   type SaveMeta,
   type SaveToWorker,
@@ -33,11 +34,13 @@ const yieldToEvents = () =>
     yieldChannel.port2.postMessage(null);
   });
 
-/** 作り直した街と、状態ハッシュが保存したときと違うか（シミュレーションの規則が変わったか）。 */
-async function restore(save: {
-  meta: SaveMeta;
-  commands: ArrayBuffer;
-}): Promise<{ sim: Simulation; rulesChanged: boolean }> {
+/**
+ * 作り直した街と、状態ハッシュが保存したときと違うか（シミュレーションの規則が変わったか）、
+ * 街の状態から開いたか。街の状態から開けないときは、記録を少しずつ再生する。
+ */
+async function restore(
+  save: SaveBody,
+): Promise<{ sim: Simulation; rulesChanged: boolean; fromState: boolean }> {
   const { meta } = save;
   const r = new Restoring(
     meta.formatVersion,
@@ -46,6 +49,7 @@ async function restore(save: {
     meta.commandCount,
     meta.stateHash,
     new Uint8Array(save.commands),
+    save.state === null ? undefined : new Uint8Array(save.state),
   );
   post({ kind: "save:progress", tick: r.tick(), target: r.target() });
   while (!r.done()) {
@@ -58,18 +62,26 @@ async function restore(save: {
   }
   const restored = r.finish();
   try {
-    return { sim: restored.take(), rulesChanged: restored.rules_changed() };
+    return {
+      sim: restored.take(),
+      rulesChanged: restored.rules_changed(),
+      fromState: restored.from_state(),
+    };
   } finally {
     restored.free();
   }
 }
 
-// メタデータと記録は同じ時点のものを 1 回で取る
-function payloadOf(sim: Simulation): { meta: SaveMeta; commands: ArrayBuffer } {
+// メタデータ、記録、街の状態は同じ時点のものを 1 回で取る
+function payloadOf(sim: Simulation): { meta: SaveMeta; commands: ArrayBuffer; state: ArrayBuffer } {
   const payload = sim.save();
   try {
     const meta = JSON.parse(payload.meta()) as SaveMeta;
-    return { meta, commands: payload.take_commands().buffer as ArrayBuffer };
+    return {
+      meta,
+      commands: payload.take_commands().buffer as ArrayBuffer,
+      state: payload.take_state().buffer as ArrayBuffer,
+    };
   } finally {
     payload.free();
   }
@@ -78,8 +90,8 @@ function payloadOf(sim: Simulation): { meta: SaveMeta; commands: ArrayBuffer } {
 const metaOf = (sim: Simulation) => JSON.parse(sim.save_meta()) as SaveMeta;
 
 function sendSave(sim: Simulation, slot: SlotId): void {
-  const { meta, commands } = payloadOf(sim);
-  post({ kind: "save:data", slot, meta, commands }, [commands]);
+  const { meta, commands, state } = payloadOf(sim);
+  post({ kind: "save:data", slot, meta, commands, state }, [commands, state]);
 }
 
 // ゲーム内の日が変わったとき、または実時間で 1 分たって何か変わっていたときに自動保存する
@@ -119,7 +131,13 @@ export function startSimulation(): Promise<Simulation> {
         post({
           kind: "save:started",
           loaded:
-            loaded === null ? null : { meta: metaOf(created), rulesChanged: loaded.rulesChanged },
+            loaded === null
+              ? null
+              : {
+                  meta: metaOf(created),
+                  rulesChanged: loaded.rulesChanged,
+                  fromState: loaded.fromState,
+                },
         });
         if (message.autoSave) {
           startAutoSave(created);
