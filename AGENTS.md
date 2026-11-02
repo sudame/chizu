@@ -111,9 +111,10 @@ cargo run -p chizu-cli -- feedback/<日時>-<番号>/commands.rec <seed> <tick>
 ```sh
 cargo run -p chizu-cli -- agent new <dir> <seed>          # セッションを作る
 cargo run -p chizu-cli -- agent new <dir> --from <fb>     # フィードバックを写してセッションを作る
-cargo run -p chizu-cli -- agent act <dir> <commands.json> # いまの tick でコマンドを適用する
+cargo run -p chizu-cli -- agent act <dir> <commands.json> [--verbose]  # いまの tick でコマンドを適用する
 cargo run -p chizu-cli -- agent advance <dir> <ticks>     # 時間を進める
 cargo run -p chizu-cli -- agent observe <dir>             # 街の様子を JSON で出す
+cargo run -p chizu-cli -- agent export <dir>              # 再現の手順を、Issue に貼れる markdown で出す
 cargo run -p chizu-cli -- agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic]  # 範囲の地図を文字のマス目で出す（traffic は道路を混み具合で出す）
 ```
 
@@ -125,6 +126,18 @@ map は observe と同じく何も書かず、フィードバックのディレ�
 observe は、人と車の動きも出す（`citizenPlaces`、`traffic`、`migration`）。「その日に着いた移動の数」などの集計は、中核の `World::traffic()` が
 移動の結果から数える。この集計は読み取り用で、状態ハッシュには入れない。止まっている車は、記録を `STOPPED_TICKS` 手前まで再生した時点の
 車の位置と見比べて決める。欄の意味は `--help` に書いてある。
+
+act の結果は、コマンドごとの `outcome` と理由だけを返す。記録に入った形のコマンドは `--verbose` を付けたときだけ添える。
+`NotOwned` で断ったときは、`notOwned` に買っていないマスと、そのマスを含むチャンクを付ける（中核の `DenyReason` は変えず、chizu-cli が買った土地と照らして求める）。
+
+observe は、前の observe からの増減を `sinceLastObserve` に出す。前の値は、`agent new` で作ったセッションの `last-observe.json` に残す。
+フィードバックのディレクトリには書かないので、そこでは `null` になる。observe が書くので、observe は排他のロックを取る。
+
+map は、電気か水が届いていない建物を、区画の文字の代わりに `*`（電気）、`^`（水）、`%`（両方）で示す。
+
+`agent export <dir>` は、種、tick、`stateHash`、ビルドしたコミット（`crates/chizu-cli/build.rs` が埋め込む）、`commands.rec` の base64 を、
+Issue にそのまま貼れる markdown で出す。何も書かないので、フィードバックのディレクトリにも打てる。
+出力の手順を貼って実行すると、`commands.rec` と `state.json` を作って `agent new --from` に渡せる。AI が問題を見つけて起票するときに使う。
 
 コマンドの JSON の形と座標の意味は `cargo run -p chizu-cli -- agent --help` で出る。
 

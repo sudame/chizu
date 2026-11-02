@@ -25,7 +25,8 @@ pub const LEGEND: &str = "\
   P W      公共施設（P 発電所、W 浄水場）
   S        信号のある交差点（--layer traffic では混み具合の文字を先に出す）
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
-  R C I O  建物（住宅、商業、工業、オフィスの区画に建っている）
+  * ^ %    電気か水が届いていない建物（* 電気だけ、^ 水だけ、% 両方。R C I O の代わりに出す）
+  R C I O  建物（住宅、商業、工業、オフィスの区画に建っている。電気も水も届いている）
   r c i o  建物のない区画（同じ並び）
   ~        水辺（海か川）
   ,        買っていない土地
@@ -73,6 +74,10 @@ struct Cell {
     /// 道路の最大の種類。0 は道路なし。
     road: u8,
     building: [u32; 4],
+    /// 電気が届いていない建物のマスの数。
+    unpowered: u32,
+    /// 水が届いていない建物のマスの数。
+    dry: u32,
     zone: [u32; 4],
     /// 水辺と買った土地は、全部のマスではなく見本のマスで数える。
     samples: u32,
@@ -127,7 +132,13 @@ impl Cell {
             }
         }
         if let Some(i) = argmax(&self.building) {
-            return zone_letter(ZoneKind::ALL[i]);
+            // 電気か水が届いていない建物は、区画の種類より先にそれを出す。
+            return match (self.unpowered > 0, self.dry > 0) {
+                (true, true) => '%',
+                (true, false) => '*',
+                (false, true) => '^',
+                (false, false) => zone_letter(ZoneKind::ALL[i]),
+            };
         }
         if let Some(i) = argmax(&self.zone) {
             return zone_letter(ZoneKind::ALL[i]).to_ascii_lowercase();
@@ -289,7 +300,11 @@ pub fn render(
         });
     }
     for (_, b) in world.buildings().iter() {
-        grid.each_tile_in(b.area, |cell, _| cell.building[b.zone.index()] += 1);
+        grid.each_tile_in(b.area, |cell, _| {
+            cell.building[b.zone.index()] += 1;
+            cell.unpowered += u32::from(!b.supply.power);
+            cell.dry += u32::from(!b.supply.water);
+        });
     }
     for f in world.facilities() {
         grid.each_tile_in(f.area, |cell, _| cell.facility[f.kind.index()] += 1);

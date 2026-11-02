@@ -5,6 +5,7 @@
 //! 呼び出しのあいだに状態は持たず、毎回、種から作った街に記録を再生していまの tick の街を作り直す。
 
 mod command_json;
+mod export;
 mod map;
 
 use std::fs::File;
@@ -16,26 +17,35 @@ use chizu_core::service::supply_balance;
 use chizu_core::world::economy::Finances;
 use chizu_core::world::highway_line;
 use chizu_core::{
-    ApplyOutcome, CHUNK_SIDE, CarSample, CitizenPlaces, CommandLog, DayTraffic, GameTime,
-    MigrationOutlook, NodeControl, ServiceKind, TilePos, TileRect, Traffic, World, ZoneKind,
-    replay,
+    ApplyOutcome, CHUNK_SIDE, CarSample, CitizenPlaces, Command, CommandLog, DayTraffic,
+    DenyReason, GameTime, Line, MigrationOutlook, NodeControl, ServiceKind, TilePos, TileRect,
+    Traffic, World, ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
 pub const USAGE: &str = r#"使い方:
   chizu-cli agent new <dir> <種>             セッションを作る（tick 0、空の記録）
   chizu-cli agent new <dir> --from <fb>      フィードバックのディレクトリ <fb> の種、tick、記録を写してセッションを作る
-  chizu-cli agent act <dir> <commands.json>  いまの tick でコマンドを順に適用し、記録に足す
+  chizu-cli agent act <dir> <commands.json> [--verbose]
+                                             いまの tick でコマンドを順に適用し、記録に足す
   chizu-cli agent advance <dir> <tick 数>    時間を進める（1 tick はゲーム内の 12 秒、1 日は 7200 tick）
-  chizu-cli agent observe <dir>              街の様子を JSON で出す
+  chizu-cli agent observe <dir>              街の様子を JSON で出す（前の observe からの増減つき）
   chizu-cli agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic]
                                              範囲の地図を、1 マス 1 文字のマス目のテキストで出す
+  chizu-cli agent export <dir>               セッションの再現手順を、Issue にそのまま貼れる markdown で出す
 
 <dir> は state.json と commands.rec を置くディレクトリである。act と advance は agent new で作ったディレクトリにだけ書く。
 feedback/<日時>-<番号>/ は observe ではそのまま見られ、続きを遊ぶときは new --from で写してから遊ぶ。
 act と advance は、記録を再生したハッシュが state.json の stateHash と食い違うときは何も書かずに止まる。
 <commands.json> に - を渡すと標準入力から読む。中身はコマンドの配列か、コマンド 1 つである。
-map のほかのサブコマンドは、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
+map と export のほかのサブコマンドは、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
+
+observe の sinceLastObserve（前の observe からの増減）:
+  agent new で作ったセッションでは、observe を打つたびに主な数をセッションの last-observe.json に残し、
+  次の observe で fromTick（前に見た tick）と toTick のあいだに変わった数を changes に出す。
+  changes は {"money": {"from": a, "to": b, "delta": b-a}, ...} の形で、変わっていない数は出さない。
+  見る数は、お金、収支、人口、就業、幸福度、車、転入、需要、建物の数、電気と水道の余裕、施設の数、買ったチャンクの数である。
+  new の直後の observe は、new が見た街との増減になる。前の observe がないとき（フィードバックのディレクトリなど）は null で、何も書かない。
 
 observe の utilities（power と water）:
   capacity と demand 道路網をまたいだ供給量と需要の合計、headroom その差（負なら足りない）、
@@ -74,6 +84,8 @@ observe の signals:
   1 文字が 1 マスで、先頭に凡例、上に x、行頭に y の目盛りが付く。座標は act のコマンドと同じである。
   --scale N を付けると、N×N マスを 1 文字にまとめる（既定は 1）。まとめた文字は、
   公共施設、信号のある交差点、道路、建物、区画、水辺、買っていない土地、空きマスの順で、最初に当てはまるものにする。
+  建物は、電気か水が届いていないものが 1 つでもあれば * ^ % にする（まとめた文字では、セルの中の建物のうち 1 つでも届いていなければ印が付く）。
+  どの網の電気や水が足りないかは observe の utilities の shortAt を見て、その at を map で眺める。
   ただし --layer traffic では、道路の混み具合を信号より先に出す。
   同じ種類が混ざるときは数の多いほう（道路は大きいほう）にする。水辺と買った土地は、セルの中の見本のマスの多数決である。
   出力は 9216 文字（96×96 など）までで、超える範囲は、必要な --scale を添えて断る。
@@ -100,6 +112,13 @@ observe の signals:
   {"type":"PlaceBuilding","kind":"PowerPlant"|"WaterPump","at":[x,y],"rotation":0..3}
       施設を置く。発電所は 4×4 で 60000、浄水場は 2×2 で 25000。at は間口の角のマスで、
       rotation 0、1、2、3 のとき、at から y-1、x+1、y+1、x-1 の向きに 1 歩のマスが道路でなければならない。
+      敷地は at から道路と反対へ延び、間口は at から道路に沿って延びる。浄水場（2×2）の図で、A が at、# が敷地、= が道路である。
+        rotation 0（道路は上）   rotation 1（道路は右）   rotation 2（道路は下）   rotation 3（道路は左）
+            = =                      #A=                      ##                       =##
+            A#                       ##=                      #A                       =A#
+            ##                                                = =
+      敷地は、rotation 0 では at から x+ と y+ へ、1 では x- と y+ へ、2 では x- と y- へ、3 では x+ と y- へ延びる。
+      発電所（4×4）も同じ向きで、間口が 4 マスになる。間口のすべてのマスの 1 歩先が道路でなければならない。
   {"type":"SetSignal","at":[x,y],"on":true|false}
       マス at の交差点（3 本以上の道路が集まるノード）に信号を置くか、外す。費用はかからない。
       at の代わりに "node":{"index":n,"generation":g} でノードを指してもよい（記録に入るのはこの形）。
@@ -120,6 +139,15 @@ act の結果:
     NotImplemented 中核にまだ中身がない
     Invalid        形か値が正しくない。message に理由がある。記録には足さない
   Applied、Denied、NotImplemented は記録に足す。画面で遊んだときと同じ扱いである。
+  reason が NotOwned のときは notOwned も付き、買っていない土地のマスを示す。
+    count 買っていないマスの数、tiles そのマス（先頭の 16 個まで）、chunks そのマスを含むチャンク（BuyChunk に渡せる。先頭の 16 個まで）。
+  結果は短く、index、type、outcome（と reason、message）だけを返す。--verbose を付けると、
+  角の順番などをそろえて記録に入れた形のコマンドを command に添える。
+
+export:
+  種、tick、stateHash、ビルドしたコミット、commands.rec の base64 を、Issue にそのまま貼れる markdown で出す（JSON ではない）。
+  貼った手順を実行すると、base64 -d で記録に戻し、再現に要る欄だけの state.json を作り、agent new --from で続きを遊べる。
+  何も書かないので、フィードバックのディレクトリにも打てる。
 "#;
 
 /// 車が止まっているとみなす時間（tick）。この長さのあいだ車線の同じ位置にいた車を止まっている車と数える。
@@ -354,7 +382,9 @@ fn hash_text(world: &World) -> String {
 
 /// コマンドを 1 つずつ記録してから、記録の番号で適用する。`replay` と同じ経路なので、
 /// あとで記録を再生しても同じ街になる。
-fn act(world: &mut World, log: &mut CommandLog, commands: &[Value]) -> Vec<Value> {
+///
+/// 結果は短く、`verbose` のときだけ記録に入った形のコマンドを添える。
+fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: bool) -> Vec<Value> {
     commands
         .iter()
         .enumerate()
@@ -373,8 +403,11 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value]) -> Vec<Value
                 Ok(seq) => seq,
                 Err(e) => return invalid(e.to_string()),
             };
-            // 角の順番などをそろえたあとの、記録に入った形を返す。
-            let mut out = json!({"index": i, "type": kind, "command": command_json::to_json(command)});
+            let mut out = json!({"index": i, "type": kind});
+            if verbose {
+                // 角の順番などをそろえたあとの、記録に入った形を返す。
+                out["command"] = command_json::to_json(command);
+            }
             // 結果の種類が増えたら、ここで JSON の名前を決めさせる。
             #[deny(clippy::wildcard_enum_match_arm)]
             let outcome = match world.apply_recorded(seq, &command) {
@@ -383,6 +416,9 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value]) -> Vec<Value
                 ApplyOutcome::Rejected => "Rejected",
                 ApplyOutcome::Denied(reason) => {
                     out["reason"] = json!(format!("{reason:?}"));
+                    if reason == DenyReason::NotOwned {
+                        out["notOwned"] = not_owned(world, &command);
+                    }
                     "Denied"
                 }
             };
@@ -390,6 +426,58 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value]) -> Vec<Value
             out
         })
         .collect()
+}
+
+/// `notOwned` に載せるマスとチャンクの数の上限。
+const NOT_OWNED_LIST: usize = 16;
+
+/// 施設の敷地のマス。`at` が間口の角で、敷地は道路（`rotation` が指す向き）と反対へ延びる。
+/// 中核の敷地の求め方と同じで、テストで置いた施設の範囲と突き合わせている。
+fn facility_tiles(kind: ServiceKind, at: TilePos, rotation: u8) -> Vec<TilePos> {
+    let (tx, ty) = [(0, -1), (1, 0), (0, 1), (-1, 0)][usize::from(rotation & 3)];
+    let (along, back) = ((-ty, tx), (-tx, -ty));
+    let (w, k) = kind.size();
+    let (w, k) = (w as i64, k as i64);
+    (0..k)
+        .flat_map(|j| {
+            (0..w).map(move |i| {
+                TilePos::new(
+                    at.x + along.0 * i + back.0 * j,
+                    at.y + along.1 * i + back.1 * j,
+                )
+            })
+        })
+        .collect()
+}
+
+/// `NotOwned` で断られたコマンドが通ろうとした、買っていない土地のマス。
+/// 断られても土地の持ち主は変わらないので、断られたあとの街で調べてよい。
+fn not_owned(world: &World, command: &Command) -> Value {
+    let tiles: Vec<TilePos> = if let Command::BuildRoad { from, to, .. } = command {
+        Line::between(*from, *to)
+            .map(|line| line.tiles().collect())
+            .unwrap_or_default()
+    } else if let Command::PlaceBuilding { kind, at, rotation } = command {
+        facility_tiles(*kind, *at, *rotation)
+    } else {
+        Vec::new()
+    };
+    let missing: Vec<TilePos> = tiles
+        .into_iter()
+        .filter(|t| t.chunk().is_none_or(|c| !world.is_owned(c)))
+        .collect();
+    let mut chunks: Vec<[i64; 2]> = missing
+        .iter()
+        .filter_map(|t| t.chunk())
+        .map(|c| [i64::from(c.cx), i64::from(c.cy)])
+        .collect();
+    chunks.sort_unstable();
+    chunks.dedup();
+    json!({
+        "count": missing.len(),
+        "tiles": missing.iter().take(NOT_OWNED_LIST).map(|t| json!([t.x, t.y])).collect::<Vec<_>>(),
+        "chunks": chunks.into_iter().take(NOT_OWNED_LIST).collect::<Vec<_>>(),
+    })
 }
 
 fn read_commands(path: &str) -> Result<Vec<Value>, String> {
@@ -716,6 +804,127 @@ fn signals(world: &World) -> Value {
     Value::Array(lit)
 }
 
+/// 前の observe とくらべる数。observe の JSON の中の位置で指す。
+const WATCHED: &[&str] = &[
+    "/money",
+    "/financesPerDay/income",
+    "/financesPerDay/expenses",
+    "/financesPerDay/net",
+    "/population/citizens",
+    "/population/housedCitizens",
+    "/population/households",
+    "/population/homes",
+    "/population/employed",
+    "/population/happiness",
+    "/citizenPlaces/homeless",
+    "/traffic/cars/total",
+    "/traffic/cars/stopped",
+    "/migration/wantingHouseholds",
+    "/migration/vacantHomes",
+    "/migration/homelessHouseholds",
+    "/migration/blockedHouseholds",
+    "/demand/Residential",
+    "/demand/Commercial",
+    "/demand/Industrial",
+    "/demand/Office",
+    "/zoned/Residential",
+    "/zoned/Commercial",
+    "/zoned/Industrial",
+    "/zoned/Office",
+    "/buildings/total",
+    "/buildings/byZone/Residential",
+    "/buildings/byZone/Commercial",
+    "/buildings/byZone/Industrial",
+    "/buildings/byZone/Office",
+    "/buildings/powered",
+    "/buildings/watered",
+    "/facilities/PowerPlant",
+    "/facilities/WaterPump",
+    "/utilities/power/headroom",
+    "/utilities/power/shortNetworks",
+    "/utilities/water/headroom",
+    "/utilities/water/shortNetworks",
+    "/land/milestone",
+];
+
+/// 前の observe と比べる数を、`/money` を `money`、`/demand/Office` を `demand.Office` と読み替えた名前で集める。
+fn watched_values(seen: &Value) -> Map<String, Value> {
+    let mut out = Map::new();
+    for path in WATCHED {
+        if let Some(v) = seen.pointer(path).filter(|v| v.is_number()) {
+            out.insert(path[1..].replace('/', "."), v.clone());
+        }
+    }
+    if let Some(chunks) = seen.pointer("/land/ownedChunks").and_then(Value::as_array) {
+        out.insert("land.ownedChunks".into(), json!(chunks.len()));
+    }
+    out
+}
+
+/// 値が数なら、`to` から `from` を引いた差。
+fn delta(from: &Value, to: &Value) -> Value {
+    if let (Some(a), Some(b)) = (from.as_i64(), to.as_i64()) {
+        return json!(i128::from(b) - i128::from(a));
+    }
+    match (from.as_f64(), to.as_f64()) {
+        (Some(a), Some(b)) => json!(((b - a) * 1000.0).round() / 1000.0),
+        _ => Value::Null,
+    }
+}
+
+/// 前に見た数（`last`）と、いまの数の増減。
+fn changes_since(last: &Value, now: &Map<String, Value>, to_tick: &Value) -> Value {
+    let before = last.get("values").and_then(Value::as_object);
+    let mut changes = Map::new();
+    for (key, to) in now {
+        let from = before.and_then(|b| b.get(key));
+        match from {
+            Some(from) if from == to => {}
+            Some(from) => {
+                changes.insert(
+                    key.clone(),
+                    json!({"from": from, "to": to, "delta": delta(from, to)}),
+                );
+            }
+            None => {
+                changes.insert(key.clone(), json!({"from": null, "to": to, "delta": null}));
+            }
+        }
+    }
+    json!({
+        "fromTick": last.get("tick"),
+        "toTick": to_tick,
+        "changes": changes,
+    })
+}
+
+const LAST_OBSERVE_FILE: &str = "last-observe.json";
+
+/// 前の observe から、いまの observe までの増減を返し、いまの数を次のために残す。
+/// 書くのは `agent new` で作ったセッションだけで、そうでなければ何も書かず `Null` を返す。
+fn since_last_observe(dir: &Path, seen: &Value, is_session: bool) -> Result<Value, String> {
+    if !is_session {
+        return Ok(Value::Null);
+    }
+    let path = dir.join(LAST_OBSERVE_FILE);
+    let now = watched_values(seen);
+    let tick = seen.get("tick").cloned().unwrap_or(Value::Null);
+    let last: Option<Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok());
+    let diff = last.map(|last| changes_since(&last, &now, &tick));
+    write_last_observe(dir, &tick, now)?;
+    Ok(diff.unwrap_or(Value::Null))
+}
+
+fn write_last_observe(dir: &Path, tick: &Value, values: Map<String, Value>) -> Result<(), String> {
+    let path = dir.join(LAST_OBSERVE_FILE);
+    let tmp = tmp_path(&path);
+    let text = print(&json!({"tick": tick, "values": values}));
+    std::fs::write(&tmp, text).map_err(|e| format!("{} に書けない: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("{} に書けない: {e}", path.display()))
+}
+
 fn parse_u64(text: &str, what: &str) -> Result<u64, String> {
     text.parse()
         .map_err(|e| format!("{what} {text:?} を読めない: {e}"))
@@ -752,16 +961,24 @@ fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, 
     let mut s = Session::create(Path::new(dir), from)?;
     s.save(&world)?;
     let mut out = observe(&world, &before);
+    // new が見せた街を、次の observe の増減の起点にする。
+    write_last_observe(Path::new(dir), &out["tick"], watched_values(&out))?;
     if let Some(c) = copied {
         out["copiedFrom"] = c;
     }
     Ok(out)
 }
 
-/// 読むだけで開く。人間のフィードバックも見られるよう、セッションでなくても読む。共有ロックは返り値が持つ。
-fn open_for_read(dir: &Path) -> Result<(Option<File>, World, CarSample), String> {
-    let lock = lock(dir, false, false)?;
+/// 読むだけで開く。人間のフィードバックも見られるよう、セッションでなくても読む。ロックは返り値が持つ。
+/// 最後の欄は、`agent new` で作ったセッションかどうか。
+/// `exclusive` はロックを排他にする（observe が増減の記録を書くため）。
+fn open_for_read(
+    dir: &Path,
+    exclusive: bool,
+) -> Result<(Option<File>, World, CarSample, bool), String> {
+    let lock = lock(dir, exclusive, false)?;
     let saved = read_saved(dir)?;
+    let is_session = lock.is_some() && saved.state.contains_key(SESSION_KEY);
     let (world, before) = saved.world_sampled();
     let hash = hash_text(&world);
     if let Some(recorded) = saved.saved_hash()
@@ -771,7 +988,31 @@ fn open_for_read(dir: &Path) -> Result<(Option<File>, World, CarSample), String>
             "{STATE_FILE} の stateHash {recorded} と、再生した街のハッシュ {hash} が食い違う"
         );
     }
-    Ok((lock, world, before))
+    Ok((lock, world, before, is_session))
+}
+
+/// 再現の手順を markdown にする。何も書かない。
+fn export_markdown(dir: &Path) -> Result<String, String> {
+    let _lock = lock(dir, false, false)?;
+    let saved = read_saved(dir)?;
+    let world = saved.world();
+    let hash = hash_text(&world);
+    let record = saved.log.encode();
+    let state_json = export::repro_state(
+        &saved.state,
+        saved.seed,
+        saved.tick,
+        saved.saved_hash().unwrap_or(&hash),
+    );
+    Ok(export::markdown(&export::Export {
+        seed: saved.seed,
+        tick: saved.tick,
+        recorded_hash: saved.saved_hash(),
+        replayed_hash: &hash,
+        commands: saved.log.len(),
+        record: &record,
+        state_json: &state_json,
+    }))
 }
 
 /// `agent` のあとの引数を受けて、標準出力に書く文字列を返す。
@@ -794,10 +1035,15 @@ pub fn run(args: &[String]) -> Result<String, String> {
             };
             Ok(print(&new_session(dir, saved, None)?))
         }
-        ["act", dir, commands] => {
+        ["act", dir, commands, rest @ ..] => {
+            let verbose = match rest {
+                [] => false,
+                ["--verbose"] => true,
+                _ => return Err(USAGE.trim_end().to_string()),
+            };
             let commands = read_commands(commands)?;
             let (mut s, mut world) = Session::open_for_write(Path::new(dir))?;
-            let results = act(&mut world, &mut s.log, &commands);
+            let results = act(&mut world, &mut s.log, &commands, verbose);
             s.save(&world)?;
             Ok(print(&json!({
                 "tick": s.tick,
@@ -824,9 +1070,12 @@ pub fn run(args: &[String]) -> Result<String, String> {
             })))
         }
         ["observe", dir] => {
-            let (_lock, world, before) = open_for_read(Path::new(dir))?;
-            Ok(print(&observe(&world, &before)))
+            let (_lock, world, before, is_session) = open_for_read(Path::new(dir), true)?;
+            let mut seen = observe(&world, &before);
+            seen["sinceLastObserve"] = since_last_observe(Path::new(dir), &seen, is_session)?;
+            Ok(print(&seen))
         }
+        ["export", dir] => export_markdown(Path::new(dir)),
         ["map", dir, x0, y0, x1, y1, rest @ ..] => {
             let coord = |s: &str, what: &str| {
                 s.parse::<i64>()
@@ -843,7 +1092,7 @@ pub fn run(args: &[String]) -> Result<String, String> {
                     _ => return Err(USAGE.trim_end().to_string()),
                 }
             }
-            let (_lock, world, _) = open_for_read(Path::new(dir))?;
+            let (_lock, world, _, _) = open_for_read(Path::new(dir), false)?;
             map::render(&world, TileRect::from_corners(a, b), scale, layer)
         }
         _ => Err(USAGE.trim_end().to_string()),
@@ -874,7 +1123,7 @@ mod tests {
         let seed = 7;
         let mut log = CommandLog::new();
         let mut world = World::new(seed);
-        let results = act(&mut world, &mut log, &commands());
+        let results = act(&mut world, &mut log, &commands(), false);
         let outcomes: Vec<&str> = results
             .iter()
             .map(|r| r["outcome"].as_str().unwrap())
@@ -890,7 +1139,7 @@ mod tests {
         // 時間を進めてから、もう一度 act する。
         replay(&mut world, &log, 300);
         let more = [json!({"type":"BuildRoad","from":[30,10],"to":[30,40],"kind":"Medium"})];
-        act(&mut world, &mut log, &more);
+        act(&mut world, &mut log, &more, false);
         replay(&mut world, &log, 200);
 
         let log = CommandLog::decode(&log.encode()).unwrap();
@@ -898,6 +1147,40 @@ mod tests {
         replay(&mut again, &log, 500);
         assert_eq!(again, world);
         assert_eq!(again.state_hash(), world.state_hash());
+    }
+
+    /// ヘルプの図と NotOwned のマスに使う敷地の求め方が、中核が置いた施設の範囲と同じになる。
+    #[test]
+    fn facility_tiles_match_the_core_site() {
+        for kind in ServiceKind::ALL {
+            for rotation in 0..4_u8 {
+                let mut world = World::new(1);
+                let mut log = CommandLog::new();
+                // 道路に面するよう、向きごとに at から 1 歩先に、間口より長い道路を引く。
+                let at = TilePos::new(20, 20);
+                let (dx, dy) = [(0, -1), (1, 0), (0, 1), (-1, 0)][usize::from(rotation)];
+                let (from, to) = if dx == 0 {
+                    (TilePos::new(10, 20 + dy), TilePos::new(40, 20 + dy))
+                } else {
+                    (TilePos::new(20 + dx, 10), TilePos::new(20 + dx, 40))
+                };
+                let road = [
+                    json!({"type":"BuildRoad","from":[from.x,from.y],"to":[to.x,to.y],"kind":"Small"}),
+                ];
+                act(&mut world, &mut log, &road, false);
+                let place = [
+                    json!({"type":"PlaceBuilding","kind":format!("{kind:?}"),"at":[at.x,at.y],"rotation":rotation}),
+                ];
+                let out = act(&mut world, &mut log, &place, false);
+                assert_eq!(out[0]["outcome"], "Applied", "{kind:?} {rotation}: {out:?}");
+                let area = world.facilities().last().unwrap().area;
+                let mut expected: Vec<TilePos> = facility_tiles(kind, at, rotation);
+                expected.sort_by_key(|t| (t.y, t.x));
+                let mut actual: Vec<TilePos> = chizu_core::zone::tiles_of(area).collect();
+                actual.sort_by_key(|t| (t.y, t.x));
+                assert_eq!(expected, actual, "{kind:?} {rotation}");
+            }
+        }
     }
 
     /// 止まっている車を見分ける見本は、いまでなく `window` tick 前の車の位置である。
@@ -919,7 +1202,7 @@ mod tests {
             {"type":"PlaceBuilding","kind":"WaterPump","at":[at(110),y+1],"rotation":0},
         ]))
         .unwrap();
-        act(&mut world, &mut log, &cmds);
+        act(&mut world, &mut log, &cmds, false);
         // 車が走っている朝のどこかまで進める。
         let (mut found, mut tick) = (None, 0);
         while tick < 5 * TICKS_PER_DAY_FOR_TEST && found.is_none() {
