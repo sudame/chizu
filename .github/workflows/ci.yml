@@ -26,6 +26,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: rumdl
       - run: mise run lint:md
 
@@ -38,6 +39,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: jactionlint shellcheck
       - run: mise run lint:actions
 
@@ -48,20 +50,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # キャッシュが古くても足りない分をビルドし直すだけなので、保存し直すのはツールチェーンか依存が変わったときだけにする。
-      # キーが外れたら前のキャッシュから戻し、新しいキーで保存する
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo
-            target
-          key: cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ github.job }}-
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
       # rust の版は mise.toml の設定で rust-toolchain.toml から読む
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: rust ripgrep
       - run: mise run lint:rust
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.target-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
   test-rust:
     runs-on: ubuntu-26.04
@@ -70,18 +71,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo
-            target
-          key: cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ github.job }}-
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
       # rust の版は mise.toml の設定で rust-toolchain.toml から読む
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: rust
       - run: mise run test:rust
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.target-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+      # 依存のクレートの保存は 1 つのジョブだけが行う
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.registry-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-registry-${{ hashFiles('Cargo.lock') }}
 
   lint-wasm:
     runs-on: ubuntu-26.04
@@ -90,17 +100,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo
-            target
-          key: cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ github.job }}-
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: rust
       - run: mise run lint:wasm
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.target-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
   lint-web:
     runs-on: ubuntu-26.04
@@ -109,18 +120,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo
-            target
-          key: cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ github.job }}-
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
       # tsc が wasm-bindgen の作る型定義を読むので、WASM のビルドに要るものも入れる
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: rust github:wasm-bindgen/wasm-bindgen node pnpm biome
       - run: mise run lint:web
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.target-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
   test-web:
     runs-on: ubuntu-26.04
@@ -131,6 +143,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: node pnpm
       - run: mise run test:web
 
@@ -141,17 +154,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo
-            target
-          key: cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ github.job }}-
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: rust github:wasm-bindgen/wasm-bindgen node pnpm http:chrome-headless-shell
       - run: mise run test:wasm
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.target-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
   test-play:
     runs-on: ubuntu-26.04
@@ -173,17 +187,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo
-            target
-          key: cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ github.job }}-
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: rust github:wasm-bindgen/wasm-bindgen node pnpm
       - run: mise run build
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.target-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
 
   build-bench:
     runs-on: ubuntu-26.04
@@ -192,14 +207,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo
-            target
-          key: cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: cargo-${{ github.job }}-
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache-restore
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
+          cache_save: ${{ github.ref == 'refs/heads/main' }}
           install_args: rust
       - run: mise run build:bench
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.target-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}

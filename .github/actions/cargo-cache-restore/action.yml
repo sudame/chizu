@@ -1,0 +1,31 @@
+name: cargo-cache-restore
+description: >-
+  cargo のキャッシュを戻す。書くのは main の push だけにして、PR は main のキャッシュを読むだけにする。
+  依存のクレート（registry）はジョブの間で共有し、target はジョブごとに分ける。
+  保存は composite の中ではできないので、呼び出し側がジョブの最後に actions/cache/save で行う。
+outputs:
+  target-hit:
+    description: target のキャッシュがキーに完全に一致したとき true
+    value: ${{ steps.target.outputs.cache-hit }}
+  registry-hit:
+    description: registry のキャッシュがキーに完全に一致したとき true
+    value: ${{ steps.registry.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    # 依存のクレートは Cargo.lock だけで決まり、どのジョブでも同じなので 1 つにまとめる
+    - id: registry
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+        key: cargo-registry-${{ hashFiles('Cargo.lock') }}
+        restore-keys: cargo-registry-
+    # キーが外れたら前の main のキャッシュから戻し、足りない分だけビルドし直す
+    - id: target
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: target
+        key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+        restore-keys: cargo-target-${{ github.job }}-
