@@ -238,28 +238,35 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   await waitMap("firstMover", spawned.firstMover ?? "", "ne");
   const moved = await map.getAttribute("data-first-mover");
   check(true, `時間を進めると移動体の位置が変わる（${spawned.firstMover} → ${moved}）`);
-  // 等速では 1 tick が約 33ms で、フレームは約 17ms。補間があれば、tick が変わらないフレームでも位置が変わる
-  const sampled = await page.evaluate(
-    () =>
-      new Promise<{ ticks: number; positions: number }>((resolve) => {
-        const ticks = new Set<string>();
-        const positions = new Set<string>();
-        const end = performance.now() + 1000;
+  // 補間そのものは Vitest（mover-interpolation.test.ts）で確かめる。ここでは、画面に補間が効いていることだけを見る。
+  // tick が変わらない続きの 2 枠のあいだで位置が変わっていれば、tick に頼らず補間で動いている。
+  // 枠の回数や間隔には頼らず、見つかるまで待つ。CI が重くても、いずれ同じ tick の枠が続く
+  const interpolated = await page.evaluate(
+    (timeoutMs) =>
+      new Promise<boolean>((resolve) => {
+        const end = performance.now() + timeoutMs;
+        let last: { tick: string; position: string } | null = null;
         const step = () => {
-          ticks.add(document.querySelector<HTMLElement>("#hud")?.dataset.tick ?? "");
-          positions.add(document.querySelector<HTMLElement>("#map")?.dataset.firstMover ?? "");
+          const tick = document.querySelector<HTMLElement>("#hud")?.dataset.tick ?? "";
+          const position = document.querySelector<HTMLElement>("#map")?.dataset.firstMover ?? "";
+          if (last !== null && last.tick === tick && last.position !== position) {
+            resolve(true);
+            return;
+          }
+          last = { tick, position };
           if (performance.now() < end) {
             requestAnimationFrame(step);
           } else {
-            resolve({ ticks: ticks.size, positions: positions.size });
+            resolve(false);
           }
         };
         requestAnimationFrame(step);
       }),
+    TIMEOUT_MS,
   );
   check(
-    sampled.positions >= sampled.ticks * 1.5,
-    `移動体は 1 tick のあいだにも少しずつ動く（tick ${sampled.ticks} 回に対し位置 ${sampled.positions} 通り）`,
+    interpolated,
+    "移動体は 1 tick のあいだにも少しずつ動く（tick が同じ枠の間で位置が変わる）",
   );
   check(
     await page.locator("#dev-flag").isVisible(),
