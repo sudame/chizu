@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "slotCount": 3,
   "controlWords": 4,
   "control": {
@@ -28,14 +28,15 @@
     "baseCx": 10,
     "baseCy": 11
   },
-  "moverWords": 4,
+  "moverWords": 5,
   "mover": {
     "x": 0,
     "y": 1,
     "headingKind": 2,
-    "id": 3
+    "id": 3,
+    "generation": 4
   },
   "maxMovers": 20000,
-  "slotWords": 80012,
-  "totalWords": 240040
+  "slotWords": 100012,
+  "totalWords": 300040
 }
