@@ -168,7 +168,7 @@ export function asphaltHalfWidth(kindCode: number): number {
 
 // 斜めの区間は、隣り合う道路のマスが角でしか接しない。車道の帯は角を越えて脇のマスにかかるので、
 // 脇のマスの建物（角から 0.15 マス内側）にかからない幅に抑える。歩道は道路のマスを階段状に塗る
-const DIAGONAL_ASPHALT_HALF = 0.2;
+export const DIAGONAL_ASPHALT_HALF = 0.2;
 
 export const isDiagonal = (a: Tile, b: Tile) => a.x !== b.x && a.y !== b.y;
 
@@ -230,6 +230,13 @@ export function footprintOutline(
     dashPx,
   );
 }
+
+/** RoadLayer に渡せる頂点の並び。Geometry のほか、交通の主題図の頂点（traffic.ts）もこの形にする。 */
+export type MeshSource = {
+  readonly origin: Tile;
+  readonly vertexCount: number;
+  build(): Float32Array;
+};
 
 /** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
 export class Geometry {
@@ -1273,7 +1280,7 @@ export class RoadLayer {
     return { buffer, vao, count: 0, origin: { x: 0, y: 0 } };
   }
 
-  #upload(name: MeshName, geometry: Geometry): void {
+  #upload(name: MeshName, geometry: MeshSource): void {
     const gl = this.#gl;
     const mesh = this.#meshes[name];
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buffer);
@@ -1302,7 +1309,7 @@ export class RoadLayer {
   }
 
   /** 交通の主題図。null なら消す。 */
-  setTraffic(meshes: { free: Geometry; busy: Geometry; bands: Geometry } | null): void {
+  setTraffic(meshes: { free: MeshSource; busy: MeshSource; bands: MeshSource } | null): void {
     const empty = new Geometry({ x: 0, y: 0 });
     this.#upload("trafficFree", meshes?.free ?? empty);
     this.#upload("trafficBusy", meshes?.busy ?? empty);
@@ -1313,7 +1320,11 @@ export class RoadLayer {
     this.#upload("preview", geometry ?? new Geometry({ x: 0, y: 0 }));
   }
 
-  draw(camera: Camera, viewport: Viewport): void {
+  /**
+   * メッシュを下から順に描く。`part` が "map" なら道具の仮の表示を除いて描き、"preview" なら仮の表示だけを描く。
+   * 仮の表示は、主題図（電気、水道、需要の面）より上に出すので、主題図のあとに分けて描く。
+   */
+  draw(camera: Camera, viewport: Viewport, part: "map" | "preview" = "map"): void {
     const gl = this.#gl;
     gl.useProgram(this.#program);
     gl.uniform1f(this.#u.zoom, camera.zoom);
@@ -1322,6 +1333,9 @@ export class RoadLayer {
     // 色だけを重ね、フレームバッファのアルファは 1 のまま保つ（キャンバスがページの背景と混ざって白く飛ばないように）
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
     for (const [name, alpha, fade] of roadDrawOrder(camera.zoom)) {
+      if ((name === "preview") !== (part === "preview")) {
+        continue;
+      }
       const mesh = this.#meshes[name];
       if (mesh.count === 0 || alpha === 0) {
         continue;

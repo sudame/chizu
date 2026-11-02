@@ -22,7 +22,7 @@ import {
   type Viewport,
 } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
-import { TRAFFIC_LAYER } from "./map/layers.ts";
+import { LabelLayer } from "./map/label-layer.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
 import {
   BULLDOZE_EDGE_COLOR,
@@ -101,7 +101,7 @@ import {
   upgradePlan,
   upgradeRoadCommand,
 } from "./map/tools.ts";
-import { TrafficValues, trafficMeshes } from "./map/traffic.ts";
+import { TrafficLines } from "./map/traffic.ts";
 import { parseOverview, renderOverview } from "./overview.ts";
 import { createPopovers } from "./popover.ts";
 import {
@@ -244,6 +244,8 @@ function createRenderer(): MapRenderer | null {
   }
 }
 let renderer = createRenderer();
+// 道路名、地区名、施設名。WebGL2 とは別の Canvas 2D に描くので、地図を描けなくても作る
+const labels = new LabelLayer(element<HTMLCanvasElement>("#labels"));
 // 最後に届いた道路網と建物。コンテキストを失ったあとに貼り直す
 let roads: RoadMeshes | null = null;
 let buildings: BuildingMeshes | null = null;
@@ -255,13 +257,9 @@ const layersOf = (id: ThemeId): number[] => {
   return layer === null ? [] : [layer];
 };
 let activeLayers: number[] = layersOf(theme);
-// 交通の主題図の値と、それから作った線。線は値か道路網が変わったときだけ、TRAFFIC_REBUILD_MS に 1 回まで作り直す
-const trafficValues = new TrafficValues();
-const TRAFFIC_REBUILD_MS = 250;
-let trafficBuiltAt = Number.NEGATIVE_INFINITY;
+// 交通の主題図の線。区間ごとの値か道路網が変わったときだけ作り直す
+const trafficLines = new TrafficLines();
 let trafficBuilds = 0;
-let roadNodeList: Float64Array = new Float64Array();
-let roadSegmentList: Float64Array = new Float64Array();
 // 需要の主題図と凡例に使う、住宅・商業・工業・オフィスの需要（街の数字の値）
 let demand: number[] | null = null;
 // 主題図の凡例。レイヤーのボタンの左に浮かべるものと、レイヤーのパネルの中のもの
@@ -312,9 +310,7 @@ function applyTheme(): void {
   activeLayers = layersOf(theme);
   renderer?.layers.setActive(activeLayers);
   send({ kind: "layers", active: activeLayers });
-  trafficValues.clear();
-  renderer?.roads.setTraffic(null);
-  trafficBuiltAt = Number.NEGATIVE_INFINITY;
+  trafficLines.clear();
   updateDemandTheme();
   updateThemeLegend();
 }
@@ -377,7 +373,6 @@ function sendView(range: ChunkRange): void {
   const removed = store.evict((cx, cy) => inRange(range, cx, cy), MAX_STORED_CHUNKS);
   for (const chunk of removed) {
     renderer?.remove(chunk.cx, chunk.cy);
-    trafficValues.remove(chunk.cx, chunk.cy);
   }
   send({
     kind: "view",
@@ -394,6 +389,7 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   rebuildTraffic();
   updateThemeLegend();
   const drawn = renderer?.draw(camera, vp, range) ?? 0;
+  labels.frame(camera, vp, performance.now());
   const movers =
     header === null
       ? 0
@@ -429,24 +425,22 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
 
 /** 交通の値か道路網が変わっていれば、交通の主題図の線を作り直す。毎フレームは作らない。 */
 function rebuildTraffic(): void {
-  const now = performance.now();
-  if (theme !== "traffic" || !trafficValues.changed || now - trafficBuiltAt < TRAFFIC_REBUILD_MS) {
+  const meshes = trafficLines.take();
+  if (meshes === undefined) {
     return;
   }
-  trafficValues.changed = false;
-  trafficBuiltAt = now;
-  renderer?.roads.setTraffic(
-    trafficMeshes(roadSegmentList, roadNodeList, (x, y) => trafficValues.at(x, y)),
-  );
-  trafficBuilds++;
-  // test:wasm が読む
-  mapCanvas.dataset.trafficBuilds = String(trafficBuilds);
+  renderer?.roads.setTraffic(meshes);
+  if (meshes !== null) {
+    trafficBuilds++;
+    // test:wasm が読む
+    mapCanvas.dataset.trafficBuilds = String(trafficBuilds);
+  }
 }
 
 /** 主題図の凡例を、中身が変わったときだけ描き直す。 */
 function updateThemeLegend(): void {
   const items = themeLegend(theme, camera.zoom, demand);
-  const key = JSON.stringify(items);
+  const key = `${theme}:${JSON.stringify(items)}`;
   if (key === themeLegendShown) {
     return;
   }
@@ -932,6 +926,7 @@ setupFeedback({
       send({ kind: "feedback" });
     }),
   map: mapCanvas,
+  overlays: [labels.canvas],
   camera: () => ({ x: camera.x, y: camera.y, zoom: camera.zoom }),
 });
 
@@ -1024,6 +1019,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "chunks") {
     for (const chunk of store.receive(message.chunks)) {
       renderer?.upload(chunk);
+      labels.setChunkTiles(chunk.cx, chunk.cy, chunk.tiles);
     }
     return;
   }
@@ -1031,12 +1027,14 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     if (activeLayers.includes(message.layer)) {
       // 画面が捨てた直後に届いたチャンクは、手元の地形と一緒に捨てる
       for (const c of message.chunks.filter((c) => store.get(c.cx, c.cy) !== undefined)) {
-        if (message.layer === TRAFFIC_LAYER) {
-          trafficValues.set(c.cx, c.cy, new Uint8Array(c.values));
-        } else {
-          renderer?.layers.upload(message.layer, c.cx, c.cy, c.version, new Uint8Array(c.values));
-        }
+        renderer?.layers.upload(message.layer, c.cx, c.cy, c.version, new Uint8Array(c.values));
       }
+    }
+    return;
+  }
+  if (message.kind === "traffic") {
+    if (theme === "traffic") {
+      trafficLines.setValues(message.revision, new Uint8Array(message.values));
     }
     return;
   }
@@ -1044,15 +1042,14 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     roads = roadMeshes(message.segments, message.nodes);
     roadIndex = buildRoadIndex(message.segments, message.nodes);
     roadSegments = message.segments;
-    roadSegmentList = message.segments;
-    roadNodeList = message.nodes;
-    // 道路網が変わったら、交通の主題図の線も作り直す
-    trafficValues.changed = true;
+    // 道路網が変わったら、交通の主題図の線も作り直す。新しい網の値が届くまでは描かない
+    trafficLines.setRoads(message.revision, message.segments, message.nodes);
     crosswalks = crosswalkArms(message.segments, message.nodes);
     // test:wasm が読む
     mapCanvas.dataset.removedCrosswalks = String(crosswalks.filter((arm) => arm.removed).length);
     updatePreview();
     renderer?.roads.setRoads(roads);
+    labels.setRoads(message.segments);
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);
     mapCanvas.dataset.roadSegments = String(message.segments.length / SEGMENT_STRIDE);
@@ -1068,6 +1065,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "buildings") {
     buildings = buildingMeshes(message.buildings, message.facilities);
     renderer?.roads.setBuildings(buildings);
+    labels.setBuildings(message.buildings, message.facilities);
     const stats = parseCityStats(message.stats);
     renderCityStats(stats, unsuppliedCount(message.buildings));
     demand = [...stats.demand];
@@ -1141,6 +1139,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   roadCosts = parseRoadCostTable(message.roadCosts);
   services = parseServiceTable(message.serviceTable);
+  labels.setSeed(message.seed);
   let reader: SnapshotReader;
   try {
     reader = new SnapshotReader(message.memory, message.snapshotOffset);

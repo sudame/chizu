@@ -391,6 +391,8 @@ export class MapRenderer {
     if (this.demand !== null) {
       this.#drawDemand(camera, viewport, range, this.demand);
     }
+    // 道具の仮の表示は、主題図に隠れないよう最後に描く
+    this.roads.draw(camera, viewport, "preview");
     return drawn;
   }
 

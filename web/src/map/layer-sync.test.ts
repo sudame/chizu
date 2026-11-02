@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { CHUNK_AREA, type WorkerToMain } from "../protocol/messages.ts";
-import { LAYER_CHECK_MS, LayerSender, type LayerSource } from "./layer-sync.ts";
+import { LAYER_CHECK_MS, LayerSender, type LayerSource, TrafficSender } from "./layer-sync.ts";
 import {
   DATA_LAYERS,
   PALETTE_SIZE,
@@ -77,6 +77,57 @@ describe("LayerSender", () => {
     sender.setView([{ cx: 1, cy: 0 }], [{ cx: 0, cy: 0 }]);
     sender.setView(view, []);
     expect(collect(sender, source)).toEqual(["1:0,0@11"]);
+  });
+});
+
+describe("交通の区間ごとの値の送り方", () => {
+  const trafficSource = () => ({
+    version: 1,
+    network: 7,
+    sent: 0,
+    layer_version(code: number) {
+      return this.version * 10 + code;
+    },
+    network_version() {
+      return this.network;
+    },
+    traffic_segments() {
+      this.sent++;
+      return new Uint8Array([1, 4]);
+    },
+  });
+
+  test("交通を出しているあいだだけ、版が変わったときに道路網の版と一緒に送る", () => {
+    const sender = new TrafficSender();
+    const source = trafficSource();
+    const sent: WorkerToMain[] = [];
+    const reply = (m: WorkerToMain) => sent.push(m);
+    sender.send(source, reply);
+    expect(sent).toHaveLength(0);
+    sender.setActive([TRAFFIC_LAYER]);
+    sender.send(source, reply, 1000);
+    expect(sent).toEqual([{ kind: "traffic", revision: 7, values: new Uint8Array([1, 4]).buffer }]);
+    // 間隔の中では確かめず、版が同じなら送らない
+    source.version = 2;
+    sender.send(source, reply, 1000 + LAYER_CHECK_MS - 1);
+    expect(sent).toHaveLength(1);
+    sender.send(source, reply, 1000 + LAYER_CHECK_MS);
+    expect(sent).toHaveLength(2);
+    sender.send(source, reply, 1000 + 2 * LAYER_CHECK_MS);
+    expect(sent).toHaveLength(2);
+    sender.setActive([1]);
+    sender.send(source, reply);
+    expect(sent).toHaveLength(2);
+  });
+
+  test("交通はマスの値では送らない", () => {
+    const sender = new LayerSender();
+    const source = fakeSource();
+    sender.setActive([TRAFFIC_LAYER]);
+    sender.setView([{ cx: 0, cy: 0 }], []);
+    const sent: WorkerToMain[] = [];
+    sender.send(source, (m) => sent.push(m), 10);
+    expect(sent).toHaveLength(0);
   });
 });
 
