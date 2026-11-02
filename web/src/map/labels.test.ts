@@ -334,7 +334,7 @@ describe("地区と施設の名前", () => {
     expect(near.find((c) => c.text.endsWith("発電所"))?.style.color).toBe("#a8500a");
   });
 
-  test("寄りの名前は、まとまりのいちばん右の記号の右に置き、標準はまとまりの中心に置く", () => {
+  test("寄りの名前は、まとまりのいちばん右の記号から試し、標準はまとまりの記号の右から試す", () => {
     const facilities = [
       [0, 0, 1, 1, 2],
       [4, 0, 5, 1, 2],
@@ -342,15 +342,17 @@ describe("地区と施設の名前", () => {
     ].flat();
     const groups = facilityLabels(0, facilities, () => false);
     expect(groups[0]?.members.map((m) => m.x)).toEqual([1, 5, 9]);
-    const camera = { x: 5, y: 1, zoom: 16 };
     const vp = { width: 800, height: 300 };
-    const std = facilityCandidates(groups, camera, vp, STAGE_STANDARD, measure)[0];
-    const near = facilityCandidates(groups, camera, vp, STAGE_NEAR, measure)[0];
+    const std = facilityCandidates(groups, { x: 5, y: 1, zoom: 8 }, vp, STAGE_STANDARD, measure)[0];
+    const near = facilityCandidates(groups, { x: 5, y: 1, zoom: 16 }, vp, STAGE_NEAR, measure)[0];
     expect(std?.wx).toBe(groups[0]?.centerX);
     expect(near?.wx).toBe(9);
-    expect(near?.owner).toBe(std?.owner);
+    expect(near?.group).toBe(std?.group);
     expect(near?.ox).toBe(15);
-    // いちばん右の記号が画面の外にあるときは、収まる記号の右に置く
+    // 置き方の違う候補は、右、左、下、上の順に並ぶ
+    const all = facilityCandidates(groups, { x: 5, y: 1, zoom: 8 }, vp, STAGE_STANDARD, measure);
+    expect(all.map((c) => c.id.split("|")[3])).toEqual(["r", "l", "b", "t"]);
+    // いちばん右の記号の右が画面の外にあるときは、収まる置き方を出す
     const narrow = { width: 300, height: 300 };
     const fallback = facilityCandidates(
       groups,
@@ -359,7 +361,8 @@ describe("地区と施設の名前", () => {
       STAGE_NEAR,
       measure,
     );
-    expect(fallback[0]?.wx).toBe(1);
+    expect(fallback.length).toBeGreaterThan(0);
+    expect(fallback.every((c) => c.box.x1 <= narrow.width && c.box.x0 >= 0)).toBe(true);
   });
 });
 

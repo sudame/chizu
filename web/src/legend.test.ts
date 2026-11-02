@@ -11,18 +11,12 @@ import {
 } from "./map/roads.ts";
 
 describe("凡例", () => {
-  test("区画・建物・印・交通・施設・道路・移動体の順に並ぶ", () => {
+  test("区画・建物・印・施設・道路・移動体の順に並ぶ。交通は主題図の凡例に出す", () => {
     const sections = legendSections();
-    expect(sections.map((s) => s.items.length)).toEqual([4, 4, 2, 4, 2, 4, 2]);
+    expect(sections.map((s) => s.items.length)).toEqual([4, 4, 2, 2, 4, 2]);
     expect(sections[0]?.items.map((i) => i.label)).toEqual(["住宅", "商業", "工業", "オフィス"]);
-    expect(sections[3]?.items.map((i) => i.label)).toEqual([
-      "空いている",
-      "やや混んでいる",
-      "混んでいる",
-      "詰まっている",
-    ]);
-    expect(sections[4]?.items.map((i) => i.label)).toEqual(["発電所", "浄水場"]);
-    expect(sections[5]?.items.map((i) => i.label)).toEqual([
+    expect(sections[3]?.items.map((i) => i.label)).toEqual(["発電所", "浄水場"]);
+    expect(sections[4]?.items.map((i) => i.label)).toEqual([
       "小さい道路",
       "中くらいの道路",
       "大きい道路",
@@ -31,12 +25,12 @@ describe("凡例", () => {
   });
 
   test("道路は車道の塗りの色を、種類ごとの縁の色で示す", () => {
-    const roads = legendSections()[5]?.items ?? [];
+    const roads = legendSections()[4]?.items ?? [];
     expect(roads[0]?.color).toBe(cssColor(roadStyle(1).asphalt));
     expect(roads[0]?.border).toBe(cssColor(roadStyle(1).edge));
     // 高速道路の縁は小の道路と違う色
     expect(roads[3]?.border).not.toBe(roads[0]?.border);
-    expect(legendSections()[6]?.items[1]?.color).toBe(cssColor(WALKER_COLOR));
+    expect(legendSections()[5]?.items[1]?.color).toBe(cssColor(WALKER_COLOR));
   });
 
   test("印の色は描画の定数と同じで、形を持つ", () => {
@@ -47,7 +41,7 @@ describe("凡例", () => {
   });
 
   test("施設は丸い記号で、丸の色と絵が描画の定数と同じである", () => {
-    const facilities = legendSections()[4]?.items ?? [];
+    const facilities = legendSections()[3]?.items ?? [];
     expect(facilities.map((i) => i.symbol?.glyph)).toEqual(["bolt", "drop"]);
     expect(facilities.map((i) => i.color)).toEqual(["#e8710a", "#12a4af"]);
   });

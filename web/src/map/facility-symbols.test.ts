@@ -1,14 +1,25 @@
 import { describe, expect, test } from "vitest";
 import {
+  activeSymbols,
+  facilityOwner,
   facilitySymbols,
   GLYPH_PATHS,
+  layoutSymbols,
   SYMBOL_BORDER,
   SYMBOL_RADIUS,
   SYMBOL_RADIUS_FAR,
   symbolBox,
   symbolLook,
 } from "./facility-symbols.ts";
-import { facilityLabels, facilityOwner, placeLabels } from "./labels.ts";
+import {
+  facilityCandidates,
+  facilityLabels,
+  type Measure,
+  nextLabelStage,
+  placeLabels,
+  STAGE_NEAR,
+  STAGE_STANDARD,
+} from "./labels.ts";
 import { FACILITY_STYLES } from "./palette.ts";
 import { BLOCK_BAND, DETAIL_BAND } from "./stages.ts";
 
@@ -55,12 +66,23 @@ describe("出す記号", () => {
       expect(symbols).toHaveLength(groups.length);
       expect(symbols.every((s) => s.alpha === 1)).toBe(true);
     }
-    // 3 棟のまとまりの記号は、まとまりの中心に出す
+  });
+
+  test("まとまりの記号は、中心にいちばん近い施設の敷地の中心に置く", () => {
+    // 3 棟（敷地の中心の x は 1、5、9）の外接矩形の中心は 5 で、真ん中の敷地の中心に当たる
     const three = groups.find((g) => g.count === 3);
-    const symbol = facilitySymbols(groups, 8).find(
-      (s) => s.owner === (three && facilityOwner(three)),
-    );
-    expect([symbol?.x, symbol?.y]).toEqual([three?.centerX, three?.centerY]);
+    expect([three?.centerX, three?.centerY]).toEqual([5, 1]);
+    // 外接矩形の中心が空き地になる配置（L 字）でも、いずれかの敷地の中心に置く
+    const l = facilityLabels(
+      0,
+      [
+        [0, 0, 1, 1, 1],
+        [0, 8, 1, 9, 1],
+        [8, 8, 9, 9, 1],
+      ].flat(),
+      () => false,
+    )[0];
+    expect(l?.members.some((m) => m.x === l.centerX && m.y === l.centerY)).toBe(true);
   });
 
   test("寄りは、施設 1 つずつに記号を出す", () => {
@@ -73,70 +95,118 @@ describe("出す記号", () => {
   test("標準から寄りへ移るあいだは、まとまりの記号を薄くし、1 つずつの記号を濃くする", () => {
     const mid = (DETAIL_BAND[0] + DETAIL_BAND[1]) / 2;
     const symbols = count(mid, 3);
-    // まとまりの記号 1 つと、3 棟の記号
     expect(symbols).toHaveLength(4);
     const alphas = symbols.map((s) => s.alpha);
     expect(alphas[0]).toBeGreaterThan(0);
     expect(alphas[0]).toBeLessThan(1);
     expect(alphas[0]).toBeCloseTo(1 - (alphas[1] ?? 0));
-    // 1 棟だけのまとまりは、入れ替えずに同じ位置で出し続ける
     expect(count(mid, 1).every((s) => s.alpha === 1)).toBe(true);
-    // 境目の外では、どちらか片方だけを描く
     expect(count(DETAIL_BAND[0], 3)).toHaveLength(1);
     expect(count(DETAIL_BAND[1], 3)).toHaveLength(3);
   });
 
+  test("名前の段が出している記号だけを数える", () => {
+    const mid = (DETAIL_BAND[0] + DETAIL_BAND[1]) / 2;
+    const placed = layoutSymbols(groups, { x: 5, y: 1, zoom: mid }, { width: 400, height: 200 });
+    expect(activeSymbols(placed, false).some((s) => s.phase === "member")).toBe(false);
+    expect(activeSymbols(placed, true).some((s) => s.phase === "group")).toBe(false);
+  });
+
   test("記号の範囲は、縁を含む丸と影を囲む", () => {
-    const s = { owner: "a", kind: 1, x: 10, y: 5, alpha: 1 };
-    const box = symbolBox(s, { x: 10, y: 5, zoom: 8 }, { width: 200, height: 100 }, SYMBOL_RADIUS);
+    const box = symbolBox({ sx: 100, sy: 50 }, SYMBOL_RADIUS);
     const r = SYMBOL_RADIUS + SYMBOL_BORDER;
     expect(box.x0).toBe(100 - r);
     expect(box.x1).toBe(100 + r);
     expect(box.y0).toBe(50 - r);
     expect(box.y1).toBeGreaterThan(50 + r);
   });
+
+  test("丸が重なる記号は、重ならない所までずらす", () => {
+    // 2 マスの隙間もない別の種類の施設を、倍率 4 で並べる
+    const near = facilityLabels(
+      0,
+      [
+        [0, 0, 1, 1, 1],
+        [2, 0, 3, 1, 2],
+      ].flat(),
+      () => false,
+    );
+    const placed = layoutSymbols(near, { x: 2, y: 1, zoom: 4 }, { width: 400, height: 200 });
+    const [a, b] = placed;
+    const min = 2 * (symbolLook(4).radius + SYMBOL_BORDER);
+    expect(
+      Math.hypot((a?.sx ?? 0) - (b?.sx ?? 0), (a?.sy ?? 0) - (b?.sy ?? 0)),
+    ).toBeGreaterThanOrEqual(min);
+  });
 });
 
-describe("ラベルとの重なり", () => {
-  const camera = { x: 5, y: 1, zoom: 8 };
-  const viewport = { width: 400, height: 200 };
+describe("施設の名前と記号", () => {
+  const measure: Measure = (text, style) => ({ w: style.size * [...text].length, h: style.size });
+  const vp = { width: 900, height: 300 };
 
-  test("施設の名前は自分の記号の右に置け、ほかのラベルは記号の上に置かない", () => {
-    const three = groups.find((g) => g.count === 3);
-    // 隣の発電所の記号が名前にかぶらないよう、3 棟のまとまりだけを出す
-    const symbols = facilitySymbols(three ? [three] : [], camera.zoom);
-    const obstacles = symbols.map((s) => ({
-      ...symbolBox(s, camera, viewport, SYMBOL_RADIUS),
-      owner: s.owner,
-    }));
-    const center = {
-      x: ((three?.centerX ?? 0) - camera.x) * camera.zoom + viewport.width / 2,
-      y: ((three?.centerY ?? 0) - camera.y) * camera.zoom + viewport.height / 2,
-    };
-    const candidate = (owner: string | undefined, x0: number) => ({
-      id: `${owner}|${x0}`,
-      priority: 1,
-      text: "名",
-      style: { size: 12, weight: 600, spacing: 0, color: "#000", alpha: 1, shield: false },
-      vertical: false,
-      angle: 0,
-      wx: 0,
-      wy: 0,
-      ox: 0,
-      oy: 0,
-      w: 40,
-      h: 16,
-      box: { x0, y0: center.y - 8, x1: x0 + 40, y1: center.y + 8 },
-      owner,
-    });
-    // 記号の右 15px から始まる名前は、自分の記号には余白をとらずに調べるので置ける
-    expect(
-      placeLabels([candidate(three && facilityOwner(three), center.x + 15)], new Set(), obstacles),
-    ).toHaveLength(1);
-    // 持ち主のないラベルは、記号の縁に重なる所には置けない
-    expect(placeLabels([candidate(undefined, center.x + 15)], new Set(), obstacles)).toHaveLength(
-      0,
+  /** 名前を置き、置けた名前を返す。記号は名前の段が出しているものを置けない範囲にする。 */
+  const placeNames = (
+    list: typeof groups,
+    camera: { x: number; y: number; zoom: number },
+    stage: number,
+  ) => {
+    const look = symbolLook(camera.zoom);
+    const obstacles = activeSymbols(layoutSymbols(list, camera, vp), stage >= STAGE_NEAR).map(
+      (s) => ({
+        ...symbolBox(s, look.radius),
+        owner: s.key,
+      }),
     );
-    expect(placeLabels([candidate(undefined, center.x - 5)], new Set(), obstacles)).toHaveLength(0);
+    return placeLabels(facilityCandidates(list, camera, vp, stage, measure), new Set(), obstacles);
+  };
+
+  test("右にほかの施設の記号があっても、左、下、上の順で置き場所を探して名前を出す", () => {
+    // 浄水場 3 棟の右隣に、発電所がある（名前の右 15px は発電所の記号に当たる）
+    const list = facilityLabels(
+      0,
+      [
+        [0, 0, 1, 1, 2],
+        [4, 0, 5, 1, 2],
+        [8, 0, 9, 1, 2],
+        [10, 0, 13, 3, 1],
+      ].flat(),
+      () => false,
+    );
+    const placed = placeNames(list, { x: 7, y: 2, zoom: 8 }, STAGE_STANDARD);
+    expect(placed).toHaveLength(2);
+    // 浄水場の名前は、右でなく別の側に置かれる
+    const water = placed.find((c) => c.text.includes("浄水場"));
+    expect(water?.ox).not.toBe(15);
+  });
+
+  test("名前を置けなくても、記号は出る", () => {
+    const list = facilityLabels(0, [[0, 0, 1, 1, 2]].flat(), () => false);
+    const camera = { x: 1, y: 1, zoom: 8 };
+    expect(placeNames(list, { ...camera }, STAGE_STANDARD).length).toBeGreaterThan(0);
+    expect(layoutSymbols(list, camera, { width: 20, height: 20 })).toHaveLength(1);
+    expect(
+      facilityCandidates(list, camera, { width: 20, height: 20 }, STAGE_STANDARD, measure),
+    ).toEqual([]);
+  });
+
+  test("倍率 9〜13 を細かく動かしても、まとまりの名前は消えない", () => {
+    const list = facilityLabels(
+      0,
+      [
+        [0, 0, 1, 1, 2],
+        [4, 0, 5, 1, 2],
+        [8, 0, 9, 1, 2],
+      ].flat(),
+      () => false,
+    );
+    for (const direction of [1, -1]) {
+      let stage = direction > 0 ? STAGE_STANDARD : STAGE_NEAR;
+      for (let i = 0; i <= 16; i++) {
+        const zoom = direction > 0 ? 9 + i / 4 : 13 - i / 4;
+        stage = nextLabelStage(zoom, stage);
+        const placed = placeNames(list, { x: 5, y: 1, zoom }, stage);
+        expect(placed, `倍率 ${zoom}`).toHaveLength(1);
+      }
+    }
   });
 });

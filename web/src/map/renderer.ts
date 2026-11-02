@@ -10,7 +10,7 @@ import {
 } from "../protocol/messages.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { chunkKey, type StoredChunk } from "./chunk-sync.ts";
-import { LayerOverlay } from "./layers.ts";
+import { LayerOverlay, WASH } from "./layers.ts";
 import { MoverLayer } from "./movers.ts";
 import {
   GROUND_COLOR,
@@ -26,6 +26,7 @@ import {
 } from "./palette.ts";
 import { buildingEdgeColor, RoadLayer, ZONE_COLORS, zoneGroundColor } from "./roads.ts";
 import { stageWeights } from "./stages.ts";
+import { demandColor, demandShare } from "./themes.ts";
 
 const vec3 = ([r, g, b]: readonly number[]) => `vec3(${r}, ${g}, ${b})`;
 
@@ -157,6 +158,37 @@ void main() {
   color = vec4(c, 1.0);
 }`;
 
+const DEMAND_PALETTE = new Float32Array(
+  [1, 2, 3, 4].flatMap((zone) => {
+    const [r = 0, g = 0, b = 0] = demandColor(zone);
+    return [r, g, b];
+  }),
+);
+
+// 需要の主題図。チャンクのマスの区画と建物のビットを読み、建物のない区画をその種類の需要の高さで濃く塗る。
+// ほかのマスは白で薄める
+const DEMAND_FRAGMENT = `#version 300 es
+precision mediump float;
+uniform mediump usampler2D u_tiles;
+uniform bool u_owned;
+uniform vec3 u_deep[4];
+uniform float u_share[4];
+uniform float u_wash;
+in highp vec2 v_uv;
+out vec4 color;
+void main() {
+  ivec2 t = min(ivec2(floor(v_uv * ${CHUNK_SIDE}.0)), ivec2(${CHUNK_SIDE - 1}));
+  uint tile = texelFetch(u_tiles, t, 0).r;
+  uint zone = (tile >> ${TILE_ZONE_SHIFT}u) & 7u;
+  bool empty = (tile & (${TILE_BUILDING}u | ${TILE_WATER}u)) == 0u;
+  if (u_owned && empty && zone >= 1u && zone <= 4u) {
+    int i = int(zone - 1u);
+    color = vec4(mix(vec3(1.0), u_deep[i], u_share[i]), 1.0);
+  } else {
+    color = vec4(1.0, 1.0, 1.0, u_wash);
+  }
+}`;
+
 function compile(gl: WebGL2RenderingContext, type: GLenum, source: string): WebGLShader {
   const shader = gl.createShader(type);
   if (shader === null) {
@@ -209,6 +241,13 @@ export class MapRenderer {
   >;
   /** 区画を塗れるマスを明るく示すか。区画の道具を選んでいるあいだだけ true にする。 */
   showZonable = false;
+  /** 需要の主題図の、住宅・商業・工業・オフィスの需要の高さ（0〜1）。null なら需要の主題図を出さない。 */
+  demand: readonly number[] | null = null;
+  readonly #demandProgram: WebGLProgram;
+  readonly #du: Record<
+    "offset" | "size" | "viewport" | "tiles" | "owned" | "share" | "wash",
+    WebGLUniformLocation
+  >;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -245,6 +284,20 @@ export class MapRenderer {
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindVertexArray(null);
+    const demand = link(gl, VERTEX, DEMAND_FRAGMENT);
+    this.#demandProgram = demand;
+    gl.useProgram(demand);
+    this.#du = {
+      offset: uniform(gl, demand, "u_offset"),
+      size: uniform(gl, demand, "u_size"),
+      viewport: uniform(gl, demand, "u_viewport"),
+      tiles: uniform(gl, demand, "u_tiles"),
+      owned: uniform(gl, demand, "u_owned"),
+      share: uniform(gl, demand, "u_share"),
+      wash: uniform(gl, demand, "u_wash"),
+    };
+    gl.uniform1i(this.#du.tiles, 0);
+    gl.uniform3fv(uniform(gl, demand, "u_deep"), DEMAND_PALETTE);
     this.roads = new RoadLayer(gl, (v, f) => link(gl, v, f));
     this.layers = new LayerOverlay(gl, (v, f) => link(gl, v, f));
     this.movers = new MoverLayer(gl, (v, f) => link(gl, v, f));
@@ -335,6 +388,49 @@ export class MapRenderer {
     gl.bindVertexArray(null);
     this.roads.draw(camera, viewport);
     this.layers.draw(camera, viewport, range);
+    if (this.demand !== null) {
+      this.#drawDemand(camera, viewport, range, this.demand);
+    }
+    // 道具の仮の表示は、主題図に隠れないよう最後に描く
+    this.roads.draw(camera, viewport, "preview");
     return drawn;
+  }
+
+  #drawDemand(
+    camera: Camera,
+    viewport: Viewport,
+    range: ChunkRange,
+    demand: readonly number[],
+  ): void {
+    const gl = this.#gl;
+    gl.useProgram(this.#demandProgram);
+    gl.bindVertexArray(this.#vao);
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+    gl.uniform2f(this.#du.viewport, viewport.width, viewport.height);
+    gl.uniform1f(this.#du.size, CHUNK_SIDE * camera.zoom);
+    gl.uniform1f(this.#du.wash, WASH);
+    gl.uniform1fv(
+      this.#du.share,
+      [0, 1, 2, 3].map((i) => demandShare(demand[i] ?? 0)),
+    );
+    for (let cy = range.minCy; cy <= range.maxCy; cy++) {
+      for (let cx = range.minCx; cx <= range.maxCx; cx++) {
+        const entry = this.#textures.get(chunkKey(cx, cy));
+        if (entry === undefined) {
+          continue;
+        }
+        gl.uniform2f(
+          this.#du.offset,
+          (cx * CHUNK_SIDE - camera.x) * camera.zoom,
+          (cy * CHUNK_SIDE - camera.y) * camera.zoom,
+        );
+        gl.uniform1i(this.#du.owned, entry.owned ? 1 : 0);
+        gl.bindTexture(gl.TEXTURE_2D, entry.texture);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+    }
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
   }
 }

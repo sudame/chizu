@@ -177,6 +177,11 @@ export type WorkerToMain =
   | { kind: "chunks"; chunks: ChunkData[] }
   /** データレイヤーの値。版が変わったチャンクだけを送る。 */
   | { kind: "layer-chunks"; layer: LayerCode; chunks: LayerChunkData[] }
+  /**
+   * 交通の、区間ごとの値（chizu-wasm の traffic_segments）。並びは revision の道路網の road_segments と同じ。
+   * 値か道路網が変わったときだけ送る。
+   */
+  | { kind: "traffic"; revision: number; values: ArrayBuffer }
   /** state は chizu-wasm の feedback_state の JSON、commands は記録を encode したもの。 */
   | { kind: "feedback"; state: string; commands: ArrayBuffer }
   /** probe-service の答え。results は向き 0〜3 の順に、置けるなら null、置けないなら理由の文。 */
@@ -259,6 +264,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "chunks":
       return Array.isArray(v.chunks) && v.chunks.every(isChunkData);
+    case "traffic":
+      return typeof v.revision === "number" && v.values instanceof ArrayBuffer;
     case "layer-chunks":
       return (
         Number.isInteger(v.layer) &&

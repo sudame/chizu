@@ -4,6 +4,13 @@
 
 import { BUILDING_STRIDE, FACILITY_STRIDE, SEGMENT_STRIDE } from "../protocol/messages.ts";
 import {
+  activeSymbols,
+  facilityOwner,
+  layoutSymbols,
+  SYMBOL_BORDER,
+  symbolLook,
+} from "./facility-symbols.ts";
+import {
   chunkOf,
   districtName,
   type FacilityGroup,
@@ -144,8 +151,10 @@ export type Candidate = {
   h: number;
   /** 画面の上で占める範囲。回したときは、回した画像を囲む長方形。 */
   box: Rect;
-  /** 施設の名前のとき、記号を出すまとまりの識別子。自分のまとまりの記号とは、余白をとらずに重なりを調べる。 */
+  /** 施設の名前のとき、名前を添える記号の識別子。その記号とは、余白をとらずに重なりを調べる。 */
   owner?: string;
+  /** 同じ値の候補は、1 つだけ置く。置き方の違う候補を、優先の高い順に並べるのに使う。 */
+  group?: string;
 };
 
 // ---- 道路 ----
@@ -503,7 +512,7 @@ export const FACILITY_LABEL_OFFSET = 15;
 export type Point = { x: number; y: number };
 
 /**
- * 施設のまとまり。座標は左上のマスと、記号を置く中心のワールド座標。
+ * 施設のまとまり。座標は左上のマスと、まとまりの記号を置くワールド座標（中心にいちばん近い施設の敷地の中心）。
  * `members` は施設 1 つずつの中心で、寄りの段ではここに記号を 1 つずつ置く。
  */
 export type FacilityLabel = {
@@ -516,10 +525,6 @@ export type FacilityLabel = {
   centerY: number;
   members: Point[];
 };
-
-/** まとまりの識別子。記号と名前の対応づけに使う。 */
-export const facilityOwner = (f: Pick<FacilityLabel, "kind" | "x" | "y">) =>
-  `${f.kind}|${f.x},${f.y}`;
 
 type Box = { x0: number; y0: number; x1: number; y1: number; kind: number };
 
@@ -588,28 +593,40 @@ export function facilityLabels(
     y: g.y0,
     count: g.count,
     name: names[i] ?? "",
-    centerX: (g.x0 + g.x1 + 1) / 2,
-    centerY: (g.y0 + g.y1 + 1) / 2,
+    ...centerOn(nearestTo((g.x0 + g.x1 + 1) / 2, (g.y0 + g.y1 + 1) / 2, g.members)),
     members: g.members,
   }));
 }
+
+/** 点 (x, y) にいちばん近い点。同じ距離なら上、左の順に選ぶ。 */
+function nearestTo(x: number, y: number, points: readonly Point[]): Point {
+  let best = points[0] as Point;
+  let bestD = Number.POSITIVE_INFINITY;
+  for (const p of points) {
+    const d = (p.x - x) ** 2 + (p.y - y) ** 2;
+    if (d < bestD || (d === bestD && (p.y < best.y || (p.y === best.y && p.x < best.x)))) {
+      best = p;
+      bestD = d;
+    }
+  }
+  return best;
+}
+const centerOn = (p: Point) => ({ centerX: p.x, centerY: p.y });
 
 /** 施設のラベルの文字。標準の段では、2 棟以上のまとまりに棟の数を添える。 */
 export function facilityText(f: FacilityLabel, stage: number): string {
   return stage === STAGE_STANDARD && f.count > 1 ? `${f.name}（${f.count} 棟）` : f.name;
 }
 
-/**
- * 名前を置く記号の位置の候補を、先に試す順に返す。標準の段は、まとまりの 1 つの記号である。
- * 寄りの段は記号を 1 つずつ出すので、いちばん右の記号（右が同じなら上）から順に、その右に置いて、
- * ほかの記号にかぶせない。いちばん右の記号が画面の外にあるときは、次の記号に置く。
- */
-export function facilityAnchors(f: FacilityLabel, stage: number): Point[] {
-  if (stage < STAGE_NEAR || f.members.length === 0) return [{ x: f.centerX, y: f.centerY }];
-  return [...f.members].sort((a, b) => b.x - a.x || a.y - b.y);
-}
+/** 1 つのまとまりの名前について試す候補の数の上限。 */
+const MAX_FACILITY_ALTERNATIVES = 12;
+// 記号の下と上に置くときの、丸の縁から名前までの隙間（CSS ピクセル）
+const BELOW_GAP = 3;
 
-/** 施設の名前の候補。画面に収まるものだけを出す。 */
+/**
+ * 施設の名前の候補。画面に収まるものだけを出す。名前は、記号の右、左、下、上の順で試す（同じ `group` の候補は
+ * 1 つだけ置く）。寄りの段は記号が 1 つずつ並ぶので、いちばん右の記号から順に試す。
+ */
 export function facilityCandidates(
   facilities: readonly FacilityLabel[],
   camera: CameraView,
@@ -619,34 +636,48 @@ export function facilityCandidates(
 ): Candidate[] {
   const ls = labelStyle("facility", stage);
   if (ls === null) return [];
+  const near = stage >= STAGE_NEAR;
+  const symbols = activeSymbols(layoutSymbols(facilities, camera, vp), near);
+  const reach = symbolLook(camera.zoom).radius + SYMBOL_BORDER;
   const out: Candidate[] = [];
   for (const f of facilities) {
+    const owner = facilityOwner(f);
     const style = { ...ls.style, color: FACILITY_LABEL_COLORS[f.kind] ?? ls.style.color };
     const label = facilityText(f, stage);
     const size = measure(label, style, false);
-    const ox = FACILITY_LABEL_OFFSET;
-    const oy = -size.h / 2;
-    for (const anchor of facilityAnchors(f, stage)) {
-      const s = toScreen(camera, vp, anchor.x, anchor.y);
-      const box = { x0: s.x + ox, y0: s.y + oy, x1: s.x + ox + size.w, y1: s.y + oy + size.h };
-      if (!inside(box, vp)) continue;
-      out.push({
-        id: `facility|${f.kind}|${f.x},${f.y}|${label}|${styleKey(style)}`,
-        priority: ls.priority,
-        text: label,
-        style,
-        vertical: false,
-        angle: 0,
-        wx: anchor.x,
-        wy: anchor.y,
-        ox,
-        oy,
-        w: size.w,
-        h: size.h,
-        box,
-        owner: facilityOwner(f),
-      });
-      break;
+    const anchors = symbols.filter((s) => s.owner === owner).sort((a, b) => b.x - a.x || a.y - b.y);
+    let count = 0;
+    for (const anchor of anchors) {
+      // 画面の位置（ずらしたあと）を基準に、記号の右、左、下、上の順に置く
+      const sides: [string, number, number][] = [
+        ["r", anchor.sx + FACILITY_LABEL_OFFSET, anchor.sy - size.h / 2],
+        ["l", anchor.sx - FACILITY_LABEL_OFFSET - size.w, anchor.sy - size.h / 2],
+        ["b", anchor.sx - size.w / 2, anchor.sy + reach + BELOW_GAP],
+        ["t", anchor.sx - size.w / 2, anchor.sy - reach - BELOW_GAP - size.h],
+      ];
+      for (const [side, x0, y0] of sides) {
+        const box = { x0, y0, x1: x0 + size.w, y1: y0 + size.h };
+        if (!inside(box, vp) || count >= MAX_FACILITY_ALTERNATIVES) continue;
+        count++;
+        const home = toScreen(camera, vp, anchor.x, anchor.y);
+        out.push({
+          id: `facility|${anchor.key}|${side}|${label}|${styleKey(style)}`,
+          priority: ls.priority,
+          text: label,
+          style,
+          vertical: false,
+          angle: 0,
+          wx: anchor.x,
+          wy: anchor.y,
+          ox: x0 - home.x,
+          oy: y0 - home.y,
+          w: size.w,
+          h: size.h,
+          box,
+          owner: anchor.key,
+          group: owner,
+        });
+      }
     }
   }
   return out;
@@ -684,7 +715,9 @@ export function placeLabels(
     .slice(0, MAX_CANDIDATES);
   const placed: Candidate[] = [];
   const taken: Rect[] = [];
+  const doneGroups = new Set<string>();
   for (const { c } of order) {
+    if (c.group !== undefined && doneGroups.has(c.group)) continue;
     const m = LABEL_MARGIN;
     const padded = { x0: c.box.x0 - m, y0: c.box.y0 - m, x1: c.box.x1 + m, y1: c.box.y1 + m };
     // 自分のまとまりの記号は、名前を記号の右 15px に置くと余白に入るので、余白をとらずに調べる
@@ -696,6 +729,7 @@ export function placeLabels(
     }
     placed.push(c);
     taken.push(c.box);
+    if (c.group !== undefined) doneGroups.add(c.group);
   }
   return placed;
 }

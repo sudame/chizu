@@ -168,9 +168,9 @@ export function asphaltHalfWidth(kindCode: number): number {
 
 // 斜めの区間は、隣り合う道路のマスが角でしか接しない。車道の帯は角を越えて脇のマスにかかるので、
 // 脇のマスの建物（角から 0.15 マス内側）にかからない幅に抑える。歩道は道路のマスを階段状に塗る
-const DIAGONAL_ASPHALT_HALF = 0.2;
+export const DIAGONAL_ASPHALT_HALF = 0.2;
 
-const isDiagonal = (a: Tile, b: Tile) => a.x !== b.x && a.y !== b.y;
+export const isDiagonal = (a: Tile, b: Tile) => a.x !== b.x && a.y !== b.y;
 
 /** 区間 a〜b に描く車道の半分の幅（マス）。斜めの区間では脇のマスの建物にかからない幅に抑える。 */
 export function drawnAsphaltHalf(kindCode: number, a: Tile, b: Tile): number {
@@ -230,6 +230,13 @@ export function footprintOutline(
     dashPx,
   );
 }
+
+/** RoadLayer に渡せる頂点の並び。Geometry のほか、交通の主題図の頂点（traffic.ts）もこの形にする。 */
+export type MeshSource = {
+  readonly origin: Tile;
+  readonly vertexCount: number;
+  build(): Float32Array;
+};
 
 /** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
 export class Geometry {
@@ -296,6 +303,7 @@ export class Geometry {
    * マス a の中心からマス b の中心への、中心線から `offset`（マス）だけ横にずらした帯。
    * 半分の太さ `half` は世界の単位で、画面では `min` ピクセルを下回らない。
    * 両端は `trimA` と `trimB`（マス）だけ内側に縮める。`offset` の正は進む向き（a から b）の右である。
+   * `extra` は画面で半分の太さに足すピクセル数、`dashPx` が正なら画面でその周期の破線にする。
    */
   strip(
     a: Tile,
@@ -306,6 +314,8 @@ export class Geometry {
     min: number,
     trimA = 0,
     trimB = 0,
+    extra = 0,
+    dashPx = 0,
   ): void {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
@@ -319,14 +329,15 @@ export class Geometry {
     const ay = a.y + 0.5 + uy * trimA + ny * offset;
     const bx = b.x + 0.5 - ux * trimB + nx * offset;
     const by = b.y + 0.5 - uy * trimB + ny * offset;
-    const v = (x: number, y: number, s: number) =>
-      this.#vertex(x, y, nx * s, ny * s, half, min, color);
-    v(ax, ay, 1);
-    v(ax, ay, -1);
-    v(bx, by, 1);
-    v(bx, by, 1);
-    v(ax, ay, -1);
-    v(bx, by, -1);
+    const along = len - trimA - trimB;
+    const v = (x: number, y: number, s: number, d: number) =>
+      this.#vertex(x, y, nx * s, ny * s, half, min, color, extra, d, dashPx);
+    v(ax, ay, 1, 0);
+    v(ax, ay, -1, 0);
+    v(bx, by, 1, along);
+    v(bx, by, 1, along);
+    v(ax, ay, -1, 0);
+    v(bx, by, -1, along);
   }
 
   /** マスの中心に置く正方形。 */
@@ -529,7 +540,7 @@ export const CLUSTER_INSET = 0.06;
  * 建物と施設の頂点。段ごとに濃さを変えて重ねるので、描く順に分けて持つ。
  * - `clusters`：標準の段の、建物のまとまり（隙間を細く、縁なし）
  * - `details`：寄りの段の、建物と施設の影と、建物の縁
- * - `facilities`：施設の敷地の縁と面。引きでは描かず、標準から濃くしていく（丸い記号は label-layer.ts が描く）
+ * - `facilities`：施設の敷地の縁と面。どの段でも描く（丸い記号は label-layer.ts が描く）
  * - `bodies`：寄りの段の、1 軒ずつの建物の本体
  * - `marks`：電気か水道が届いていない印
  */
@@ -638,7 +649,7 @@ type Arm = { segment: number; dx: number; dy: number };
  * 塗る車道のいちばん広い半分の幅で、`asphaltColor` と `edgeColor` はその車道の塗りと縁の色である。
  * `minPx` は縮小したときの車道の太さの下限のいちばん大きい値、`sidewalk` は歩道のある区間がつながっているかである。
  */
-type RoadNode = {
+export type RoadNode = {
   half: number;
   asphalt: number;
   asphaltColor: Color;
@@ -651,7 +662,7 @@ type RoadNode = {
   sidewalk: boolean;
   arms: Arm[];
 };
-type RoadNodes = Map<string, RoadNode>;
+export type RoadNodes = Map<string, RoadNode>;
 
 const nodeKey = (x: number, y: number) => `${x},${y}`;
 
@@ -700,7 +711,7 @@ function roadNodes(segments: Float64Array): RoadNodes {
 // ノードのマスを拡大したときに埋める色。歩道のある道路がつながっていれば歩道の色、高速道路だけなら縁の色にする
 const groundOf = (node: RoadNode): Color => (node.sidewalk ? SIDEWALK_COLOR : node.edgeColor);
 
-type RoadNet = {
+export type RoadNet = {
   ends: RoadNodes;
   /** `noCrosswalk` は横断歩道を外した腕の向きのビット（chizu-wasm の road_nodes の 5 つめ）である。 */
   nodeList: { x: number; y: number; node: RoadNode; noCrosswalk: number }[];
@@ -708,7 +719,7 @@ type RoadNet = {
   each: (fn: (a: Tile, b: Tile, kind: number, index: number) => void) => void;
 };
 
-function roadNet(segments: Float64Array, nodes: Float64Array): RoadNet {
+export function roadNet(segments: Float64Array, nodes: Float64Array): RoadNet {
   const ends = roadNodes(segments);
   const nodeList: RoadNet["nodeList"] = [];
   for (let i = 0; i + NODE_STRIDE <= nodes.length; i += NODE_STRIDE) {
@@ -800,7 +811,7 @@ export function miterTrim(
  * 3 本以上が集まる交差点では `crossing(node)` だけ縮め（斜めの区間は √2 倍）、2 本だけがつながる角では
  * 折れ曲がりに沿ってつなぐ。行き止まりでは縮めない。
  */
-function trimmer(segments: Float64Array, ends: RoadNodes) {
+export function trimmer(segments: Float64Array, ends: RoadNodes) {
   return (
     index: number,
     atEnd: boolean,
@@ -1177,6 +1188,9 @@ const MESH_NAMES = [
   "lanes",
   "markings",
   "signals",
+  "trafficFree",
+  "trafficBusy",
+  "trafficBands",
   "preview",
 ] as const;
 export type MeshName = (typeof MESH_NAMES)[number];
@@ -1193,7 +1207,7 @@ export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
   const order: [MeshName, number][] = [
     ["clusters", w.clusters],
     ["details", w.detail],
-    ["facilities", w.marks],
+    ["facilities", 1],
     // 寄りに移るあいだは、本体を濃いまま描き、縁と影と隙間だけを濃くしていく
     ["bodies", w.detail > 0 ? 1 : 0],
     ["marks", w.marks],
@@ -1202,6 +1216,10 @@ export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
     ["lanes", w.detail],
     ["markings", w.detail],
     ["signals", w.detail],
+    // 交通の主題図。道路の中の線は、寄りに入ると車道の両端の帯に替わる。「空いている」は引きでは描かない
+    ["trafficFree", (1 - w.detail) * w.trafficFree],
+    ["trafficBusy", 1 - w.detail],
+    ["trafficBands", w.detail],
     ["preview", 1],
   ];
   // 小の道路は不透明に描き、色を地面の色に寄せて薄くする
@@ -1263,7 +1281,7 @@ export class RoadLayer {
     return { buffer, vao, count: 0, origin: { x: 0, y: 0 } };
   }
 
-  #upload(name: MeshName, geometry: Geometry): void {
+  #upload(name: MeshName, geometry: MeshSource): void {
     const gl = this.#gl;
     const mesh = this.#meshes[name];
     gl.bindBuffer(gl.ARRAY_BUFFER, mesh.buffer);
@@ -1291,11 +1309,23 @@ export class RoadLayer {
     this.#upload("signals", geometry);
   }
 
+  /** 交通の主題図。null なら消す。 */
+  setTraffic(meshes: { free: MeshSource; busy: MeshSource; bands: MeshSource } | null): void {
+    const empty = new Geometry({ x: 0, y: 0 });
+    this.#upload("trafficFree", meshes?.free ?? empty);
+    this.#upload("trafficBusy", meshes?.busy ?? empty);
+    this.#upload("trafficBands", meshes?.bands ?? empty);
+  }
+
   setPreview(geometry: Geometry | null): void {
     this.#upload("preview", geometry ?? new Geometry({ x: 0, y: 0 }));
   }
 
-  draw(camera: Camera, viewport: Viewport): void {
+  /**
+   * メッシュを下から順に描く。`part` が "map" なら道具の仮の表示を除いて描き、"preview" なら仮の表示だけを描く。
+   * 仮の表示は、主題図（電気、水道、需要の面）より上に出すので、主題図のあとに分けて描く。
+   */
+  draw(camera: Camera, viewport: Viewport, part: "map" | "preview" = "map"): void {
     const gl = this.#gl;
     gl.useProgram(this.#program);
     gl.uniform1f(this.#u.zoom, camera.zoom);
@@ -1304,6 +1334,9 @@ export class RoadLayer {
     // 色だけを重ね、フレームバッファのアルファは 1 のまま保つ（キャンバスがページの背景と混ざって白く飛ばないように）
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
     for (const [name, alpha, fade] of roadDrawOrder(camera.zoom)) {
+      if ((name === "preview") !== (part === "preview")) {
+        continue;
+      }
       const mesh = this.#meshes[name];
       if (mesh.count === 0 || alpha === 0) {
         continue;

@@ -4,9 +4,10 @@
 
 import { TILE_WATER } from "../protocol/messages.ts";
 import {
+  activeSymbols,
   drawSymbol,
-  type FacilitySymbol,
-  facilitySymbols,
+  layoutSymbols,
+  type PlacedSymbol,
   SYMBOL_BORDER,
   symbolBox,
   symbolLook,
@@ -28,6 +29,7 @@ import {
   type RoadRun,
   roadCandidates,
   roadRuns,
+  STAGE_NEAR,
   STAGE_STANDARD,
   styleKey,
   type TextStyle,
@@ -77,7 +79,7 @@ export class LabelLayer {
   #runs: RoadRun[] = [];
   #districts: DistrictLabel[] = [];
   #facilityLabels: FacilityLabel[] = [];
-  #symbols: FacilitySymbol[] = [];
+  #symbols: PlacedSymbol[] = [];
   #roadsDirty = false;
   #placesDirty = false;
   #stage = STAGE_STANDARD;
@@ -219,12 +221,12 @@ export class LabelLayer {
       ...facilityCandidates(this.#facilityLabels, camera, viewport, this.#stage, measure),
     ];
     // 施設の記号の上にも、ほかのラベルを置かない
-    this.#symbols = facilitySymbols(this.#facilityLabels, camera.zoom);
+    this.#symbols = layoutSymbols(this.#facilityLabels, camera, viewport);
     const look = symbolLook(camera.zoom);
-    const symbolObstacles: Obstacle[] = this.#symbols.map((s) => ({
-      ...symbolBox(s, camera, viewport, look.radius),
-      owner: s.owner,
-    }));
+    // 名前の段が出している記号だけを、置けない範囲にする。名前を添える記号は、名前の置き方で外す
+    const symbolObstacles: Obstacle[] = activeSymbols(this.#symbols, this.#stage >= STAGE_NEAR).map(
+      (s) => ({ ...symbolBox(s, look.radius), owner: s.key }),
+    );
     const placed = placeLabels(candidates, this.#fader.shown(), [
       ...this.#readObstacles(),
       ...symbolObstacles,
@@ -298,17 +300,15 @@ export class LabelLayer {
     const reach = look.radius + SYMBOL_BORDER + 2;
     ctx.setTransform(this.#dpr, 0, 0, this.#dpr, 0, 0);
     for (const s of this.#symbols) {
-      const sx = (s.x - camera.x) * camera.zoom + viewport.width / 2;
-      const sy = (s.y - camera.y) * camera.zoom + viewport.height / 2;
       if (
-        sx < -reach ||
-        sy < -reach ||
-        sx > viewport.width + reach ||
-        sy > viewport.height + reach
+        s.sx < -reach ||
+        s.sy < -reach ||
+        s.sx > viewport.width + reach ||
+        s.sy > viewport.height + reach
       ) {
         continue;
       }
-      drawSymbol(ctx, s, sx, sy, look);
+      drawSymbol(ctx, s, look);
     }
     ctx.globalAlpha = 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);

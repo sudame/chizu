@@ -186,6 +186,23 @@ fn traffic_values(world: &World) -> LayerGrid {
     grid
 }
 
+/// 区間ごとの交通の値。並びは `Sim::road_segments` と同じ（`network.segments()` の順）で、
+/// 高速道路は混み具合を数えないので 0 にする。マスの値と違い、交わるマスで隣の区間の値に上書きされない。
+pub fn traffic_segment_values(world: &World) -> Vec<u8> {
+    let congestion = world.road_congestion();
+    world
+        .network()
+        .segments()
+        .map(|(id, s)| {
+            if s.kind == SegmentKind::Highway {
+                0
+            } else {
+                traffic_value(congestion.get(&id).copied())
+            }
+        })
+        .collect()
+}
+
 fn traffic_value(level: Option<Congestion>) -> u8 {
     match level.unwrap_or_default() {
         Congestion::Free => TRAFFIC_FREE,
@@ -287,6 +304,11 @@ impl Simulation {
         Ok((h.finish() & ((1 << 52) - 1)) as f64)
     }
 
+    /// 交通の、区間ごとの値。並びは `road_segments` と同じで、版は `layer_version(3)` で見分ける。
+    pub fn traffic_segments(&self) -> Vec<u8> {
+        traffic_segment_values(self.0.world())
+    }
+
     /// データレイヤーの、チャンクの 64×64 の値。
     pub fn layer_chunk(&mut self, code: u8, cx: i32, cy: i32) -> Result<Vec<u8>, JsError> {
         let layer = layer(code)?;
@@ -369,6 +391,36 @@ mod tests {
         // 発電所は足り、浄水場のない網だけが残る
         assert_eq!(utility_gaps(sim.world()), [0, 1, 0, 0]);
         assert_eq!(sim.city_stats()[12..16], [0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn traffic_segment_values_follow_the_road_segments_order() {
+        let mut sim = Sim::new(0);
+        sim.submit(Command::BuildRoad {
+            from: TilePos::new(10, 10),
+            to: TilePos::new(30, 10),
+            kind: RoadKind::Small,
+        })
+        .unwrap();
+        sim.submit(Command::BuildRoad {
+            from: TilePos::new(20, 10),
+            to: TilePos::new(20, 20),
+            kind: RoadKind::Medium,
+        })
+        .unwrap();
+        let values = traffic_segment_values(sim.world());
+        let segments = sim.road_segments();
+        assert_eq!(values.len() * 5, segments.len());
+        let highways = segments
+            .chunks(5)
+            .filter(|s| s[4] == f64::from(crate::sim::segment_kind_code(SegmentKind::Highway)))
+            .count();
+        // 高速道路は 0、ほかの区間は車がいなければ「空いている」
+        assert_eq!(values.iter().filter(|v| **v == 0).count(), highways);
+        assert_eq!(
+            values.iter().filter(|v| **v == TRAFFIC_FREE).count(),
+            values.len() - highways
+        );
     }
 
     #[test]
