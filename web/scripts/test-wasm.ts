@@ -283,6 +283,39 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   await page.close();
 }
 
+// 地図のラベル。起動した直後の画面には高速道路が入らないので、引きの段まで引いてから、
+// 高速道路の名前が、地図の上に重ねたラベルの canvas に盾で出ることを確かめる
+async function checkLabels(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  for (let i = 0; i < 2; i++) {
+    await page.locator("#zoom-out").click();
+  }
+  await page.waitForFunction(
+    () =>
+      (document.querySelector<HTMLElement>("#labels")?.dataset.labels ?? "").includes("自動車道"),
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  // ラベルは 200ms かけて現れる
+  await page.waitForTimeout(400);
+  const labelInk = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#labels");
+    const ctx = canvas?.getContext("2d");
+    if (canvas === null || canvas === undefined || ctx === null || ctx === undefined) return 0;
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    let n = 0;
+    for (let i = 3; i < data.length; i += 4) if ((data[i] ?? 0) > 0) n++;
+    return n;
+  });
+  check(
+    labelInk > 0,
+    `高速道路の名前のラベルが描かれる（${await page.locator("#labels").getAttribute("data-labels")}）`,
+  );
+
+  await page.close();
+}
+
 // 開発用の道具で歩く人を出し、描かれること、時間を進めると動くこと、着くと消えることを確かめる。
 // 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その左寄りと右寄りのマスのあいだに出す
 async function checkDevWalks(page: Page, at: string): Promise<void> {
@@ -580,29 +613,6 @@ try {
     initialSegments > 0,
     `起動すると、外部接続の高速道路のある道路網が届く（${initialSegments} 本）`,
   );
-  // 高速道路の名前が、地図の上に重ねたラベルの canvas に盾で出る
-  await page.waitForFunction(
-    () =>
-      (document.querySelector<HTMLElement>("#labels")?.dataset.labels ?? "").includes("自動車道"),
-    undefined,
-    { timeout: TIMEOUT_MS },
-  );
-  // ラベルは 200ms かけて現れる
-  await page.waitForTimeout(400);
-  const labelInk = await page.evaluate(() => {
-    const canvas = document.querySelector<HTMLCanvasElement>("#labels");
-    const ctx = canvas?.getContext("2d");
-    if (canvas === null || canvas === undefined || ctx === null || ctx === undefined) return 0;
-    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-    let n = 0;
-    for (let i = 3; i < data.length; i += 4) if ((data[i] ?? 0) > 0) n++;
-    return n;
-  });
-  check(
-    labelInk > 0,
-    `高速道路の名前のラベルが描かれる（${await page.locator("#labels").getAttribute("data-labels")}）`,
-  );
-
   // 道路を引く道具で、画面の中心の行に横の道路を引く
   const message = page.locator("#tool-message");
   const outcomeCount = async () => Number((await message.getAttribute("data-count")) ?? 0);
@@ -1622,6 +1632,7 @@ try {
   await page.close();
   await checkHudPanel(await browser.newPage(), url);
   await checkDevWalks(await browser.newPage(), url);
+  await checkLabels(await browser.newPage(), url);
 } finally {
   await browser.close();
   await server?.close();
