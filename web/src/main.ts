@@ -2,6 +2,7 @@ import { parseCityStats, renderCityStats } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
 import {
+  balanceNote,
   deficitNote,
   type Finance,
   type FinancePanel,
@@ -12,7 +13,14 @@ import { parseGrowthBlocks, parseStalls, setupGrowthNotice } from "./growth-noti
 import { setupHudPanel, trackHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
-import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
+import {
+  Camera,
+  type ChunkRange,
+  chunksByDistance,
+  MAX_ZOOM,
+  MIN_ZOOM,
+  type Viewport,
+} from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { setupLayerPanel } from "./map/layers.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
@@ -62,6 +70,7 @@ import {
   upgradeRoadCommand,
 } from "./map/tools.ts";
 import { parseOverview, renderOverview } from "./overview.ts";
+import { createPopovers } from "./popover.ts";
 import {
   CHUNK_SIDE,
   type CommandMessage,
@@ -78,6 +87,7 @@ import {
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 import { setupSaves } from "./save/main-side.ts";
+import { setupScaleBar } from "./scale-bar.ts";
 import { describeSpeed, shownSpeed, splitSpeed } from "./speed.ts";
 
 function element<T extends Element>(selector: string): T {
@@ -93,6 +103,7 @@ const hud = element<HTMLElement>("#hud");
 const hudClock = element<HTMLElement>("#hud-clock");
 const hudMoney = element<HTMLElement>("#hud-money");
 const hudDeficit = element<HTMLElement>("#hud-deficit");
+const speedButtons = [...document.querySelectorAll<HTMLButtonElement>("button[data-speed]")];
 const hudSpeed = element<HTMLElement>("#hud-speed");
 const mapCanvas = element<HTMLCanvasElement>("#map");
 renderLegend(element<HTMLElement>("#legend-body"));
@@ -147,10 +158,20 @@ function draw(header: SnapshotHeader): void {
   setText(hudMoney, `お金 ${header.money.toLocaleString("ja-JP")}`);
   // 収支が赤字のあいだは、所持金の横に知らせる
   const note = deficitNote(finance);
-  setText(hudDeficit, note);
-  hudDeficit.hidden = note === "";
+  const balance = balanceNote(finance);
+  setText(hudDeficit, balance);
+  hudDeficit.hidden = balance === "";
+  hudDeficit.dataset.deficit = String(note !== "");
   const speed = shownSpeed(header.speed, workerPace);
   setText(hudSpeed, header.paused ? "一時停止中" : describeSpeed(speed));
+  // 帯のボタンに出ていない速度（0.25、0.5、48 倍）のときと、止めているときだけ、速度の文字を出す
+  hudSpeed.hidden =
+    !header.paused &&
+    speedButtons.some((b) => Number(b.dataset.speed) === speed && b.closest("#speeds") !== null);
+  for (const b of speedButtons) {
+    b.setAttribute("aria-pressed", String(!header.paused && Number(b.dataset.speed) === speed));
+  }
+  pauseButton.setAttribute("aria-pressed", String(header.paused));
   hud.dataset.deficit = String(note !== "");
   // test:wasm が読む
   hud.dataset.tick = String(header.tick);
@@ -196,8 +217,24 @@ let buildings: Geometry | null = null;
 let signals: Geometry | null = null;
 let activeLayers: number[] = [];
 setupHudPanel(element<HTMLButtonElement>("#hud-toggle"), element<HTMLElement>("#hud-details"));
-trackHeight(element<HTMLElement>("#toolbar"), "--toolbar-h");
+// 道具の帯と、その上の見積もりと 2 段目の高さ。狭い画面で、下の知らせをその上へ積むのに使う
+trackHeight(element<HTMLElement>("#toolstack"), "--toolbar-h");
+// 道具の帯だけの高さ。狭い画面で、左下と右下の部品を帯の上へ上げるのに使う
+trackHeight(element<HTMLElement>("#toolbar"), "--bar-h");
 trackHeight(element<HTMLElement>("#hudbar"), "--hudbar-h");
+trackHeight(element<HTMLElement>("#map-meta"), "--meta-h");
+const updateScale = setupScaleBar(element<HTMLElement>("#scale"));
+const popovers = createPopovers();
+for (const toggle of document.querySelectorAll<HTMLButtonElement>("button[data-menu]")) {
+  popovers.add(toggle, element<HTMLElement>(`#menu-${toggle.dataset.menu}`));
+}
+popovers.add(element<HTMLElement>("#layers-open"), element<HTMLElement>("#layer-panel"));
+popovers.add(element<HTMLElement>("#finance-toggle"), element<HTMLElement>("#finance"));
+const toolGroups = [...document.querySelectorAll<HTMLButtonElement>("button[data-menu]")].map(
+  (toggle) => ({ toggle, menu: element<HTMLElement>(`#menu-${toggle.dataset.menu}`) }),
+);
+const zoomInButton = element<HTMLButtonElement>("#zoom-in");
+const zoomOutButton = element<HTMLButtonElement>("#zoom-out");
 setupLayerPanel(element<HTMLElement>("#layers"), (active) => {
   activeLayers = active;
   renderer?.layers.setActive(active);
@@ -294,6 +331,9 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   mapCanvas.dataset.cameraX = String(camera.x);
   mapCanvas.dataset.cameraY = String(camera.y);
   mapCanvas.dataset.zoom = String(camera.zoom);
+  updateScale(camera.zoom);
+  zoomInButton.disabled = camera.zoom >= MAX_ZOOM;
+  zoomOutButton.disabled = camera.zoom <= MIN_ZOOM;
 }
 
 function startDrawing(reader: SnapshotReader): void {
@@ -516,6 +556,10 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
   for (const b of toolButtons) {
     b.setAttribute("aria-pressed", String(b === button));
   }
+  // 2 段目の中の道具を選んでいるあいだは、その入口の帯のボタンを押した状態にする
+  for (const { toggle, menu } of toolGroups) {
+    toggle.setAttribute("aria-pressed", String(menu.contains(button)));
+  }
   mapCanvas.dataset.tool = button.dataset.tool;
   manualRotation = null;
   if (renderer !== null) {
@@ -668,7 +712,7 @@ mapCanvas.addEventListener(
 let paused = false;
 function setPaused(next: boolean): void {
   paused = next;
-  pauseButton.textContent = paused ? "再開" : "一時停止";
+  pauseButton.setAttribute("aria-pressed", String(paused));
   send({ kind: "pause", paused });
 }
 pauseButton.addEventListener("click", () => setPaused(!paused));
@@ -747,7 +791,15 @@ function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?:
   toolMessage.dataset.count = String(Number(toolMessage.dataset.count ?? 0) + 1);
 }
 
-for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-speed]")) {
+const ZOOM_BUTTON_FACTOR = 1.5;
+function zoomByButton(factor: number): void {
+  const vp = viewport();
+  camera.zoomAt(vp.width / 2, vp.height / 2, factor, vp);
+}
+zoomInButton.addEventListener("click", () => zoomByButton(ZOOM_BUTTON_FACTOR));
+zoomOutButton.addEventListener("click", () => zoomByButton(1 / ZOOM_BUTTON_FACTOR));
+
+for (const button of speedButtons) {
   button.addEventListener("click", () => {
     const { core, pace: next } = splitSpeed(Number(button.dataset.speed));
     send({ kind: "pace", pace: next });

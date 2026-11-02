@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { preview } from "vite";
+import { openHudDetails, pickSpeed, pickTool } from "./ui.ts";
 
 const TIMEOUT_MS = 30_000;
 const FAST_SPEED = 48;
@@ -75,12 +76,12 @@ try {
     x: size.width / 2 + (x + 0.5 - 32) * 4,
     y: size.height / 2 + (y + 0.5 - 32) * 4,
   });
-  await page.locator('button[data-tool="road-Small"]').click();
+  await pickTool(page, "road-Small");
   await page.mouse.click(tile(12, 32).x, tile(12, 32).y);
   await page.mouse.click(tile(52, 32).x, tile(52, 32).y);
   await page.keyboard.press("Escape");
   await waitFor(() => document.querySelector<HTMLElement>("#tool-message")?.dataset.count === "1");
-  await page.locator('button[data-tool="zone-Residential"]').click();
+  await pickTool(page, "zone-Residential");
   const r0 = tile(14, 26);
   const r1 = tile(30, 31);
   await page.mouse.move(r0.x, r0.y);
@@ -94,7 +95,7 @@ try {
   );
 
   // 速くして日をまたがせ、自動保存と建物が建つのを待つ
-  await page.locator(`button[data-speed="${FAST_SPEED}"]`).click();
+  await pickSpeed(page, FAST_SPEED);
   await waitFor(
     () => Number(document.querySelector<HTMLElement>("#save-open")?.dataset.autoSaves ?? 0) > 0,
   );
@@ -109,6 +110,8 @@ try {
   // 止めてから保存 1 に保存する
   await page.locator("#pause").click();
   await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
+  // 保存のボタンは、上の帯の「⋯」で開く詳細の欄にある
+  await openHudDetails(page);
   await saveButton.click();
   await page.locator('#save-dialog button[data-save="manual-1"]').click();
   await waitFor(
