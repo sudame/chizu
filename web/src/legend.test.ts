@@ -3,11 +3,17 @@ import { cssColor, legendSections, trianglePoints, zoneGroundColor } from "./leg
 import { NO_POWER_COLOR, NO_WATER_COLOR } from "./map/roads.ts";
 
 describe("凡例", () => {
-  test("区画・建物の段階・印・施設の順に並ぶ", () => {
+  test("区画・建物の段階・印・交通・施設の順に並ぶ", () => {
     const sections = legendSections();
-    expect(sections.map((s) => s.items.length)).toEqual([4, 5, 2, 2]);
+    expect(sections.map((s) => s.items.length)).toEqual([4, 5, 2, 4, 2]);
     expect(sections[0]?.items.map((i) => i.label)).toEqual(["住宅", "商業", "工業", "オフィス"]);
-    expect(sections[3]?.items.map((i) => i.label)).toEqual(["発電所", "浄水場"]);
+    expect(sections[3]?.items.map((i) => i.label)).toEqual([
+      "空いている",
+      "やや混んでいる",
+      "混んでいる",
+      "詰まっている",
+    ]);
+    expect(sections[4]?.items.map((i) => i.label)).toEqual(["発電所", "浄水場"]);
   });
 
   test("印の色は描画の定数と同じで、形を持つ", () => {

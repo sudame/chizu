@@ -25,9 +25,24 @@ const supplyPalette = (facility: Color): Color[] => [
   facility,
 ];
 
+/**
+ * 交通の値の色と凡例の名前。値は chizu-wasm の layers::TRAFFIC_FREE などと同じ並びで、
+ * 空いている、やや混んでいる、混んでいる、詰まっている。緑、黄、橙、赤で、一目で混み具合が分かるようにする。
+ */
+export const TRAFFIC_LEVELS: readonly { label: string; color: Color }[] = [
+  { label: "空いている", color: [0.2, 0.8, 0.35, 0.9] },
+  { label: "やや混んでいる", color: [0.98, 0.88, 0.15, 0.9] },
+  { label: "混んでいる", color: [1, 0.5, 0.05, 0.9] },
+  { label: "詰まっている", color: [0.9, 0.12, 0.12, 0.95] },
+];
+
+/** 交通のレイヤーの番号。chizu-wasm の layers::LAYERS の 3 番めである。 */
+export const TRAFFIC_LAYER: LayerCode = 3;
+
 export const DATA_LAYERS: readonly DataLayer[] = [
   { code: 1, label: "電気", palette: supplyPalette([1, 0.85, 0.1, 0.95]) },
   { code: 2, label: "水道", palette: supplyPalette([0.2, 0.5, 1, 0.95]) },
+  { code: TRAFFIC_LAYER, label: "交通", palette: [NONE, ...TRAFFIC_LEVELS.map((l) => l.color)] },
 ];
 
 /** レイヤーを出しているあいだ、下の地図をこの割合だけ暗くして、重ねた色を見やすくする。 */

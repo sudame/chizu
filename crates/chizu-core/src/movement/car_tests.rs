@@ -696,3 +696,102 @@ fn stalled_cars_stay_stalled_when_the_road_is_split() {
         "分けられた区間で止まった車が動いた扱いになった"
     );
 }
+
+/// 先頭の車が動かず後ろに車が詰まった短い道路は「詰まっている」になり、走っている車だけの道路は空いている。
+#[test]
+fn a_queue_behind_a_pinned_car_is_jammed() {
+    use super::congestion::Congestion;
+
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    road(&mut n, (30, 10), (90, 10), RoadKind::Small);
+    let mut c = Cars::new(n);
+    // 長い道路を走る 1 台は、空いている
+    c.drive(at(30, 10, (1, 0), 0), at(89, 10, (1, 0), 0));
+    let lead = c.drive(at(15, 0, (1, 0), 0), at(19, 0, (1, 0), 0));
+    for i in 0..12 {
+        c.drive(at(i, 0, (1, 0), 0), at(19, 0, (1, 0), 0));
+    }
+    for _ in 0..200 {
+        step_with_lead_pinned(&mut c, lead);
+    }
+    let levels = c.trips.congestion(&c.net);
+    let on = |x: i64| {
+        let seg = c.net.segments_through(TilePos::new(x, 0))[0];
+        levels.get(&seg).copied().unwrap_or(Congestion::Free)
+    };
+    assert_eq!(on(10), Congestion::Jammed);
+    let far = c.net.segments_through(TilePos::new(60, 10))[0];
+    assert!(!levels.contains_key(&far), "1 台だけの道路が混んでいる");
+}
+
+/// 指定した車だけを動かさずに 1 tick 進める。
+fn step_with_pinned(c: &mut Cars, pinned: &[TripId]) {
+    let saved: Vec<_> = pinned
+        .iter()
+        .map(|id| (*id, c.trips.get(*id).expect("固定する車がない").clone()))
+        .collect();
+    c.step();
+    for (id, t) in saved {
+        c.trips.rows[id.slot()] = Some(t);
+    }
+}
+
+/// 向きの違う 2 つの車線のうち、混んでいるほうの段階を区間の段階にする。
+#[test]
+fn the_busier_direction_decides_the_segment() {
+    use super::congestion::Congestion;
+
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    road(&mut n, (20, 0), (60, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    // 行きは詰まらせ、帰りは 1 台だけ止める
+    let lead = c.drive(at(15, 0, (1, 0), 0), at(19, 0, (1, 0), 0));
+    for i in 0..12 {
+        c.drive(at(i, 0, (1, 0), 0), at(19, 0, (1, 0), 0));
+    }
+    let back = c.drive(at(18, 0, (-1, 0), 0), at(1, 0, (-1, 0), 0));
+    for _ in 0..200 {
+        step_with_pinned(&mut c, &[lead, back]);
+    }
+    let levels = c.trips.congestion(&c.net);
+    let seg = c.net.segments_through(TilePos::new(10, 0))[0];
+    assert_eq!(levels.get(&seg), Some(&Congestion::Jammed));
+}
+
+/// 1〜2 マスの短い区間は、並べる台数まで埋まって止まっていれば「詰まっている」になる。
+#[test]
+fn short_segments_jam_when_filled() {
+    use super::congestion::Congestion;
+
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (1, 0), RoadKind::Small);
+    road(&mut n, (1, 0), (3, 0), RoadKind::Small);
+    road(&mut n, (3, 0), (40, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    // 1 マスの区間に止まる 1 台
+    let one = c.drive(at(0, 0, (1, 0), 4_000), at(39, 0, (1, 0), 0));
+    for _ in 0..5 {
+        step_with_pinned(&mut c, &[one]);
+    }
+    let seg = |c: &Cars, x: i64| c.net.segments_through(TilePos::new(x, 0));
+    let levels = c.trips.congestion(&c.net);
+    let first = seg(&c, 0)[0];
+    assert_eq!(levels.get(&first), Some(&Congestion::Jammed));
+
+    // 2 マスの区間に止まる 2 台。別の道路で試す
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (2, 0), RoadKind::Small);
+    road(&mut n, (2, 0), (40, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let lead = c.drive(at(1, 0, (1, 0), 4_000), at(39, 0, (1, 0), 0));
+    let follower = c.drive(at(0, 0, (1, 0), 0), at(39, 0, (1, 0), 0));
+    for _ in 0..100 {
+        step_with_pinned(&mut c, &[lead]);
+    }
+    assert_eq!(c.trips.get(follower).unwrap().speed().0, 0);
+    let levels = c.trips.congestion(&c.net);
+    let seg = c.net.segments_through(TilePos::new(1, 0))[0];
+    assert_eq!(levels.get(&seg), Some(&Congestion::Jammed));
+}

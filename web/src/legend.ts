@@ -1,5 +1,6 @@
 // 地図の色と印の凡例。色と形は描画で使う定数（map/roads.ts）から取る。
 
+import { TRAFFIC_LEVELS } from "./map/layers.ts";
 import {
   BOLT_SHAPE,
   buildingColor,
@@ -72,6 +73,10 @@ export function legendSections(): LegendSection[] {
           icon: { triangles: DROP_SHAPE },
         },
       ],
+    },
+    {
+      title: "交通（データレイヤー、道路の色）",
+      items: TRAFFIC_LEVELS.map((l) => ({ label: l.label, color: cssColor(l.color) })),
     },
     {
       title: "公共施設",

@@ -6,7 +6,8 @@
 use super::World;
 use crate::citizens::Activity;
 use crate::clock::TICKS_PER_DAY;
-use crate::movement::Finished;
+use crate::movement::{Congestion, Finished};
+use crate::network::SegmentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -160,6 +161,11 @@ impl World {
     /// いま走っている車の位置。状態は変えない。
     pub fn car_sample(&self) -> CarSample {
         CarSample::of(&self.trips)
+    }
+
+    /// 車のいる区間の混み具合。空いている区間は載せない。状態は変えず、状態ハッシュにも入れない。
+    pub fn road_congestion(&self) -> BTreeMap<SegmentId, Congestion> {
+        self.trips.congestion(&self.network)
     }
 
     /// 住民の居場所ごとの人数。状態は変えない。

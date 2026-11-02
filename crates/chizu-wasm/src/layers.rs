@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 use chizu_core::service::{Balance, supply_balance};
 use chizu_core::zone::tiles_of;
 use chizu_core::{
-    CHUNK_AREA, CHUNK_SIDE, ChunkCoord, SegmentKind, ServiceKind, StateHasher, TilePos, World,
+    CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Congestion, SegmentId, SegmentKind, ServiceKind,
+    StateHasher, TilePos, World,
 };
 use wasm_bindgen::prelude::*;
 
@@ -51,7 +52,25 @@ pub const LAYERS: &[DataLayer] = &[
         version: supply_version,
         values: |w| supply_values(w, ServiceKind::WaterPump),
     },
+    DataLayer {
+        code: 3,
+        version: traffic_version,
+        values: traffic_values,
+    },
 ];
+
+// 交通のレイヤーの値。0 は何も塗らない。中核の `Congestion` の段階に 1 を足した値である
+/// 空いている道路。
+pub const TRAFFIC_FREE: u8 = 1;
+/// やや混んでいる道路。
+pub const TRAFFIC_BUSY: u8 = 2;
+/// 混んでいる道路。
+pub const TRAFFIC_HEAVY: u8 = 3;
+/// 詰まっている道路。
+pub const TRAFFIC_JAMMED: u8 = 4;
+
+/// 交通のレイヤーを作り直す間隔（tick）。毎 tick は数えず、この間隔ごとに車の位置から区間の混み具合を数え直す。
+pub const TRAFFIC_REFRESH_TICKS: u64 = 10;
 
 /// マスごとの 1 バイトの値を、値のあるチャンクにだけ持つ。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -133,6 +152,47 @@ fn supply_values(world: &World, kind: ServiceKind) -> LayerGrid {
         }
     }
     grid
+}
+
+/// 道路網が変わるか、`TRAFFIC_REFRESH_TICKS` が過ぎると変わる。
+fn traffic_version(sim: &Sim) -> u64 {
+    let mut h = StateHasher::new();
+    h.write(&sim.network_version());
+    h.write(&(sim.world().tick().0 / TRAFFIC_REFRESH_TICKS));
+    h.finish()
+}
+
+/// 高速道路を除くすべての区間を、混み具合の段階で塗る。車のいない区間は「空いている」になる。
+/// 区間が交わるマスは、混んでいるほうの段階にする。
+fn traffic_values(world: &World) -> LayerGrid {
+    let network = world.network();
+    let congestion = world.road_congestion();
+    let mut segments: Vec<(u8, SegmentId)> = network
+        .segments()
+        .filter(|(_, s)| s.kind != SegmentKind::Highway)
+        .map(|(id, _)| (traffic_value(congestion.get(&id).copied()), id))
+        .collect();
+    // 段階の低いものから塗り、あとから塗る高い段階が上書きする
+    segments.sort();
+    let mut grid = LayerGrid::default();
+    for (value, id) in segments {
+        let Some(line) = network.segment_line(id) else {
+            continue;
+        };
+        for t in line.tiles() {
+            grid.set(t, value);
+        }
+    }
+    grid
+}
+
+fn traffic_value(level: Option<Congestion>) -> u8 {
+    match level.unwrap_or_default() {
+        Congestion::Free => TRAFFIC_FREE,
+        Congestion::Busy => TRAFFIC_BUSY,
+        Congestion::Heavy => TRAFFIC_HEAVY,
+        Congestion::Jammed => TRAFFIC_JAMMED,
+    }
 }
 
 fn road_value(b: Balance) -> u8 {
@@ -309,6 +369,40 @@ mod tests {
         // 発電所は足り、浄水場のない網だけが残る
         assert_eq!(utility_gaps(sim.world()), [0, 1, 0, 0]);
         assert_eq!(sim.city_stats()[12..16], [0.0, 1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn traffic_layer_paints_roads_and_refreshes_on_an_interval() {
+        let mut sim = Sim::new(0);
+        sim.submit(Command::BuildRoad {
+            from: TilePos::new(10, 10),
+            to: TilePos::new(30, 10),
+            kind: RoadKind::Small,
+        })
+        .unwrap();
+        let traffic = &LAYERS[2];
+        let mut cache = LayerCache::default();
+        assert_eq!(
+            value_at(&mut cache, &sim, traffic, TilePos::new(20, 10)),
+            TRAFFIC_FREE
+        );
+        assert_eq!(value_at(&mut cache, &sim, traffic, TilePos::new(20, 9)), 0);
+        // 同じ間隔の中では版が変わらず、間隔をまたぐと変わる
+        let to_boundary = TRAFFIC_REFRESH_TICKS - sim.world().tick().0 % TRAFFIC_REFRESH_TICKS;
+        sim.advance(to_boundary as u32);
+        let v = (traffic.version)(&sim);
+        sim.advance(TRAFFIC_REFRESH_TICKS as u32 - 1);
+        assert_eq!((traffic.version)(&sim), v);
+        sim.advance(1);
+        assert_ne!((traffic.version)(&sim), v);
+    }
+
+    #[test]
+    fn congestion_levels_map_to_values() {
+        assert_eq!(traffic_value(None), TRAFFIC_FREE);
+        assert_eq!(traffic_value(Some(Congestion::Busy)), TRAFFIC_BUSY);
+        assert_eq!(traffic_value(Some(Congestion::Heavy)), TRAFFIC_HEAVY);
+        assert_eq!(traffic_value(Some(Congestion::Jammed)), TRAFFIC_JAMMED);
     }
 
     #[test]
