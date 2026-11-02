@@ -62,7 +62,7 @@ void main() {
   v_color = kind == ${KIND_CAR}u ? CAR[h % ${CAR_COLORS.length}u] : ${glslVec3(WALKER_COLOR)};
 }`;
 
-// 車は暗い縁と、前（進む向き）の窓を描き、向きが分かるようにする。人は暗い縁の丸にする。
+// 車は少し暗い縁と、前（進む向き）の白い窓を描き、向きが分かるようにする。人は白い縁の丸にする。
 // 縁と窓は、画面で描ける大きさのときだけ描く
 const FRAGMENT = `#version 300 es
 precision mediump float;
@@ -76,9 +76,9 @@ void main() {
     vec2 d = (1.0 - abs(v_corner)) * v_half_px;
     vec3 c = v_color;
     if (v_half_px.y >= 2.0 && min(d.x, d.y) < 0.75) {
-      c *= 0.4;
+      c *= 0.7;
     } else if (v_half_px.x >= 4.0 && v_corner.x > 0.25 && v_corner.x < 0.6) {
-      c = mix(c, vec3(0.12, 0.15, 0.2), 0.75);
+      c = mix(c, vec3(1.0), 0.55);
     }
     color = vec4(c, 1.0);
     return;
@@ -87,8 +87,8 @@ void main() {
   if (r > 1.0) {
     discard;
   }
-  bool rim = v_half_px.x >= 2.0 && (1.0 - r) * v_half_px.x < 0.75;
-  color = vec4(rim ? v_color * 0.35 : v_color, 1.0);
+  bool rim = v_half_px.x >= 2.0 && (1.0 - r) * v_half_px.x < 1.0;
+  color = vec4(rim ? vec3(1.0) : v_color, 1.0);
 }`;
 
 export class MoverLayer {

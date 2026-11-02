@@ -6,7 +6,8 @@
 use core::fmt;
 
 use chizu_core::{
-    ChunkCoord, Command, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, ZoneKind,
+    ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect,
+    ZoneKind,
 };
 
 /// オブジェクトのフィールドを読んだ値。
@@ -35,8 +36,10 @@ pub enum InputError {
     BadService,
     /// 真偽値で読めないフィールド。
     BadBool(&'static str),
-    /// 信号を置く・外すマスにノードがない。
+    /// 信号や横断歩道を変えるマスにノードがない。
     NoNode,
+    /// 腕の向き（dx、dy）が 8 方向の 1 歩でない。
+    BadArm,
 }
 
 impl fmt::Display for InputError {
@@ -51,6 +54,7 @@ impl fmt::Display for InputError {
             InputError::BadService => write!(f, "service は PowerPlant か WaterPump で指定する"),
             InputError::BadBool(name) => write!(f, "{name} が真偽値でない"),
             InputError::NoNode => write!(f, "そのマスに交差点がない"),
+            InputError::BadArm => write!(f, "腕の向き dx、dy は -1、0、1 の 8 方向で指定する"),
             InputError::BadTaxZone => write!(
                 f,
                 "zone は Residential、Commercial、Industrial、Office のどれかで指定する"
@@ -182,6 +186,16 @@ pub fn parse(
             let node = node_at(tile(&field, "x", "y")?).ok_or(InputError::NoNode)?;
             Ok(Command::SetSignal { node, on })
         }
+        "SetCrosswalk" => {
+            let on = match field("on") {
+                Field::Bool(b) => b,
+                _ => return Err(InputError::BadBool("on")),
+            };
+            let step = (integer(&field, "dx")?, integer(&field, "dy")?);
+            let arm = Heading::of_step(step).ok_or(InputError::BadArm)?;
+            let node = node_at(tile(&field, "x", "y")?).ok_or(InputError::NoNode)?;
+            Ok(Command::SetCrosswalk { node, arm, on })
+        }
         _ => Err(InputError::UnknownKind(kind)),
     }
 }
@@ -255,6 +269,34 @@ mod tests {
             signal(3.0, Field::Number(1.0)),
             Err(InputError::BadBool("on"))
         );
+    }
+
+    #[test]
+    fn set_crosswalk_finds_the_node_and_the_arm() {
+        let crosswalk = |x: f64, dx: f64, dy: f64| {
+            object(&[
+                ("kind", Field::Text("SetCrosswalk".into())),
+                ("x", Field::Number(x)),
+                ("y", Field::Number(4.0)),
+                ("dx", Field::Number(dx)),
+                ("dy", Field::Number(dy)),
+                ("on", Field::Bool(false)),
+            ])
+        };
+        assert_eq!(
+            crosswalk(3.0, -1.0, 1.0),
+            Ok(Command::SetCrosswalk {
+                node: NodeId {
+                    index: 7,
+                    generation: 2
+                },
+                arm: Heading::SW,
+                on: false
+            })
+        );
+        assert_eq!(crosswalk(5.0, 1.0, 0.0), Err(InputError::NoNode));
+        assert_eq!(crosswalk(3.0, 0.0, 0.0), Err(InputError::BadArm));
+        assert_eq!(crosswalk(3.0, 2.0, 0.0), Err(InputError::BadArm));
     }
 
     fn speed(value: Field) -> Result<Command, InputError> {

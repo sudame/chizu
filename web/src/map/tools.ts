@@ -7,8 +7,8 @@ import {
   type ServiceName,
   type ZoneName,
 } from "../protocol/messages.ts";
-import type { Camera, Viewport } from "./camera.ts";
-import type { Tile } from "./roads.ts";
+import type { Camera, Point, Viewport } from "./camera.ts";
+import type { CrosswalkArm, Tile } from "./roads.ts";
 
 export type { Tile };
 
@@ -24,6 +24,8 @@ export type Tool =
   | { kind: "zone"; zone: ZoneName }
   | { kind: "service"; service: ServiceName }
   | { kind: "signal"; on: boolean }
+  /** 交差点の腕の横断歩道を戻すか（on が true）、外す。 */
+  | { kind: "crosswalk"; on: boolean }
   | { kind: "buy" };
 
 /** 画面の点（CSS ピクセル）の下にあるマス。 */
@@ -280,6 +282,34 @@ export function placeServiceCommand(
 /** マスの交差点に信号を置くか（on が true）、外す。 */
 export function signalCommand(at: Tile, on: boolean): CommandMessage {
   return { kind: "SetSignal", x: at.x, y: at.y, on };
+}
+
+/** 腕の横断歩道を戻すか（on が true）、外す。 */
+export function crosswalkCommand(arm: CrosswalkArm, on: boolean): CommandMessage {
+  return { kind: "SetCrosswalk", x: arm.x, y: arm.y, dx: arm.dx, dy: arm.dy, on };
+}
+
+/** 横断歩道の縞の真ん中から、押したとみなす距離（マス）。 */
+export const CROSSWALK_PICK_RADIUS = 0.6;
+
+/**
+ * 点 `at` に近い、道具で変えられる腕。外す道具（on が false）なら横断歩道のある腕、戻す道具なら外した腕から、
+ * 縞の真ん中が `CROSSWALK_PICK_RADIUS` より近いもののうち、いちばん近いものを選ぶ。
+ */
+export function pickCrosswalk(arms: CrosswalkArm[], at: Point, on: boolean): CrosswalkArm | null {
+  let best: CrosswalkArm | null = null;
+  let bestDistance = CROSSWALK_PICK_RADIUS;
+  for (const arm of arms) {
+    if (arm.removed !== on) {
+      continue;
+    }
+    const d = Math.hypot(arm.cx - at.x, arm.cy - at.y);
+    if (d < bestDistance) {
+      best = arm;
+      bestDistance = d;
+    }
+  }
+  return best;
 }
 
 /** マスを含むチャンクを買う。 */

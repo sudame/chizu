@@ -10,7 +10,13 @@ import type { Color } from "./roads.ts";
 export const PALETTE_SIZE = 8;
 
 /** データレイヤー 1 枚。palette[v] が値 v の色で、0 の値は塗らない。 */
-export type DataLayer = { code: LayerCode; label: string; palette: readonly Color[] };
+export type DataLayer = {
+  code: LayerCode;
+  label: string;
+  palette: readonly Color[];
+  /** レイヤーを選ぶパネルで、名前の横に出す見本の色。 */
+  swatch: Color;
+};
 
 const NONE: Color = [0, 0, 0, 0];
 // 電気と水道の値の色。値は chizu-wasm の layers::SUPPLY_BUILDING_ON などと同じ並び。
@@ -40,9 +46,19 @@ export const TRAFFIC_LEVELS: readonly { label: string; color: Color }[] = [
 export const TRAFFIC_LAYER: LayerCode = 3;
 
 export const DATA_LAYERS: readonly DataLayer[] = [
-  { code: 1, label: "電気", palette: supplyPalette([1, 0.85, 0.1, 0.95]) },
-  { code: 2, label: "水道", palette: supplyPalette([0.2, 0.5, 1, 0.95]) },
-  { code: TRAFFIC_LAYER, label: "交通", palette: [NONE, ...TRAFFIC_LEVELS.map((l) => l.color)] },
+  {
+    code: 1,
+    label: "電気",
+    palette: supplyPalette([1, 0.85, 0.1, 0.95]),
+    swatch: [1, 0.85, 0.1, 1],
+  },
+  { code: 2, label: "水道", palette: supplyPalette([0.2, 0.5, 1, 0.95]), swatch: [0.2, 0.5, 1, 1] },
+  {
+    code: TRAFFIC_LAYER,
+    label: "交通",
+    palette: [NONE, ...TRAFFIC_LEVELS.map((l) => l.color)],
+    swatch: TRAFFIC_LEVELS[0]?.color ?? [0.2, 0.8, 0.35, 1],
+  },
 ];
 
 /** レイヤーを出しているあいだ、下の地図をこの割合だけ暗くして、重ねた色を見やすくする。 */
@@ -247,44 +263,55 @@ export class LayerOverlay {
   }
 }
 
+function cssColor([r, g, b]: Color): string {
+  const channel = (v: number) => Math.round(v * 255);
+  return `rgb(${channel(r)} ${channel(g)} ${channel(b)})`;
+}
+
 /**
- * 画面の端に、レイヤーを選ぶボタンを並べる。CS2 の情報表示にならい、「なし」とレイヤーごとのボタンを置く。
- * レイヤーのボタンはそれぞれ押すたびにオンとオフが変わり、いくつでも重ねられる。「なし」はすべて消す。
+ * レイヤーを選ぶパネルの中身を作る。地図アプリのレイヤーにならい、「なし」と電気、水道、交通のうち 1 つだけを選ぶ。
+ * 初めは「なし」を選んでいる。
  */
 export function setupLayerPanel(
   container: HTMLElement,
   onChange: (active: LayerCode[]) => void,
 ): void {
-  let active: LayerCode[] = [];
-  const entries: [LayerCode | null, string][] = [
-    [null, "なし"],
-    ...DATA_LAYERS.map((l): [LayerCode, string] => [l.code, l.label]),
+  let selected: LayerCode | null = null;
+  const entries: [LayerCode | null, string, string | null][] = [
+    [null, "なし", null],
+    // 並びは、なし、交通、電気、水道
+    ...[...DATA_LAYERS]
+      .sort((a, b) => Number(b.code === TRAFFIC_LAYER) - Number(a.code === TRAFFIC_LAYER))
+      .map((l): [LayerCode, string, string] => [l.code, l.label, cssColor(l.swatch)]),
   ];
-  const buttons = entries.map(([code, label]) => {
+  const active = (): LayerCode[] => (selected === null ? [] : [selected]);
+  const buttons = entries.map(([code, label, color]) => {
     const b = document.createElement("button");
     b.type = "button";
-    b.textContent = label;
+    const dot = document.createElement("span");
+    dot.className = "layer-dot";
+    dot.setAttribute("aria-hidden", "true");
+    if (color !== null) {
+      dot.style.background = color;
+    }
+    const text = document.createElement("span");
+    text.textContent = label;
+    b.append(dot, text);
     b.dataset.layer = code === null ? "none" : String(code);
     b.addEventListener("click", () => {
-      active =
-        code === null
-          ? []
-          : active.includes(code)
-            ? active.filter((c) => c !== code)
-            : [...active, code];
+      selected = code;
       show();
-      onChange(active);
+      onChange(active());
     });
     return b;
   });
   const show = () => {
     buttons.forEach((b, i) => {
       const code = entries[i]?.[0] ?? null;
-      const pressed = code === null ? active.length === 0 : active.includes(code);
-      b.setAttribute("aria-pressed", String(pressed));
+      b.setAttribute("aria-pressed", String(code === selected));
     });
     // test:wasm が読む
-    container.dataset.active = active.join(",");
+    container.dataset.active = selected === null ? "" : String(selected);
   };
   container.replaceChildren(...buttons);
   show();

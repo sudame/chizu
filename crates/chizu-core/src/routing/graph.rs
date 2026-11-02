@@ -3,6 +3,7 @@
 use core::fmt;
 
 use crate::command::{NodeId, RoadKind};
+use crate::movement::crossing::{self, JAYWALK_DETOUR_MM};
 use crate::network::{Dir, LaneId, LaneMode, Line, LinkId, Network, SegmentId, SegmentKind};
 use crate::tile::TilePos;
 use crate::units::MmPerTick;
@@ -117,7 +118,7 @@ pub struct Connector {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Edge {
     pub to: u32,
-    /// 曲がるのにかかる費用（ms）。右折禁止や信号の待ちを入れるまでは 0 である。
+    /// 曲がるのにかかる費用（ms）。歩道で横断歩道を外した腕を越えるときのほかは 0 である（[`turn_cost`]）。
     pub cost: u64,
 }
 
@@ -176,6 +177,20 @@ fn departures(net: &Network, n: NodeId, mode: LaneMode) -> Result<Vec<LinkId>, G
     Ok(out)
 }
 
+/// ノード `n` で、`from` から `to` へ曲がる費用（ms）。歩道では、横断歩道を外した腕を、ほかに回れずに越える
+/// 1 本ごとに、[`JAYWALK_DETOUR_MM`] を歩く時間を足す（`movement::crossing`）。車は 0 である。
+fn turn_cost(net: &Network, n: NodeId, from: LinkId, to: LinkId) -> Result<u64, GraphError> {
+    if from.mode != LaneMode::Sidewalk {
+        return Ok(0);
+    }
+    let count = crossing::removed_crossings(net, n, from.segment, None, to.segment);
+    let per = travel_ms(JAYWALK_DETOUR_MM, WALK_SPEED).ok_or(GraphError::Overflow)?;
+    u64::try_from(count)
+        .ok()
+        .and_then(|c| c.checked_mul(per))
+        .ok_or(GraphError::Overflow)
+}
+
 /// ノード `n` で、`from` から曲がり先 `to` に進めるか。車は行き止まりでだけ折り返せる。
 /// ただし「外の世界」ノードは出入りする所なので、車はそこで折り返さない。歩行者はどこでも折り返せる。
 fn may_turn(
@@ -229,12 +244,13 @@ impl Graph {
             let out = departures(net, node, mode)?;
             for to in &out {
                 if may_turn(net, node, *l, *to, out.len())? {
+                    let cost = turn_cost(net, node, *l, *to)?;
                     let to = links
                         .binary_search(to)
                         .map_err(|_| GraphError::MissingSegment(to.segment))?;
                     edges.push(Edge {
                         to: to_u32(to)?,
-                        cost: 0,
+                        cost,
                     });
                 }
             }

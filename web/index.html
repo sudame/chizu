@@ -5,12 +5,100 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>chizu</title>
     <style>
+      /* 地図の部品の見た目は docs/map-style.md の「地図の部品」に従う。
+         角丸は 3 段（ボタン 8、パネル 12、帯 16〜20）、余白は端から 12、部品どうし 8、字は 11、12、13、14、16 の 5 つに絞る */
+      :root {
+        --panel: #fff;
+        --ink: #202124;
+        --ink-sub: #5f6368;
+        --line: #dadce0;
+        --hover: #f1f3f4;
+        --accent: #1a73e8;
+        --accent-bg: #e8f0fe;
+        --good: #188038;
+        --bad: #b3261e;
+        --shadow: 0 1px 2px rgb(60 64 67 / 30%), 0 2px 6px 2px rgb(60 64 67 / 15%);
+        --r-button: 8px;
+        --r-panel: 12px;
+        --r-bar: 16px;
+        --r-top: 20px;
+        --edge: 12px;
+        --gap: 8px;
+        font:
+          13px/1.45 system-ui,
+          -apple-system,
+          "Hiragino Sans",
+          "Noto Sans JP",
+          sans-serif;
+        color: var(--ink);
+      }
+      [hidden] {
+        display: none;
+      }
       html,
       body {
         margin: 0;
         height: 100%;
         overflow: hidden;
-        background: #1a1a1f;
+        background: #e6e3db;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+      }
+      button:focus-visible,
+      summary:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+      }
+      svg.icon {
+        width: 20px;
+        height: 20px;
+        fill: none;
+        stroke: currentcolor;
+        stroke-width: 1.7;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        flex: none;
+      }
+      .panel {
+        box-sizing: border-box;
+        padding: 12px 14px;
+        color: var(--ink);
+        background: var(--panel);
+        border-radius: var(--r-panel);
+        box-shadow: var(--shadow);
+      }
+      .panel h2 {
+        margin: 0 0 8px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      /* 字だけの小さなボタン */
+      .chip,
+      #save-open {
+        min-height: 28px;
+        padding: 0 12px;
+        font-size: 13px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--r-button);
+        cursor: pointer;
+      }
+      .chip:hover:not(:disabled),
+      #save-open:hover:not(:disabled) {
+        background: var(--hover);
+      }
+      .chip:disabled,
+      #save-open:disabled {
+        color: var(--ink-sub);
+        cursor: default;
+      }
+      .chip[aria-pressed="true"] {
+        color: var(--accent);
+        background: var(--accent-bg);
+        border-color: transparent;
+        font-weight: 600;
       }
       #map {
         position: fixed;
@@ -23,155 +111,177 @@
       #map:not([data-tool="none"]) {
         cursor: crosshair;
       }
-      #toolbar {
-        position: fixed;
-        bottom: 8px;
-        left: 50%;
-        transform: translateX(-50%);
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: 4px;
-        align-items: center;
-        width: max-content;
-        max-width: calc(100vw - 16px);
-        box-sizing: border-box;
-        padding: 4px 8px;
-        background: rgb(255 255 255 / 85%);
-        border-radius: 4px;
-        white-space: nowrap;
-      }
-      #toolbar button[aria-pressed="true"] {
-        background: #2d6cdf;
-        color: #fff;
-      }
-      #layers {
-        display: flex;
-        gap: 4px;
-        align-items: center;
-        padding-left: 8px;
-        border-left: 1px solid #888;
-      }
-      #layers button[aria-pressed="true"] {
-        background: #2d6cdf;
-        color: #fff;
-      }
-      /* 右上の部品は、上の帯の下に積む。帯は幅が狭いと 2 行になるので、高さは --hudbar-h で測る */
-      #feedback-open {
-        position: fixed;
-        top: calc(var(--hudbar-h, 30px) + 16px);
-        right: 8px;
-      }
-      #feedback textarea {
-        width: 28em;
-        height: 6em;
-      }
-      #dev-tools {
-        position: fixed;
-        top: calc(var(--hudbar-h, 30px) + 48px);
-        right: 8px;
-        max-width: 14em;
-        text-align: right;
-      }
-      #dev-tools button[aria-pressed="true"] {
-        background: #2d6cdf;
-        color: #fff;
-      }
-      #dev-flag {
-        margin: 0;
-        font-size: 12px;
-        font-weight: bold;
-        color: #a33;
-      }
-      #dev-info {
-        margin: 4px 0 0;
-        font-size: 12px;
-        color: #a33;
-        background: rgb(255 255 255 / 85%);
-      }
-      #dev-info:empty {
-        display: none;
-      }
-      #tool-info,
-      #tool-message {
-        min-width: 10em;
-        font-size: 14px;
-      }
-      /* 上の端の細い帯。いつも見るもの（日時、お金、速度とその操作）だけを置く */
+
+      /* 上の帯。いつも見るもの（日時、お金と収支、人口、速度）だけを置く。右上のフィードバックの分を空ける */
       #overlay {
         position: fixed;
-        top: 8px;
-        left: 8px;
+        top: var(--edge);
+        left: var(--edge);
         display: flex;
         flex-direction: column;
-        gap: 4px;
-        max-width: calc(100vw - 16px);
+        align-items: flex-start;
+        gap: var(--gap);
+        max-width: calc(100vw - 68px);
         box-sizing: border-box;
-      }
-      #hudbar,
-      #hud-details {
-        padding: 2px 8px;
-        background: rgb(255 255 255 / 85%);
-        border-radius: 4px;
       }
       #hudbar {
         display: flex;
         flex-wrap: wrap;
-        gap: 2px 10px;
+        gap: 0 12px;
         align-items: center;
+        box-sizing: border-box;
+        min-height: 40px;
+        max-width: 100%;
+        padding: 0 8px 0 16px;
+        background: var(--panel);
+        border-radius: var(--r-top);
+        box-shadow: var(--shadow);
       }
       #hud {
         display: flex;
         flex-wrap: wrap;
-        gap: 0 14px;
+        gap: 0 12px;
+        align-items: center;
         margin: 0;
-        font-size: 17px;
-        color: #222;
+        font-size: 14px;
+        font-variant-numeric: tabular-nums;
         white-space: nowrap;
       }
-      #hud [hidden] {
-        display: none;
+      #hud-clock,
+      #hud-population {
+        font-weight: 600;
+      }
+      .vsep {
+        width: 1px;
+        height: 20px;
+        background: var(--line);
+      }
+      #finance-toggle {
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        padding: 4px 8px;
+        margin: 0 -8px;
+        font-size: 14px;
+        background: none;
+        border: 0;
+        border-radius: var(--r-button);
+        cursor: pointer;
+      }
+      #finance-toggle:hover,
+      #finance-toggle[aria-expanded="true"] {
+        background: var(--hover);
+      }
+      #hud-money {
+        font-weight: 600;
       }
       #hud-deficit {
-        color: #b00020;
-      }
-      #controls {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 3px;
-      }
-      #controls button,
-      #hud-toggle {
-        padding: 1px 6px;
         font-size: 12px;
+        color: var(--good);
       }
-      /* 開発者向けの表示。小さく、控えめに出す */
+      #hud-deficit[data-deficit="true"] {
+        color: var(--bad);
+      }
+      #speeds {
+        display: flex;
+        gap: 2px;
+        align-items: center;
+      }
+      #speeds button,
+      #hud-toggle {
+        min-width: 28px;
+        height: 28px;
+        padding: 0 10px;
+        font-size: 13px;
+        color: var(--ink-sub);
+        background: none;
+        border: 0;
+        border-radius: 14px;
+        cursor: pointer;
+      }
+      #speeds button:hover,
+      #hud-toggle:hover {
+        background: var(--hover);
+      }
+      #speeds button[aria-pressed="true"],
+      #hud-toggle[aria-expanded="true"] {
+        font-weight: 600;
+        color: var(--accent);
+        background: var(--accent-bg);
+      }
+      #pause {
+        padding: 0;
+      }
+      #pause svg,
+      #hud-toggle svg {
+        width: 16px;
+        height: 16px;
+        vertical-align: middle;
+      }
+      #hud-speed {
+        padding: 0 8px;
+        font-size: 12px;
+        color: var(--ink-sub);
+      }
+      /* 開発者向けの表示。左下に小さく出す */
       #status {
         margin: 0;
+        padding: 2px 8px;
         font-size: 11px;
-        color: #666;
+        color: var(--ink-sub);
+        background: rgb(255 255 255 / 85%);
+        border-radius: var(--r-button);
       }
       #status[data-state="error"] {
         font-size: 13px;
-        font-weight: bold;
-        color: #a31515;
+        font-weight: 600;
+        color: var(--bad);
+      }
+      #dev-flag {
+        margin: 0;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--bad);
+      }
+      /* 詳細の欄と収支は、上の帯の下に縦に積む */
+      #hud-details,
+      #finance {
+        font-size: 13px;
       }
       #hud-details {
         width: max-content;
         max-width: 100%;
-        box-sizing: border-box;
-        padding: 4px 8px;
       }
-      #hud-details[hidden] {
-        display: none;
+      #finance {
+        width: 280px;
+        max-width: 100%;
+        max-height: calc(100vh - var(--hudbar-h, 40px) - 40px);
+        overflow-y: auto;
+      }
+      #hud-extra {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        align-items: center;
+        margin: 0 0 8px;
+      }
+      #hud-extra > .extra-label {
+        margin-right: 4px;
+        font-size: 12px;
+        color: var(--ink-sub);
+      }
+      #controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
       }
       #city-numbers,
       #city-utilities {
         margin: 0;
       }
       #city-utilities.short {
-        color: #a31515;
-        font-weight: bold;
+        color: var(--bad);
+        font-weight: 600;
       }
       #city {
         display: flex;
@@ -179,68 +289,131 @@
         align-items: center;
         margin: 0 0 4px;
       }
+      #overview {
+        font-size: 13px;
+      }
+      #overview summary {
+        cursor: pointer;
+      }
+      #overview p {
+        margin: 2px 0 0;
+      }
+      #overview-parts {
+        margin-top: 2px;
+      }
+      #demand {
+        display: flex;
+        gap: 4px;
+        align-items: flex-end;
+      }
+      #demand .slot {
+        position: relative;
+        width: 12px;
+        height: 40px;
+        border-bottom: 1px solid #888;
+        background: linear-gradient(transparent 19px, #888 19px, #888 20px, transparent 20px);
+      }
+      #demand .bar {
+        position: absolute;
+        left: 0;
+        width: 12px;
+        height: 0;
+      }
+      #demand .label {
+        font-size: 11px;
+        text-align: center;
+      }
+      #finance h2 {
+        margin: 0 0 4px;
+      }
+      #finance.deficit h2 {
+        color: var(--bad);
+      }
+      #finance h3 {
+        margin: 8px 0 4px;
+        font-size: 12px;
+        color: var(--ink-sub);
+      }
+      #finance .finance-row {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+      #finance .finance-row > span:first-child {
+        flex: 1;
+      }
+      #finance .finance-rate {
+        min-width: 3.5em;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+      }
+      #finance .finance-amount {
+        min-width: 5em;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      #finance .finance-net {
+        justify-content: space-between;
+        margin-top: 4px;
+        padding-top: 4px;
+        font-weight: 600;
+        border-top: 1px solid var(--line);
+      }
+      #finance.deficit .finance-net {
+        color: var(--bad);
+      }
+      #finance .finance-note {
+        margin: 4px 0 0;
+        font-size: 11px;
+        color: var(--ink-sub);
+      }
+
+      /* 知らせ。上の帯の下に置き、狭い画面では下の道具の上へ積む */
       #notices {
         position: fixed;
-        top: calc(var(--hudbar-h, 30px) + 16px);
-        left: 390px;
+        top: calc(var(--hudbar-h, 40px) + 24px);
+        left: 440px;
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: var(--gap);
         width: max-content;
-        max-width: min(24em, calc(100vw - 610px));
+        max-width: min(28em, calc(100vw - 520px));
       }
       #city-shortage,
       #growth-notice,
       #save-notice,
+      #milestone-notice,
       .save-alert {
         margin: 0;
-        padding: 4px 8px;
+        padding: 8px 16px;
         font-size: 13px;
-        color: #7a1010;
-        background: #ffe3a3;
-        border: 1px solid #d49a00;
-        border-radius: 4px;
+        color: #5c3b00;
+        background: #fef7e0;
+        border-radius: var(--r-top);
+        box-shadow: var(--shadow);
+      }
+      #milestone-notice {
+        color: #0d652d;
+        background: #e6f4ea;
       }
       #growth-notice button {
         display: block;
         margin-top: 4px;
-        padding: 2px 8px;
-        font: inherit;
+        padding: 2px 12px;
+        font-size: 13px;
         color: #fff;
-        background: #b8620a;
-        border: 1px solid #7a1010;
-        border-radius: 4px;
+        background: var(--accent);
+        border: 0;
+        border-radius: var(--r-button);
         cursor: pointer;
       }
-      #growth-notice button[hidden] {
-        display: none;
-      }
       #growth-notice button:hover {
-        background: #9a5008;
-      }
-      #growth-notice button:focus-visible {
-        outline: 2px solid #1a4fd6;
-        outline-offset: 2px;
-      }
-      #city-shortage[hidden],
-      #growth-notice[hidden],
-      #save-notice[hidden] {
-        display: none;
-      }
-      @media (max-width: 900px) {
-        #notices {
-          top: auto;
-          right: 8px;
-          bottom: calc(var(--toolbar-h, 48px) + 56px);
-          left: 8px;
-          width: auto;
-          max-width: none;
-        }
+        background: #1558b0;
       }
       #save-alerts {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: var(--gap);
       }
       .save-alert {
         display: flex;
@@ -249,25 +422,298 @@
         justify-content: space-between;
       }
       #save-alerts button {
-        padding: 0 6px;
+        padding: 0 8px;
+        font-size: 13px;
+        background: none;
+        border: 0;
+        cursor: pointer;
+      }
+      dialog {
+        color: var(--ink);
+        border: 0;
+        border-radius: var(--r-panel);
+        box-shadow: var(--shadow);
+      }
+      dialog::backdrop {
+        background: rgb(32 33 36 / 30%);
+      }
+      #feedback textarea {
+        box-sizing: border-box;
+        width: min(28em, 100%);
+        height: 6em;
+      }
+
+      /* 右上の小さな丸いボタン */
+      #feedback-open {
+        position: fixed;
+        top: var(--edge);
+        right: var(--edge);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        padding: 0;
+        color: var(--ink-sub);
+        background: var(--panel);
+        border: 0;
+        border-radius: 50%;
+        box-shadow: var(--shadow);
+        cursor: pointer;
+      }
+      #feedback-open:hover {
+        background: var(--hover);
+      }
+      #dev-tools {
+        max-width: 12em;
+        pointer-events: auto;
+      }
+      #dev-tools button[aria-pressed="true"] {
+        color: var(--accent);
+        background: var(--accent-bg);
+      }
+      #dev-info {
+        margin: 4px 0 0;
+        padding: 2px 8px;
         font-size: 12px;
+        color: var(--bad);
+        background: rgb(255 255 255 / 90%);
+        border-radius: var(--r-button);
+      }
+      #dev-info:empty {
+        display: none;
+      }
+      #inspector {
+        width: 248px;
+        max-width: 100%;
+        font-size: 13px;
+      }
+      #inspector header {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      #inspector dl {
+        display: grid;
+        grid-template-columns: auto auto;
+        gap: 2px 12px;
+        margin: 8px 0 0;
+        font-variant-numeric: tabular-nums;
+      }
+      #inspector dt {
+        color: var(--ink-sub);
+      }
+      #inspector dd {
+        margin: 0;
+        text-align: right;
+      }
+
+      /* 下の中央。道具の帯、その上に開く 2 段目、選んだ道具の見積もりを縦に積む */
+      #toolstack {
+        position: fixed;
+        bottom: var(--edge);
+        left: 50%;
+        display: flex;
+        flex-direction: column;
+        gap: var(--gap);
+        align-items: center;
+        max-width: calc(100vw - 2 * var(--edge));
+        /* 帯と 2 段目の外は、下の地図を押せるようにする */
+        pointer-events: none;
+        transform: translateX(-50%);
+      }
+      #tool-status {
+        /* 見積もりと結果の知らせは読むだけなので、下の地図を押せるようにする */
+        pointer-events: none;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0 12px;
+        justify-content: center;
+        padding: 6px 14px;
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      #tool-status:not(:has(> :not(:empty))) {
+        display: none;
+      }
+      #tool-info:empty,
+      #tool-message:empty {
+        display: none;
+      }
+      #toolbar {
+        pointer-events: auto;
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        box-sizing: border-box;
+        padding: 8px;
+        background: var(--panel);
+        border-radius: var(--r-bar);
+        box-shadow: var(--shadow);
+      }
+      #toolbar .tool {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        align-items: center;
+        justify-content: center;
+        width: 60px;
+        height: 48px;
+        padding: 0;
+        font-size: 11px;
+        color: var(--ink-sub);
+        background: none;
+        border: 0;
+        border-radius: var(--r-panel);
+        cursor: pointer;
+      }
+      #toolbar .tool:hover {
+        background: var(--hover);
+      }
+      #toolbar .tool[aria-pressed="true"] {
+        font-weight: 600;
+        color: var(--accent);
+        background: var(--accent-bg);
+      }
+      #toolbar .tool[aria-expanded="true"]:not([aria-pressed="true"]) {
+        background: var(--hover);
+      }
+      .tool-menu {
+        pointer-events: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        max-width: 100%;
+      }
+      .tool-menu .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        align-items: center;
+      }
+      .tool-menu .row > span {
+        min-width: 4.5em;
+        font-size: 12px;
+        color: var(--ink-sub);
+      }
+      .tool-menu .swatch {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        margin-right: 6px;
+        border-radius: 50%;
+        vertical-align: baseline;
+      }
+
+      /* 右下。拡大縮小と、その上のレイヤーのボタン */
+      #map-controls {
+        position: fixed;
+        right: var(--edge);
+        bottom: var(--edge);
+        display: flex;
+        flex-direction: column;
+        gap: var(--gap);
+        align-items: flex-end;
+      }
+      .map-button {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+        padding: 0;
+        color: var(--ink-sub);
+        background: var(--panel);
+        border: 0;
+        cursor: pointer;
+      }
+      .map-button:hover:not(:disabled) {
+        background: var(--hover);
+      }
+      .map-button:disabled {
+        color: var(--line);
+        cursor: default;
+      }
+      #layers-open {
+        border-radius: var(--r-button);
+        box-shadow: var(--shadow);
+      }
+      #layers-open[aria-expanded="true"] {
+        color: var(--accent);
+        background: var(--accent-bg);
+      }
+      #zoom {
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        background: var(--panel);
+        border-radius: var(--r-button);
+        box-shadow: var(--shadow);
+      }
+      #zoom-out {
+        border-top: 1px solid var(--line);
+      }
+      .layer-wrap {
+        position: relative;
+      }
+      #layer-panel {
+        position: absolute;
+        right: calc(100% + var(--gap));
+        bottom: 0;
+        width: 208px;
+      }
+      #layers {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      #layers button {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        height: 32px;
+        padding: 0 8px;
+        font-size: 13px;
+        text-align: left;
+        background: none;
+        border: 0;
+        border-radius: var(--r-button);
+        cursor: pointer;
+      }
+      #layers button:hover {
+        background: var(--hover);
+      }
+      #layers button[aria-pressed="true"] {
+        font-weight: 600;
+        color: var(--accent);
+        background: var(--accent-bg);
+      }
+      .layer-dot {
+        width: 16px;
+        height: 16px;
+        box-sizing: border-box;
+        border: 1px solid var(--line);
+        border-radius: 50%;
       }
       #legend {
-        position: fixed;
-        right: 8px;
-        bottom: calc(var(--toolbar-h, 48px) + 8px);
-        max-width: 16em;
-        padding: 4px 8px;
+        margin-top: 8px;
+        padding-top: 8px;
         font-size: 12px;
-        background: rgb(255 255 255 / 90%);
-        border-radius: 4px;
+        border-top: 1px solid var(--line);
+      }
+      #legend-body {
+        max-height: 40vh;
+        overflow-y: auto;
       }
       #legend summary {
         cursor: pointer;
-        font-weight: bold;
+        font-weight: 600;
       }
       #legend h3 {
-        margin: 6px 0 2px;
+        margin: 8px 0 4px;
         font-size: 12px;
       }
       #legend ul {
@@ -293,100 +739,182 @@
         background: #555;
         border-radius: 2px;
       }
-      #overview {
-        font-size: 13px;
+
+      /* 左下。縮尺の物差しと、開発者向けの状態 */
+      #map-meta {
+        position: fixed;
+        bottom: var(--edge);
+        left: var(--edge);
+        display: flex;
+        flex-direction: column;
+        gap: var(--gap);
+        align-items: flex-start;
+        pointer-events: none;
       }
-      #overview summary {
+      #scale {
+        padding: 4px 8px 6px;
+        font-size: 11px;
+        font-variant-numeric: tabular-nums;
+        color: var(--ink);
+        background: var(--panel);
+        border-radius: var(--r-button);
+        box-shadow: var(--shadow);
+      }
+      #scale [data-scale-line] {
+        width: 100px;
+        height: 4px;
+        box-sizing: border-box;
+        border: 1.5px solid var(--ink);
+        border-top: 0;
+      }
+
+      #finance .finance-row button {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--r-button);
         cursor: pointer;
       }
-      #overview p {
-        margin: 2px 0 0;
+      #finance .finance-row button:hover {
+        background: var(--hover);
       }
-      #overview-parts {
-        margin-top: 2px;
+
+      #inspector-close {
+        width: 24px;
+        height: 24px;
+        padding: 0;
+        background: none;
+        border: 0;
+        border-radius: var(--r-button);
+        cursor: pointer;
       }
-      #milestone-notice {
-        position: fixed;
-        bottom: calc(var(--toolbar-h, 48px) + 16px);
-        left: 50%;
-        transform: translateX(-50%);
-        max-width: 24em;
-        padding: 8px 16px;
-        font-size: 14px;
-        color: #0b4a1c;
-        background: #c9f2d3;
-        border: 1px solid #2c9a4a;
-        border-radius: 4px;
+      #inspector-close:hover {
+        background: var(--hover);
       }
-      #milestone-notice[hidden] {
+
+      /* display を決めた部品も、hidden のときは隠す */
+      .tool-menu[hidden],
+      #feedback-open[hidden],
+      #growth-notice button[hidden] {
         display: none;
       }
+
+      /* 幅 900px 以下では、下の道具の帯が左下と右下の部品に届くので、部品を帯の上へ上げる */
       @media (max-width: 900px) {
-        /* 足りない知らせと同じ縦の並び（#notices）に積む */
-        #milestone-notice {
-          position: static;
-          transform: none;
+        #map-controls,
+        #map-meta {
+          bottom: calc(var(--bar-h, 64px) + var(--edge) + var(--gap));
+        }
+        /* 道具の 2 段目を開いているあいだは、隅の部品が 2 段目に重なるので隠す */
+        body[data-menu-open] #map-controls,
+        body[data-menu-open] #map-meta {
+          visibility: hidden;
+        }
+        /* 左下の部品の上へ積む */
+        #notices {
+          top: auto;
+          right: 68px;
+          bottom: calc(
+            var(--toolbar-h, 64px) + var(--edge) + var(--gap) + var(--meta-h, 66px) + var(--gap)
+          );
+          left: var(--edge);
+          width: auto;
           max-width: none;
         }
+        body[data-layers-open] #notices,
+        body[data-layers-open] #map-meta {
+          visibility: hidden;
+        }
       }
-      #demand {
-        display: flex;
-        gap: 4px;
-        align-items: flex-end;
-      }
-      #demand .slot {
-        position: relative;
-        width: 12px;
-        height: 40px;
-        border-bottom: 1px solid #888;
-        background: linear-gradient(transparent 19px, #888 19px, #888 20px, transparent 20px);
-      }
-      #demand .bar {
-        position: absolute;
-        left: 0;
-        width: 12px;
-        height: 0;
-      }
-      #demand .label {
-        font-size: 11px;
-        text-align: center;
+      /* 幅 640px 以下では、道具の帯を絵だけにし、上の帯は折り返す */
+      @media (max-width: 640px) {
+        #toolbar .tool {
+          width: 44px;
+        }
+        #toolbar .tool span {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          clip-path: inset(50%);
+          white-space: nowrap;
+        }
+        #hudbar {
+          padding: 4px 8px 4px 12px;
+          border-radius: var(--r-bar);
+        }
+        .vsep {
+          display: none;
+        }
       }
     </style>
   </head>
   <body>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true" focusable="false">
+      <defs>
+        <symbol id="i-select" viewBox="0 0 20 20"><path d="M5 3l11 6-4.5 1.6L9.5 15z" /></symbol>
+        <symbol id="i-road" viewBox="0 0 20 20"><path d="M7.5 3L4 17M12.5 3L16 17M10 4v2.5M10 9v2M10 13.5V16" /></symbol>
+        <symbol id="i-zone" viewBox="0 0 20 20"><rect x="3.5" y="3.5" width="5.5" height="5.5" rx="1" /><rect x="11" y="3.5" width="5.5" height="5.5" rx="1" /><rect x="3.5" y="11" width="5.5" height="5.5" rx="1" /><rect x="11" y="11" width="5.5" height="5.5" rx="1" /></symbol>
+        <symbol id="i-service" viewBox="0 0 20 20"><path d="M10 17.5s-5.5-4.6-5.5-9a5.5 5.5 0 0111 0c0 4.4-5.5 9-5.5 9z" /><circle cx="10" cy="8.5" r="2" /></symbol>
+        <symbol id="i-signal" viewBox="0 0 20 20"><rect x="6.5" y="2.5" width="7" height="15" rx="3" /><circle cx="10" cy="6.2" r=".8" /><circle cx="10" cy="10" r=".8" /><circle cx="10" cy="13.8" r=".8" /></symbol>
+        <symbol id="i-land" viewBox="0 0 20 20"><path d="M3 5.5L7.5 3.5l5 2 4.5-2v11l-4.5 2-5-2-4.5 2zM7.5 3.5v11M12.5 5.5v11" /></symbol>
+        <symbol id="i-bulldoze" viewBox="0 0 20 20"><path d="M3.5 16.5h13M5 13.5h10l-1.5-8h-7z" /></symbol>
+        <symbol id="i-layers" viewBox="0 0 20 20"><path d="M10 3l7.5 4L10 11 2.5 7zM2.5 10.5L10 14.5l7.5-4M2.5 13.5L10 17.5l7.5-4" /></symbol>
+        <symbol id="i-plus" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12" /></symbol>
+        <symbol id="i-minus" viewBox="0 0 20 20"><path d="M4 10h12" /></symbol>
+        <symbol id="i-pause" viewBox="0 0 20 20"><path d="M7 4.5v11M13 4.5v11" /></symbol>
+        <symbol id="i-more" viewBox="0 0 20 20"><circle cx="4.5" cy="10" r="1" /><circle cx="10" cy="10" r="1" /><circle cx="15.5" cy="10" r="1" /></symbol>
+        <symbol id="i-chat" viewBox="0 0 20 20"><path d="M4 4.5h12v8H9.5L6 15.5v-3H4z" /></symbol>
+      </defs>
+    </svg>
     <canvas id="map" data-tool="none"></canvas>
     <div id="overlay">
       <div id="hudbar">
         <p id="hud">
           <span id="hud-clock">1 日目 00:00</span>
-          <span id="hud-money">お金 0</span>
-          <span id="hud-deficit" hidden></span>
-          <span id="hud-speed">速度 1 倍</span>
+          <span class="vsep" aria-hidden="true"></span>
+          <button type="button" id="finance-toggle" aria-controls="finance" aria-expanded="false">
+            <span id="hud-money">お金 0</span>
+            <span id="hud-deficit" hidden></span>
+          </button>
+          <span class="vsep" aria-hidden="true"></span>
+          <span id="hud-population">人口 0</span>
         </p>
-        <div id="controls">
-          <button type="button" id="pause">一時停止</button>
-          <button type="button" data-speed="0.25">0.25 倍</button>
-          <button type="button" data-speed="0.5">0.5 倍</button>
-          <button type="button" data-speed="1">1 倍</button>
-          <button type="button" data-speed="4">4 倍</button>
-          <button type="button" data-speed="16">16 倍</button>
-          <button type="button" data-speed="48">48 倍</button>
+        <span class="vsep" aria-hidden="true"></span>
+        <div id="speeds" role="toolbar" aria-label="速度">
+          <button type="button" id="pause" aria-label="一時停止" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-pause" /></svg></button>
+          <button type="button" data-speed="1" aria-pressed="false">1 倍</button>
+          <button type="button" data-speed="4" aria-pressed="false">4 倍</button>
+          <button type="button" data-speed="16" aria-pressed="false">16 倍</button>
+          <span id="hud-speed" hidden>速度 1 倍</span>
         </div>
-        <button type="button" id="hud-toggle" aria-controls="hud-details" aria-expanded="false">詳細<span aria-hidden="true"> ▸</span></button>
-        <p id="status" data-state="loading">WASM を読み込んでいる</p>
-        <p id="dev-flag" hidden>開発用の操作あり：再現不可</p>
+        <button type="button" id="hud-toggle" aria-label="詳細" aria-controls="hud-details" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-more" /></svg></button>
       </div>
-      <div id="hud-details" hidden>
+      <div id="finance" class="panel" hidden>
+        <h2 data-finance-summary>収支</h2>
+        <div data-finance-body></div>
+      </div>
+      <div id="hud-details" class="panel" hidden>
+        <div id="hud-extra">
+          <span class="extra-label">ほかの速度と保存</span>
+          <div id="controls">
+            <button type="button" class="chip" data-speed="0.25" aria-pressed="false">0.25 倍</button>
+            <button type="button" class="chip" data-speed="0.5" aria-pressed="false">0.5 倍</button>
+            <button type="button" class="chip" data-speed="48" aria-pressed="false">48 倍</button>
+          </div>
+        </div>
         <div id="city">
           <div>
             <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
             <p id="city-utilities">電気 0 / 需要 0・水道 0 / 需要 0</p>
           </div>
           <div id="demand" title="区画の種類ごとの需要">
-            <div><div class="slot"><div class="bar" style="background: #26f226"></div></div><div class="label">住</div></div>
-            <div><div class="slot"><div class="bar" style="background: #4073f2"></div></div><div class="label">商</div></div>
-            <div><div class="slot"><div class="bar" style="background: #f2cc33"></div></div><div class="label">工</div></div>
-            <div><div class="slot"><div class="bar" style="background: #4dd9f2"></div></div><div class="label">オ</div></div>
+            <div><div class="slot"><div class="bar" style="background: #a7c18e"></div></div><div class="label">住</div></div>
+            <div><div class="slot"><div class="bar" style="background: #91a9d4"></div></div><div class="label">商</div></div>
+            <div><div class="slot"><div class="bar" style="background: #c0a462"></div></div><div class="label">工</div></div>
+            <div><div class="slot"><div class="bar" style="background: #84bbc1"></div></div><div class="label">オ</div></div>
           </div>
         </div>
         <details id="overview">
@@ -395,6 +923,13 @@
           <div id="overview-parts"></div>
         </details>
       </div>
+      <aside id="inspector" class="panel" hidden>
+        <header>
+          <span data-inspector-title aria-live="polite"></span>
+          <button type="button" id="inspector-close" data-inspector-close aria-label="閉じる">×</button>
+        </header>
+        <dl data-inspector-rows></dl>
+      </aside>
     </div>
     <div id="notices">
       <div id="city-shortage" role="status" hidden></div>
@@ -404,151 +939,99 @@
       </div>
       <div id="milestone-notice" role="status" hidden></div>
     </div>
-    <div id="toolbar">
-      <button type="button" data-tool="none" aria-pressed="true">見る</button>
-      <button type="button" data-tool="road-Small" aria-pressed="false">道路 小</button>
-      <button type="button" data-tool="road-Medium" aria-pressed="false">道路 中</button>
-      <button type="button" data-tool="road-Large" aria-pressed="false">道路 大</button>
-      <button type="button" data-tool="upgrade-Small" aria-pressed="false">小に変える</button>
-      <button type="button" data-tool="upgrade-Medium" aria-pressed="false">中に変える</button>
-      <button type="button" data-tool="upgrade-Large" aria-pressed="false">大に変える</button>
-      <button type="button" data-tool="bulldoze" aria-pressed="false">ブルドーザ</button>
-      <button type="button" data-tool="zone-Residential" aria-pressed="false">住宅</button>
-      <button type="button" data-tool="zone-Commercial" aria-pressed="false">商業</button>
-      <button type="button" data-tool="zone-Industrial" aria-pressed="false">工業</button>
-      <button type="button" data-tool="zone-Office" aria-pressed="false">オフィス</button>
-      <button type="button" data-tool="zone-Clear" aria-pressed="false">区画を消す</button>
-      <button type="button" data-tool="service-PowerPlant" aria-pressed="false">発電所</button>
-      <button type="button" data-tool="service-WaterPump" aria-pressed="false">浄水場</button>
-      <button type="button" data-tool="signal-on" aria-pressed="false">信号を置く</button>
-      <button type="button" data-tool="signal-off" aria-pressed="false">信号を外す</button>
-      <button type="button" data-tool="buy" aria-pressed="false">土地を買う</button>
-      <div id="layers" title="データレイヤー"></div>
-      <span id="tool-info"></span>
-      <span id="tool-message" aria-live="polite"></span>
+    <div id="toolstack">
+      <div id="tool-status" class="panel">
+        <span id="tool-info"></span>
+        <span id="tool-message" aria-live="polite"></span>
+      </div>
+      <div id="menu-road" class="tool-menu panel" hidden>
+        <div class="row">
+          <span>つくる</span>
+          <button type="button" class="chip" data-tool="road-Small" aria-pressed="false" aria-label="道路 小">小</button>
+          <button type="button" class="chip" data-tool="road-Medium" aria-pressed="false" aria-label="道路 中">中</button>
+          <button type="button" class="chip" data-tool="road-Large" aria-pressed="false" aria-label="道路 大">大</button>
+        </div>
+        <div class="row">
+          <span>種類を変える</span>
+          <button type="button" class="chip" data-tool="upgrade-Small" aria-pressed="false">小に変える</button>
+          <button type="button" class="chip" data-tool="upgrade-Medium" aria-pressed="false">中に変える</button>
+          <button type="button" class="chip" data-tool="upgrade-Large" aria-pressed="false">大に変える</button>
+        </div>
+      </div>
+      <div id="menu-zone" class="tool-menu panel" hidden>
+        <div class="row">
+          <button type="button" class="chip" data-tool="zone-Residential" aria-pressed="false"><span class="swatch" style="background: #a7c18e"></span>住宅</button>
+          <button type="button" class="chip" data-tool="zone-Commercial" aria-pressed="false"><span class="swatch" style="background: #91a9d4"></span>商業</button>
+          <button type="button" class="chip" data-tool="zone-Industrial" aria-pressed="false"><span class="swatch" style="background: #c0a462"></span>工業</button>
+          <button type="button" class="chip" data-tool="zone-Office" aria-pressed="false"><span class="swatch" style="background: #84bbc1"></span>オフィス</button>
+          <button type="button" class="chip" data-tool="zone-Clear" aria-pressed="false">区画を消す</button>
+        </div>
+      </div>
+      <div id="menu-service" class="tool-menu panel" hidden>
+        <div class="row">
+          <button type="button" class="chip" data-tool="service-PowerPlant" aria-pressed="false">発電所</button>
+          <button type="button" class="chip" data-tool="service-WaterPump" aria-pressed="false">浄水場</button>
+        </div>
+      </div>
+      <div id="menu-signal" class="tool-menu panel" hidden>
+        <div class="row">
+          <button type="button" class="chip" data-tool="signal-on" aria-pressed="false">信号を置く</button>
+          <button type="button" class="chip" data-tool="signal-off" aria-pressed="false">信号を外す</button>
+          <button type="button" class="chip" data-tool="crosswalk-off" aria-pressed="false">横断歩道を外す</button>
+          <button type="button" class="chip" data-tool="crosswalk-on" aria-pressed="false">横断歩道を戻す</button>
+        </div>
+      </div>
+      <div id="toolbar" role="toolbar" aria-label="道具">
+        <button type="button" class="tool" data-tool="none" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-select" /></svg><span>見る</span></button>
+        <span class="vsep" aria-hidden="true"></span>
+        <button type="button" class="tool" data-menu="road" aria-pressed="false" aria-controls="menu-road" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-road" /></svg><span>道路</span></button>
+        <button type="button" class="tool" data-menu="zone" aria-pressed="false" aria-controls="menu-zone" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-zone" /></svg><span>区画</span></button>
+        <button type="button" class="tool" data-menu="service" aria-pressed="false" aria-controls="menu-service" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-service" /></svg><span>施設</span></button>
+        <button type="button" class="tool" data-menu="signal" aria-pressed="false" aria-controls="menu-signal" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-signal" /></svg><span>信号</span></button>
+        <button type="button" class="tool" data-tool="buy" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-land" /></svg><span>土地</span></button>
+        <span class="vsep" aria-hidden="true"></span>
+        <button type="button" class="tool" data-tool="bulldoze" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-bulldoze" /></svg><span>取り壊す</span></button>
+      </div>
     </div>
-    <details id="legend">
-      <summary>凡例</summary>
-      <div id="legend-body"></div>
-    </details>
-    <style>
-      /* 左下に置く。左上の #overlay は縦に伸ばすと地図のクリックを隠すので、広げたときも下から上へ伸びる場所にする */
-      #finance {
-        position: fixed;
-        left: 8px;
-        bottom: calc(var(--toolbar-h, 48px) + 8px);
-        width: 17em;
-        max-height: 50vh;
-        padding: 4px 8px;
-        overflow-y: auto;
-        font-size: 13px;
-        background: rgb(255 255 255 / 90%);
-        border-radius: 4px;
-      }
-      #finance summary {
-        cursor: pointer;
-        font-weight: bold;
-      }
-      #finance.deficit summary {
-        color: #b00020;
-      }
-      #finance h3 {
-        margin: 6px 0 2px;
-        font-size: 12px;
-      }
-      #finance .finance-row {
-        display: flex;
-        gap: 4px;
-        align-items: center;
-      }
-      #finance .finance-row > :first-child {
-        flex: 1;
-      }
-      #finance .finance-rate {
-        min-width: 3.5em;
-        text-align: center;
-      }
-      #finance .finance-amount {
-        min-width: 5em;
-        text-align: right;
-      }
-      #finance .finance-net {
-        justify-content: space-between;
-        margin-top: 4px;
-        padding-top: 2px;
-        font-weight: bold;
-        border-top: 1px solid #888;
-      }
-      #finance.deficit .finance-net {
-        color: #b00020;
-      }
-      #finance .finance-note {
-        margin: 4px 0 0;
-        font-size: 11px;
-        color: #555;
-      }
-    </style>
-    <details id="finance">
-      <summary>収支</summary>
-      <div data-finance-body></div>
-    </details>
-    <button type="button" id="feedback-open" hidden>フィードバック</button>
-    <div id="dev-tools">
-      <button type="button" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>
-      <p id="dev-info"></p>
+    <div id="map-controls">
+      <div class="layer-wrap">
+        <button type="button" id="layers-open" class="map-button" aria-label="レイヤー" aria-controls="layer-panel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-layers" /></svg></button>
+        <div id="layer-panel" class="panel" hidden>
+          <h2>レイヤー</h2>
+          <div id="layers"></div>
+          <details id="legend">
+            <summary>凡例</summary>
+            <div id="legend-body"></div>
+          </details>
+        </div>
+      </div>
+      <div id="zoom">
+        <button type="button" id="zoom-in" class="map-button" aria-label="拡大"><svg class="icon" aria-hidden="true"><use href="#i-plus" /></svg></button>
+        <button type="button" id="zoom-out" class="map-button" aria-label="縮小"><svg class="icon" aria-hidden="true"><use href="#i-minus" /></svg></button>
+      </div>
     </div>
+    <div id="map-meta">
+      <div id="dev-tools">
+        <p id="dev-flag" hidden>開発用の操作あり：再現不可</p>
+        <button type="button" class="chip" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>
+        <p id="dev-info"></p>
+      </div>
+      <p id="status" data-state="loading">WASM を読み込んでいる</p>
+      <div id="scale">
+        <div data-scale-label>100 m</div>
+        <div data-scale-line></div>
+      </div>
+    </div>
+    <button type="button" id="feedback-open" aria-label="フィードバック" title="フィードバック" hidden><svg class="icon" aria-hidden="true"><use href="#i-chat" /></svg></button>
     <dialog id="feedback">
       <form method="dialog">
         <p>気づいたことを書く。画面、状態、これまでの操作の記録と一緒に保存する。</p>
         <textarea id="feedback-note"></textarea>
         <p id="feedback-result" aria-live="polite"></p>
-        <button type="submit" id="feedback-send">送る</button>
-        <button type="submit" value="close" formnovalidate>閉じる</button>
+        <button type="submit" class="chip" id="feedback-send">送る</button>
+        <button type="submit" class="chip" value="close" formnovalidate>閉じる</button>
       </form>
     </dialog>
-    <style>
-      /* 右下の凡例と重ならないよう、右上のフィードバックのボタンの下に置く */
-      #inspector {
-        position: fixed;
-        right: 8px;
-        top: calc(var(--hudbar-h, 30px) + 116px);
-        min-width: 16em;
-        padding: 4px 8px 8px;
-        font-size: 14px;
-        background: rgb(255 255 255 / 90%);
-        border-radius: 4px;
-      }
-      #inspector[hidden] {
-        display: none;
-      }
-      #inspector header {
-        display: flex;
-        gap: 8px;
-        align-items: center;
-        justify-content: space-between;
-        font-weight: bold;
-      }
-      #inspector dl {
-        display: grid;
-        grid-template-columns: auto auto;
-        gap: 2px 12px;
-        margin: 4px 0 0;
-      }
-      #inspector dt {
-        color: #555;
-      }
-      #inspector dd {
-        margin: 0;
-        text-align: right;
-      }
-    </style>
-    <aside id="inspector" hidden>
-      <header>
-        <span data-inspector-title aria-live="polite"></span>
-        <button type="button" data-inspector-close aria-label="閉じる">×</button>
-      </header>
-      <dl data-inspector-rows></dl>
-    </aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

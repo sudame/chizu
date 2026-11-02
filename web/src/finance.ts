@@ -88,6 +88,14 @@ export function deficitNote(finance: Finance | null): string {
   return finance !== null && isDeficit(finance) ? `赤字 ${formatSigned(finance.net)} / 日` : "";
 }
 
+/** 上の帯の所持金の横に出す、1 日あたりの収支。赤字のときは赤字と分かる文にする。 */
+export function balanceNote(finance: Finance | null): string {
+  if (finance === null) {
+    return "";
+  }
+  return isDeficit(finance) ? deficitNote(finance) : `${formatSigned(finance.net)} / 日`;
+}
+
 /** 税率を 1 刻み動かした値。0 と上限のあいだに収める。 */
 export function steppedRate(current: number, direction: 1 | -1, max: number): number {
   return Math.max(0, Math.min(max, current + direction * RATE_STEP_PERMILLE));
@@ -184,10 +192,10 @@ function make<K extends keyof HTMLElementTagNameMap>(
  * 返事が届くまでに続けて押しても 1 つ飛ばさないよう、押した先の税率を覚えておき、次の finance が届いたら捨てる。
  */
 export function setupFinance(
-  root: HTMLDetailsElement,
+  root: HTMLElement,
   send: (command: ReturnType<typeof taxCommand>) => void,
 ): FinancePanel {
-  const summary = root.querySelector<HTMLElement>("summary");
+  const summary = root.querySelector<HTMLElement>("[data-finance-summary]");
   const body = root.querySelector<HTMLElement>("[data-finance-body]");
   if (summary === null || body === null) {
     throw new Error("収支のパネルの要素が足りない");
