@@ -5,6 +5,7 @@
 //! 覚えた結果の有無やスレッドの数に関わらず同じ経路を返す。
 
 mod astar;
+mod delay;
 mod graph;
 #[cfg(test)]
 mod tests;
@@ -17,6 +18,7 @@ use rayon::prelude::*;
 
 use astar::{Marks, extract, search_many};
 pub use astar::{Route, Scratch, Toward, astar, one_to_many};
+pub use delay::Delays;
 pub use graph::{
     Connector, Graph, GraphError, WALK_SPEED, connectors, speed_limit, try_connectors,
 };
@@ -25,6 +27,9 @@ use crate::network::{LaneMode, LinkId, Network};
 
 /// 1 日を分ける時間帯の数。重みは時間帯ごとに写す。
 pub const TIME_BANDS: u8 = 96;
+
+/// 1 つの時間帯の tick 数。
+pub const BAND_TICKS: u64 = crate::clock::TICKS_PER_DAY / TIME_BANDS as u64;
 
 /// 1 対多の探索に束ねる依頼の数の既定の下限。これより少ない組は A* で解く。
 pub const DEFAULT_BUNDLE_MIN: usize = 4;
@@ -86,6 +91,8 @@ pub struct AstarRouter {
     bundle_min: usize,
     cache_limit: usize,
     cache: BTreeMap<RouteRequest, Option<Arc<Route>>>,
+    /// 車のグラフの費用に足している遅れ。グラフを作り直しても引き継ぐ。
+    delays: Delays,
 }
 
 /// 一括の探索で、1 本のスレッドが解く単位。
@@ -118,6 +125,7 @@ impl AstarRouter {
             bundle_min: DEFAULT_BUNDLE_MIN,
             cache_limit: DEFAULT_CACHE_LIMIT,
             cache: BTreeMap::new(),
+            delays: Delays::default(),
         })
     }
 
@@ -167,6 +175,21 @@ impl AstarRouter {
 
     pub fn band(&self) -> u8 {
         self.band
+    }
+
+    /// 車のリンクの費用に足す遅れを `delays` にする。変わったら、覚えた車の結果を捨てる。
+    pub fn set_delays(&mut self, delays: &Delays) {
+        if *delays == self.delays {
+            return;
+        }
+        self.delays.clone_from(delays);
+        self.car.set_delays(delays);
+        self.cache.retain(|r, _| r.mode != LaneMode::Car);
+    }
+
+    /// 車のリンクの費用に足している遅れ。
+    pub fn delays(&self) -> &Delays {
+        &self.delays
     }
 
     /// 覚えている結果の数。
@@ -285,12 +308,14 @@ fn extract_all(
 
 impl Router for AstarRouter {
     fn rebuild(&mut self, net: &Network) {
+        let delays = core::mem::take(&mut self.delays);
         *self = AstarRouter {
             band: self.band,
             bundle_min: self.bundle_min,
             cache_limit: self.cache_limit,
             ..AstarRouter::new(net)
         };
+        self.set_delays(&delays);
     }
 
     fn set_band(&mut self, band: u8) {

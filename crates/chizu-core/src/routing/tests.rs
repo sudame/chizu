@@ -591,3 +591,50 @@ fn try_new_matches_new_on_networks_built_by_commands() {
         assert_eq!(Graph::try_build(&n, mode).unwrap(), Graph::build(&n, mode));
     }
 }
+
+#[test]
+fn delays_steer_cars_to_the_parallel_road_and_survive_a_rebuild() {
+    // (0, 0) から (20, 0) へ、まっすぐの道と、北へ回る道がある。
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    road(&mut n, (0, 0), (0, -4), RoadKind::Small);
+    road(&mut n, (0, -4), (20, -4), RoadKind::Small);
+    road(&mut n, (20, -4), (20, 0), RoadKind::Small);
+    road(&mut n, (20, 0), (24, 0), RoadKind::Small);
+    road(&mut n, (-4, 0), (0, 0), RoadKind::Small);
+    let car = LaneMode::Car;
+    let req = RouteRequest {
+        from: link(&n, (-4, 0), (0, 0), car),
+        to: link(&n, (20, 0), (24, 0), car),
+        mode: car,
+    };
+    let walk = RouteRequest {
+        from: link(&n, (-4, 0), (0, 0), LaneMode::Sidewalk),
+        to: link(&n, (20, 0), (24, 0), LaneMode::Sidewalk),
+        mode: LaneMode::Sidewalk,
+    };
+    let straight = link(&n, (0, 0), (20, 0), car);
+    let mut router = AstarRouter::new(&n);
+    let free = router.route_batch(&[req, walk]);
+    assert!(free[0].as_ref().unwrap().links.contains(&straight));
+    // まっすぐの道に、回り道の 8 マスぶんより長い遅れを足すと、車は北へ回る。歩く経路は変わらない。
+    let detour_ms = router
+        .graph(car)
+        .link_cost(link(&n, (0, 0), (0, -4), car))
+        .unwrap()
+        * 3;
+    let delays = Delays::from_sorted([(straight, detour_ms)]);
+    router.set_delays(&delays);
+    assert_eq!(router.cached(), 1, "歩く経路の覚えた結果は残す");
+    let jammed = router.route_batch(&[req, walk]);
+    let r = jammed[0].as_ref().unwrap();
+    assert!(!r.links.contains(&straight), "混んだ道を避けない {r:?}");
+    check_route(router.graph(car), r);
+    assert_eq!(jammed[1], free[1]);
+    // 網を作り直しても遅れは残り、遅れを消せば元の経路に戻る。
+    router.rebuild(&n);
+    assert_eq!(router.delays(), &delays);
+    assert_eq!(router.route_batch(&[req])[0], jammed[0]);
+    router.set_delays(&Delays::default());
+    assert_eq!(router.route_batch(&[req])[0], free[0]);
+}

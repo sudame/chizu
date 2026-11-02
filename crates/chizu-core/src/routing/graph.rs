@@ -7,6 +7,8 @@ use crate::network::{Dir, LaneId, LaneMode, Line, LinkId, Network, SegmentId, Se
 use crate::tile::TilePos;
 use crate::units::MmPerTick;
 
+use super::Delays;
+
 /// 歩く速さ（時速 5km）。
 pub const WALK_SPEED: MmPerTick = MmPerTick(1_389);
 
@@ -124,8 +126,10 @@ pub(crate) struct Edge {
 pub struct Graph {
     mode: LaneMode,
     links: Vec<LinkId>,
-    /// リンクを端から端まで通る費用（ms）。
+    /// リンクを端から端まで通る費用（ms）。自由に走れたときの所要時間に、混み具合の遅れを足したもの。
     cost: Vec<u64>,
+    /// 自由に走れたときの、リンクを端から端まで通る所要時間（ms）。
+    free: Vec<u64>,
     /// リンクの終わりのノードのマス。ヒューリスティックに使う。
     end_tile: Vec<TilePos>,
     /// 頂点 `v` から出る辺は `edges[edge_start[v]..edge_start[v + 1]]` で、行き先の番号の順に並ぶ。
@@ -240,6 +244,7 @@ impl Graph {
         Ok(Graph {
             mode,
             links,
+            free: cost.clone(),
             cost,
             end_tile,
             edge_start,
@@ -265,6 +270,18 @@ impl Graph {
 
     pub(crate) fn link(&self, v: u32) -> LinkId {
         self.links[v as usize]
+    }
+
+    /// リンクの費用を、自由に走れたときの所要時間に `delays` の遅れを足したものにする。
+    /// グラフにないリンクの遅れは捨てる。費用は下がらないので、ヒューリスティックは下限のままである。
+    pub(crate) fn set_delays(&mut self, delays: &Delays) {
+        self.cost.clone_from(&self.free);
+        for (link, ms) in delays.iter() {
+            if let Some(v) = self.vertex(link) {
+                let v = v as usize;
+                self.cost[v] = self.free[v].saturating_add(ms);
+            }
+        }
     }
 
     /// リンクを端から端まで通る費用（ms）。
