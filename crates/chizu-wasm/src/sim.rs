@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use chizu_core::building::demand;
 use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
+use chizu_core::world::economy::{chunk_slots, milestone_population};
 use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::zone::{ZONE_DEPTH, near_road};
 use chizu_core::{
@@ -15,6 +16,9 @@ use chizu_core::{
 };
 
 use crate::snapshot::{Header, Mover, TripleBuffer};
+
+/// [`Sim::overview`] が返す数の個数。画面の側の `OVERVIEW_LENGTH` と合わせる。
+pub const OVERVIEW_LENGTH: usize = 9;
 
 pub struct Sim {
     world: World,
@@ -244,12 +248,17 @@ impl Sim {
         out
     }
 
-    /// ノードを、1 つにつき `[x, y, つながる区間の数]` の 3 つの数で返す。
+    /// ノードを、1 つにつき `[x, y, つながる区間の数, 外の世界か（0 か 1）]` の 4 つの数で返す。
     pub fn road_nodes(&self) -> Vec<f64> {
         let mut out = Vec::new();
         for (_, node) in self.world.network().nodes() {
             let t = node.tile();
-            out.extend([t.x as f64, t.y as f64, node.segments.len() as f64]);
+            out.extend([
+                t.x as f64,
+                t.y as f64,
+                node.segments.len() as f64,
+                f64::from(u8::from(node.outside)),
+            ]);
         }
         out
     }
@@ -388,6 +397,39 @@ impl Sim {
         out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
         out.extend(crate::layers::utility_gaps(&self.world).map(|v| v as f64));
         out
+    }
+
+    /// 収支の見込みを次の数で返す。税率の上限（‰）、区画の種類ごとの税率（‰）、区画の種類ごとの税収、
+    /// 道路の維持費、発電所と浄水場の維持費。区画の種類の順は住宅、商業、工業、オフィス。
+    /// 金額はどれも 1 日あたりである。
+    pub fn finance(&self) -> Vec<f64> {
+        let f = self.world.finances();
+        let mut out = vec![f64::from(chizu_core::command::MAX_TAX_PERMILLE)];
+        out.extend(chizu_core::ZoneKind::ALL.map(|z| f64::from(self.world.tax_permille(z))));
+        out.extend(f.taxes.map(|m| m.0 as f64));
+        out.push(f.road_upkeep.0 as f64);
+        out.extend(f.facility_upkeep.map(|m| m.0 as f64));
+        out
+    }
+
+    /// 人口と幸福度とマイルストーンを、次の [`OVERVIEW_LENGTH`] 個の数で返す。
+    /// 家のある住民の数、幸福度の平均、通勤・生活サービス・暮らし向きの平均、届いた段階、
+    /// 次の段階に届く人口、いまの段階までで買える枠の数、次の段階で買える枠の数。
+    /// 建物の表が変わらなくても動く値なので、街の数字（[`Sim::city_stats`]）とは別に返す。
+    pub fn overview(&self) -> Vec<f64> {
+        let (happiness, parts) = self.world.happiness_summary();
+        let step = self.world.milestone();
+        vec![
+            self.world.housed_citizens() as f64,
+            f64::from(happiness),
+            f64::from(parts.commute),
+            f64::from(parts.services),
+            f64::from(parts.wealth),
+            f64::from(step),
+            milestone_population(step + 1) as f64,
+            f64::from(chunk_slots(step)),
+            f64::from(chunk_slots(step + 1)),
+        ]
     }
 
     /// いまの状態を三重バッファに書く。
@@ -638,6 +680,23 @@ mod tests {
         assert_eq!(stats[0], count as f64);
         assert!(stats[1] > 0.0);
         assert_ne!(sim.buildings_version(), version);
+        sim.advance(20_000);
+        let o = sim.overview();
+        assert_eq!(o.len(), OVERVIEW_LENGTH);
+        assert!(o[0] >= 0.0, "{o:?}");
+    }
+
+    #[test]
+    fn overview_starts_neutral_and_points_at_the_first_milestone() {
+        let sim = Sim::new(0);
+        let o = sim.overview();
+        assert_eq!(o.len(), OVERVIEW_LENGTH);
+        assert_eq!(o[0], 0.0);
+        assert_eq!(o[2..5], [50.0, 50.0, 50.0]);
+        assert_eq!(o[5], 0.0);
+        assert_eq!(o[6], 250.0);
+        assert_eq!(o[7], 6.0);
+        assert_eq!(o[8], 9.0);
     }
 
     #[test]
@@ -866,6 +925,26 @@ mod tests {
         assert!(sim.log().is_empty());
     }
 
+    #[test]
+    fn finance_follows_tax_rate_commands_and_the_log() {
+        let mut sim = Sim::new(0);
+        let before = sim.finance();
+        assert_eq!(before.len(), 12);
+        assert_eq!(before[0], f64::from(MAX_TAX_PERMILLE));
+        // 住宅、商業、工業、オフィスの順の税率
+        assert_eq!(&before[1..5], &[100.0; 4]);
+        let set = Command::SetTaxRate {
+            zone: ZoneKind::Commercial,
+            permille: 170,
+        };
+        sim.submit(set).unwrap();
+        sim.advance(1);
+        let after = sim.finance();
+        assert_eq!(&after[1..5], &[100.0, 170.0, 100.0, 100.0]);
+        // 記録に残る
+        assert_eq!(sim.log().len(), 1);
+    }
+
     fn road(from: (i64, i64), to: (i64, i64)) -> Command {
         Command::BuildRoad {
             from: TilePos::new(from.0, from.1),
@@ -900,7 +979,10 @@ mod tests {
         assert_eq!(segments[4], 4.0);
         assert_eq!(segments[segments.len() - 5..], [0.0, 0.0, 4.0, 0.0, 1.0]);
         let nodes = sim.road_nodes();
-        assert_eq!(nodes[nodes.len() - 6..], [0.0, 0.0, 1.0, 4.0, 0.0, 1.0]);
+        assert_eq!(
+            nodes[nodes.len() - 8..],
+            [0.0, 0.0, 1.0, 0.0, 4.0, 0.0, 1.0, 0.0]
+        );
 
         let far = (CHUNK_SIDE as i64) * 3;
         sim.submit(road((far, 0), (far + 2, 0))).unwrap();

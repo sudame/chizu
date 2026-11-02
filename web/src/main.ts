@@ -1,6 +1,13 @@
 import { parseCityStats, renderCityStats } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
+import {
+  deficitNote,
+  type Finance,
+  type FinancePanel,
+  parseFinance,
+  setupFinance,
+} from "./finance.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
@@ -19,6 +26,14 @@ import {
   unsuppliedCount,
 } from "./map/roads.ts";
 import {
+  buildRoadIndex,
+  DISCONNECTED_NOTICE,
+  EMPTY_ROAD_INDEX,
+  isDisconnected,
+  type RoadIndex,
+  roadEndpoints,
+} from "./map/snap.ts";
+import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
@@ -35,10 +50,10 @@ import {
   type ServiceProbe,
   screenToTile,
   serviceFootprint,
-  snapToEightDirections,
   type Tile,
   type Tool,
 } from "./map/tools.ts";
+import { parseOverview, renderOverview } from "./overview.ts";
 import {
   CHUNK_SIDE,
   type CommandMessage,
@@ -54,6 +69,7 @@ import {
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 import { setupSaves } from "./save/main-side.ts";
+import { describeSpeed, shownSpeed, splitSpeed } from "./speed.ts";
 
 function element<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
@@ -92,6 +108,16 @@ function sendCommand(command: CommandMessage): void {
   send({ kind: "command", id, command });
 }
 
+// 最後に届いた収支の見込み。所持金の横の赤字の表示に使う
+let finance: Finance | null = null;
+const financePanel: FinancePanel = setupFinance(
+  element<HTMLDetailsElement>("#finance"),
+  sendCommand,
+);
+
+// 1 倍より遅く進めているときの倍率。中核の速度は 1 のままなので、Worker だけが持つ。表示は Worker が返した値を使う
+let workerPace = 1;
+
 const pad = (n: number) => String(n).padStart(2, "0");
 
 function describeClock(header: SnapshotHeader): string {
@@ -105,11 +131,21 @@ function draw(ctx: CanvasRenderingContext2D, header: SnapshotHeader): void {
   ctx.fillStyle = "#222";
   ctx.font = "20px sans-serif";
   ctx.fillText(describeClock(header), 12, 30);
-  ctx.fillText(`お金 ${header.money.toLocaleString("ja-JP")}`, 12, 58);
-  ctx.fillText(header.paused ? "一時停止中" : `速度 ${header.speed} 倍`, 12, 86);
+  const moneyText = `お金 ${header.money.toLocaleString("ja-JP")}`;
+  ctx.fillText(moneyText, 12, 58);
+  // 収支が赤字のあいだは、所持金の横に知らせる
+  const note = deficitNote(finance);
+  if (note !== "") {
+    ctx.fillStyle = "#b00020";
+    ctx.fillText(note, 12 + ctx.measureText(moneyText).width + 12, 58);
+    ctx.fillStyle = "#222";
+  }
+  canvas.dataset.deficit = String(note !== "");
+  const speed = shownSpeed(header.speed, workerPace);
+  ctx.fillText(header.paused ? "一時停止中" : describeSpeed(speed), 12, 86);
   // test:wasm が読む
   canvas.dataset.tick = String(header.tick);
-  canvas.dataset.speed = String(header.speed);
+  canvas.dataset.speed = String(speed);
   canvas.dataset.paused = String(header.paused);
   canvas.dataset.day = String(header.day);
   canvas.dataset.secondOfDay = String(header.secondOfDay);
@@ -212,7 +248,13 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   const movers =
     header === null
       ? 0
-      : (renderer?.movers.draw(camera, vp, header, reader.movers(header.moverCount)) ?? 0);
+      : (renderer?.movers.draw(
+          camera,
+          vp,
+          header,
+          reader.movers(header.moverCount),
+          performance.now(),
+        ) ?? 0);
   // test:wasm が読む
   mapCanvas.dataset.drawnMovers = String(movers);
   const first = renderer?.movers.first;
@@ -271,6 +313,17 @@ let probe: { service: ServiceName; x: number; y: number; results: ServiceProbe }
 let probeSent = "";
 let money = 0;
 let roadStart: Tile | null = null;
+let roadIndex: RoadIndex = EMPTY_ROAD_INDEX;
+// Alt を押しているあいだは、道路を近くの道路に吸い付けない
+let noSnap = false;
+// プレビューで最後に見せた道路。押したときは、これと同じ道路を送る
+let shownRoad: {
+  start: Tile | null;
+  cursor: Tile;
+  noSnap: boolean;
+  from: Tile;
+  to: Tile;
+} | null = null;
 let cursor: Tile | null = null;
 let pointer: {
   id: number;
@@ -291,8 +344,8 @@ function updatePreview(): void {
   let info = "";
   let infoText = "";
   if (tool.kind === "road" && cursor !== null) {
-    const from = roadStart ?? cursor;
-    const to = roadStart === null ? cursor : snapToEightDirections(roadStart, cursor);
+    const { from, to } = roadEndpoints(roadIndex, roadStart, cursor, noSnap);
+    shownRoad = { start: roadStart, cursor, noSnap, from, to };
     geometry = new Geometry(from);
     const half = halfWidthOf(ROAD_CODES[tool.road]);
     if (roadStart !== null && roadCosts !== null) {
@@ -301,6 +354,9 @@ function updatePreview(): void {
       const color = cost > money ? PREVIEW_BAD : PREVIEW_OK;
       geometry.segment(from, to, half, color);
       info = `長さ ${length} マス・費用 ${cost.toLocaleString("ja-JP")}`;
+      if (isDisconnected(roadIndex, from, to)) {
+        info += `・${DISCONNECTED_NOTICE}`;
+      }
       mapCanvas.dataset.previewCost = String(cost);
     }
     geometry.square(from, half, PREVIEW_OK);
@@ -339,6 +395,25 @@ function updatePreview(): void {
   }
   renderer?.roads.setPreview(geometry);
   toolInfo.textContent = infoText === "" ? info : infoText;
+}
+
+/**
+ * 押した位置の道路の始点と終点。プレビューで最後に見せた道路と同じ条件ならそれをそのまま使い、
+ * 道路網が届いて索引が変わっていても、プレビューと違う道路を送らない。
+ */
+function roadAt(at: Tile): { from: Tile; to: Tile } {
+  const shown = shownRoad;
+  if (
+    shown !== null &&
+    shown.noSnap === noSnap &&
+    shown.cursor.x === at.x &&
+    shown.cursor.y === at.y &&
+    shown.start?.x === roadStart?.x &&
+    shown.start?.y === roadStart?.y
+  ) {
+    return shown;
+  }
+  return roadEndpoints(roadIndex, roadStart, at, noSnap);
 }
 
 function requestProbe(service: ServiceName, at: Tile): void {
@@ -399,9 +474,9 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
 function clickTile(at: Tile): void {
   if (tool.kind === "road") {
     if (roadStart === null) {
-      roadStart = at;
+      roadStart = roadAt(at).from;
     } else {
-      const end = snapToEightDirections(roadStart, at);
+      const end = roadAt(at).to;
       if (end.x !== roadStart.x || end.y !== roadStart.y) {
         sendCommand(buildRoadCommand(tool.road, roadStart, end));
         // CS2 と同じく、引いた終点から続けて引ける
@@ -466,7 +541,8 @@ mapCanvas.addEventListener("pointerdown", (event) => {
 });
 mapCanvas.addEventListener("pointermove", (event) => {
   const at = tileAt(event);
-  if (cursor?.x !== at.x || cursor?.y !== at.y) {
+  if (cursor?.x !== at.x || cursor?.y !== at.y || noSnap !== event.altKey) {
+    noSnap = event.altKey;
     cursor = at;
     updatePreview();
   }
@@ -491,6 +567,7 @@ mapCanvas.addEventListener("pointerup", (event) => {
   }
   const done = pointer;
   pointer = null;
+  noSnap = event.altKey;
   if (done.mode === "click") {
     clickTile(tileAt(event));
   } else if (done.mode === "area") {
@@ -590,6 +667,7 @@ const DONE: Record<CommandMessage["kind"], string> = {
   PaintZone: "区画を塗った",
   PlaceBuilding: "施設を置いた",
   SetSimSpeed: "速度を変えた",
+  SetTaxRate: "税率を変えた",
 };
 function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?: string): void {
   const text: Record<Outcome, string> = {
@@ -607,13 +685,19 @@ function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?:
 
 for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-speed]")) {
   button.addEventListener("click", () => {
-    sendCommand({ kind: "SetSimSpeed", speed: Number(button.dataset.speed) });
+    const { core, pace: next } = splitSpeed(Number(button.dataset.speed));
+    send({ kind: "pace", pace: next });
+    sendCommand({ kind: "SetSimSpeed", speed: core });
   });
 }
 
 worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   const message = event.data;
   if (!isWorkerToMain(message)) {
+    return;
+  }
+  if (message.kind === "pace") {
+    workerPace = message.pace;
     return;
   }
   if (message.kind === "chunks") {
@@ -633,6 +717,8 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "roads") {
     roads = roadMeshes(message.segments, message.nodes);
+    roadIndex = buildRoadIndex(message.segments, message.nodes);
+    updatePreview();
     renderer?.roads.setRoads(roads);
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);
@@ -649,6 +735,17 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     mapCanvas.dataset.facilities = String(message.facilities.length / FACILITY_STRIDE);
     return;
   }
+  if (message.kind === "finance") {
+    finance = parseFinance(message.values);
+    if (finance !== null) {
+      financePanel.update(finance);
+    }
+    return;
+  }
+  if (message.kind === "overview") {
+    renderOverview(parseOverview(message.overview));
+    return;
+  }
   if (message.kind === "outcome") {
     const command = sentCommands.get(message.id);
     sentCommands.delete(message.id);
@@ -656,6 +753,9 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     probeSent = "";
     if (tool.kind === "service") {
       updatePreview();
+    }
+    if (command === "SetTaxRate" && message.outcome !== "Applied") {
+      financePanel.rejected();
     }
     if (command !== undefined && command !== "SetSimSpeed") {
       showOutcome(command, message.outcome, message.reason);

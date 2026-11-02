@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// 配置の版。配置を変えたら上げる。
-pub const LAYOUT_VERSION: u32 = 2;
+pub const LAYOUT_VERSION: u32 = 3;
 
 pub const SLOT_COUNT: u32 = 3;
 /// 枠の前に置く制御の語の数。
@@ -58,8 +58,8 @@ pub mod header {
 /// 4 の倍数にする。バッファそのものの先頭の位置は 4 バイト境界にしか乗せていない。
 pub const SLOT_HEADER_WORDS: usize = 12;
 
-/// 移動体 1 体の語の数（16 バイト）。中の語の位置は [`mover`] にある。
-pub const MOVER_WORDS: usize = 4;
+/// 移動体 1 体の語の数（20 バイト）。中の語の位置は [`mover`] にある。
+pub const MOVER_WORDS: usize = 5;
 
 /// 移動体の、1 体の中での語の位置。
 pub mod mover {
@@ -69,7 +69,10 @@ pub mod mover {
     pub const Y: usize = 1;
     /// 下位 16 ビットが向き、上位 16 ビットが種類と色。
     pub const HEADING_KIND: usize = 2;
+    /// 移動の添え字。添え字は使い回されるので、世代と組にして移動を区別する。
     pub const ID: usize = 3;
+    /// 移動の世代。
+    pub const GENERATION: usize = 4;
 }
 
 /// 1 枠に入る移動体の上限。
@@ -105,6 +108,7 @@ pub struct Mover {
     pub heading: u16,
     pub kind: u16,
     pub id: u32,
+    pub generation: u32,
 }
 
 /// 書き手の側の三重バッファ。
@@ -165,6 +169,7 @@ impl TripleBuffer {
                 u32::from(m.heading) | (u32::from(m.kind) << 16),
             );
             put(at + mover::ID, m.id);
+            put(at + mover::GENERATION, m.generation);
         }
 
         let previous = self.words[LATEST].swap(self.writing | FRESH, Ordering::AcqRel);
@@ -210,7 +215,8 @@ pub fn layout_json() -> String {
     "x": {},
     "y": {},
     "headingKind": {},
-    "id": {}
+    "id": {},
+    "generation": {}
   }},
   "maxMovers": {MAX_MOVERS},
   "slotWords": {SLOT_WORDS},
@@ -233,6 +239,7 @@ pub fn layout_json() -> String {
         mover::Y,
         mover::HEADING_KIND,
         mover::ID,
+        mover::GENERATION,
     )
 }
 
@@ -370,6 +377,7 @@ mod tests {
             heading: 0x1234,
             kind: 0xabcd,
             id: 7,
+            generation: 3,
         };
         buf.publish(&header(0), &[m]);
         let mut r = Reader {
@@ -382,5 +390,6 @@ mod tests {
         assert_eq!(f32::from_bits(r.word(&buf, at + mover::Y)), -2.0);
         assert_eq!(r.word(&buf, at + mover::HEADING_KIND), 0xabcd_1234);
         assert_eq!(r.word(&buf, at + mover::ID), 7);
+        assert_eq!(r.word(&buf, at + mover::GENERATION), 3);
     }
 }

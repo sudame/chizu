@@ -140,6 +140,29 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   await waitMap("firstMover", spawned.firstMover ?? "", "ne");
   const moved = await map.getAttribute("data-first-mover");
   check(true, `時間を進めると移動体の位置が変わる（${spawned.firstMover} → ${moved}）`);
+  // 等速では 1 tick が約 33ms で、フレームは約 17ms。補間があれば、tick が変わらないフレームでも位置が変わる
+  const sampled = await page.evaluate(
+    () =>
+      new Promise<{ ticks: number; positions: number }>((resolve) => {
+        const ticks = new Set<string>();
+        const positions = new Set<string>();
+        const end = performance.now() + 1000;
+        const step = () => {
+          ticks.add(document.querySelector<HTMLElement>("#hud")?.dataset.tick ?? "");
+          positions.add(document.querySelector<HTMLElement>("#map")?.dataset.firstMover ?? "");
+          if (performance.now() < end) {
+            requestAnimationFrame(step);
+          } else {
+            resolve({ ticks: ticks.size, positions: positions.size });
+          }
+        };
+        requestAnimationFrame(step);
+      }),
+  );
+  check(
+    sampled.positions >= sampled.ticks * 1.5,
+    `移動体は 1 tick のあいだにも少しずつ動く（tick ${sampled.ticks} 回に対し位置 ${sampled.positions} 通り）`,
+  );
   check(
     await page.locator("#dev-flag").isVisible(),
     "開発用の道具を使うと、再現できないことの印が出る",
@@ -206,6 +229,22 @@ try {
   check(
     normal >= TICKS_PER_SECOND && normal <= TICKS_PER_SECOND * 4,
     `等速で 2 秒待つと時計が 60 tick ほど進む（${normal} tick）`,
+  );
+
+  await page.locator('button[data-speed="0.5"]').click();
+  await hud.and(page.locator('[data-speed="0.5"]')).waitFor({ timeout: TIMEOUT_MS });
+  const half = await ticksIn(2_000);
+  check(
+    half >= normal * 0.3 && half <= normal * 0.7,
+    `0.5 倍にすると等速の半分ほど進む（${half} tick、等速は ${normal} tick）`,
+  );
+
+  await page.locator('button[data-speed="0.25"]').click();
+  await hud.and(page.locator('[data-speed="0.25"]')).waitFor({ timeout: TIMEOUT_MS });
+  const quarter = await ticksIn(2_000);
+  check(
+    quarter >= normal * 0.15 && quarter <= normal * 0.35,
+    `0.25 倍にすると等速の 4 分の 1 ほど進む（${quarter} tick、等速は ${normal} tick）`,
   );
 
   await page.locator(`button[data-speed="${FAST_SPEED}"]`).click();
@@ -376,6 +415,9 @@ try {
     x: cx + (x + 0.5 - first.x) * zoom,
     y: cy + (y + 0.5 - first.y) * zoom,
   });
+  // カーソルのある道路には始点の印が重なるので、道路から離れたところへ動かしてから色を読む
+  await page.mouse.move(cx, cy - 120, { steps: 2 });
+  await page.waitForTimeout(100);
   // 道路とノードは灰色、地面は緑が強い
   const isRoad = (c: number[]) =>
     Math.abs((c[1] ?? 0) - (c[0] ?? 0)) < 20 && Math.abs((c[2] ?? 0) - (c[1] ?? 0)) < 20;
@@ -399,6 +441,39 @@ try {
       `${label} (${x}, ${y}) が${road ? "道路" : "地面"}の色で描かれる（${c.join(", ")}）`,
     );
   }
+
+  // 道路の吸い付き。既存の道路（行 32）の 1 マス手前（行 31）で離すと、行 32 まで延びてつながる
+  const toolInfo = page.locator("#tool-info");
+  const snapSegments = await roadSegments();
+  const [snapFrom, snapNear, snapFar] = [
+    tileCenter(30, 20),
+    tileCenter(30, 31),
+    tileCenter(40, 20),
+  ];
+  await page.mouse.click(snapFrom.x, snapFrom.y);
+  await page.mouse.move(snapFar.x, snapFar.y, { steps: 3 });
+  const lonely = (await toolInfo.textContent()) ?? "";
+  check(
+    lonely.includes("つながらない"),
+    `どの道路ともつながらない道路は、プレビューで知らせる（${lonely}）`,
+  );
+  await page.mouse.move(snapNear.x, snapNear.y, { steps: 3 });
+  const joined = (await toolInfo.textContent()) ?? "";
+  check(
+    !joined.includes("つながらない") && joined.includes("長さ 12 マス"),
+    `道路の 1 マス手前までなら、つながる道路として長さ 12 マスと見積もる（${joined}）`,
+  );
+  const snapBeforeOutcome = await outcomeCount();
+  await page.mouse.click(snapNear.x, snapNear.y);
+  await page.keyboard.press("Escape");
+  const snapped = await nextOutcome(snapBeforeOutcome);
+  check(snapped.outcome === "Applied", `吸い付けた道路は受け付けられる（${snapped.text}）`);
+  // 新しい道路 1 本と、つながった既存の道路が分かれた 1 本で、区間が 2 本増える
+  await waitSegments(snapSegments + 2);
+  check(
+    (await roadSegments()) === snapSegments + 2,
+    `1 マス手前で離した道路は既存の道路につながる（${snapSegments} → ${await roadSegments()} 本）`,
+  );
 
   const again = await drawRoad();
   check(
@@ -601,6 +676,15 @@ try {
   check(
     Number(await cityNumbers.getAttribute("data-buildings")) > 0,
     `時間を進めると住宅が建ち、数が出る（${await cityNumbers.textContent()}）`,
+  );
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#overview")?.dataset.population !== undefined,
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(
+    ((await page.locator("#overview-happiness").textContent()) ?? "").startsWith("幸福度"),
+    "人口と幸福度が出る",
   );
   await page.waitForTimeout(100);
   // 印と重ならない、左上のマスの下寄りを読む
@@ -883,6 +967,44 @@ try {
     { timeout: TIMEOUT_MS },
   );
   check((await mapState()).zoom === MAX_ZOOM, `拡大は上限 ${MAX_ZOOM} で止まる`);
+
+  // 収支のパネルは閉じていて、開くと税率を変えられる。変えた税率は記録に入り、下の再生でも同じ状態になる
+  const finance = page.locator("#finance");
+  await finance.and(page.locator("[data-net]")).waitFor({ state: "attached", timeout: TIMEOUT_MS });
+  check((await finance.getAttribute("open")) === null, "収支のパネルは閉じて始まる");
+  await finance.locator("summary").click();
+  const resRow = finance.locator('[data-zone="Residential"]');
+  check((await resRow.getAttribute("data-permille")) === "100", "住宅の税率は 10% で始まる");
+  const netBefore = Number(await finance.getAttribute("data-net"));
+  check(
+    (await finance.getAttribute("data-deficit")) === String(netBefore < 0) &&
+      (await hud.getAttribute("data-deficit")) === String(netBefore < 0),
+    `赤字かどうかがパネルと所持金の横に出る（差し引き ${netBefore}）`,
+  );
+  await resRow.getByLabel("住宅の税率を上げる").click();
+  await resRow.getByLabel("住宅の税率を上げる").click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector<HTMLElement>('#finance [data-zone="Residential"]')?.dataset
+        .permille === "120",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(
+    (await resRow.locator(".finance-rate").textContent()) === "12%" &&
+      (await page.locator("#tool-message").getAttribute("data-command")) === "SetTaxRate" &&
+      (await page.locator("#tool-message").getAttribute("data-outcome")) === "Applied",
+    "税率を 1% ずつ上げると中核が受け付け、パネルの税率が変わる",
+  );
+  await resRow.getByLabel("住宅の税率を下げる").click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector<HTMLElement>('#finance [data-zone="Residential"]')?.dataset
+        .permille === "110",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, "税率を下げると 11% に戻る");
 
   // フィードバックを送り、保存した記録を chizu-cli で再生する
   await page.locator("#feedback-open").click();

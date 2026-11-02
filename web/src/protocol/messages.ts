@@ -5,6 +5,11 @@ export type RoadKindName = "Small" | "Medium" | "Large";
 export type ServiceName = "PowerPlant" | "WaterPump";
 /** chizu-wasm の city_stats の数の個数。 */
 export const CITY_STATS_LENGTH = 16;
+/** chizu-wasm の finance の数の個数。 */
+export const FINANCE_LENGTH = 12;
+
+/** chizu-wasm の overview の数の個数。 */
+export const OVERVIEW_LENGTH = 9;
 /** 区画の種類。Clear は区画を消す。 */
 export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
 
@@ -29,6 +34,8 @@ export type CommandMessage =
       maxY: number;
     }
   | { kind: "BuyChunk"; cx: number; cy: number }
+  /** 区画の種類ごとの税率（‰）。上限は chizu-core の MAX_TAX_PERMILLE で、中核が検証する。 */
+  | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear">; permille: number }
   | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number };
 
 /** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
@@ -44,7 +51,7 @@ export const SUPPLY_WATER = 2;
 /** 施設 1 つの数の個数。chizu-wasm の facilities と同じ。 */
 export const FACILITY_STRIDE = 5;
 /** ノード 1 つの数の個数。chizu-wasm の road_nodes と同じ。 */
-export const NODE_STRIDE = 3;
+export const NODE_STRIDE = 4;
 
 /** チャンクの 1 辺のマス数。chizu-core の CHUNK_SIDE と同じ。 */
 export const CHUNK_SIDE = 64;
@@ -106,6 +113,8 @@ export type MainToWorker =
   /** id は画面が振る番号で、結果の通知で返ってくる。 */
   | { kind: "command"; id: number; command: CommandMessage }
   | { kind: "pause"; paused: boolean }
+  /** 1 倍より遅く進めるときの倍率（0 より大きく 1 以下）。中核の速度は変えず、tick を進める頻度だけを落とす。 */
+  | { kind: "pace"; pace: number }
   /** 施設を間口のマス (x, y) に置けるかを、向きごとに中核に問い合わせる。 */
   | { kind: "probe-service"; service: ServiceName; x: number; y: number }
   /** マス (x, y) にある建物か施設の様子を中核に問い合わせる。 */
@@ -167,13 +176,22 @@ export type WorkerToMain =
    * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並ぶ。
    */
   | { kind: "buildings"; buildings: Float64Array; facilities: Float64Array; stats: number[] }
+  /** 人口と幸福度とマイルストーン。overview は chizu-wasm の overview で、数の並びは overview.ts にある。 */
+  | { kind: "overview"; overview: number[] }
   /**
    * id は画面が振ったコマンドの番号、seq は記録の通し番号。
    * 記録する前に受け付けなかったコマンドには seq がない。
    */
   | { kind: "outcome"; id: number; seq?: number; outcome: Outcome; reason?: string }
+  /**
+   * 収支の見込みと税率。chizu-wasm の finance で、Worker が一定の間隔で送る。
+   * 並びは税率の上限、区画の種類ごとの税率、税収、道路の維持費、発電所と浄水場の維持費。
+   */
+  | { kind: "finance"; values: number[] }
   /** dev-spawn-walks で出せた人数。 */
   | { kind: "dev-spawned"; count: number }
+  /** Worker が受け取って使っている倍率。画面の表示はこの値を使う。 */
+  | { kind: "pace"; pace: number }
   | { kind: "error"; message: string };
 
 function isChunkData(value: unknown): value is ChunkData {
@@ -240,6 +258,12 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.facilities.length % FACILITY_STRIDE === 0 &&
         v.stats.length === CITY_STATS_LENGTH
       );
+    case "overview":
+      return (
+        Array.isArray(v.overview) &&
+        v.overview.length === OVERVIEW_LENGTH &&
+        v.overview.every((x) => typeof x === "number")
+      );
     case "outcome":
       return (
         Number.isInteger(v.id) &&
@@ -249,8 +273,16 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "feedback":
       return typeof v.state === "string" && v.commands instanceof ArrayBuffer;
+    case "finance":
+      return (
+        Array.isArray(v.values) &&
+        v.values.length === FINANCE_LENGTH &&
+        v.values.every((n) => typeof n === "number")
+      );
     case "dev-spawned":
       return Number.isInteger(v.count);
+    case "pace":
+      return typeof v.pace === "number" && v.pace > 0 && v.pace <= 1;
     case "service-probe":
       return (
         typeof v.service === "string" &&
