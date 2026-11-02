@@ -364,7 +364,9 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   check(true, `時間を進めると移動体の位置が変わる（${spawned.firstMover} → ${moved}）`);
   // 補間そのものは Vitest（mover-interpolation.test.ts）で確かめる。ここでは、画面に補間が効いていることだけを見る。
   // tick が変わらない続きの 2 枠のあいだで位置が変わっていれば、tick に頼らず補間で動いている。
-  // 枠の回数や間隔には頼らず、見つかるまで待つ。CI が重くても、いずれ同じ tick の枠が続く
+  // 枠の回数や間隔には頼らず、見つかるまで待つ。寄りの段は描画が重く、CI では 1 枠のあいだに tick が
+  // 進みきって同じ tick の枠が続かないことがあるので、0.25 倍に落として 1 tick を長くしてから見る
+  await setSpeed(0.25);
   const interpolated = await page.evaluate(
     (timeoutMs) =>
       new Promise<boolean>((resolve) => {
