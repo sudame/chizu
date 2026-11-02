@@ -81,8 +81,12 @@ pub struct Trip {
     speed: MmPerTick,
     /// 出発の位置の車線に空きがなく、車線の上に出るのを待っている車か。
     waiting: bool,
-    /// 交差点の手前で、ほかの車に譲って待った tick 数。ノードを抜けたら 0 に戻す。
+    /// 車なら、交差点の手前で、ほかの車や横断歩道の人に譲って待った tick 数。ノードを抜けたら 0 に戻す。
+    /// 歩く人なら、車道を渡り始めるのを続けて待った tick 数。歩き出したら 0 に戻す。
     waited: u32,
+    /// 車が交差点の手前で、横断歩道の人だけのために待った tick 数。ノードを抜けたら 0 に戻す。
+    /// 歩く人が渡り始めてよいかを決めるのに使う（`crossing`）。
+    yielded: u32,
     /// 車線の上で、位置が変わらないまま過ぎた tick 数。動いたら 0 に戻す。
     stalled: u32,
     /// いま歩いているリンクの、経路の中での番号。
@@ -198,20 +202,30 @@ impl Trip {
     /// 渡り始めるところで `gate` が許さなければ、その手前（歩道の端）で待つ。
     fn advance(&mut self, net: &Network, gate: &crossing::Gate) -> (bool, Option<crossing::Occ>) {
         let speed = u32::try_from(WALK_SPEED.0).expect("歩く速さが負");
+        let waited = core::mem::take(&mut self.waited);
         if let Some(done) = self.walk.jay {
             let spot = (self.link(), self.offset.0);
             let w = crossing::width(net, spot.0.segment);
-            let next = if done == 0 && !gate.may_jaywalk(net, spot.0, spot.1) {
-                0
+            let start = if done == 0 {
+                gate.jaywalk(net, spot.0, spot.1, waited)
             } else {
-                done.saturating_add(speed)
+                crossing::Jaywalk::Cross
             };
+            let next = if start == crossing::Jaywalk::Cross {
+                done.saturating_add(speed)
+            } else {
+                self.waited = waited.saturating_add(1);
+                0
+            };
+            self.walk.hold = start == crossing::Jaywalk::Hold;
             if next < w {
                 self.walk.jay = Some(next);
-                return (
-                    false,
-                    (next > 0).then_some(crossing::Occ::Jay(spot.0, spot.1)),
-                );
+                let occ = match start {
+                    crossing::Jaywalk::Cross => Some(crossing::Occ::Jay(spot.0, spot.1)),
+                    crossing::Jaywalk::Hold => Some(crossing::Occ::Hold(spot.0, spot.1)),
+                    crossing::Jaywalk::Wait => None,
+                };
+                return (false, occ);
             }
             // 渡り終えた。反対の側の歩道から、少しずつ寄せて歩き出す。
             let shown = self.shift_on_leg(net, self.leg as usize);
@@ -251,6 +265,7 @@ impl Trip {
                 };
                 if p0 <= s && s < p1 && !gate.may_cross(net, n, seg) {
                     p1 = s;
+                    self.waited = waited.saturating_add(1);
                     break;
                 }
             }
@@ -446,6 +461,7 @@ fn plan(
                         far,
                         jay: jay.then_some(0),
                         far_end,
+                        hold: false,
                     };
                     let key = match mode {
                         LaneMode::Car => driven_ms(net, g, &r, *e)?,
@@ -682,7 +698,9 @@ impl Trips {
             .filter_map(advance)
             .collect();
         let mut arrived: Vec<usize> = walked.iter().filter(|w| w.1).map(|w| w.0).collect();
-        let occupied = crossing::Occupied::of(net, walked.iter().filter_map(|w| w.2));
+        let mut occupied = crossing::Occupied::of(net, walked.iter().filter_map(|w| w.2));
+        // 長く待った人のいる横断歩道でも、止まりきれる車を止めて、人が渡り始められるようにする。
+        occupied.crosswalks.extend(gate.claimed.iter().copied());
         arrived.extend(car::step(
             &mut self.rows,
             net,
@@ -758,11 +776,12 @@ impl Trips {
                     continue;
                 };
                 let old = self.get(id).expect("探し直す主体がない");
-                let (departed, speed, waiting, waited, stalled, then) = (
+                let (departed, speed, waiting, waited, yielded, stalled, then) = (
                     old.departed,
                     old.speed,
                     old.waiting,
                     old.waited,
+                    old.yielded,
                     old.stalled,
                     old.then,
                 );
@@ -780,8 +799,8 @@ impl Trips {
                 };
                 let old_far = old.walk.far;
                 let mut t = make_trip(net, route, ends, dest, departed, jay);
-                (t.speed, t.waiting, t.waited, t.stalled, t.then) =
-                    (speed, waiting, waited, stalled, then);
+                (t.speed, t.waiting, t.waited, t.yielded, t.stalled, t.then) =
+                    (speed, waiting, waited, yielded, stalled, then);
                 // いまの位置は、いまのリンクと同じ向きのリンクで表してあるので、そのリンクから
                 // 向きを変えたなら、側も入れ替わる。
                 t.walk.far ^= old_far;
@@ -789,6 +808,7 @@ impl Trips {
                     // 渡りかけていた横切りは、歩道の端からやり直す。
                     let mismatch = t.route.links.len() == 1 && t.walk.far != t.walk.far_end;
                     t.walk.jay = mismatch.then_some(0);
+                    t.walk.hold = false;
                 }
                 self.rows[id.slot()] = Some(t);
                 if mode == LaneMode::Car && !waiting {
@@ -854,6 +874,7 @@ fn make_trip(
         speed: MmPerTick::ZERO,
         waiting: false,
         waited: 0,
+        yielded: 0,
         stalled: 0,
         route,
         leg: 0,
@@ -879,6 +900,7 @@ impl StateHash for Trip {
         h.write(&self.speed);
         h.write(&self.waiting);
         h.write(&self.waited);
+        h.write(&self.yielded);
         h.write(&self.stalled);
         h.write_len(self.route.links.len());
         for l in &self.route.links {
@@ -898,6 +920,7 @@ impl StateHash for Trip {
         h.write(&self.walk.far);
         h.write(&self.walk.jay);
         h.write(&self.walk.far_end);
+        h.write(&self.walk.hold);
         h.write(&self.departed);
     }
 }

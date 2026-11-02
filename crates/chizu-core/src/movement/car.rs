@@ -17,8 +17,9 @@ use std::collections::BTreeMap;
 use rayon::prelude::*;
 
 use super::Trip;
+use super::crossing::{self, JayCar};
 use super::junction::{self, Approach, Inside};
-use super::{crossing, signal};
+use super::signal;
 use crate::command::NodeId;
 use crate::network::{Dir, LaneId, LaneMode, LinkId, Network};
 use crate::routing::{Connector, speed_limit};
@@ -396,11 +397,13 @@ fn room_clear_of(
     Some(p)
 }
 
-/// 歩く人がこの tick に渡り始めてよいかを決めるための、前の tick の車の様子を集める。
+/// 歩く人がこの tick に渡り始めてよいかを決めるための、前の tick の車と歩く人の様子を集める。
 ///
-/// 横断歩道は、止まりきれずに交差点へ入る車、交差点の中の車、[`crossing::PED_PATIENCE`] tick より長く
-/// 待った車が入る腕と出る腕で、渡り始めさせない。信号のある交差点で待った車は、その腕が青のときだけ数える。
-/// 赤で待つあいだは、歩く人が渡る番だからである。
+/// 止まりきれずに交差点へ入る車と交差点の中の車が入る腕と出る腕の横断歩道は、`busy` に入れる。
+/// 交差点の手前まで来た、止まりきれる車が入る腕と出る腕の横断歩道は、`near` に入れ、止まって横断歩道の人に
+/// 譲った tick 数を添える。信号のある交差点で譲った車は、その腕が青のときだけ数える。赤で待つあいだは、
+/// 歩く人が渡る番だからである。最後に、[`crossing::PED_WAIT`] tick より長く待った人のいる横断歩道を、
+/// 譲った車と待った長さを比べて `claimed` に入れる。
 pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing::Gate {
     let mut g = crossing::Gate {
         now,
@@ -411,11 +414,15 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
     let mut cars = Vec::new();
     let mut waiting = Vec::new();
     let mut walkers = false;
+    // 横断歩道の前で長く待った人。
+    let mut patient = Vec::new();
     for t in rows.iter().flatten() {
         if t.mode == LaneMode::Sidewalk {
             walkers = true;
             if t.walk.jay.is_some() {
                 jay_segments.insert(t.link().segment);
+            } else if t.waited >= crossing::PED_WAIT {
+                patient.push(t);
             }
         } else if t.waiting {
             waiting.push(t);
@@ -426,35 +433,42 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
     if !walkers {
         return g;
     }
-    // 出発で置かれる車は、出発の位置に止まった車として数える。
+    // 出発で置かれる車は、出発の位置に止まった、まだ車線に出ていない車として数える。
     for t in waiting {
         let link = t.link();
         if jay_segments.contains(&link.segment) {
-            g.cars
-                .entry(link.segment)
-                .or_default()
-                .push((link.dir, i64::from(t.offset.0), 0, 0));
+            g.cars.entry(link.segment).or_default().push(JayCar {
+                dir: link.dir,
+                front: i64::from(t.offset.0),
+                speed: 0,
+                stalled: t.stalled,
+                on_road: false,
+            });
         }
     }
     for t in cars {
         let link = t.link();
         if jay_segments.contains(&link.segment) {
-            g.cars.entry(link.segment).or_default().push((
-                link.dir,
-                i64::from(t.offset.0),
-                t.speed.0,
-                t.stalled,
-            ));
+            g.cars.entry(link.segment).or_default().push(JayCar {
+                dir: link.dir,
+                front: i64::from(t.offset.0),
+                speed: t.speed.0,
+                stalled: t.stalled,
+                on_road: true,
+            });
         }
         // ノードを越えて横切る区間へ入ってくる車は、次のリンクの始まりより手前にいるものとして数える。
         if !t.last_leg() && near_end(net, t) {
             let next = t.route.links[t.leg as usize + 1];
             if jay_segments.contains(&next.segment) {
                 let behind = i64::from(t.offset.0) - i64::from(t.link_len.0);
-                g.cars
-                    .entry(next.segment)
-                    .or_default()
-                    .push((next.dir, behind, t.speed.0, t.stalled));
+                g.cars.entry(next.segment).or_default().push(JayCar {
+                    dir: next.dir,
+                    front: behind,
+                    speed: t.speed.0,
+                    stalled: t.stalled,
+                    on_road: true,
+                });
             }
         }
         if t.leg > 0 && t.offset.0 < JUNCTION_CLEAR {
@@ -462,8 +476,12 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
             if net.segment(prev.segment).is_some() {
                 let node = end_node(net, prev);
                 if junction::is_junction(net, node) {
-                    g.busy.insert((node, prev.segment));
-                    g.busy.insert((node, link.segment));
+                    for s in [prev.segment, link.segment] {
+                        g.busy.insert((node, s));
+                        if t.speed == MmPerTick::ZERO {
+                            g.stuck.insert((node, s));
+                        }
+                    }
                 }
             }
         }
@@ -474,19 +492,49 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
         if !junction::is_junction(net, node) {
             continue;
         }
-        let committed = stop_speed(t) < i64::from(t.speed.0) - i64::from(CAR_DECEL);
-        let long = t.speed == MmPerTick::ZERO && t.waited >= crossing::PED_PATIENCE && {
+        let next = t.route.links[t.leg as usize + 1];
+        if stop_speed(t) < i64::from(t.speed.0) - i64::from(CAR_DECEL) {
+            g.busy.insert((node, link.segment));
+            g.busy.insert((node, next.segment));
+            continue;
+        }
+        let green = || {
             let axis = net
                 .segment_line(link.segment)
                 .map_or(0, |l| signal::axis(l.step));
             signal::state(net, node, now)
                 .is_none_or(|st| st.light_for(axis) == signal::Light::Green)
         };
-        if committed || long {
-            let next = t.route.links[t.leg as usize + 1];
-            g.busy.insert((node, link.segment));
-            g.busy.insert((node, next.segment));
+        let stopped = t.speed == MmPerTick::ZERO;
+        let yielded = if stopped && t.yielded > 0 && green() {
+            t.yielded
+        } else {
+            0
+        };
+        for s in [link.segment, next.segment] {
+            let c = g.near.entry((node, s)).or_insert(0);
+            *c = (*c).max(yielded);
         }
+    }
+    // 長く待った人が、いまどの横断歩道の前にいるか。渡り始めるのを待つ人は、渡る所の始まりにいる。
+    let mut longest = BTreeMap::<(NodeId, crate::network::SegmentId), u32>::new();
+    for t in patient {
+        if t.last_leg() || t.offset < t.link_len {
+            continue;
+        }
+        let node = end_node(net, t.link());
+        let mut at = t.link_len.0;
+        for s in t.departure(net).1 {
+            if t.offset.0 == at {
+                let w = longest.entry((node, s)).or_insert(0);
+                *w = (*w).max(t.waited);
+                break;
+            }
+            at = at.saturating_add(crossing::width(net, s));
+        }
+    }
+    for (at, waited) in longest {
+        g.claim(net, at, waited);
     }
     g
 }
@@ -611,7 +659,7 @@ pub(super) fn step(
     if !waiting.is_empty() {
         let mut ix = LaneIndex::of(rows, None);
         for i in waiting {
-            if !place(rows, net, &mut ix, i, &occupied.jay) {
+            if !place(rows, net, &mut ix, i, &occupied.zones) {
                 still_waiting.push(i);
             }
         }
@@ -639,6 +687,7 @@ pub(super) fn step(
     let looks: Vec<Look> = (0..order.len()).map(look_at).collect();
     // 交差点の手前で止める車を、前の tick の状態だけからノードの順に決める。
     let mut held = vec![false; order.len()];
+    let mut yielded = vec![false; order.len()];
     let (cands, inside) = looks.iter().fold((Vec::new(), Vec::new()), |mut acc, l| {
         acc.0.extend(l.approach);
         acc.1.extend(l.inside);
@@ -648,6 +697,9 @@ pub(super) fn step(
     rescues.passed_stuck = rescues.passed_stuck.saturating_add(stop.passed);
     for k in stop.ids {
         held[k] = true;
+    }
+    for k in stop.yielded {
+        yielded[k] = true;
     }
     let plan = |k: usize| {
         let (lane, _, i) = order[k];
@@ -669,9 +721,9 @@ pub(super) fn step(
                 .map(|(at, v)| (LaneOffset(t.link_len.0.saturating_add(at.0)), *v))
         });
         // いまのリンクと、ノードの先の次のリンクの衝突区間。次のリンクの位置は、いまのリンクの始まりから数え直す。
-        let here = occupied.jay.get(&t.link()).map_or(&[][..], Vec::as_slice);
+        let here = occupied.zones.get(&t.link()).map_or(&[][..], Vec::as_slice);
         let ahead = next_lane
-            .and_then(|_| occupied.jay.get(&t.route.links[t.leg as usize + 1]))
+            .and_then(|_| occupied.zones.get(&t.route.links[t.leg as usize + 1]))
             .filter(|zs| !zs.is_empty());
         let both: Vec<u32>;
         let jay = match ahead {
@@ -704,12 +756,19 @@ pub(super) fn step(
         .collect();
     let mut arrived = Vec::new();
     let mut crossing = Vec::new();
-    for (i, before, v, at, next_lane, held) in moves {
+    for (k, (i, before, v, at, next_lane, held)) in moves.into_iter().enumerate() {
         let t = rows[i].as_mut().expect("車の主体がない");
         (t.speed, t.offset) = (v, at);
         if held {
             t.waited = t.waited.saturating_add(1);
         }
+        // いま横断歩道の人のために止まっているのでなければ数え直す。ほかの車や先の車線の空きを待つ車は、
+        // 人を止めない。
+        t.yielded = if yielded[k] {
+            t.yielded.saturating_add(1)
+        } else {
+            0
+        };
         if t.last_leg() {
             if at >= t.dest_offset {
                 arrived.push(i);
@@ -764,7 +823,7 @@ pub(super) fn step(
             None => {}
         }
         t.leg += 1;
-        t.waited = 0;
+        (t.waited, t.yielded) = (0, 0);
         t.enter(net, place, Some(lane));
         let r = rear.entry(lane).or_insert(place);
         *r = (*r).min(place);
