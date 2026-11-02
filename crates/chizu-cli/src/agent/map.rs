@@ -440,20 +440,20 @@ mod tests {
     }
 
     /// 区間は座標で選ぶ。この街を再生した結果は決まっているので、段階ごとのマスが決まった文字になる。
-    /// (41, 70) は詰まった道、(68, 97) は混んだ道、(20, 97) は車のいない道、(41, 500) は高速道路である。
+    /// (59, 70) は詰まった道、(68, 97) は混んだ道、(20, 97) は車のいない道、(41, 500) は高速道路である。
     #[test]
     fn traffic_layer_marks_jammed_and_free_roads() {
         let world = jammed_city();
         let at = |x: i64, y: i64, layer| glyph_at(&world, TilePos::new(x, y), layer);
-        assert_eq!(at(41, 70, MapLayer::Traffic), 'X');
+        assert_eq!(at(59, 70, MapLayer::Traffic), 'X');
         assert_eq!(at(68, 97, MapLayer::Traffic), '#');
         assert_eq!(at(20, 97, MapLayer::Traffic), '-');
         assert_eq!(at(41, 500, MapLayer::Traffic), 'H');
         // 層を付けなければ、道路の種類のまま
-        assert!(matches!(at(41, 70, MapLayer::Terrain), '1'..='3'));
+        assert!(matches!(at(59, 70, MapLayer::Terrain), '1'..='3'));
         let text = render(
             &world,
-            TileRect::from_corners(TilePos::new(39, 70), TilePos::new(43, 70)),
+            TileRect::from_corners(TilePos::new(57, 70), TilePos::new(61, 70)),
             1,
             MapLayer::Traffic,
         )
