@@ -238,6 +238,16 @@ export type MeshSource = {
   build(): Float32Array;
 };
 
+// 丸を近づける正多角形の辺の数と、角の向き。最後に最初の角をもう一度置いて閉じる
+export const DISC_SIDES = 8;
+const corners = (sides: number) =>
+  Array.from({ length: sides + 1 }, (_, k) => {
+    const a = (2 * Math.PI * k) / sides;
+    return [Math.cos(a), Math.sin(a)] as const;
+  });
+const DISC_CORNERS = corners(DISC_SIDES);
+const HEX_CORNERS = corners(6);
+
 /** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
 export class Geometry {
   readonly #data: number[] = [];
@@ -270,7 +280,11 @@ export class Geometry {
       ny,
       half,
       min,
-      ...color,
+      // 頂点の数が多い細部の段（detail.ts）で重くならないよう、展開の構文を使わずに積む
+      color[0],
+      color[1],
+      color[2],
+      color[3],
       extra,
       along,
       dash,
@@ -365,6 +379,42 @@ export class Geometry {
       for (const [sx, sy] of t) {
         this.#vertex(x, y, sx, sy, half, MIN_PX, color);
       }
+    }
+  }
+
+  /**
+   * ワールド座標の (ax, ay) から (bx, by) への線。半分の太さ `half` は世界の単位で、画面では `min` ピクセルを
+   * 下回らない。マスの中心にそろえないので、建物の屋根の線や信号の台のように、マスの中の自由な位置に引ける。
+   */
+  line(ax: number, ay: number, bx: number, by: number, half: number, color: Color, min = 0): void {
+    const len = Math.hypot(bx - ax, by - ay);
+    if (len === 0) {
+      return;
+    }
+    const nx = -(by - ay) / len;
+    const ny = (bx - ax) / len;
+    const v = (x: number, y: number, s: number) =>
+      this.#vertex(x, y, nx * s, ny * s, half, min, color);
+    v(ax, ay, 1);
+    v(ax, ay, -1);
+    v(bx, by, 1);
+    v(bx, by, 1);
+    v(ax, ay, -1);
+    v(bx, by, -1);
+  }
+
+  /**
+   * ワールド座標 (x, y) を中心にした、半径 `half` の丸。`sides` が 8 なら正八角形、6 なら正六角形で近づける。
+   * 半径は画面で `min` ピクセルを下回らない。
+   */
+  disc(x: number, y: number, half: number, color: Color, min = MIN_PX, sides: 6 | 8 = 8): void {
+    const corners = sides === 6 ? HEX_CORNERS : DISC_CORNERS;
+    for (let k = 0; k < sides; k++) {
+      const [c0, s0] = corners[k] ?? [1, 0];
+      const [c1, s1] = corners[k + 1] ?? [1, 0];
+      this.#vertex(x, y, 0, 0, half, min, color);
+      this.#vertex(x, y, c0, s0, half, min, color);
+      this.#vertex(x, y, c1, s1, half, min, color);
     }
   }
 
@@ -486,7 +536,8 @@ const UNKNOWN_ZONE: ZoneColors = {
   edge: hex("#a8a8a8"),
 };
 const zoneColors = (zone: number): ZoneColors => ZONE_COLORS[zone] ?? UNKNOWN_ZONE;
-const BUILDING_INSET = 0.15;
+/** 寄りの段で、1 軒ずつの建物をマスの縁から内側に縮める幅（マス）。 */
+export const BUILDING_INSET = 0.15;
 
 /** 区画の地面の色。 */
 export function zoneGroundColor(zone: number): Color {
@@ -511,7 +562,7 @@ export function buildingEdgeColor(zone: number): Color {
 
 // 建物の縁の幅は BUILDING_EDGE（マス）にする。
 // 影は右下へ画面で BUILDING_SHADOW_PX ずらした `#3c4043` の 18% で、建物の大きさを見やすくする
-const BUILDING_EDGE = 0.05;
+export const BUILDING_EDGE = 0.05;
 const BUILDING_SHADOW_PX = 2;
 const SHADOW_COLOR = hex("#3c4043", 0.18);
 
@@ -934,7 +985,7 @@ export function roadLaneGeometry(segments: Float64Array, nodes: Float64Array): G
 }
 
 /** 2 本の縦横の区間が、まっすぐ反対の向きにつながるノードか。 */
-function isThrough(node: RoadNode): boolean {
+export function isThrough(node: RoadNode): boolean {
   const [p, q] = node.arms;
   return (
     node.arms.length === 2 &&
@@ -1083,7 +1134,7 @@ export function crosswalkArms(segments: Float64Array, nodes: Float64Array): Cros
 /** 横断歩道の縞（と、入れるときの停止線）。白い車道の上でも黄の車道の上でも見える色にする。 */
 export const ZEBRA_COLOR = hex("#a9b3c2");
 // 縞の、腕の向きの長さと、横の間隔と太さの半分（マス）
-const ZEBRA_LENGTH = 0.16;
+export const ZEBRA_LENGTH = 0.16;
 const ZEBRA_SPACING = 0.14;
 const ZEBRA_HALF = 0.035;
 
@@ -1182,15 +1233,19 @@ const MESH_NAMES = [
   "details",
   "facilities",
   "bodies",
+  "roofs",
   "marks",
   "minor",
   "major",
   "lanes",
   "markings",
+  "streets",
   "signals",
+  "lamps",
   "trafficFree",
   "trafficBusy",
   "trafficBands",
+  "trafficFineBands",
   "preview",
 ] as const;
 export type MeshName = (typeof MESH_NAMES)[number];
@@ -1210,16 +1265,23 @@ export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
     ["facilities", 1],
     // 寄りに移るあいだは、本体を濃いまま描き、縁と影と隙間だけを濃くしていく
     ["bodies", w.detail > 0 ? 1 : 0],
+    // 細部の段では、寄りの描き方に描き足す（detail.ts）
+    ["roofs", w.fine],
     ["marks", w.marks],
     ["minor", lines],
     ["major", lines],
     ["lanes", w.detail],
     ["markings", w.detail],
-    ["signals", w.detail],
-    // 交通の主題図。道路の中の線は、寄りに入ると車道の両端の帯に替わる。「空いている」は引きでは描かない
+    ["streets", w.fine],
+    // 信号の灯火は、細部の段で 1 つから 3 つの並びに替わる
+    ["signals", w.detail * (1 - w.fine)],
+    ["lamps", w.fine],
+    // 交通の主題図。道路の中の線は、寄りに入ると車道の両端の帯に替わる。「空いている」は引きでは描かない。
+    // 帯は、細部の段で細く薄い帯に替わる
     ["trafficFree", (1 - w.detail) * w.trafficFree],
     ["trafficBusy", 1 - w.detail],
-    ["trafficBands", w.detail],
+    ["trafficBands", w.detail * (1 - w.fine)],
+    ["trafficFineBands", w.fine],
     ["preview", 1],
   ];
   // 小の道路は不透明に描き、色を地面の色に寄せて薄くする
@@ -1309,12 +1371,30 @@ export class RoadLayer {
     this.#upload("signals", geometry);
   }
 
-  /** 交通の主題図。null なら消す。 */
-  setTraffic(meshes: { free: MeshSource; busy: MeshSource; bands: MeshSource } | null): void {
+  /** 交通の主題図。null なら消す。細部の段の帯は、細部の段に入るまで作らないので null のこともある。 */
+  setTraffic(
+    meshes: {
+      free: MeshSource;
+      busy: MeshSource;
+      bands: MeshSource;
+      fineBands: MeshSource | null;
+    } | null,
+  ): void {
     const empty = new Geometry({ x: 0, y: 0 });
     this.#upload("trafficFree", meshes?.free ?? empty);
     this.#upload("trafficBusy", meshes?.busy ?? empty);
     this.#upload("trafficBands", meshes?.bands ?? empty);
+    this.#upload("trafficFineBands", meshes?.fineBands ?? empty);
+  }
+
+  /** 細部の段で描き足すもの（detail.ts）。作り直したものだけを渡す。 */
+  setDetail(meshes: { roofs?: MeshSource; streets?: MeshSource; lamps?: MeshSource }): void {
+    for (const name of ["roofs", "streets", "lamps"] as const) {
+      const mesh = meshes[name];
+      if (mesh !== undefined) {
+        this.#upload(name, mesh);
+      }
+    }
   }
 
   setPreview(geometry: Geometry | null): void {

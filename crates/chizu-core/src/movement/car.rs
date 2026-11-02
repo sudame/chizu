@@ -154,7 +154,7 @@ pub(super) fn place(
         .find_map(|l| Some((l, room_clear_of(ix, l, t.offset, zones)?)));
     match found {
         Some((lane, at)) => {
-            (t.lane, t.offset, t.waiting, t.stalled) = (lane, at, false, 0);
+            (t.lane, t.offset, t.waiting, t.rejoining, t.stalled) = (lane, at, false, false, 0);
             ix.insert(lane, at);
             true
         }
@@ -182,7 +182,10 @@ pub(super) fn keep_lane(rows: &mut [Option<Trip>], net: &Network, i: usize, inde
     match found {
         Some(lane) => t.lane = lane,
         // 待ち始めから数え直す。引き継いだまま待たせると、すぐ歩きに切り替わってしまう。
-        None => (t.lane, t.speed, t.waiting, t.stalled) = (same, MmPerTick::ZERO, true, 0),
+        None => {
+            (t.lane, t.speed, t.waiting, t.rejoining, t.stalled) =
+                (same, MmPerTick::ZERO, true, true, 0);
+        }
     }
 }
 

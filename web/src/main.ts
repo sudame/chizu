@@ -9,7 +9,12 @@ import {
   parseFinance,
   setupFinance,
 } from "./finance.ts";
-import { parseGrowthBlocks, parseStalls, setupGrowthNotice } from "./growth-notice.ts";
+import {
+  parseGrowthBlocks,
+  parseIsolated,
+  parseStalls,
+  setupGrowthNotice,
+} from "./growth-notice.ts";
 import { setupHudPanel, trackHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
@@ -22,6 +27,7 @@ import {
   type Viewport,
 } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
+import { DetailCache } from "./map/detail.ts";
 import { LabelLayer } from "./map/label-layer.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
 import {
@@ -66,6 +72,7 @@ import {
   type RoadIndex,
   roadEndpoints,
 } from "./map/snap.ts";
+import { showsFine } from "./map/stages.ts";
 import {
   loadTheme,
   renderThemeLegend,
@@ -250,6 +257,8 @@ const labels = new LabelLayer(element<HTMLCanvasElement>("#labels"));
 let roads: RoadMeshes | null = null;
 let buildings: BuildingMeshes | null = null;
 let signals: Geometry | null = null;
+// 細部の段で描き足すもの。細部の段に入っているときだけ、見えている範囲のぶんを作る
+const detail = new DetailCache();
 // 主題図。選んだものはブラウザに覚えさせ、次に開いたときも同じものにする
 let theme: ThemeId = loadTheme(themeStorage());
 const layersOf = (id: ThemeId): number[] => {
@@ -348,6 +357,7 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
   if (signals !== null) {
     renderer?.roads.setSignals(signals);
   }
+  detail.invalidate();
   applyTheme();
   updatePreview();
 });
@@ -387,6 +397,7 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   const range = camera.visibleChunks(vp);
   sendView(range);
   rebuildTraffic();
+  rebuildDetail(vp);
   updateThemeLegend();
   const drawn = renderer?.draw(camera, vp, range) ?? 0;
   labels.frame(camera, vp, performance.now());
@@ -423,9 +434,36 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   zoomOutButton.disabled = camera.zoom <= MIN_ZOOM;
 }
 
+/** 細部の段に入っていて、画面が前に作った範囲を出たか、形が変わっていれば、細部の頂点を作り直す。 */
+function rebuildDetail(vp: Viewport): void {
+  const min = camera.screenToWorld(0, 0, vp);
+  const max = camera.screenToWorld(vp.width, vp.height, vp);
+  const meshes = detail.update(camera.zoom, {
+    minX: min.x,
+    minY: min.y,
+    maxX: max.x,
+    maxY: max.y,
+  });
+  if (meshes === null) {
+    return;
+  }
+  renderer?.roads.setDetail(meshes);
+  // test:wasm が読む
+  mapCanvas.dataset.detailBuilds = String(detail.builds);
+  if (meshes.roofs !== undefined) {
+    mapCanvas.dataset.detailRoofs = String(meshes.roofs.vertexCount);
+  }
+  if (meshes.streets !== undefined) {
+    mapCanvas.dataset.detailStreets = String(meshes.streets.vertexCount);
+  }
+  if (meshes.lamps !== undefined) {
+    mapCanvas.dataset.detailLamps = String(meshes.lamps.vertexCount);
+  }
+}
+
 /** 交通の値か道路網が変わっていれば、交通の主題図の線を作り直す。毎フレームは作らない。 */
 function rebuildTraffic(): void {
-  const meshes = trafficLines.take();
+  const meshes = trafficLines.take(showsFine(camera.zoom));
   if (meshes === undefined) {
     return;
   }
@@ -1044,6 +1082,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     roadSegments = message.segments;
     // 道路網が変わったら、交通の主題図の線も作り直す。新しい網の値が届くまでは描かない
     trafficLines.setRoads(message.revision, message.segments, message.nodes);
+    detail.setRoads(message.segments, message.nodes);
     crosswalks = crosswalkArms(message.segments, message.nodes);
     // test:wasm が読む
     mapCanvas.dataset.removedCrosswalks = String(crosswalks.filter((arm) => arm.removed).length);
@@ -1057,6 +1096,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "signals") {
     signals = signalGeometry(message.lights);
+    detail.setSignals(message.lights);
     renderer?.roads.setSignals(signals);
     // test:wasm が読む
     mapCanvas.dataset.signalArms = String(message.lights.length / SIGNAL_STRIDE);
@@ -1064,6 +1104,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "buildings") {
     buildings = buildingMeshes(message.buildings, message.facilities);
+    detail.setBuildings(message.buildings);
     renderer?.roads.setBuildings(buildings);
     labels.setBuildings(message.buildings, message.facilities);
     const stats = parseCityStats(message.stats);
@@ -1085,7 +1126,11 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "overview") {
     renderOverview(parseOverview(message.overview));
-    growthNotice.render(parseGrowthBlocks(message.overview), parseStalls(message.stalls));
+    growthNotice.render(
+      parseGrowthBlocks(message.overview),
+      parseStalls(message.stalls),
+      parseIsolated(message.isolated),
+    );
     return;
   }
   if (message.kind === "outcome") {

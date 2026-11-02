@@ -44,7 +44,7 @@ function mixHex(a: string, b: string, t: number): string {
 // 地面に買える土地の仮の表示（#1a73e8 の 10%）が重なった色
 const GROUND_ON_HINT_HEX = "#dee5ec";
 const MIN_ZOOM = 1;
-const MAX_ZOOM = 32;
+const MAX_ZOOM = 128;
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -1338,6 +1338,69 @@ try {
     !(await growth.isVisible()),
     `施設を置いて余裕が戻ると、建たない理由の知らせが消える（${await growth.textContent()}）`,
   );
+  // 道路を消して入口を失った浄水場は、孤立した施設として知らせが出る。押すとそこへ移る。
+  // 区画が止まっているかは街の育ち方しだいなので、時計を止めてから確かめる
+  await pickTool(page, "road-Small");
+  for (const [x, y] of [
+    [52, 12],
+    [60, 12],
+  ] as const) {
+    const p = tilePoint(x, y);
+    await page.mouse.click(p.x, p.y);
+  }
+  await page.keyboard.press("Escape");
+  // 所持金が残り少ないので、安いほうの浄水場を置く
+  const cutOff = await place("WaterPump", 53, 13);
+  check(cutOff.outcome === "Applied", `つながっていない道路に浄水場を置ける（${cutOff.text}）`);
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
+  await page.locator('button[data-tool="bulldoze"]').click();
+  const beforeRoadCut = await outcomeCount();
+  const roadCutFrom = tilePoint(52, 12);
+  const roadCutTo = tilePoint(60, 12);
+  await page.mouse.move(roadCutFrom.x, roadCutFrom.y);
+  await page.mouse.down();
+  await page.mouse.move(roadCutTo.x, roadCutTo.y, { steps: 4 });
+  await page.mouse.up();
+  const roadCut = await nextOutcome(beforeRoadCut);
+  check(roadCut.outcome === "Applied", `浄水場の前の道路を消せる（${roadCut.text}）`);
+  await page.keyboard.press("Escape");
+  await page
+    .waitForFunction(
+      () =>
+        document
+          .querySelector<HTMLElement>("#growth-notice")
+          ?.textContent?.includes("つながっていない"),
+      undefined,
+      { timeout: TIMEOUT_MS },
+    )
+    .catch(() => undefined);
+  check(
+    (await growth.isVisible()) &&
+      /施設はあるが、街の道路網につながっていない（浄水場 1）/.test(
+        (await growth.textContent()) ?? "",
+      ),
+    `つながっていない浄水場の知らせが出る（${await growth.textContent()}）`,
+  );
+  // 止まっている区画があれば、行き先に先に入る。押すたびに次へ移るので、孤立した施設に着くまで押す
+  const beforeCutOff = await mapState();
+  await stallButton.focus();
+  let atCutOff = beforeCutOff;
+  for (let i = 0; i < 8; i++) {
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    atCutOff = await mapState();
+    if (Math.abs(atCutOff.x - 53.5) < 8 && Math.abs(atCutOff.y - 13.5) < 8) {
+      break;
+    }
+  }
+  check(
+    Math.abs(atCutOff.x - 53.5) < 8 && Math.abs(atCutOff.y - 13.5) < 8,
+    `知らせを押すと、つながっていない浄水場へカメラが動く（カメラ ${atCutOff.x.toFixed(1)}, ${atCutOff.y.toFixed(1)}）`,
+  );
+  await panCameraBy(beforeCutOff.x - atCutOff.x, beforeCutOff.y - atCutOff.y);
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
   // 電気の主題図では地図を白で薄めるが、発電所の敷地は薄めずにそのまま（淡い橙）出す。
@@ -1558,6 +1621,46 @@ try {
   );
   await page.locator('button[data-tool="none"]').click();
 
+  // 細部の段（倍率 32 から上）に入るまでは、細部の頂点を作らない。上限の 128 まで寄ると、住宅に寄棟の屋根の線を描き足す
+  check(
+    (await map.getAttribute("data-detail-builds")) === null,
+    "細部の段より引いているあいだは、細部の頂点を作らない",
+  );
+  // 本体の右下の角（マスの縁から 0.2 マス）から 45 度に隅棟が延びる。角から 0.15 マス先の、隅棟の上と脇を比べる。
+  // 左上のマスには電気と水道の印が重なることがあるので、右下のマスに寄って見る
+  const [, , bx1 = bx, by1 = by] = firstBuilding;
+  const corner = tilePoint(bx1, by1);
+  await page.mouse.move(corner.x, corner.y);
+  for (let i = 0; i < 20; i++) {
+    await page.mouse.wheel(0, -400);
+  }
+  await page.waitForFunction(
+    (max) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) === max,
+    MAX_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  await page.waitForTimeout(300);
+  const fine = await mapState();
+  const at = (wx: number, wy: number) => ({
+    x: cx + (wx - fine.x) * fine.zoom,
+    y: cy + (wy - fine.y) * fine.zoom,
+  });
+  const ridgeAt = at(bx1 + 0.65, by1 + 0.65);
+  const ridgeArea: number[][] = [];
+  for (const dx of [-1, 0, 1]) {
+    for (const dy of [-1, 0, 1]) {
+      ridgeArea.push(await pixel(ridgeAt.x + dx, ridgeAt.y + dy));
+    }
+  }
+  const besideRidge = at(bx1 + 0.62, by1 + 0.76);
+  const roofSide = await pixel(besideRidge.x, besideRidge.y);
+  check(
+    Number(await map.getAttribute("data-detail-roofs")) > 0 &&
+      ridgeArea.some((c) => near(c, "#a7c18e", 8)) &&
+      near(roofSide, "#d3e3c0", 8),
+    `上限の倍率 ${fine.zoom} まで寄れ、住宅に屋根の線を描き足す（線 ${ridgeArea.map((c) => c.join(",")).join(" ")}、脇 ${roofSide.join(", ")}）`,
+  );
+
   await page.mouse.move(cx, cy);
   for (let i = 0; i < 20; i++) {
     await page.mouse.wheel(0, 400);
@@ -1639,7 +1742,7 @@ try {
   check((await mapState()).zoom === MAX_ZOOM, `拡大は上限 ${MAX_ZOOM} で止まる`);
   // 拡大縮小のボタンは、画面の真ん中を動かさずに 1.5 倍ずつ変え、物差しも追う
   await page.waitForFunction(
-    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "20",
+    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "5",
     undefined,
     { timeout: TIMEOUT_MS },
   );
@@ -1648,7 +1751,7 @@ try {
     (await page.locator("#zoom-in").isDisabled()) &&
       !(await page.locator("#zoom-out").isDisabled()) &&
       (await scale.getAttribute("data-px")) === "80",
-    "上限では、拡大のボタンだけが押せず、物差しは 20 m（80px）を示す",
+    "上限では、拡大のボタンだけが押せず、物差しは 5 m（80px）を示す",
   );
   await page.locator("#zoom-out").click();
   await page.waitForFunction(
@@ -1664,14 +1767,14 @@ try {
     `縮小のボタンで画面の真ん中を動かさずに 1.5 分の 1 になる（${smaller.zoom.toFixed(2)}）`,
   );
   await page.waitForFunction(
-    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "50",
+    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "10",
     undefined,
     { timeout: TIMEOUT_MS },
   );
   check(
-    (await scale.getAttribute("data-px")) === "133" &&
-      ((await scale.locator("[data-scale-label]").textContent()) ?? "") === "50 m",
-    "倍率が下がると、物差しは 50 m（133px）に変わる",
+    (await scale.getAttribute("data-px")) === "107" &&
+      ((await scale.locator("[data-scale-label]").textContent()) ?? "") === "10 m",
+    "倍率が下がると、物差しは 10 m（107px）に変わる",
   );
   await page.locator("#zoom-in").click();
   await page.waitForFunction(

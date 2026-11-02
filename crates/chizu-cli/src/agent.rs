@@ -48,10 +48,19 @@ observe の sinceLastObserve（前の observe からの増減）:
   new の直後の observe は、new が見た街との増減になる。前の observe がないとき（フィードバックのディレクトリなど）は null で、何も書かない。
 
 observe の utilities（power と water）:
-  capacity と demand 道路網をまたいだ供給量と需要の合計、headroom その差（負なら足りない）、
-  headroomPermille 供給量に対する余りの千分率（供給量 0 なら null）、lowHeadroom 余りが 0 以上 1 割未満（画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）。
-  shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at
-  （網の中で需要が最も大きい建物の道路に面したマス）。at を map で見れば、どの網かが分かる。
+  capacity と demand 道路網をまたいだ供給量と需要の合計。この合計から余りは出さない。つながっていない施設の分まで足されて、
+  主の網が足りないのに余っているように見えるからである。余りは次の 2 つに分けて読む。
+  main 主の網（需要がいちばん大きい網。どの網にも需要がなければ null）の capacity、demand、headroom（その差。負なら足りない）、
+  headroomPermille（供給量に対する余りの千分率。供給量 0 なら null）、lowHeadroom（余りが 0 以上 1 割未満。画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）、
+  at（網の中で需要が最も大きい建物の道路に面したマス）。
+  others 主の網以外で、施設か建物のある道路網の networks（数）と capacity、demand、headroom（その差）。
+  shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at。at を map で見れば、どの網かが分かる。
+  isolatedFacilities 孤立した施設の at の一覧。電気は発電所、水道は浄水場について数える。次のどちらかに当たる施設である。
+    入口がない（面した道路が消えた）。
+    主の網ではない網にあり、その網の余りが正で、主の網の余りが少ないか足りない（main の lowHeadroom か headroom が負）。
+  この施設は主の網に届かないので、余りに数えてはならない。道路でつなぐか、置き直す。
+  主の網に十分な余りがあるあいだは、ほかの網に施設があっても数えない（別の町を作る遊び方で、誤った知らせを出さないため）。
+  切れた道路に区画を塗って家が建っても、主の網が足りないあいだは数える。
 
 observe の growth（新築が電気か水道の余裕で止まっている間口）:
   区画の種類ごとに fronts 候補の間口、blocked 止まっている数、noPower と noWater そのうち電気、水道の余裕がない数。
@@ -61,8 +70,11 @@ observe の growth（新築が電気か水道の余裕で止まっている間�
 observe の人と車の欄（原因が交通にあるかを見分けるためのもの）:
   citizenPlaces  住民のいまの居場所ごとの人数。atHome 家、atWork 職場か学校、atShop 帰りに寄った店、
                  walking 歩いて移動中（車を降りて歩く区切りを含む）、driving 車で移動中、homeless 家のない世帯の住民。
-  traffic.cars   車の台数。total 全部、stopped 直前の 100 tick（ゲーム内の約 20 分）のあいだ同じ車線の同じ位置にいる車、
-                 moving それ以外。stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。
+  traffic.cars   車の台数。total 全部、stopped 道路の上で、直前の 100 tick（ゲーム内の約 20 分）のあいだ同じ位置にいる車
+                 （道路の種類を下げて車線を外れ、車線に戻るのを待つ車も含む）、
+                 waitingAtCurb 建物の前の路肩で、車線に出る順番を待っている車、moving それ以外。
+                 stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。waitingAtCurb が多いのは、
+                 建物の前の車線が埋まって出られない車が多いということである。
   traffic.walkers 車道を渡るところの歩く人。atCrosswalks 交差点の横断歩道を渡っているか渡るのを待っている人、
                  midblock 区間の途中で道路を横切っているか横切るのを待っている人。横断歩道は 3 本以上の道路が集まる
                  交差点の、高速道路でないどの腕にも自動で置かれ、人が渡っているあいだ、その腕から入る車と出る車は止まる。
@@ -575,14 +587,16 @@ fn clock_text(time: GameTime) -> String {
     )
 }
 
-/// 車の台数。`before` の時点から同じ車線の同じ位置にいる車を、止まっている車と数える。
+/// 車の台数。`before` の時点から車線の同じ位置にいる車を止まっている車と数え、路肩で待つ車は別に数える。
 fn cars(world: &World, before: &CarSample) -> Value {
     let now = world.car_sample();
-    let stopped = now.unmoved_since(before);
+    let stopped = now.stopped_on_road_since(before);
+    let waiting = now.waiting_at_curb();
     json!({
         "total": now.len(),
-        "moving": now.len() - stopped,
+        "moving": now.len() - stopped - waiting,
         "stopped": stopped,
+        "waitingAtCurb": waiting,
         "stoppedAfterTicks": STOPPED_TICKS,
     })
 }
@@ -720,6 +734,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
     let buildings = world.buildings();
     let count = |f: &dyn Fn(&Building) -> bool| buildings.iter().filter(|(_, b)| f(b)).count();
     let balance = supply_balance(world.network(), world.facilities(), buildings);
+    let isolated = world.isolated_facilities();
     let utility = |slot: usize| {
         let (mut capacity, mut need, mut bare) = (0_u64, 0_u64, 0_u64);
         let mut short = Vec::new();
@@ -736,19 +751,52 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 }));
             }
         }
-        // 余りは供給量から需要を引いた値で、負なら足りない。割合は供給量に対する千分率で、
-        // 供給量が 0 なら null。余りが 1 割を切ったら lowHeadroom を立てる（画面の知らせと同じ基準）。
-        let headroom = i128::from(capacity) - i128::from(need);
-        let permille = (capacity > 0).then(|| headroom * 1000 / i128::from(capacity));
+        // 余りは供給量から需要を引いた値で、負なら足りない。網をまたいだ合計の余りは出さない。
+        // つながっていない施設の分まで足されて、足りない網があるのに余っているように見えるからである。
+        // 余りは、主の網（需要がいちばん大きい網）と、それ以外の網に分けて出す。
+        let main_idx = balance.main_network(slot);
+        let main = main_idx.map(|i| {
+            let b = balance.components[i][slot];
+            let headroom = i128::from(b.capacity) - i128::from(b.demand);
+            // 割合は供給量に対する千分率で、供給量が 0 なら null。余りが 1 割を切ったら lowHeadroom を立てる（画面の知らせと同じ基準）。
+            let permille = (b.capacity > 0).then(|| headroom * 1000 / i128::from(b.capacity));
+            json!({
+                "capacity": b.capacity,
+                "demand": b.demand,
+                "headroom": headroom,
+                "headroomPermille": permille,
+                "lowHeadroom": b.demand > 0 && headroom >= 0 && permille.is_some_and(|p| p < 100),
+                "at": balance.spots[i].map(|p| json!([p.x, p.y])),
+            })
+        });
+        let (mut o_networks, mut o_capacity, mut o_demand) = (0_u64, 0_u64, 0_u64);
+        for (i, c) in balance.components.iter().enumerate() {
+            if Some(i) != main_idx && (c[slot].capacity > 0 || c[slot].demand > 0) {
+                o_networks += 1;
+                o_capacity += c[slot].capacity;
+                o_demand += c[slot].demand;
+            }
+        }
+        let kind = [ServiceKind::PowerPlant, ServiceKind::WaterPump][slot];
+        let isolated: Vec<Value> = isolated
+            .iter()
+            .filter(|f| f.kind == kind)
+            .map(|f| json!({"at": [f.front.x, f.front.y]}))
+            .collect();
         json!({
             "capacity": capacity,
             "demand": need,
-            "headroom": headroom,
-            "headroomPermille": permille,
-            "lowHeadroom": need > 0 && headroom >= 0 && permille.is_some_and(|p| p < 100),
+            "main": main,
+            "others": {
+                "networks": o_networks,
+                "capacity": o_capacity,
+                "demand": o_demand,
+                "headroom": i128::from(o_capacity) - i128::from(o_demand),
+            },
             "shortNetworks": short.len(),
             "networksWithoutFacility": bare,
             "shortAt": short,
+            "isolatedFacilities": isolated,
         })
     };
     let (growth, stalled) = world.growth_report();
@@ -916,6 +964,7 @@ const WATCHED: &[&str] = &[
     "/citizenPlaces/homeless",
     "/traffic/cars/total",
     "/traffic/cars/stopped",
+    "/traffic/cars/waitingAtCurb",
     "/migration/wantingHouseholds",
     "/migration/vacantHomes",
     "/migration/homelessHouseholds",
@@ -933,9 +982,11 @@ const WATCHED: &[&str] = &[
     "/buildings/watered",
     "/facilities/PowerPlant",
     "/facilities/WaterPump",
-    "/utilities/power/headroom",
+    "/utilities/power/main/headroom",
+    "/utilities/power/others/headroom",
     "/utilities/power/shortNetworks",
-    "/utilities/water/headroom",
+    "/utilities/water/main/headroom",
+    "/utilities/water/others/headroom",
     "/utilities/water/shortNetworks",
     "/land/milestone",
 ];

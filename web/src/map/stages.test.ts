@@ -3,8 +3,10 @@ import { moverArea } from "./movers.ts";
 import {
   BLOCK_BAND,
   DETAIL_BAND,
+  FINE_BAND,
   MIN_MOVER_ZOOM,
   MOVER_BAND,
+  showsFine,
   showsMovers,
   smoothstep,
   stageWeights,
@@ -64,6 +66,20 @@ describe("縮尺の段", () => {
       0.5,
     );
     expect(stageWeights(8).trafficFree).toBe(1);
+  });
+
+  test("細部は 32〜48 で現れ、寄りの描き方は消さない", () => {
+    expect(FINE_BAND).toEqual([32, 48]);
+    expect(stageWeights(20).fine).toBe(0);
+    expect(stageWeights(32).fine).toBe(0);
+    expect(showsFine(32)).toBe(false);
+    expect(showsFine(32.01)).toBe(true);
+    expect(stageWeights(40).fine).toBeCloseTo(0.5);
+    const top = stageWeights(128);
+    expect(top.fine).toBe(1);
+    expect(top.detail).toBe(1);
+    expect(top.movers).toBe(1);
+    expect(top.clusters).toBe(0);
   });
 
   test("寄りの段より引いたら、Worker に移動体の範囲を頼まない", () => {

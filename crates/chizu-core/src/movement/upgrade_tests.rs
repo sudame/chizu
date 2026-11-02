@@ -232,3 +232,44 @@ fn cars_merge_without_overlapping_after_the_road_is_narrowed() {
         assert_eq!(pool.install(|| narrowed(false)), one);
     }
 }
+
+#[test]
+fn cars_pushed_off_a_narrowed_road_count_as_stopped_on_the_road() {
+    use crate::world::CarSample;
+
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (40, 0), RoadKind::Large);
+    road(&mut n, (40, 0), (70, 0), RoadKind::Large);
+    let mut c = Cars::new(n);
+    for _ in 0..12 {
+        c.drive(at(5, 0, (1, 0)), at(65, 0, (1, 0)));
+    }
+    for _ in 0..6 {
+        c.step();
+    }
+    c.change((0, 0), (40, 0), RoadKind::Small);
+    let off: Vec<&Trip> = c
+        .trips
+        .iter()
+        .filter(|(_, t)| t.waiting)
+        .map(|(_, t)| t)
+        .collect();
+    assert!(!off.is_empty(), "車線を外れた車がいない");
+    // 区間の途中で車線に戻るのを待つ車は、建物の前から出発を待つ車ではない。
+    assert!(off.iter().all(|t| t.rejoining && !t.waiting_to_depart()));
+    let before = CarSample::of(&c.trips);
+    assert_eq!(before.waiting_at_curb(), 0);
+    assert!(before.stopped_on_road_since(&before) >= off.len());
+    // 止まっている車として、道路の遅れにも数える。
+    let link = off[0].link();
+    let on_link = c
+        .trips
+        .iter()
+        .filter(|(_, t)| t.link() == link && t.speed.0 < congestion::QUEUED_BELOW)
+        .count() as u64;
+    assert_eq!(
+        c.trips.queue_delays(&c.net).get(link),
+        on_link * congestion::QUEUE_MS_PER_CAR / c.net.link_lanes(link).count() as u64
+    );
+    c.run_until_empty(600);
+}

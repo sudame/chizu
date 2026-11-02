@@ -276,6 +276,23 @@ describe("道路の見た目", () => {
     expect(between.get("lanes")).toBeLessThan(1);
     expect(between.get("clusters")).toBeGreaterThan(0);
     expect(between.get("bodies")).toBe(1);
+    // 細部の段：寄りの描き方はそのまま描き、屋根の形、街路樹と停止線、3 つ並びの信号を描き足す
+    expect(yori.has("roofs")).toBe(false);
+    const saibu = drawn(128);
+    for (const name of ["bodies", "details", "lanes", "markings", "roofs", "streets", "lamps"]) {
+      expect(saibu.get(name as never)).toBe(1);
+    }
+    expect(saibu.has("signals")).toBe(false);
+    // 32〜48 で溶け込む。1 つの灯火は 3 つの並びに入れ替わる
+    const fading = drawn(40);
+    expect(fading.get("roofs")).toBeCloseTo(0.5);
+    expect(fading.get("signals")).toBeCloseTo(0.5);
+    expect(fading.get("lamps")).toBeCloseTo(0.5);
+    expect(fading.get("lanes")).toBe(1);
+    const fineOrder = roadDrawOrder(128).map(([name]) => name);
+    expect(fineOrder.indexOf("bodies")).toBeLessThan(fineOrder.indexOf("roofs"));
+    expect(fineOrder.indexOf("roofs")).toBeLessThan(fineOrder.indexOf("marks"));
+    expect(fineOrder.indexOf("markings")).toBeLessThan(fineOrder.indexOf("streets"));
     // 下から順に、建物、道路、路面の線、信号、仮の表示
     const order = roadDrawOrder(12).map(([name]) => name);
     expect(order.indexOf("bodies")).toBeLessThan(order.indexOf("major"));

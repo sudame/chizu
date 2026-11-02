@@ -236,6 +236,27 @@ pub fn utility_totals(world: &World) -> [u64; 4] {
     out
 }
 
+/// 電気と水道の、主の網（需要がいちばん大きい網）の供給量と需要、主の網以外で施設か建物のある網の数。
+/// `[電気の供給量, 水道の供給量, 需要, 電気のほかの網の数, 水道のほかの網の数]`。
+/// どの網にも需要がなければ、主の網はなく、供給量と需要は 0 で、ほかの網は施設のある網すべてである。
+pub fn utility_main(world: &World) -> [u64; 5] {
+    let balance = supply_balance(world.network(), world.facilities(), world.buildings());
+    let mut out = [0; 5];
+    let main = balance.main_network(0);
+    if let Some(i) = main {
+        out[0] = balance.components[i][0].capacity;
+        out[1] = balance.components[i][1].capacity;
+        out[2] = balance.components[i][0].demand;
+    }
+    for (i, c) in balance.components.iter().enumerate() {
+        for slot in 0..2 {
+            out[3 + slot] +=
+                u64::from(Some(i) != main && (c[slot].capacity > 0 || c[slot].demand > 0));
+        }
+    }
+    out
+}
+
 /// 電気と水道の不足の中身。`[電気の施設のない網, 水道の施設のない網, 電気の不足量, 水道の不足量]`。
 /// 施設のない網は、建物があるのに供給量が 0 の網の数である。
 /// 不足量は、施設のある網で需要が供給量を上回った分の合計である。

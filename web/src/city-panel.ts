@@ -21,6 +21,13 @@ export type CityStats = {
   /** 施設のある網で、需要が供給量を上回った分の合計。 */
   powerGap: number;
   waterGap: number;
+  /** 主の網（需要がいちばん大きい網）の供給量と需要。余りは網をまたいで足さず、この網で見る。 */
+  mainPower: number;
+  mainWater: number;
+  mainDemand: number;
+  /** 主の網以外で、施設か建物のある道路網の数。 */
+  powerOthers: number;
+  waterOthers: number;
 };
 
 export function parseCityStats(stats: number[]): CityStats {
@@ -39,6 +46,11 @@ export function parseCityStats(stats: number[]): CityStats {
     waterIsolated: at(13),
     powerGap: at(14),
     waterGap: at(15),
+    mainPower: at(16),
+    mainWater: at(17),
+    mainDemand: at(18),
+    powerOthers: at(19),
+    waterOthers: at(20),
   };
 }
 
@@ -58,11 +70,27 @@ export function formatCityNumbers(stats: CityStats): string {
   return `建物 ${n(stats.buildings)} 棟・住める世帯 ${n(stats.households)}・職場の枠 ${n(stats.workplaces)}`;
 }
 
-/** 電気と水道の供給量と需要の 1 行。 */
+/**
+ * 余りを見る網ごとの供給量と需要。建物がある街では主の網の値で、ほかの網の分は足さない。
+ * 建物がまだないうちは主の網がないので、施設の供給量の合計を出す。
+ */
+function mainView(stats: CityStats) {
+  const hasMain = stats.mainDemand > 0;
+  return {
+    power: hasMain ? stats.mainPower : stats.power,
+    water: hasMain ? stats.mainWater : stats.water,
+    demand: hasMain ? stats.mainDemand : stats.utilityDemand,
+    powerOthers: hasMain ? stats.powerOthers : 0,
+    waterOthers: hasMain ? stats.waterOthers : 0,
+  };
+}
+
+/** 電気と水道の、主の網の供給量と需要の 1 行。ほかに道路網があれば、その数を添える。 */
 export function formatUtilities(stats: CityStats): string {
   const n = (v: number) => v.toLocaleString("ja-JP");
-  const d = n(stats.utilityDemand);
-  return `電気 ${n(stats.power)} / 需要 ${d}・水道 ${n(stats.water)} / 需要 ${d}`;
+  const m = mainView(stats);
+  const others = (count: number) => (count > 0 ? `（ほかの網 ${n(count)}）` : "");
+  return `電気 ${n(m.power)} / 需要 ${n(m.demand)}${others(m.powerOthers)}・水道 ${n(m.water)} / 需要 ${n(m.demand)}${others(m.waterOthers)}`;
 }
 
 /**
@@ -103,21 +131,22 @@ export const LOW_HEADROOM_PERCENT = 10;
 
 /**
  * 届いていない建物がまだないが、電気か水道の余りが少なくなっているときの知らせ。余裕があるときは null。
- * 余りは、道路網をまたいだ供給量の合計と需要の合計で見る。
+ * 余りは主の網の供給量と需要で見る。ほかの網にある施設の分は足さない。
  */
 export function utilityLowHeadroom(stats: CityStats): UtilityShortage | null {
   const reasons: string[] = [];
+  const m = mainView(stats);
   const add = (name: string, facility: string, supply: number) => {
-    if (supply <= 0 || stats.utilityDemand > supply) {
+    if (supply <= 0 || m.demand > supply) {
       return;
     }
-    const left = Math.floor(((supply - stats.utilityDemand) * 100) / supply);
+    const left = Math.floor(((supply - m.demand) * 100) / supply);
     if (left < LOW_HEADROOM_PERCENT) {
       reasons.push(`${name}の余りが ${left}% になった。${facility}を足す用意をする`);
     }
   };
-  add("電気", "発電所", stats.power);
-  add("水道", "浄水場", stats.water);
+  add("電気", "発電所", m.power);
+  add("水道", "浄水場", m.water);
   if (reasons.length === 0) {
     return null;
   }
