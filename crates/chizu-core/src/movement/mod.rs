@@ -42,6 +42,20 @@ use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::TilePos;
 use crate::units::{LaneOffset, Mm, MmPerTick, Tick, WorldPos};
 
+/// 歩く人を並列に進めるときに、1 本のスレッドが受け持つ行の数の下限。行がこの 2 倍に満たなければ
+/// 1 本のスレッドで回す。1 行は数ナノ秒で済むので、これより小さく分けると、スレッドを起こして
+/// 待ち合わせる時間のほうが長くなる。
+///
+/// 分け方で結果は変わらない。単体テストでは、小さな街でも分けた道を通してスレッド数に依らないことを
+/// 確かめられるように 1 にする。
+#[cfg(feature = "parallel")]
+const PAR_MIN_WALKS: usize = if cfg!(test) { 1 } else { 8_192 };
+
+/// 車の前を見て速さを決めるのを並列に回すときに、1 本のスレッドが受け持つ車の数の下限。
+/// 単体テストで 1 にするのは [`PAR_MIN_WALKS`] と同じ理由である。
+#[cfg(feature = "parallel")]
+const PAR_MIN_CARS: usize = if cfg!(test) { 1 } else { 256 };
+
 /// 歩くか車で走って移動している主体。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Trip {
@@ -513,6 +527,7 @@ impl Trips {
         let arrived: Vec<usize> = self
             .rows
             .par_iter_mut()
+            .with_min_len(PAR_MIN_WALKS)
             .enumerate()
             .filter_map(advance)
             .collect();

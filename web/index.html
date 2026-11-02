@@ -291,6 +291,67 @@
       <summary>凡例</summary>
       <div id="legend-body"></div>
     </details>
+    <style>
+      /* 左下に置く。左上の #overlay は縦に伸ばすと地図のクリックを隠すので、広げたときも下から上へ伸びる場所にする */
+      #finance {
+        position: fixed;
+        left: 8px;
+        bottom: 56px;
+        width: 17em;
+        max-height: 50vh;
+        padding: 4px 8px;
+        overflow-y: auto;
+        font-size: 13px;
+        background: rgb(255 255 255 / 90%);
+        border-radius: 4px;
+      }
+      #finance summary {
+        cursor: pointer;
+        font-weight: bold;
+      }
+      #finance.deficit summary {
+        color: #b00020;
+      }
+      #finance h3 {
+        margin: 6px 0 2px;
+        font-size: 12px;
+      }
+      #finance .finance-row {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+      }
+      #finance .finance-row > :first-child {
+        flex: 1;
+      }
+      #finance .finance-rate {
+        min-width: 3.5em;
+        text-align: center;
+      }
+      #finance .finance-amount {
+        min-width: 5em;
+        text-align: right;
+      }
+      #finance .finance-net {
+        justify-content: space-between;
+        margin-top: 4px;
+        padding-top: 2px;
+        font-weight: bold;
+        border-top: 1px solid #888;
+      }
+      #finance.deficit .finance-net {
+        color: #b00020;
+      }
+      #finance .finance-note {
+        margin: 4px 0 0;
+        font-size: 11px;
+        color: #555;
+      }
+    </style>
+    <details id="finance">
+      <summary>収支</summary>
+      <div data-finance-body></div>
+    </details>
     <button type="button" id="feedback-open" hidden>フィードバック</button>
     <div id="dev-tools">
       <button type="button" data-tool="dev-walks" aria-pressed="false" hidden>歩く人を出す</button>

@@ -5,6 +5,8 @@ export type RoadKindName = "Small" | "Medium" | "Large";
 export type ServiceName = "PowerPlant" | "WaterPump";
 /** chizu-wasm の city_stats の数の個数。 */
 export const CITY_STATS_LENGTH = 16;
+/** chizu-wasm の finance の数の個数。 */
+export const FINANCE_LENGTH = 12;
 
 /** chizu-wasm の overview の数の個数。 */
 export const OVERVIEW_LENGTH = 9;
@@ -32,6 +34,8 @@ export type CommandMessage =
       maxY: number;
     }
   | { kind: "BuyChunk"; cx: number; cy: number }
+  /** 区画の種類ごとの税率（‰）。上限は chizu-core の MAX_TAX_PERMILLE で、中核が検証する。 */
+  | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear">; permille: number }
   | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number };
 
 /** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
@@ -179,6 +183,11 @@ export type WorkerToMain =
    * 記録する前に受け付けなかったコマンドには seq がない。
    */
   | { kind: "outcome"; id: number; seq?: number; outcome: Outcome; reason?: string }
+  /**
+   * 収支の見込みと税率。chizu-wasm の finance で、Worker が一定の間隔で送る。
+   * 並びは税率の上限、区画の種類ごとの税率、税収、道路の維持費、発電所と浄水場の維持費。
+   */
+  | { kind: "finance"; values: number[] }
   /** dev-spawn-walks で出せた人数。 */
   | { kind: "dev-spawned"; count: number }
   /** Worker が受け取って使っている倍率。画面の表示はこの値を使う。 */
@@ -264,6 +273,12 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "feedback":
       return typeof v.state === "string" && v.commands instanceof ArrayBuffer;
+    case "finance":
+      return (
+        Array.isArray(v.values) &&
+        v.values.length === FINANCE_LENGTH &&
+        v.values.every((n) => typeof n === "number")
+      );
     case "dev-spawned":
       return Number.isInteger(v.count);
     case "pace":

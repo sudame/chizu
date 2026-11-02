@@ -456,11 +456,13 @@ pub(super) fn step(
     let waiting: Vec<usize> = (0..rows.len())
         .filter(|i| rows[*i].as_ref().is_some_and(|t| t.waiting))
         .collect();
-    let mut ix = LaneIndex::of(rows, None);
     let mut still_waiting = Vec::new();
-    for i in waiting {
-        if !place(rows, net, &mut ix, i) {
-            still_waiting.push(i);
+    if !waiting.is_empty() {
+        let mut ix = LaneIndex::of(rows, None);
+        for i in waiting {
+            if !place(rows, net, &mut ix, i) {
+                still_waiting.push(i);
+            }
         }
     }
     let st = LaneState::of(rows);
@@ -477,7 +479,11 @@ pub(super) fn step(
     let rows_ro = &*rows;
     let look_at = |k: usize| look(rows_ro, net, conn, &st, &order, k);
     #[cfg(feature = "parallel")]
-    let looks: Vec<Look> = (0..order.len()).into_par_iter().map(look_at).collect();
+    let looks: Vec<Look> = (0..order.len())
+        .into_par_iter()
+        .with_min_len(super::PAR_MIN_CARS)
+        .map(look_at)
+        .collect();
     #[cfg(not(feature = "parallel"))]
     let looks: Vec<Look> = (0..order.len()).map(look_at).collect();
     // 交差点の手前で止める車を、前の tick の状態だけからノードの順に決める。
@@ -515,7 +521,11 @@ pub(super) fn step(
         (i, t.speed, v, at, next_lane, held[k])
     };
     #[cfg(feature = "parallel")]
-    let moves: Vec<_> = (0..order.len()).into_par_iter().map(plan).collect();
+    let moves: Vec<_> = (0..order.len())
+        .into_par_iter()
+        .with_min_len(super::PAR_MIN_CARS)
+        .map(plan)
+        .collect();
     #[cfg(not(feature = "parallel"))]
     let moves: Vec<_> = (0..order.len()).map(plan).collect();
 

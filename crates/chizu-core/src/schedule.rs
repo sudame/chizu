@@ -21,6 +21,15 @@ pub const BUCKET_COUNT: u32 = 64;
 /// 組に分けるときの塊の人数。
 pub const BLOCK_SIZE: u32 = 64;
 
+/// 並列に分けたときに 1 本のスレッドが受け持つ塊の数の下限。塊がこの 2 倍に満たない組は
+/// 1 本のスレッドで回す。1 人の更新は数十ナノ秒なので、これより小さく分けると、スレッドを起こして
+/// 待ち合わせる時間のほうが長くなる。
+///
+/// 分け方で結果は変わらない。単体テストでは、少ない人数でも分けた道を通してスレッド数に依らないことを
+/// 確かめられるように 1 にする。
+#[cfg(feature = "parallel")]
+const PAR_MIN_BLOCKS: usize = if cfg!(test) { 1 } else { 32 };
+
 /// `tick` に更新する組。
 pub fn bucket_at(tick: Tick) -> u32 {
     (tick.0 % u64::from(BUCKET_COUNT)) as u32
@@ -116,6 +125,7 @@ impl Population {
         #[cfg(feature = "parallel")]
         let changes: Vec<_> = (0..blocks)
             .into_par_iter()
+            .with_min_len(PAR_MIN_BLOCKS)
             .flat_map_iter(|k| block_slots(k).filter_map(compute))
             .collect();
         #[cfg(not(feature = "parallel"))]

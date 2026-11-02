@@ -29,6 +29,8 @@ pub enum InputError {
     BadInteger(&'static str),
     BadRoadKind,
     BadZone,
+    /// 税率をかける区画の種類でない（消す指定の Clear は取れない）。
+    BadTaxZone,
     BadService,
 }
 
@@ -42,6 +44,10 @@ impl fmt::Display for InputError {
             InputError::BadInteger(name) => write!(f, "{name} が範囲の中の整数でない"),
             InputError::BadRoadKind => write!(f, "road は Small、Medium、Large のどれかで指定する"),
             InputError::BadService => write!(f, "service は PowerPlant か WaterPump で指定する"),
+            InputError::BadTaxZone => write!(
+                f,
+                "zone は Residential、Commercial、Industrial、Office のどれかで指定する"
+            ),
             InputError::BadZone => write!(
                 f,
                 "zone は Residential、Commercial、Industrial、Office、Clear のどれかで指定する"
@@ -101,6 +107,22 @@ pub fn parse(is_object: bool, field: impl Fn(&str) -> Field) -> Result<Command, 
                 },
                 zone,
             })
+        }
+        "SetTaxRate" => {
+            let zone = match field("zone") {
+                Field::Text(t) => match t.as_str() {
+                    "Residential" => ZoneKind::Residential,
+                    "Commercial" => ZoneKind::Commercial,
+                    "Industrial" => ZoneKind::Industrial,
+                    "Office" => ZoneKind::Office,
+                    _ => return Err(InputError::BadTaxZone),
+                },
+                _ => return Err(InputError::BadTaxZone),
+            };
+            // 上限の検査は Command::validate に任せる
+            let permille = integer(&field, "permille")
+                .and_then(|v| u16::try_from(v).map_err(|_| InputError::BadInteger("permille")))?;
+            Ok(Command::SetTaxRate { zone, permille })
         }
         "Bulldoze" => Ok(Command::Bulldoze {
             area: TileRect {
@@ -334,6 +356,43 @@ mod tests {
             place("PowerPlant", 300.0),
             Err(InputError::BadInteger("rotation"))
         );
+    }
+
+    #[test]
+    fn accepts_set_tax_rate() {
+        let tax = |zone: Field, permille: Field| {
+            object(&[
+                ("kind", Field::Text("SetTaxRate".into())),
+                ("zone", zone),
+                ("permille", permille),
+            ])
+        };
+        assert_eq!(
+            tax(Field::Text("Commercial".into()), Field::Number(120.0)),
+            Ok(Command::SetTaxRate {
+                zone: ZoneKind::Commercial,
+                permille: 120
+            })
+        );
+        // 区画を消す指定や知らない種類は、税率の対象にならない
+        for zone in [
+            Field::Text("Clear".into()),
+            Field::Text("Park".into()),
+            Field::Missing,
+        ] {
+            assert_eq!(tax(zone, Field::Number(100.0)), Err(InputError::BadTaxZone));
+        }
+        for bad in [
+            Field::Number(-1.0),
+            Field::Number(70_000.0),
+            Field::Number(0.5),
+            Field::Missing,
+        ] {
+            assert_eq!(
+                tax(Field::Text("Office".into()), bad),
+                Err(InputError::BadInteger("permille"))
+            );
+        }
     }
 
     #[test]

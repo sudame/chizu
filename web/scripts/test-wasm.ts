@@ -968,6 +968,44 @@ try {
   );
   check((await mapState()).zoom === MAX_ZOOM, `拡大は上限 ${MAX_ZOOM} で止まる`);
 
+  // 収支のパネルは閉じていて、開くと税率を変えられる。変えた税率は記録に入り、下の再生でも同じ状態になる
+  const finance = page.locator("#finance");
+  await finance.and(page.locator("[data-net]")).waitFor({ state: "attached", timeout: TIMEOUT_MS });
+  check((await finance.getAttribute("open")) === null, "収支のパネルは閉じて始まる");
+  await finance.locator("summary").click();
+  const resRow = finance.locator('[data-zone="Residential"]');
+  check((await resRow.getAttribute("data-permille")) === "100", "住宅の税率は 10% で始まる");
+  const netBefore = Number(await finance.getAttribute("data-net"));
+  check(
+    (await finance.getAttribute("data-deficit")) === String(netBefore < 0) &&
+      (await hud.getAttribute("data-deficit")) === String(netBefore < 0),
+    `赤字かどうかがパネルと所持金の横に出る（差し引き ${netBefore}）`,
+  );
+  await resRow.getByLabel("住宅の税率を上げる").click();
+  await resRow.getByLabel("住宅の税率を上げる").click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector<HTMLElement>('#finance [data-zone="Residential"]')?.dataset
+        .permille === "120",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(
+    (await resRow.locator(".finance-rate").textContent()) === "12%" &&
+      (await page.locator("#tool-message").getAttribute("data-command")) === "SetTaxRate" &&
+      (await page.locator("#tool-message").getAttribute("data-outcome")) === "Applied",
+    "税率を 1% ずつ上げると中核が受け付け、パネルの税率が変わる",
+  );
+  await resRow.getByLabel("住宅の税率を下げる").click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector<HTMLElement>('#finance [data-zone="Residential"]')?.dataset
+        .permille === "110",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, "税率を下げると 11% に戻る");
+
   // フィードバックを送り、保存した記録を chizu-cli で再生する
   await page.locator("#feedback-open").click();
   await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
