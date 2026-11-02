@@ -5,6 +5,7 @@
 import { CHUNK_SIDE, type MoverArea } from "../protocol/messages.ts";
 import { layout, type SnapshotHeader } from "../protocol/snapshot.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
+import { SIDEWALK_WIDTH } from "./lanes.ts";
 import { CAR_COLORS, WALKER_COLOR } from "./mover-colors.ts";
 import { MoverInterpolator } from "./mover-interpolation.ts";
 
@@ -42,11 +43,12 @@ void main() {
   vec2 along = vec2(cos(angle), sin(angle));
   vec2 across = vec2(-along.y, along.x);
   // 半分の大きさ（マス）。1 マスは 8m。車はいちばん狭い車線（大きい道路の 1.1m）に収まる幅にし、
-  // 長さは幅の 3 倍ほどにして、車線の線と見分けられる形にする。人は丸にする。
+  // 長さは幅の 3 倍ほどにして、車線の線と見分けられる形にする。人は、中核が置く歩道の中心から
+  // 歩道の幅（0.08 マス）に収まる丸にし、車道やマスの外にはみ出さないようにする。
   // 縮小しても形が分かるよう、画面のピクセルの下限を置く
   vec2 half_px = kind == ${KIND_CAR}u
     ? max(vec2(0.2, 0.065) * u_zoom, vec2(2.0, 1.0))
-    : vec2(max(0.07 * u_zoom, 1.5));
+    : vec2(max(${SIDEWALK_WIDTH / 2} * u_zoom, 1.5));
   vec2 p = a_pos * u_zoom + u_offset + along * a_corner.x * half_px.x + across * a_corner.y * half_px.y;
   p /= u_viewport * 0.5;
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);

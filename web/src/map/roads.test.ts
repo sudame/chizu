@@ -13,6 +13,7 @@ import {
   markingAlpha,
   miterTrim,
   ROAD_VISUAL_HALF,
+  roadFootprint,
   roadGeometry,
   roadLaneGeometry,
   roadMarkingGeometry,
@@ -22,6 +23,7 @@ import {
   signalGeometry,
   signalLampCenter,
   THIN_PX,
+  tilesOnLine,
   unsuppliedCount,
   VERTEX_FLOATS,
   zebra,
@@ -173,10 +175,10 @@ describe("車線ごとの道路", () => {
     return { x: data[i] ?? 0, y: data[i + 1] ?? 0, half: data[i + 4] ?? 0, min: data[i + 5] ?? 0 };
   };
 
-  test("中くらいの道路 1 本は、両端の四角、歩道 2、境目の線 2、車道、両端の車道の四角と、線 3 本になる", () => {
+  test("中くらいの道路 1 本は、両端の四角、歩道 2、境目の線 2 と行き止まりの 3 辺ずつ、車道、両端の車道の四角と、線 3 本になる", () => {
     const segments = new Float64Array([0, 0, 4, 0, 2]);
     const nodes = nodesOf([0, 0], [4, 0]);
-    expect(roadLaneGeometry(segments, nodes).vertexCount).toBe(6 * (2 + 2 + 2 + 1 + 2));
+    expect(roadLaneGeometry(segments, nodes).vertexCount).toBe(6 * (2 + 2 + 2 + 2 * 3 + 1 + 2));
     expect(roadMarkingGeometry(segments, nodes).vertexCount).toBe(6 * 3);
   });
 
@@ -199,9 +201,9 @@ describe("車線ごとの道路", () => {
     const segments = new Float64Array([0, 0, 4, 0, 3]);
     const nodes = nodesOf([0, 0], [4, 0]);
     const lanes = roadLaneGeometry(segments, nodes);
-    // 四角 2、歩道 2、境目の線 2 のあとが車道で、半分の太さは車線 3 本分（0.14 × 3）
-    expect(at(lanes, 6, 0).half).toBeCloseTo(0.42);
-    expect(at(lanes, 6, 0).min).toBe(0);
+    // 四角 2、歩道 2、境目の線 2、行き止まりの境目の線 6 のあとが車道で、半分の太さは車線 3 本分（0.14 × 3）
+    expect(at(lanes, 12, 0).half).toBeCloseTo(0.42);
+    expect(at(lanes, 12, 0).min).toBe(0);
     expect(at(lanes, 4, 0).min).toBe(THIN_PX);
     expect(at(roadMarkingGeometry(segments, nodes), 0, 0).min).toBe(THIN_PX);
   });
@@ -211,8 +213,12 @@ describe("車線ごとの道路", () => {
     const segments = new Float64Array([0, 0, 4, 0, 1, 4, 0, 8, 0, 1, 4, 0, 4, 4, 1]);
     const nodes = nodesOf([0, 0], [4, 0], [8, 0], [4, 4]);
     const lanes = roadLaneGeometry(segments, nodes);
-    // 四角 4、歩道 6、境目の線 6、車道 3、車道の四角 4
-    expect(lanes.vertexCount).toBe(6 * (4 + 6 + 6 + 3 + 4));
+    // 四角 4、歩道 6、境目の線 6、交差点の腕のない北の辺 1 と行き止まり 3 つの 3 辺ずつ、車道 3、車道の四角 4
+    expect(lanes.vertexCount).toBe(6 * (4 + 6 + 6 + 1 + 3 * 3 + 3 + 4));
+    // 交差点のノードの北の辺の境目の線は、マスの上の縁に沿う。行き止まり (0,0) の 3 辺のあとにある
+    const north = at(lanes, 4 + 6 + 6 + 3, 0);
+    expect(north.y).toBeCloseTo(0 + 0.0125);
+    expect(north.x).toBeCloseTo(4);
     // 区間 (0,0)-(4,0) の境目の線は、終点側がマスの縁で終わる
     expect(at(lanes, 10, 2).x).toBeCloseTo(4.5 - ROAD_VISUAL_HALF);
     // 中央線は、終点側が交差点の道路の半分の幅（0.3）だけ手前で終わる
@@ -316,9 +322,74 @@ describe("横断歩道", () => {
     const segments = new Float64Array([0, 0, 4, 0, 1, 4, 0, 8, 0, 1, 4, 0, 4, 4, 1]);
     const nodes = new Float64Array([0, 0, 1, 0, 4, 0, 1, 0, 8, 0, 1, 0, 4, 4, 1, 0]);
     // 車線ごとの道路には縞を入れず、路面の線の頂点に入れる
-    expect(roadLaneGeometry(segments, nodes).vertexCount).toBe(6 * (4 + 6 + 6 + 3 + 4));
+    expect(roadLaneGeometry(segments, nodes).vertexCount).toBe(6 * (4 + 6 + 6 + 1 + 9 + 3 + 4));
     const last = roadMarkingGeometry(segments, nodes).build();
     const v = last.length / VERTEX_FLOATS - 1;
     expect(last[v * VERTEX_FLOATS + 5]).toBe(THIN_PX);
+  });
+});
+
+describe("斜めの道路", () => {
+  const segments = new Float64Array([0, 0, 4, 4, 3]);
+  const nodes = new Float64Array([0, 0, 1, 0, 4, 4, 1, 0]);
+  // 頂点を広げたあとの位置（マス）
+  const corners = (g: Geometry) => {
+    const d = g.build();
+    const out: { x: number; y: number }[] = [];
+    for (let v = 0; v < g.vertexCount; v++) {
+      const o = v * VERTEX_FLOATS;
+      const half = d[o + 4] ?? 0;
+      out.push({
+        x: (d[o] ?? 0) + (d[o + 2] ?? 0) * half,
+        y: (d[o + 1] ?? 0) + (d[o + 3] ?? 0) * half,
+      });
+    }
+    return out;
+  };
+
+  test("通るマスは縦横と斜めの線の上のマスである", () => {
+    expect(tilesOnLine({ x: 0, y: 0 }, { x: 3, y: -3 })).toEqual([
+      { x: 0, y: 0 },
+      { x: 1, y: -1 },
+      { x: 2, y: -2 },
+      { x: 3, y: -3 },
+    ]);
+    expect(tilesOnLine({ x: 2, y: 5 }, { x: 0, y: 5 })).toHaveLength(3);
+  });
+
+  test("脇のマスの建物（角から 0.15 マス内側）に、道路の帯がかからない", () => {
+    // 三角形のどれかが点 p を覆うか
+    const covers = (g: Geometry, p: { x: number; y: number }) => {
+      const c = corners(g);
+      const cross = (a: typeof p, b: typeof p) =>
+        (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x);
+      for (let i = 0; i + 2 < c.length; i += 3) {
+        const [a, b, d] = [c[i], c[i + 1], c[i + 2]] as [typeof p, typeof p, typeof p];
+        const [s1, s2, s3] = [cross(a, b), cross(b, d), cross(d, a)];
+        if ((s1 > 0 && s2 > 0 && s3 > 0) || (s1 < 0 && s2 < 0 && s3 < 0)) {
+          return true;
+        }
+      }
+      return false;
+    };
+    for (const g of [roadLaneGeometry(segments, nodes), roadGeometry(segments, nodes)]) {
+      for (let k = 0; k < 4; k++) {
+        // マス (k+1, k) と (k, k+1) の建物の、道路にいちばん近い角
+        expect(covers(g, { x: k + 1.15, y: k + 0.85 })).toBe(false);
+        expect(covers(g, { x: k + 0.85, y: k + 1.15 })).toBe(false);
+      }
+      // 道路のマスの外側の角は塗る
+      expect(covers(g, { x: 1.05, y: 1.9 })).toBe(true);
+    }
+  });
+
+  test("歩道は道路のマスを階段状に塗る", () => {
+    const g = new Geometry({ x: 0, y: 0 });
+    roadFootprint(g, { x: 0, y: 0 }, { x: 2, y: 2 }, [1, 1, 1, 1]);
+    expect(g.vertexCount).toBe(3 * 6);
+    const xs = corners(g).map((p) => `${p.x},${p.y}`);
+    expect(xs).toContain("0,0");
+    expect(xs).toContain("3,3");
+    expect(xs).not.toContain("2,0");
   });
 });

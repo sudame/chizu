@@ -21,8 +21,10 @@ import {
   type Color,
   FACILITY_COLOR,
   Geometry,
-  halfWidthOf,
+  MIN_PX,
+  ROAD_VISUAL_HALF,
   type RoadMeshes,
+  roadFootprint,
   roadMeshes,
   signalGeometry,
   unsuppliedCount,
@@ -297,7 +299,6 @@ function startDrawing(reader: SnapshotReader, ctx: CanvasRenderingContext2D): vo
 
 // 左のボタンは、この距離（CSS ピクセル）より動かしたら地図を引きずる操作とみなす。中のボタンはいつも引きずる
 const CLICK_SLOP_PX = 4;
-const ROAD_CODES: Record<RoadKindName, number> = { Small: 1, Medium: 2, Large: 3 };
 const PREVIEW_OK: Color = [0.3, 0.6, 1, 0.7];
 const PREVIEW_BAD: Color = [1, 0.3, 0.3, 0.7];
 const BULLDOZE_AREA: Color = [1, 0.3, 0.3, 0.35];
@@ -355,19 +356,19 @@ function updatePreview(): void {
     const { from, to } = roadEndpoints(roadIndex, roadStart, cursor, noSnap);
     shownRoad = { start: roadStart, cursor, noSnap, from, to };
     geometry = new Geometry(from);
-    const half = halfWidthOf(ROAD_CODES[tool.road]);
+    // 置いたあとの道路と同じく、通るマスをマスいっぱいに塗る
     if (roadStart !== null && roadCosts !== null) {
       const cost = roadCost(roadCosts, tool.road, from, to);
       const length = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y));
       const color = cost > money ? PREVIEW_BAD : PREVIEW_OK;
-      geometry.segment(from, to, half, color);
+      roadFootprint(geometry, from, to, color, MIN_PX);
       info = `長さ ${length} マス・費用 ${cost.toLocaleString("ja-JP")}`;
       if (isDisconnected(roadIndex, from, to)) {
         info += `・${DISCONNECTED_NOTICE}`;
       }
       mapCanvas.dataset.previewCost = String(cost);
     }
-    geometry.square(from, half, PREVIEW_OK);
+    geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK, MIN_PX);
   } else if ((tool.kind === "bulldoze" || tool.kind === "zone") && cursor !== null) {
     const start = pointer?.mode === "area" ? pointer.start : cursor;
     const end = tool.kind === "zone" ? clampArea(start, cursor, MAX_ZONE_SIDE) : cursor;

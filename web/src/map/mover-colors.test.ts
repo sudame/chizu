@@ -1,5 +1,43 @@
 import { describe, expect, test } from "vitest";
-import { CAR_COLORS, carColorIndex, WALKER_COLOR } from "./mover-colors.ts";
+import { HIGHWAY_CODE } from "./lanes.ts";
+import {
+  CAR_COLORS,
+  carColorIndex,
+  MOVER_MATCH_TOLERANCE,
+  moverColorAt,
+  WALKER_COLOR,
+} from "./mover-colors.ts";
+import {
+  CENTER_LINE_COLOR,
+  type Color,
+  CURB_COLOR,
+  DIVIDER_COLOR,
+  GRASS_COLOR,
+  roadStyle,
+  SHOULDER_COLOR,
+  SIDEWALK_COLOR,
+  ZEBRA_COLOR,
+} from "./roads.ts";
+
+/** 半透明の色 fg を bg の上に重ねた色（0〜255）。 */
+const over = (fg: Color, bg: readonly number[]) =>
+  [0, 1, 2].map((i) => ((fg[i] ?? 0) * fg[3] + (bg[i] ?? 0) * (1 - fg[3])) * 255);
+
+/** 移動体がいないときに、移動体の位置に描かれうる道路の色（0〜255）。 */
+function roadSurfaces(): number[][] {
+  const out: number[][] = [];
+  for (const c of [GRASS_COLOR, SIDEWALK_COLOR, SHOULDER_COLOR, CURB_COLOR]) {
+    out.push([0, 1, 2].map((i) => (c[i] ?? 0) * 255));
+  }
+  for (const kind of [1, 2, 3, HIGHWAY_CODE]) {
+    const asphalt = roadStyle(kind).asphalt;
+    out.push(over(asphalt, asphalt));
+    for (const line of [CENTER_LINE_COLOR, DIVIDER_COLOR, ZEBRA_COLOR]) {
+      out.push(over(line, asphalt));
+    }
+  }
+  return out;
+}
 
 describe("移動体の色", () => {
   test("車の色は ID で決まり、続いた ID でもばらつく", () => {
@@ -20,6 +58,25 @@ describe("移動体の色", () => {
       h = mul(h ^ (h >> 16n), 0x85ebca6bn);
       h ^= h >> 13n;
       expect(carColorIndex(id)).toBe(Number(h % BigInt(CAR_COLORS.length)));
+    }
+  });
+
+  test("移動体がいなければ、道路のどの色も移動体の色と見なされない", () => {
+    for (const bg of roadSurfaces()) {
+      expect(moverColorAt(bg.map(Math.round))).toBe(false);
+    }
+    // 道路の色は、どの移動体の色とも、許す差の 2 倍より離れている
+    for (const m of [...CAR_COLORS, WALKER_COLOR]) {
+      for (const bg of roadSurfaces()) {
+        const far = Math.max(...m.map((v, i) => Math.abs(v * 255 - (bg[i] ?? 0))));
+        expect(far).toBeGreaterThan(2 * MOVER_MATCH_TOLERANCE);
+      }
+    }
+  });
+
+  test("移動体の色の画素は、移動体の色と見なされる", () => {
+    for (const m of [...CAR_COLORS, WALKER_COLOR]) {
+      expect(moverColorAt(m.map((v) => Math.round(v * 255)))).toBe(true);
     }
   });
 

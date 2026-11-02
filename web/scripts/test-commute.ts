@@ -12,7 +12,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { preview } from "vite";
-import { CAR_COLORS, WALKER_COLOR } from "../src/map/mover-colors.ts";
+// 移動体の画素は、車か歩く人の色のどれかに近い。道路の色は、どの移動体の色からも離してある
+import { moverColorAt } from "../src/map/mover-colors.ts";
 
 const TIMEOUT_MS = 30_000;
 // chizu-core の clock.rs と world/people.rs の値
@@ -30,9 +31,6 @@ const TICK = SCENARIO === "errand" ? NOON : TICKS_PER_DAY + INDUSTRIAL_LEAVE_HOM
 const NEED_BOTH = SCENARIO !== "errand";
 const WHEN = SCENARIO === "errand" ? "昼の買い物" : "朝の通勤";
 const SEED = "42";
-// 移動体の画素は、web/src/map/mover-colors.ts の車か歩く人の色のどれかに、各色がこの差までで近い
-const MOVER_TOLERANCE = 24;
-const MOVER_COLORS = [...CAR_COLORS, WALKER_COLOR].map((c) => c.map((v) => v * 255));
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -172,8 +170,6 @@ try {
       gl?.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
       return [...out];
     }, p);
-  const isMover = (c: number[]) =>
-    MOVER_COLORS.some((m) => m.every((v, i) => Math.abs(v - (c[i] ?? 0)) <= MOVER_TOLERANCE));
   for (const [key, label] of [
     ["firstWalker", "歩く人"],
     ["firstCar", "車"],
@@ -184,7 +180,7 @@ try {
     }
     const c = await pixel(screenOf(at));
     check(
-      isMover(c),
+      moverColorAt(c),
       `${WHEN}で${label}の画素が描かれる（${at}、${c.join(", ")}、移動体 ${d.drawnMovers}）`,
     );
   }
