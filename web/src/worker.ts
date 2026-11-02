@@ -152,7 +152,7 @@ function sendOverview(sim: Simulation, now: number, paused: boolean, force = fal
     return;
   }
   overviewSentAt = now;
-  reply({ kind: "overview", overview: [...sim.overview()] });
+  reply({ kind: "overview", overview: [...sim.overview()], stalls: [...sim.growth_stalls()] });
 }
 
 // 実時間に合わせて tick を進める。何 tick 進めるかはここで決め、中核には整数の tick 数だけを渡す

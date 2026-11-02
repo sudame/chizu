@@ -461,6 +461,20 @@ impl Sim {
         out
     }
 
+    /// 新築が電気か水道の余裕で止まっている道路網ごとに `[x, y, 足りない資源]` を並べた平らな配列。
+    /// `x, y` は網の中で止まっている間口のうち座標が最小のマス、足りない資源は電気が 1、水道が 2 の和である。
+    /// 網は中核が決めた順に並ぶ。
+    pub fn growth_stalls(&self) -> Vec<f64> {
+        self.world
+            .stalled_networks()
+            .into_iter()
+            .flat_map(|n| {
+                let lacks = u8::from(n.no_power) + 2 * u8::from(n.no_water);
+                [n.at.x as f64, n.at.y as f64, f64::from(lacks)]
+            })
+            .collect()
+    }
+
     /// いまの状態を三重バッファに書く。
     ///
     /// 設計書 2.1 は最高速では移動体を送らないとするが、粗い計算が入るまではどの速度でも細かい計算で
@@ -749,6 +763,26 @@ mod tests {
         assert!(o[10] == 0.0 && o[11] > 0.0, "{o:?}");
         place(&mut sim, ServiceKind::WaterPump, 20);
         assert_eq!(sim.overview()[9], 0.0);
+    }
+
+    #[test]
+    fn growth_stalls_point_at_the_network_without_facilities() {
+        let mut sim = Sim::new(0);
+        assert!(sim.growth_stalls().is_empty());
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(ZoneKind::Residential),
+        })
+        .unwrap();
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+        let s = sim.growth_stalls();
+        assert_eq!(s.len(), 3, "{s:?}");
+        assert!(
+            (10.0..=30.0).contains(&s[0]) && (10.0..=16.0).contains(&s[1]),
+            "{s:?}"
+        );
+        assert_eq!(s[2], 3.0, "{s:?}");
     }
 
     #[test]

@@ -8,7 +8,7 @@ import {
   parseFinance,
   setupFinance,
 } from "./finance.ts";
-import { parseGrowthBlocks, renderGrowthNotice } from "./growth-notice.ts";
+import { parseGrowthBlocks, parseStalls, setupGrowthNotice } from "./growth-notice.ts";
 import { setupHudPanel, trackHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
@@ -171,6 +171,11 @@ const WHEEL_LINE_PIXELS = 16;
 // 開始地点の買ってあるチャンク（-1〜1）の真ん中から見始める
 const camera = new Camera(CHUNK_SIDE / 2, CHUNK_SIDE / 2, 4);
 const store = new ChunkStore();
+// 建たない理由の知らせを押すと、止まっている区画のマスの真ん中へカメラを動かす。拡大率は変えない
+const growthNotice = setupGrowthNotice((x, y) => {
+  camera.x = x + 0.5;
+  camera.y = y + 0.5;
+});
 
 // WebGL2 を使えなくても、時計と操作は動かす
 let mapError: string | null = null;
@@ -811,7 +816,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "overview") {
     renderOverview(parseOverview(message.overview));
-    renderGrowthNotice(parseGrowthBlocks(message.overview));
+    growthNotice.render(parseGrowthBlocks(message.overview), parseStalls(message.stalls));
     return;
   }
   if (message.kind === "outcome") {

@@ -39,19 +39,77 @@ export function growthNotice(blocks: GrowthBlocks): GrowthNotice | null {
   };
 }
 
-export function renderGrowthNotice(blocks: GrowthBlocks): void {
+/** 新築が止まっている道路網 1 つ。x, y は止まっている間口のマスで、lacks は電気が 1、水道が 2 の和。 */
+export type Stall = { x: number; y: number; lacks: number };
+
+/** worker から届いた平らな配列 [x, y, 足りない資源, ...] を読む。 */
+export function parseStalls(flat: number[]): Stall[] {
+  const out: Stall[] = [];
+  for (let i = 0; i + 2 < flat.length; i += 3) {
+    out.push({ x: flat[i] ?? 0, y: flat[i + 1] ?? 0, lacks: flat[i + 2] ?? 0 });
+  }
+  return out;
+}
+
+/** 押すたびに次の網を選ぶ。網の数が変わっても範囲に収める。網がなければ null。 */
+export function pickStall(stalls: Stall[], cursor: number): { stall: Stall; next: number } | null {
+  const at = stalls.length === 0 ? 0 : ((cursor % stalls.length) + stalls.length) % stalls.length;
+  const stall = stalls[at];
+  return stall === undefined ? null : { stall, next: at + 1 };
+}
+
+/**
+ * 知らせを押せるようにする。押すと止まっている道路網の区画へ jump を呼び、網が複数あれば押すたびに次へ移る。
+ * 作り直すとボタンのフォーカスが外れるので、中身が変わらないあいだは DOM に触らない。
+ */
+export function setupGrowthNotice(jump: (x: number, y: number) => void): {
+  render: (blocks: GrowthBlocks, stalls: Stall[]) => void;
+} {
   const el = document.querySelector<HTMLElement>("#growth-notice");
-  if (el === null) {
-    return;
-  }
-  const notice = growthNotice(blocks);
-  el.hidden = notice === null;
-  el.replaceChildren();
-  if (notice !== null) {
-    const head = document.createElement("strong");
-    head.textContent = notice.headline;
-    const action = document.createElement("div");
-    action.textContent = notice.action;
-    el.append(head, action);
-  }
+  let stalls: Stall[] = [];
+  let cursor = 0;
+  let shown = "";
+  const go = () => {
+    const picked = pickStall(stalls, cursor);
+    if (picked === null) {
+      return;
+    }
+    cursor = picked.next;
+    jump(picked.stall.x, picked.stall.y);
+  };
+  return {
+    render(blocks, next) {
+      if (el === null) {
+        return;
+      }
+      stalls = next;
+      const notice = growthNotice(blocks);
+      el.hidden = notice === null;
+      if (notice === null) {
+        shown = "";
+        el.replaceChildren();
+        return;
+      }
+      const key = JSON.stringify([notice, stalls.length]);
+      if (key === shown) {
+        return;
+      }
+      shown = key;
+      const head = document.createElement("strong");
+      head.textContent = notice.headline;
+      const action = document.createElement("div");
+      action.textContent = notice.action;
+      el.replaceChildren(head, action);
+      if (stalls.length > 0) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent =
+          stalls.length > 1
+            ? "止まっている区画へ移る（押すたびに次の道路網）"
+            : "止まっている区画へ移る";
+        button.addEventListener("click", go);
+        el.append(button);
+      }
+    },
+  };
 }

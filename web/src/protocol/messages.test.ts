@@ -51,8 +51,15 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain(buildings)).toBe(true);
     expect(isWorkerToMain({ ...buildings, buildings: new Float64Array(5) })).toBe(false);
     expect(isWorkerToMain({ ...buildings, stats: [1, 2] })).toBe(false);
-    const overview = { kind: "overview", overview: Array.from({ length: 21 }, (_, i) => i) };
+    const overview = {
+      kind: "overview",
+      overview: Array.from({ length: 21 }, (_, i) => i),
+      stalls: [40, 12, 3],
+    };
     expect(isWorkerToMain(overview)).toBe(true);
+    expect(isWorkerToMain({ ...overview, stalls: [] })).toBe(true);
+    expect(isWorkerToMain({ ...overview, stalls: [1, 2] })).toBe(false);
+    expect(isWorkerToMain({ ...overview, stalls: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, overview: [1, 2] })).toBe(false);
     expect(
       isWorkerToMain({

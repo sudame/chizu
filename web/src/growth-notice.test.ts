@@ -1,11 +1,40 @@
 import { describe, expect, test } from "vitest";
-import { growthNotice, parseGrowthBlocks } from "./growth-notice.ts";
+import { growthNotice, parseGrowthBlocks, parseStalls, pickStall } from "./growth-notice.ts";
 
 /** 区画ごとの [止まっている数, 電気, 水道] から overview の並びを作る。 */
 const overview = (zones: [number, number, number][]) => {
   const flat = zones.flat();
   return [...new Array<number>(9).fill(0), ...flat, ...new Array<number>(12 - flat.length).fill(0)];
 };
+
+describe("止まっている網への移動", () => {
+  const stalls = parseStalls([40, 12, 3, 90, 7, 1]);
+
+  test("平らな配列を網ごとに読む", () => {
+    expect(stalls).toEqual([
+      { x: 40, y: 12, lacks: 3 },
+      { x: 90, y: 7, lacks: 1 },
+    ]);
+    expect(parseStalls([])).toEqual([]);
+    expect(parseStalls([1, 2])).toEqual([]);
+  });
+
+  test("押すたびに次の網へ移り、最後の次は最初へ戻る", () => {
+    const first = pickStall(stalls, 0);
+    expect(first?.stall.x).toBe(40);
+    const second = pickStall(stalls, first?.next ?? 0);
+    expect(second?.stall.x).toBe(90);
+    expect(pickStall(stalls, second?.next ?? 0)?.stall.x).toBe(40);
+  });
+
+  test("網が減って位置が範囲を超えても収まる", () => {
+    expect(pickStall(stalls.slice(0, 1), 5)?.stall.x).toBe(40);
+  });
+
+  test("網がなければ移らない", () => {
+    expect(pickStall([], 0)).toBeNull();
+  });
+});
 
 describe("growth notice", () => {
   test("overview から区画ごとの数を読む", () => {

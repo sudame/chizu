@@ -646,6 +646,24 @@ try {
   await page.mouse.move(cx - 200, cy, { steps: 5 });
   await page.mouse.up();
   const view = await mapState();
+  // 見る道具で地図を引きずり、カメラをワールドの (wx, wy) だけ動かす
+  const panCameraBy = async (wx: number, wy: number) => {
+    await page.locator('button[data-tool="none"]').click();
+    const limitX = size.width / 2 - 20;
+    const limitY = size.height / 2 - 20;
+    for (let i = 0; i < 40 && (Math.abs(wx) > 0.05 || Math.abs(wy) > 0.05); i++) {
+      const zoom = (await mapState()).zoom;
+      const dx = Math.max(-limitX, Math.min(limitX, -wx * zoom));
+      const dy = Math.max(-limitY, Math.min(limitY, -wy * zoom));
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx + dx, cy + dy, { steps: 4 });
+      await page.mouse.up();
+      wx += dx / zoom;
+      wy += dy / zoom;
+    }
+    await page.waitForTimeout(150);
+  };
   // チャンク (ccx, ccy) の真ん中のマスの、画面の位置
   const chunkPoint = (ccx: number, ccy: number) => ({
     x: cx + (ccx * 64 + 32.5 - view.x) * view.zoom,
@@ -899,6 +917,41 @@ try {
     (await growth.isVisible()) &&
       /余裕がなく.*新築が止まっている/.test((await growth.textContent()) ?? ""),
     `施設のない網の区画が建たない理由が出る（${await growth.textContent()}）`,
+  );
+  // 区画が画面の外にあっても、知らせを押せばそこが映る。キーボードで押す
+  const stallButton = growth.locator("button");
+  check(
+    (await stallButton.count()) === 1 && (await stallButton.isVisible()),
+    "知らせに、止まっている区画へ移るボタンが出る",
+  );
+  const homeCamera = await mapState();
+  await panCameraBy(400, 300);
+  const awayCamera = await mapState();
+  check(
+    Math.abs(awayCamera.x - 32) > 200 && Math.abs(awayCamera.y - 32) > 100,
+    `区画から遠く離れた（カメラ ${awayCamera.x.toFixed(1)}, ${awayCamera.y.toFixed(1)}）`,
+  );
+  await stallButton.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(
+    () => {
+      const d = document.querySelector<HTMLElement>("#map")?.dataset;
+      return Math.abs(Number(d?.cameraX) - 32) < 25 && Math.abs(Number(d?.cameraY) - 36) < 12;
+    },
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const jumped = await mapState();
+  check(
+    jumped.x >= 12 && jumped.x <= 53 && jumped.y >= 31 && jumped.y <= 45,
+    `知らせを押すと、施設のない網の区画へカメラが動く（カメラ ${jumped.x.toFixed(1)}, ${jumped.y.toFixed(1)}）`,
+  );
+  // 以降の検査は最初の位置で見る。カメラを元へ戻す
+  await panCameraBy(homeCamera.x - jumped.x, homeCamera.y - jumped.y);
+  const restored = await mapState();
+  check(
+    Math.abs(restored.x - homeCamera.x) < 0.2 && Math.abs(restored.y - homeCamera.y) < 0.2,
+    `カメラを元の位置へ戻した（${restored.x.toFixed(2)}, ${restored.y.toFixed(2)}）`,
   );
   check(
     (await page.locator("#legend-body li").count()) >= 10,

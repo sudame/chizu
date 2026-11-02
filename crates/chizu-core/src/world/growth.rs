@@ -132,7 +132,53 @@ pub struct GrowthBlock {
     pub no_water: u64,
 }
 
+/// 新築が電気か水道の余裕で止まっている道路網 1 つ。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StalledNetwork {
+    /// 網の中で止まっている間口のうち、座標が最も小さいもの。
+    pub at: TilePos,
+    /// 網で電気の余裕がなくて建たない間口があるか。
+    pub no_power: bool,
+    /// 網で水道の余裕がなくて建たない間口があるか。
+    pub no_water: bool,
+}
+
 impl World {
+    /// 需要があるのに新築が電気か水道の余裕で止まっている道路網を、網の識別子の順に返す。状態は変えない。
+    ///
+    /// 数え方は [`World::growth_blocks`] と同じで、その間口を網ごとにまとめる。
+    pub fn stalled_networks(&self) -> Vec<StalledNetwork> {
+        let mut headroom = Headroom::of(&self.network, &self.facilities, &self.buildings);
+        let mut out = BTreeMap::<usize, StalledNetwork>::new();
+        let demand = demand(&self.city_stats());
+        for (front, (zone, d)) in &self.lots.fronts {
+            if demand[zone.index()] <= 0 {
+                continue;
+            }
+            let Some((link, _)) = self.frontage(*front, FRONT_DIRS[usize::from(*d)]) else {
+                continue;
+            };
+            let (Some(net), Some([power, water])) = (
+                headroom.network_of(&self.network, link),
+                headroom.lacks(&self.network, link),
+            ) else {
+                continue;
+            };
+            if !(power || water) {
+                continue;
+            }
+            // 間口は座標の順に来るので、網で最初に来たものが最小である。
+            let entry = out.entry(net).or_insert(StalledNetwork {
+                at: *front,
+                no_power: false,
+                no_water: false,
+            });
+            entry.no_power |= power;
+            entry.no_water |= water;
+        }
+        out.into_values().collect()
+    }
+
     /// 区画の種類（[`ZoneKind::index`] の順）ごとに、需要があるのに新築が電気と水道の余裕で止まっている間口を数える。状態は変えない。
     pub fn growth_blocks(&self) -> [GrowthBlock; 4] {
         let mut headroom = Headroom::of(&self.network, &self.facilities, &self.buildings);
@@ -1332,6 +1378,31 @@ mod tests {
         assert!(cut_demand <= UNSUPPLIED_ALLOWANCE, "{cut_demand}");
         assert!(cut_off.iter().all(|b| b.supply == Supply::default()));
         assert!(served > cut_off.len(), "{served} 棟");
+    }
+
+    /// 止まっている網ごとに、座標が最小の間口と、足りない資源が返る。
+    #[test]
+    fn stalled_networks_name_the_blocked_network_and_what_it_lacks() {
+        let mut w = served_street();
+        assert!(w.stalled_networks().is_empty());
+        let end = crate::world::highway_line(w.seed()).start.x.max(40);
+        let (x0, x1) = (end + 1, end + 40);
+        street(&mut w, x0, x1);
+        paint(&mut w, (x0, 4), (x1, 9), ZoneKind::Residential);
+        run(&mut w, 40 * GROWTH_INTERVAL);
+        let bare = w.stalled_networks();
+        assert_eq!(bare.len(), 1, "{bare:?}");
+        assert!(bare[0].no_power && bare[0].no_water, "{bare:?}");
+        assert!(bare[0].at.x >= x0 && bare[0].at.x <= x1, "{bare:?}");
+        assert_eq!(bare, w.stalled_networks());
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (x0 + 5, 9), 2),
+            ApplyOutcome::Applied
+        );
+        run(&mut w, 40 * GROWTH_INTERVAL);
+        let half = w.stalled_networks();
+        assert_eq!(half.len(), 1, "{half:?}");
+        assert!(!half[0].no_power && half[0].no_water, "{half:?}");
     }
 
     /// 離れた網に片方の施設だけを置くと、足りないほうだけが `growth_blocks` に数えられる。
