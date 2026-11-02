@@ -74,6 +74,11 @@ pub fn markdown(e: &Export) -> String {
     out.push_str(&format!("| stateHash | `{hash}` |\n"));
     out.push_str(&format!("| ビルドしたコミット | `{BUILD_COMMIT}` |\n"));
     out.push_str(&format!("| 記録したコマンド | {} 件 |\n", e.commands));
+    if BUILD_COMMIT.ends_with("-dirty") {
+        out.push_str(
+            "\n注意：コミットしていない変更を入れてビルドしたので、上のコミットでは再現が合わないことがある。\n",
+        );
+    }
     if let Some(recorded) = e.recorded_hash
         && recorded != e.replayed_hash
     {

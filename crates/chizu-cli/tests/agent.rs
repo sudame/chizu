@@ -701,6 +701,23 @@ fn not_owned_names_the_tiles_and_chunks() {
     assert_eq!(plant["reason"], "NotOwned", "{acted}");
     assert_eq!(plant["notOwned"]["count"], 8, "{acted}");
     assert_eq!(plant["notOwned"]["chunks"], serde_json::json!([[2, 0]]));
+    assert_eq!(
+        plant["notOwned"]["chunksNotAdjacent"],
+        serde_json::json!([])
+    );
+    // 買った土地と角でしか接しないチャンクは、買えるほうに入れない。
+    let diagonal = write(
+        &dir.join("diag.json"),
+        r#"{"type":"BuildRoad","from":[120,120],"to":[135,135],"kind":"Small"}"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &diagonal]));
+    let diag = &acted["results"][0]["notOwned"];
+    assert_eq!(diag["chunks"], serde_json::json!([]), "{acted}");
+    assert_eq!(
+        diag["chunksNotAdjacent"],
+        serde_json::json!([[2, 2]]),
+        "{acted}"
+    );
     // 返されたチャンクを買えば、同じ道路が通る。
     let buy = write(
         &dir.join("buy.json"),
@@ -755,7 +772,66 @@ fn observe_shows_changes_since_the_last_observe() {
 /// 電気が届かなくなった建物は、地図で区画の文字の代わりに印が付く。
 #[test]
 fn map_marks_buildings_without_power_or_water() {
-    let dir = session("agent-map-unsupplied");
+    let (dir, x, y) = supplied_town("agent-map-unsupplied");
+    let d = dir.to_str().unwrap();
+    let supplied = town_map(d, x, y);
+    assert!(map_body(&supplied).contains('R'), "{supplied}");
+    for mark in ['*', '^', '%'] {
+        assert!(!map_body(&supplied).contains(mark), "{supplied}");
+    }
+    // 発電所を壊すと、建物は残って電気だけが届かなくなる。
+    bulldoze(&dir, [x + 27, y - 4, x + 30, y - 1]);
+    let dark = town_map(d, x, y);
+    assert!(map_body(&dark).contains('*'), "{dark}");
+    assert!(!map_body(&dark).contains('R'), "{dark}");
+    assert!(dark.contains("電気か水が届いていない建物"), "{dark}");
+    // 浄水場も壊すと、両方届かない。
+    bulldoze(&dir, [x + 36, y - 2, x + 37, y - 1]);
+    let both = town_map(d, x, y);
+    assert!(map_body(&both).contains('%'), "{both}");
+    assert!(!map_body(&both).contains('*'), "{both}");
+    assert!(!map_body(&both).contains('^'), "{both}");
+}
+
+/// 浄水場だけを壊すと、水だけが届かない建物が `^` になる。
+#[test]
+fn map_marks_buildings_without_water_only() {
+    let (dir, x, y) = supplied_town("agent-map-dry");
+    let d = dir.to_str().unwrap();
+    bulldoze(&dir, [x + 36, y - 2, x + 37, y - 1]);
+    let dry = town_map(d, x, y);
+    assert!(map_body(&dry).contains('^'), "{dry}");
+    assert!(!map_body(&dry).contains('*'), "{dry}");
+    assert!(!map_body(&dry).contains('%'), "{dry}");
+    assert!(!map_body(&dry).contains('R'), "{dry}");
+}
+
+/// 凡例を除いた、地図の本体の行。
+fn map_body(text: &str) -> String {
+    text.lines().skip(12).collect::<Vec<_>>().join("\n")
+}
+
+fn town_map(d: &str, x: i64, y: i64) -> String {
+    let (x0, y0, x1, y1) = (
+        x.to_string(),
+        (y - 6).to_string(),
+        (x + 40).to_string(),
+        (y + 7).to_string(),
+    );
+    cli(&["agent", "map", d, &x0, &y0, &x1, &y1])
+}
+
+fn bulldoze(dir: &Path, [x0, y0, x1, y1]: [i64; 4]) {
+    let file = write(
+        &dir.join("b.json"),
+        &serde_json::json!({"type":"Bulldoze","area":[[x0,y0],[x1,y1]]}).to_string(),
+    );
+    cli(&["agent", "act", dir.to_str().unwrap(), &file]);
+}
+
+/// 高速道路から道路を引き、住宅の区画、発電所、浄水場を置いて 2 日進めた街。(x, y) は道路の始点である。
+fn supplied_town(name: &str) -> (PathBuf, i64, i64) {
+    let dir = session(name);
     let d = dir.to_str().unwrap();
     cli(&["agent", "new", d, "42"]);
     let end = json(&cli(&["agent", "observe", d]))["highway"]["end"].clone();
@@ -775,28 +851,36 @@ fn map_marks_buildings_without_power_or_water() {
         assert_eq!(r["outcome"], "Applied", "{acted}");
     }
     cli(&["agent", "advance", d, &(2 * 7200).to_string()]);
-    let (x0, y0, x1, y1) = (
-        x.to_string(),
-        (y - 6).to_string(),
-        (x + 40).to_string(),
-        (y + 7).to_string(),
-    );
-    let map = || cli(&["agent", "map", d, &x0, &y0, &x1, &y1]);
-    // 凡例は先頭の 11 行ほどなので、道路の行以降だけを調べる。
-    let body = |text: &str| text.lines().skip(11).collect::<Vec<_>>().join("\n");
-    let supplied = map();
-    assert!(body(&supplied).contains('R'), "{supplied}");
-    assert!(!body(&supplied).contains('*'), "{supplied}");
-    // 発電所を壊すと、建物は残って電気だけが届かなくなる。
-    let bulldoze = write(
-        &dir.join("b.json"),
-        &serde_json::json!({"type":"Bulldoze","area":[[x+27,y-4],[x+30,y-1]]}).to_string(),
-    );
-    cli(&["agent", "act", d, &bulldoze]);
-    let dark = map();
-    assert!(body(&dark).contains('*'), "{dark}");
-    assert!(!body(&dark).contains('R'), "{dark}");
-    assert!(dark.contains("電気か水が届いていない建物"), "{dark}");
+    (dir, x, y)
+}
+
+/// 前の observe の記録が壊れていても、observe は落ちず、前の値なしとして上書きする。
+#[test]
+fn observe_survives_a_broken_last_observe_file() {
+    let dir = session("agent-observe-broken");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let path = dir.join("last-observe.json");
+    let broken = [
+        "ここは JSON ではない",
+        "[1, 2]",
+        r#"{"tick":"x","values":{}}"#,
+        r#"{"tick":0,"values":{"money":"文字列"}}"#,
+        r#"{"tick":0,"values":{"money":-9223372036854775808}}"#,
+        r#"{"tick":0,"values":{"money":18446744073709551615}}"#,
+    ];
+    for text in broken {
+        std::fs::write(&path, text).unwrap();
+        let seen = json(&cli(&["agent", "observe", d]));
+        let diff = &seen["sinceLastObserve"];
+        assert!(
+            diff.is_null() || diff["changes"].is_object(),
+            "{text}: {seen}"
+        );
+        // 上書きされて、次は普通に増減が出る。
+        let again = json(&cli(&["agent", "observe", d]));
+        assert_eq!(again["sinceLastObserve"]["changes"], serde_json::json!({}));
+    }
 }
 
 /// export は、種、tick、ハッシュ、コミット、記録の base64 を、貼れる markdown にして出す。
@@ -826,10 +910,14 @@ fn export_prints_a_reproduction_in_markdown() {
         .find_map(|l| l.strip_prefix("| ビルドしたコミット | `"))
         .unwrap()
         .trim_end_matches("` |");
+    let sha = commit.strip_suffix("-dirty").unwrap_or(commit);
     assert!(
-        commit == "unknown"
-            || (commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit())),
+        sha == "unknown" || (sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit())),
         "{commit}"
+    );
+    assert_eq!(
+        md.contains("コミットしていない変更を入れてビルドした"),
+        commit.ends_with("-dirty")
     );
     // 貼られた 2 つのファイルを取り出して、new --from で同じ街を作り直せる。
     let block = |start: &str| -> String {

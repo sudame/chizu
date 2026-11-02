@@ -17,9 +17,9 @@ use chizu_core::service::supply_balance;
 use chizu_core::world::economy::Finances;
 use chizu_core::world::highway_line;
 use chizu_core::{
-    ApplyOutcome, CHUNK_SIDE, CarSample, CitizenPlaces, Command, CommandLog, DayTraffic,
-    DenyReason, GameTime, Line, MigrationOutlook, NodeControl, ServiceKind, TilePos, TileRect,
-    Traffic, World, ZoneKind, replay,
+    ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
+    DayTraffic, DenyReason, GameTime, Line, MigrationOutlook, NodeControl, ServiceKind, TilePos,
+    TileRect, Traffic, World, ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -119,9 +119,9 @@ observe の signals:
       rotation 0、1、2、3 のとき、at から y-1、x+1、y+1、x-1 の向きに 1 歩のマスが道路でなければならない。
       敷地は at から道路と反対へ延び、間口は at から道路に沿って延びる。浄水場（2×2）の図で、A が at、# が敷地、= が道路である。
         rotation 0（道路は上）   rotation 1（道路は右）   rotation 2（道路は下）   rotation 3（道路は左）
-            = =                      #A=                      ##                       =##
+            ==                       #A=                      ##                       =##
             A#                       ##=                      #A                       =A#
-            ##                                                = =
+            ##                                                ==
       敷地は、rotation 0 では at から x+ と y+ へ、1 では x- と y+ へ、2 では x- と y- へ、3 では x+ と y- へ延びる。
       発電所（4×4）も同じ向きで、間口が 4 マスになる。間口のすべてのマスの 1 歩先が道路でなければならない。
   {"type":"SetSignal","at":[x,y],"on":true|false}
@@ -145,7 +145,9 @@ act の結果:
     Invalid        形か値が正しくない。message に理由がある。記録には足さない
   Applied、Denied、NotImplemented は記録に足す。画面で遊んだときと同じ扱いである。
   reason が NotOwned のときは notOwned も付き、買っていない土地のマスを示す。
-    count 買っていないマスの数、tiles そのマス（先頭の 16 個まで）、chunks そのマスを含むチャンク（BuyChunk に渡せる。先頭の 16 個まで）。
+    count 買っていないマスの数、tiles そのマス（先頭の 16 個まで）、
+    chunks そのマスを含むチャンクのうち、いま BuyChunk で買えるもの（買った土地と辺で接する。先頭の 16 個まで）、
+    chunksNotAdjacent 含むが、いまは辺で接していないので買えないもの（手前のチャンクを先に買うと買えるようになる）。
   結果は短く、index、type、outcome（と reason、message）だけを返す。--verbose を付けると、
   角の順番などをそろえて記録に入れた形のコマンドを command に添える。
 
@@ -471,17 +473,23 @@ fn not_owned(world: &World, command: &Command) -> Value {
         .into_iter()
         .filter(|t| t.chunk().is_none_or(|c| !world.is_owned(c)))
         .collect();
-    let mut chunks: Vec<[i64; 2]> = missing
-        .iter()
-        .filter_map(|t| t.chunk())
-        .map(|c| [i64::from(c.cx), i64::from(c.cy)])
-        .collect();
-    chunks.sort_unstable();
-    chunks.dedup();
+    let mut coords: Vec<ChunkCoord> = missing.iter().filter_map(|t| t.chunk()).collect();
+    coords.sort_unstable_by_key(|c| (c.cx, c.cy));
+    coords.dedup();
+    // いま買えるもの（買った土地と辺で接する）と、手前を買わないと買えないもの。
+    let (buyable, later): (Vec<ChunkCoord>, Vec<ChunkCoord>) =
+        coords.into_iter().partition(|c| world.can_buy_chunk(*c));
+    let list = |v: Vec<ChunkCoord>| -> Vec<[i64; 2]> {
+        v.into_iter()
+            .take(NOT_OWNED_LIST)
+            .map(|c| [i64::from(c.cx), i64::from(c.cy)])
+            .collect()
+    };
     json!({
         "count": missing.len(),
         "tiles": missing.iter().take(NOT_OWNED_LIST).map(|t| json!([t.x, t.y])).collect::<Vec<_>>(),
-        "chunks": chunks.into_iter().take(NOT_OWNED_LIST).collect::<Vec<_>>(),
+        "chunks": list(buyable),
+        "chunksNotAdjacent": list(later),
     })
 }
 
@@ -841,10 +849,6 @@ const WATCHED: &[&str] = &[
     "/demand/Commercial",
     "/demand/Industrial",
     "/demand/Office",
-    "/zoned/Residential",
-    "/zoned/Commercial",
-    "/zoned/Industrial",
-    "/zoned/Office",
     "/buildings/total",
     "/buildings/byZone/Residential",
     "/buildings/byZone/Commercial",
@@ -878,7 +882,9 @@ fn watched_values(seen: &Value) -> Map<String, Value> {
 /// 値が数なら、`to` から `from` を引いた差。
 fn delta(from: &Value, to: &Value) -> Value {
     if let (Some(a), Some(b)) = (from.as_i64(), to.as_i64()) {
-        return json!(i128::from(b) - i128::from(a));
+        // 差は i64 に収まらないことがあるので、飽和させる。
+        let d = (i128::from(b) - i128::from(a)).clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+        return json!(d as i64);
     }
     match (from.as_f64(), to.as_f64()) {
         (Some(a), Some(b)) => json!(((b - a) * 1000.0).round() / 1000.0),
@@ -891,7 +897,8 @@ fn changes_since(last: &Value, now: &Map<String, Value>, to_tick: &Value) -> Val
     let before = last.get("values").and_then(Value::as_object);
     let mut changes = Map::new();
     for (key, to) in now {
-        let from = before.and_then(|b| b.get(key));
+        // 数でない値は、前の値がなかったものとして扱う。
+        let from = before.and_then(|b| b.get(key)).filter(|v| v.is_number());
         match from {
             Some(from) if from == to => {}
             Some(from) => {
@@ -923,9 +930,14 @@ fn since_last_observe(dir: &Path, seen: &Value, is_session: bool) -> Result<Valu
     let path = dir.join(LAST_OBSERVE_FILE);
     let now = watched_values(seen);
     let tick = seen.get("tick").cloned().unwrap_or(Value::Null);
+    // 読めない、形が違うファイルは、前の値がないものとして上書きする。
     let last: Option<Value> = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|t| serde_json::from_str(&t).ok());
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .filter(|v| {
+            v.get("tick").is_some_and(Value::is_u64)
+                && v.get("values").is_some_and(Value::is_object)
+        });
     let diff = last.map(|last| changes_since(&last, &now, &tick));
     write_last_observe(dir, &tick, now)?;
     Ok(diff.unwrap_or(Value::Null))
