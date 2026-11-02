@@ -9,6 +9,7 @@
 //!
 //! 道路か区画が消えて建物の条件が崩れたら、建物も消える。
 
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
@@ -37,7 +38,7 @@ pub const MAX_LOT_DEPTH: u64 = ZONE_DEPTH as u64;
 ///
 /// 道路、区画、マスの使い道が変わるたびに、変わったマスのまわりだけを [`World::refresh_lot_fronts`] で直す。
 /// 区画とマスの使い道と網から作り直せるので、状態ハッシュには入れない。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct LotFronts {
     /// 間口のマスと、その区画の種類と、道路へ向かう向き（`FRONT_DIRS` の添え字）。
     fronts: BTreeMap<TilePos, (ZoneKind, u8)>,

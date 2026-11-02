@@ -7,6 +7,7 @@ use super::World;
 use crate::citizens::Activity;
 use crate::clock::TICKS_PER_DAY;
 use crate::movement::Finished;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::movement::Trips;
@@ -14,7 +15,7 @@ use crate::units::{Mm, WorldPos};
 use crate::{LaneMode, TripId};
 
 /// 1 日ぶんの、通勤の移動の結果。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DayTraffic {
     /// 数えた日（0 から数える）。
     pub day: u64,
@@ -29,7 +30,7 @@ pub struct DayTraffic {
 }
 
 /// 通勤の移動の結果の集計。今日と前の日だけを持つ。状態ハッシュには入れない。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct TrafficTally {
     today: DayTraffic,
     yesterday: Option<DayTraffic>,

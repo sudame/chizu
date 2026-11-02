@@ -12,6 +12,7 @@
 //! 区画に新しい建物が建つのは、その範囲の電気と水道に余りがあるときだけである（[`Headroom`]）。
 //! 施設のない範囲にも [`UNSUPPLIED_ALLOWANCE`] までは建つので、施設を置く前に家が数軒建つ。
 
+use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
@@ -70,7 +71,7 @@ pub fn building_demand(b: &Building) -> u64 {
 }
 
 /// プレイヤーが置いた公共の施設。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Facility {
     pub kind: ServiceKind,
     pub area: TileRect,
@@ -104,7 +105,7 @@ impl StateHash for Facility {
 }
 
 /// 建物 1 つに電気と水道が届いているか。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Supply {
     pub power: bool,
     pub water: bool,

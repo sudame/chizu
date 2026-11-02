@@ -21,6 +21,7 @@ mod pos;
 #[cfg(test)]
 mod tests;
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -57,7 +58,7 @@ const PAR_MIN_WALKS: usize = if cfg!(test) { 1 } else { 8_192 };
 const PAR_MIN_CARS: usize = if cfg!(test) { 1 } else { 256 };
 
 /// 歩くか車で走って移動している主体。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trip {
     mode: LaneMode,
     route: Arc<Route>,
@@ -187,7 +188,7 @@ impl Trip {
 }
 
 /// 移動の主体の表。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Trips {
     slots: Slots,
     rows: Vec<Option<Trip>>,
@@ -200,7 +201,7 @@ pub struct Trips {
 }
 
 /// 消えた移動の結果。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finished {
     /// 行き先に着いたか。次の区切りの経路が見つからず消えた移動と、通れなくなって消えた移動は `false`。
     pub reached: bool,

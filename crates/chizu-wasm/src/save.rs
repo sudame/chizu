@@ -1,7 +1,9 @@
 //! ブラウザの中に保存するデータの取り出しと、保存データからの作り直し。
 //!
-//! 中核は決定論的なので、保存するのは種、tick、コマンドの記録だけにする。
-//! 読み込むときは、種から作った街に記録を再生して同じ状態を作り直す。
+//! 保存するのは種、tick、コマンドの記録と、街の状態（`World::to_snapshot`）である。
+//! 読み込むときは、街の状態を読み戻せればそこから開く。状態がないか、読み戻せないか、読み戻した街が
+//! 保存データの種、tick、記録の件数、状態ハッシュと食い違えば、種から作った街に記録を再生して作り直す。
+//! 記録は、フィードバックの再現と、状態から読めない保存データのために残す。
 //! 再生は長くかかりうるので、[`Restore::step`] で少しずつ進め、そのあいだに Worker が進み具合を送れるようにする。
 
 use core::fmt;
@@ -32,6 +34,8 @@ pub struct SaveData {
     pub state_hash: u64,
     /// `CommandLog::encode` の形式の記録。
     pub commands: Vec<u8>,
+    /// `World::to_snapshot` の形式の街の状態。状態を入れる前の保存データにはない。
+    pub state: Option<Vec<u8>>,
 }
 
 impl SaveData {
@@ -44,6 +48,7 @@ impl SaveData {
             command_count: sim.log().next_seq(),
             state_hash: w.state_hash(),
             commands: sim.log().encode(),
+            state: Some(w.to_snapshot()),
         }
     }
 }
@@ -100,11 +105,14 @@ pub struct Restore {
     log: CommandLog,
     target: u64,
     saved_hash: u64,
+    from_state: bool,
 }
 
 /// 作り直し終えた街。
 pub struct Restored {
     pub sim: Sim,
+    /// 記録を再生せずに、街の状態から開いた。
+    pub from_state: bool,
     /// 作り直した街の状態ハッシュが、保存したときと違う。記録を読めても、シミュレーションの規則が
     /// 変わっていると違う街になる。読み込みは止めず、画面で知らせる。
     pub rules_changed: bool,
@@ -138,6 +146,19 @@ impl Restore {
                 tick: data.tick,
             });
         }
+        if let Some(world) = data
+            .state
+            .as_deref()
+            .and_then(|s| world_from_state(data, s))
+        {
+            return Ok(Restore {
+                world,
+                log,
+                target: data.tick,
+                saved_hash: data.state_hash,
+                from_state: true,
+            });
+        }
         let mut world = World::new(data.seed);
         // tick 0 のコマンドを適用する
         replay(&mut world, &log, 0);
@@ -146,6 +167,7 @@ impl Restore {
             log,
             target: data.tick,
             saved_hash: data.state_hash,
+            from_state: false,
         })
     }
 
@@ -177,9 +199,22 @@ impl Restore {
         let rules_changed = self.world.state_hash() != self.saved_hash;
         Restored {
             sim: Sim::from_parts(self.world, self.log),
+            from_state: self.from_state,
             rules_changed,
         }
     }
+}
+
+/// 街の状態を読み戻す。読み戻せないか、保存データのほかの欄と食い違えば `None` を返し、記録の再生に任せる。
+///
+/// 状態ハッシュも比べる。状態の形を変えたのに版を上げ忘れていても、読み違えた街から始めないためである。
+fn world_from_state(data: &SaveData, state: &[u8]) -> Option<World> {
+    let world = World::from_snapshot(state).ok()?;
+    let agrees = world.seed() == data.seed
+        && world.tick().0 == data.tick
+        && world.next_seq() == data.command_count
+        && world.state_hash() == data.state_hash;
+    agrees.then_some(world)
 }
 
 /// 画面から受け取った保存データを確かめて [`SaveData`] にする。
@@ -191,6 +226,7 @@ pub fn parse_input(
     command_count: f64,
     state_hash: &str,
     commands: Vec<u8>,
+    state: Option<Vec<u8>>,
 ) -> Result<SaveData, String> {
     let seed: u64 = seed
         .parse()
@@ -218,6 +254,7 @@ pub fn parse_input(
         command_count,
         state_hash,
         commands,
+        state,
     })
 }
 
@@ -227,11 +264,12 @@ pub fn record_format_version() -> u32 {
     FORMAT_VERSION
 }
 
-/// 同じ時点で取り出した保存データ。`meta` は記録のバイト列を除いたものの JSON である。
+/// 同じ時点で取り出した保存データ。`meta` は記録と街の状態のバイト列を除いたものの JSON である。
 #[wasm_bindgen]
 pub struct SavePayload {
     meta: String,
     commands: Vec<u8>,
+    state: Vec<u8>,
 }
 
 #[wasm_bindgen]
@@ -244,6 +282,11 @@ impl SavePayload {
     /// 記録のバイト列を取り出す。複製しないので、2 度目は空になる。
     pub fn take_commands(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.commands)
+    }
+
+    /// 街の状態のバイト列を取り出す。複製しないので、2 度目は空になる。
+    pub fn take_state(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.state)
     }
 }
 
@@ -279,11 +322,12 @@ impl Simulation {
         meta_json(&self.0)
     }
 
-    /// いまの状態の保存データ。メタデータと記録は同じ時点のものである。
+    /// いまの状態の保存データ。メタデータ、記録、街の状態は同じ時点のものである。
     pub fn save(&self) -> SavePayload {
         SavePayload {
             meta: meta_json(&self.0),
             commands: self.0.log().encode(),
+            state: self.0.world().to_snapshot(),
         }
     }
 }
@@ -294,7 +338,7 @@ pub struct Restoring(Restore);
 
 #[wasm_bindgen]
 impl Restoring {
-    /// 引数の形は [`parse_input`] にある。
+    /// 引数の形は [`parse_input`] にある。`state` は、街の状態を入れる前の保存データでは渡さない。
     #[wasm_bindgen(constructor)]
     pub fn new(
         format_version: u32,
@@ -303,6 +347,7 @@ impl Restoring {
         command_count: f64,
         state_hash: &str,
         commands: Vec<u8>,
+        state: Option<Vec<u8>>,
     ) -> Result<Restoring, JsError> {
         let data = parse_input(
             format_version,
@@ -311,6 +356,7 @@ impl Restoring {
             command_count,
             state_hash,
             commands,
+            state,
         )
         .map_err(|e| JsError::new(&e))?;
         Restore::new(&data)
@@ -338,6 +384,7 @@ impl Restoring {
         let r = self.0.finish();
         RestoredSimulation {
             sim: Some(Simulation(r.sim, crate::layers::LayerCache::default())),
+            from_state: r.from_state,
             rules_changed: r.rules_changed,
         }
     }
@@ -347,6 +394,7 @@ impl Restoring {
 #[wasm_bindgen]
 pub struct RestoredSimulation {
     sim: Option<Simulation>,
+    from_state: bool,
     rules_changed: bool,
 }
 
@@ -355,6 +403,11 @@ impl RestoredSimulation {
     /// 作り直した街の状態ハッシュが、保存したときと違う。シミュレーションの規則が変わっている。
     pub fn rules_changed(&self) -> bool {
         self.rules_changed
+    }
+
+    /// 記録を再生せずに、街の状態から開いた。
+    pub fn from_state(&self) -> bool {
+        self.from_state
     }
 
     /// 街を取り出す。2 度目は失敗する。
@@ -400,19 +453,72 @@ mod tests {
         r.finish()
     }
 
+    /// 街の状態を入れる前の形の保存データ。読み込むと記録を再生する。
+    fn without_state(mut data: SaveData) -> SaveData {
+        data.state = None;
+        data
+    }
+
     #[test]
     fn restored_state_matches_the_saved_state() {
         let mut sim = Sim::new(3);
         build_city(&mut sim);
         assert!(!sim.world().buildings().is_empty(), "建物が建っていない");
         let data = SaveData::of(&sim);
-        for chunk in [1, 7, 1_000_000] {
-            let restored = restore(&data, chunk);
-            assert!(!restored.rules_changed);
-            let w = restored.sim.world();
-            assert_eq!(w.state_hash(), sim.world().state_hash());
-            assert_eq!(w.money(), sim.world().money());
-            assert_eq!(w.tick(), sim.world().tick());
+        for (data, from_state) in [(data.clone(), true), (without_state(data), false)] {
+            for chunk in [1, 7, 1_000_000] {
+                let restored = restore(&data, chunk);
+                assert!(!restored.rules_changed);
+                assert_eq!(restored.from_state, from_state);
+                let w = restored.sim.world();
+                assert_eq!(w.state_hash(), sim.world().state_hash());
+                assert_eq!(w.money(), sim.world().money());
+                assert_eq!(w.tick(), sim.world().tick());
+                assert_eq!(restored.sim.log(), sim.log());
+            }
+        }
+    }
+
+    #[test]
+    fn a_save_with_state_opens_without_replaying() {
+        let mut sim = Sim::new(3);
+        build_city(&mut sim);
+        let r = Restore::new(&SaveData::of(&sim)).unwrap();
+        assert!(r.done(), "状態があるのに再生しようとしている");
+        assert_eq!(r.tick(), sim.world().tick().0);
+        let restored = r.finish();
+        assert!(restored.from_state && !restored.rules_changed);
+        assert_eq!(restored.sim.world().state_hash(), sim.world().state_hash());
+    }
+
+    #[test]
+    fn an_unreadable_or_mismatched_state_falls_back_to_the_record() {
+        let mut sim = Sim::new(3);
+        build_city(&mut sim);
+        let data = SaveData::of(&sim);
+        let state = data.state.clone().unwrap();
+        let mut other_version = state.clone();
+        other_version[8..12].copy_from_slice(&(chizu_core::SNAPSHOT_VERSION + 1).to_le_bytes());
+        let mut earlier = Sim::new(3);
+        earlier.advance(5);
+        let cases = [
+            ("版が違う", other_version),
+            ("途中で切れている", state[..state.len() / 2].to_vec()),
+            ("別の時点の状態", earlier.world().to_snapshot()),
+        ];
+        for (what, state) in cases {
+            let data = SaveData {
+                state: Some(state),
+                ..data.clone()
+            };
+            let restored = restore(&data, 1_000);
+            assert!(!restored.from_state, "{what}");
+            assert!(!restored.rules_changed, "{what}");
+            assert_eq!(
+                restored.sim.world().state_hash(),
+                sim.world().state_hash(),
+                "{what}"
+            );
         }
     }
 
@@ -446,8 +552,10 @@ mod tests {
     fn continuing_after_load_matches_an_unbroken_run() {
         let mut through = Sim::new(9);
         build_city(&mut through);
-        let mut loaded = restore(&SaveData::of(&through), 100).sim;
-        for sim in [&mut through, &mut loaded] {
+        let data = SaveData::of(&through);
+        let mut from_state = restore(&data, 100).sim;
+        let mut replayed = restore(&without_state(data), 100).sim;
+        for sim in [&mut through, &mut from_state, &mut replayed] {
             sim.submit(Command::BuildRoad {
                 from: TilePos::new(40, 10),
                 to: TilePos::new(40, 30),
@@ -456,8 +564,10 @@ mod tests {
             .unwrap();
             sim.advance(u32::try_from(GROWTH_INTERVAL * 2).unwrap());
         }
-        assert_eq!(loaded.world().state_hash(), through.world().state_hash());
-        assert_eq!(loaded.log(), through.log());
+        for loaded in [&from_state, &replayed] {
+            assert_eq!(loaded.world().state_hash(), through.world().state_hash());
+            assert_eq!(loaded.log(), through.log());
+        }
     }
 
     #[test]
@@ -468,6 +578,8 @@ mod tests {
         data.state_hash ^= 1;
         let restored = restore(&data, 1_000);
         assert!(restored.rules_changed);
+        // 状態ハッシュの食い違う状態からは開かず、記録を再生する
+        assert!(!restored.from_state);
         assert_eq!(restored.sim.world().state_hash(), sim.world().state_hash());
     }
 
@@ -564,7 +676,15 @@ mod tests {
         let good = SaveData::of(&Sim::new(8));
         let hash = format!("{:016x}", good.state_hash);
         let parse = |seed: &str, tick: f64, count: f64, hash: &str| {
-            parse_input(1, seed, tick, count, hash, good.commands.clone())
+            parse_input(
+                1,
+                seed,
+                tick,
+                count,
+                hash,
+                good.commands.clone(),
+                good.state.clone(),
+            )
         };
         assert_eq!(parse("8", 0.0, 0.0, &hash), Ok(good.clone()));
         assert_eq!(

@@ -5,11 +5,12 @@
 //! 世代が `u16::MAX` に達した添え字は、それ以上使い回さずに捨てる。
 
 use crate::state_hash::{StateHash, StateHasher};
+use serde::{Deserialize, Serialize};
 
 macro_rules! generational_id {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
         pub struct $name {
             pub index: u32,
             pub generation: u16,
@@ -49,7 +50,7 @@ generational_id!(
 );
 
 /// 表の行の割り当て。どの添え字が使われていて、いまの世代がいくつかを持つ。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Slots {
     generation: Vec<u16>,
     live: Vec<bool>,

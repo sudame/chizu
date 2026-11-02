@@ -127,6 +127,12 @@ impl AstarRouter {
         true
     }
 
+    /// グラフを作ったときの網の版を `version` にする。読み戻した街で、作り直しの要否を書き出す前と同じにするのに使う。
+    pub(crate) fn with_version(mut self, version: u64) -> AstarRouter {
+        self.version = version;
+        self
+    }
+
     /// 1 対多の探索に束ねる依頼の数の下限を変える。`usize::MAX` なら束ねずにすべて A* で解く。
     pub fn with_bundle_min(mut self, n: usize) -> AstarRouter {
         self.bundle_min = n.max(1);

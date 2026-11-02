@@ -45,6 +45,7 @@
 //! 信号を入れるときは、いまの段階で赤の動きを候補から外し、残りをこの順で決める形にする。
 
 use core::cmp::Reverse;
+use serde::{Deserialize, Serialize};
 
 use crate::command::{NodeId, RoadKind};
 use crate::network::{LaneId, LinkId, Network, SegmentKind};
@@ -238,7 +239,7 @@ pub(super) fn holds(
 }
 
 /// 詰まりをほどく救済が働いた回数。状態には入れず、状態ハッシュにも含めない。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rescues {
     /// `GIVE_UP` を越えて待った車が、交差点の中で止まった車を無視して入った回数。
     pub passed_stuck: u64,

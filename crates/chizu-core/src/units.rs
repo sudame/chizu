@@ -5,6 +5,7 @@
 //! メソッドを使い、`None` を呼び出し側で扱う。
 
 use core::ops::{Add, AddAssign, Mul, Neg, Sub, SubAssign};
+use serde::{Deserialize, Serialize};
 
 use crate::round;
 
@@ -15,7 +16,7 @@ fn overflow(what: &str) -> ! {
 }
 
 /// 長さ（mm）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Mm(pub i64);
 
 impl Mm {
@@ -122,7 +123,7 @@ impl SubAssign for Mm {
 }
 
 /// ワールド座標。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct WorldPos {
     pub x: Mm,
     pub y: Mm,
@@ -160,7 +161,7 @@ impl WorldPos {
 }
 
 /// シミュレーションの時刻（tick の通し番号）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Tick(pub u64);
 
 impl Tick {
@@ -204,7 +205,7 @@ impl AddAssign<u64> for Tick {
 }
 
 /// 速さ（1 tick に進む mm）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MmPerTick(pub i32);
 
 impl MmPerTick {
@@ -271,7 +272,7 @@ impl Neg for MmPerTick {
 }
 
 /// 車線の始点からの距離（mm）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LaneOffset(pub u32);
 
 impl LaneOffset {
@@ -302,7 +303,7 @@ impl LaneOffset {
 }
 
 /// お金。1 が通貨の最小の単位である。借金を表せるように符号つきで持つ。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Money(pub i64);
 
 impl Money {

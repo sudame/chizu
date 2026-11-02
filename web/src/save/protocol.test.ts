@@ -60,4 +60,28 @@ describe("保存データ", () => {
     expect(isSaveToWorker({ kind: "save:start", save: null })).toBe(false);
     expect(isSaveFromWorker({ kind: "ready" })).toBe(false);
   });
+
+  it("街の状態は、ないか ArrayBuffer のときだけ受け付ける", () => {
+    expect(isSaveRecord({ ...record, state: new ArrayBuffer(8) })).toBe(true);
+    expect(isSaveRecord({ ...record, state: "abc" })).toBe(false);
+    expect(isSaveRecord({ ...record, state: null })).toBe(false);
+    const save = { meta: record.meta, commands: new ArrayBuffer(4) };
+    for (const state of [null, new ArrayBuffer(8)]) {
+      expect(isSaveToWorker({ kind: "save:start", save: { ...save, state }, autoSave: true })).toBe(
+        true,
+      );
+    }
+    expect(isSaveToWorker({ kind: "save:start", save, autoSave: true })).toBe(false);
+    const data = { kind: "save:data", slot: "auto", ...save };
+    expect(isSaveFromWorker({ ...data, state: new ArrayBuffer(8) })).toBe(true);
+    expect(isSaveFromWorker(data)).toBe(false);
+  });
+
+  it("読み込んだ街には、状態から開いたかを添える", () => {
+    const loaded = { meta: record.meta, rulesChanged: false };
+    expect(isSaveFromWorker({ kind: "save:started", loaded: { ...loaded, fromState: true } })).toBe(
+      true,
+    );
+    expect(isSaveFromWorker({ kind: "save:started", loaded })).toBe(false);
+  });
 });

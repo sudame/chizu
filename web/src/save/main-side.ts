@@ -157,10 +157,14 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
     startMessage.textContent = `${SLOT_NAMES[record.slot]}を読み込んでいる`;
     progress.hidden = false;
     progress.value = 0;
-    // 枠の記録は IndexedDB に残すので、複製を送る
+    // 枠の記録と街の状態は IndexedDB に残すので、複製を送る
     send({
       kind: "save:start",
-      save: { meta: record.meta, commands: record.commands.slice(0) },
+      save: {
+        meta: record.meta,
+        commands: record.commands.slice(0),
+        state: record.state?.slice(0) ?? null,
+      },
       autoSave: storage && autoSave,
     });
   }
@@ -225,6 +229,7 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
       savedAt: Date.now(),
       meta: message.meta,
       commands: message.commands,
+      state: message.state,
     };
     try {
       await (await storePromise).put(record);
@@ -277,6 +282,7 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
         if (loaded !== null && loading !== null) {
           // test:wasm が読む
           saveButton.dataset.rulesChanged = String(loaded.rulesChanged);
+          saveButton.dataset.fromState = String(loaded.fromState);
           saveButton.dataset.loadedHash = loaded.meta.stateHash;
           saveButton.dataset.loadedMoney = loaded.meta.money;
           notice.textContent = loaded.rulesChanged
