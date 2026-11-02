@@ -625,4 +625,11 @@ fn act_places_a_signal_by_tile_and_observe_and_map_show_it() {
     assert!(greens <= 2, "{seen}");
     let map = cli(&["agent", "map", d, "4", "4", "6", "6"]);
     assert_eq!(grid_rows(&map, 3, 3), [".1.", "1S1", ".1."], "{map}");
+    // 交通の層では、混み具合が信号を隠さない。
+    let traffic = cli(&["agent", "map", d, "4", "4", "6", "6", "--layer", "traffic"]);
+    assert_eq!(
+        grid_rows(&traffic, 3, 3),
+        [".-.", "---", ".-."],
+        "{traffic}"
+    );
 }

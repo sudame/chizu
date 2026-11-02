@@ -23,7 +23,7 @@ const HIGHWAY: u8 = 4;
 pub const LEGEND: &str = "\
 凡例（重なったときは上のものを出す）
   P W      公共施設（P 発電所、W 浄水場）
-  S        信号のある交差点
+  S        信号のある交差点（--layer traffic では混み具合の文字を先に出す）
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
   R C I O  建物（住宅、商業、工業、オフィスの区画に建っている）
   r c i o  建物のない区画（同じ並び）
@@ -107,13 +107,14 @@ fn facility_letter(k: ServiceKind) -> char {
 }
 
 impl Cell {
-    /// 載せる文字。公共施設、信号、道路、建物、区画、水辺、買っていない土地、空きマスの順に選び、
+    /// 載せる文字。公共施設、信号（交通の層では道路のあと）、道路、建物、区画、水辺、買っていない土地、空きマスの順に選び、
     /// 同じ種類の中では数の多いものを選ぶ（道路は種類の大きいもの）。
     fn glyph(&self) -> char {
         if let Some(i) = argmax(&self.facility) {
             return facility_letter(ServiceKind::ALL[i]);
         }
-        if self.signal {
+        // 交通の層では、道路の混み具合を信号より先に出す。
+        if self.signal && self.congestion.is_none() {
             return 'S';
         }
         match self.road {

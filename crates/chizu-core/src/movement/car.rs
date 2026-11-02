@@ -490,7 +490,6 @@ pub(super) fn step(
     let looks: Vec<Look> = (0..order.len()).map(look_at).collect();
     // 交差点の手前で止める車を、前の tick の状態だけからノードの順に決める。
     let mut held = vec![false; order.len()];
-    let mut by_signal = vec![false; order.len()];
     let (cands, inside) = looks.iter().fold((Vec::new(), Vec::new()), |mut acc, l| {
         acc.0.extend(l.approach);
         acc.1.extend(l.inside);
@@ -500,9 +499,6 @@ pub(super) fn step(
     rescues.passed_stuck = rescues.passed_stuck.saturating_add(stop.passed);
     for k in stop.ids {
         held[k] = true;
-    }
-    for k in stop.by_signal {
-        by_signal[k] = true;
     }
     let plan = |k: usize| {
         let (lane, _, i) = order[k];
@@ -524,7 +520,7 @@ pub(super) fn step(
                 .map(|(at, v)| (LaneOffset(t.link_len.0.saturating_add(at.0)), *v))
         });
         let (v, at) = drive(net, t, leader, held[k] || looks[k].no_room);
-        (i, t.speed, v, at, next_lane, held[k], by_signal[k])
+        (i, t.speed, v, at, next_lane, held[k])
     };
     #[cfg(feature = "parallel")]
     let moves: Vec<_> = (0..order.len())
@@ -542,10 +538,10 @@ pub(super) fn step(
         .collect();
     let mut arrived = Vec::new();
     let mut crossing = Vec::new();
-    for (i, before, v, at, next_lane, held, by_signal) in moves {
+    for (i, before, v, at, next_lane, held) in moves {
         let t = rows[i].as_mut().expect("車の主体がない");
         (t.speed, t.offset) = (v, at);
-        if held && !by_signal {
+        if held {
             t.waited = t.waited.saturating_add(1);
         }
         if t.last_leg() {

@@ -64,6 +64,8 @@ pub struct SignalState {
     pub axis: u8,
     /// その軸への灯火。ほかの軸はすべて赤である。
     pub light: Light,
+    /// 1 つの腕が 1 周期のうちに青でない tick 数。
+    pub red_ticks: u32,
 }
 
 impl SignalState {
@@ -97,6 +99,8 @@ pub fn state(net: &Network, node: NodeId, now: Tick) -> Option<SignalState> {
         (tile.x.rem_euclid(cycle_i) * 7 + tile.y.rem_euclid(cycle_i) * 13).rem_euclid(cycle_i),
     )
     .expect("ずらしが負になった");
+    // 区間を足したり消したりして軸の数が変わると、周期も変わり、段階が飛ぶ。黄と全方向の赤を経ずに
+    // 別の軸が青になることがあるが、交差点の中の車とは譲り合いで衝突しないので、そのままにする。
     let t = (now.0 % cycle + shift) % cycle;
     let phase = usize::try_from(t / PHASE).expect("段階の番号が usize に収まらない");
     let within = t % PHASE;
@@ -110,6 +114,7 @@ pub fn state(net: &Network, node: NodeId, now: Tick) -> Option<SignalState> {
     Some(SignalState {
         axis: order[phase],
         light,
+        red_ticks: u32::try_from(cycle - GREEN).expect("赤の長さが u32 に収まらない"),
     })
 }
 

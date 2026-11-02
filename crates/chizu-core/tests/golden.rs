@@ -452,10 +452,40 @@ fn signals_scenario_stops_cars_on_red() {
         .map(|(id, _)| id)
         .collect();
     assert_eq!(lit.len(), 2);
-    let mut waited = 0;
+    let end_of = |net: &chizu_core::Network, l: chizu_core::LinkId| {
+        let s = net.segment(l.segment).unwrap();
+        match l.dir {
+            chizu_core::Dir::Forward => s.b,
+            chizu_core::Dir::Backward => s.a,
+        }
+    };
+    let (mut waited, mut entered) = (0, 0);
     for _ in 6..COMMUTE_TICKS {
+        // 信号の交差点へ向かうリンクの上の車。進めたあとにリンクが変わっていれば、交差点に入った。
+        let now = world.tick();
+        let before: Vec<_> = world
+            .trips()
+            .iter()
+            .filter(|(_, t)| t.mode() == LaneMode::Car)
+            .filter(|(_, t)| lit.contains(&end_of(world.network(), t.link())))
+            .map(|(id, t)| (id, t.link()))
+            .collect();
         replay(&mut world, &log, 1);
         let net = world.network();
+        for (id, link) in before {
+            let Some(t) = world.trips().get(id) else {
+                continue;
+            };
+            if t.mode() != LaneMode::Car || t.link() == link {
+                continue;
+            }
+            entered += 1;
+            let axis = signal::axis(net.segment_line(link.segment).unwrap().step);
+            let light = signal::state(net, end_of(net, link), now)
+                .unwrap()
+                .light_for(axis);
+            assert_ne!(light, signal::Light::Red, "赤で入った {now:?} {link:?}");
+        }
         for (_, t) in world.trips().iter() {
             if t.mode() != LaneMode::Car || t.speed().0 != 0 {
                 continue;
@@ -478,6 +508,7 @@ fn signals_scenario_stops_cars_on_red() {
         }
     }
     assert!(waited > 0, "信号の手前で止まった車がない");
+    assert!(entered > 0, "信号の交差点に入った車がない");
 }
 
 /// 通勤のシナリオで、朝に住民が歩きと車の両方で職場へ向かい、着いたら職場にいることを確かめる。

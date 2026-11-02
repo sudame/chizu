@@ -184,3 +184,151 @@ fn signalled_crossroads_lets_cars_in_only_on_green_or_yellow() {
     assert_eq!(entered, [15; 4]);
     assert_eq!(c.trips.rescues(), Default::default(), "救済が働いた");
 }
+
+/// (10, 10) を中心に、`arms` の向きへ 10 マスずつ腕を延ばした交差点に信号を置く。
+/// 腕は向き合う 2 本をまとめて 1 本の道路で引くので、`arms` には片方の向きだけを書く。`t` なら
+/// 最後の 1 本は中心から片側だけにする。
+fn signalled(arms: &[(i64, i64)], t: bool) -> (Network, NodeId) {
+    let mut n = Network::new();
+    for (k, &(dx, dy)) in arms.iter().enumerate() {
+        let from = if t && k + 1 == arms.len() {
+            (10, 10)
+        } else {
+            (10 - 10 * dx, 10 - 10 * dy)
+        };
+        road(&mut n, from, (10 + 10 * dx, 10 + 10 * dy), RoadKind::Small);
+    }
+    let node = n.node_at(TilePos::new(10, 10)).unwrap();
+    n.set_signal(node, true).unwrap();
+    (n, node)
+}
+
+/// ノード `node` から出ていく腕の向き。
+fn arm_steps(n: &Network, node: NodeId) -> Vec<(i64, i64)> {
+    signal::arm_lights(n, node, Tick(0))
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect()
+}
+
+/// 腕 `a` から入って腕 `b` へ出る車。
+fn movement(a: (i64, i64), b: (i64, i64)) -> (SidewalkPos, SidewalkPos) {
+    let step = |d: (i64, i64)| (d.0 as i8, d.1 as i8);
+    (
+        at(10 + 10 * a.0, 10 + 10 * a.1, step((-a.0, -a.1)), 0),
+        at(10 + 9 * b.0, 10 + 9 * b.1, step(b), 0),
+    )
+}
+
+fn end_node(n: &Network, link: LinkId) -> NodeId {
+    let s = n.segment(link.segment).unwrap();
+    match link.dir {
+        crate::network::Dir::Forward => s.b,
+        crate::network::Dir::Backward => s.a,
+    }
+}
+
+/// 交差点のどの腕からも、ほかのどの腕へも `per` 台ずつ出して `ticks` 進める。交差点に入った車が
+/// 赤の腕から来ていないことを確かめ、入った台数を返す。
+fn every_movement(n: Network, node: NodeId, per: usize, ticks: usize) -> usize {
+    let arms = arm_steps(&n, node);
+    let mut c = Cars::new(n, 0);
+    let mut drives = Vec::new();
+    for &a in &arms {
+        for &b in arms.iter().filter(|b| **b != a) {
+            drives.extend(std::iter::repeat_n(movement(a, b), per));
+        }
+    }
+    let ids = c.trips.spawn_drives(&c.net, &mut c.router, &drives, c.now);
+    assert!(ids.iter().all(Option::is_some));
+    let (mut arrived, mut entered) = (0, 0);
+    for _ in 0..ticks {
+        let before: Vec<(TripId, LinkId)> = c
+            .trips
+            .iter()
+            .filter(|(_, t)| car::on_road(t) && end_node(&c.net, t.link()) == node)
+            .map(|(id, t)| (id, t.link()))
+            .collect();
+        let now = c.now;
+        arrived += c.step().len();
+        let st = signal::state(&c.net, node, now).unwrap();
+        for (id, link) in before {
+            if c.trips.get(id).is_some_and(|t| t.link() != link) {
+                entered += 1;
+                let axis = signal::axis(c.net.segment_line(link.segment).unwrap().step);
+                assert_ne!(
+                    st.light_for(axis),
+                    Light::Red,
+                    "赤で入った {now:?} {link:?}"
+                );
+            }
+        }
+    }
+    assert_eq!(arrived, drives.len(), "着かない車がある");
+    assert_eq!(entered, drives.len());
+    entered
+}
+
+#[test]
+fn turning_cars_enter_only_on_green_or_yellow() {
+    // 十字路で、直進、左折、対向の車線をまたぐ右折を、どの腕からも出す。
+    let (n, node) = signalled(&[(1, 0), (0, 1)], false);
+    every_movement(n, node, 4, 3_000);
+}
+
+#[test]
+fn t_junction_enters_only_on_green_or_yellow() {
+    let (n, node) = signalled(&[(1, 0), (0, 1)], true);
+    assert_eq!(arm_steps(&n, node).len(), 3);
+    every_movement(n, node, 5, 3_000);
+}
+
+#[test]
+fn diagonal_arms_enter_only_on_green_or_yellow() {
+    // 縦横と 2 本の斜めで、腕 8 本、軸 4 つの交差点。
+    let (n, node) = signalled(&[(1, 0), (0, 1), (1, 1), (1, -1)], false);
+    assert_eq!(arm_steps(&n, node).len(), 8);
+    every_movement(n, node, 1, 4_000);
+}
+
+/// 車 `id` を、経路の中のリンク `link` の位置 `offset` に止めて置き直す。
+fn put(c: &mut Cars, id: TripId, link: LinkId, offset: u32) {
+    let t = c.trips.rows[id.slot()].as_mut().unwrap();
+    let leg = t.route.links.iter().position(|l| *l == link).unwrap();
+    t.leg = u32::try_from(leg).unwrap();
+    let lane = c.net.link_lanes(link).next().unwrap();
+    t.enter(&c.net, LaneOffset(offset), Some(lane));
+    t.speed = MmPerTick::ZERO;
+    t.stalled = 0;
+    t.waiting = false;
+}
+
+#[test]
+fn a_car_stuck_inside_a_signalled_junction_is_passed_before_the_rescue() {
+    // 軸 4 つの信号の交差点で、北から南へ抜ける車が交差点の中で止まったままになる。
+    // 西から東へ向かう車は、赤の待ちも数えて `GIVE_UP` に届き、`RESCUE` より先に脇を抜ける。
+    let (n, _) = signalled(&[(1, 0), (0, 1), (1, 1), (1, -1)], false);
+    let mut c = Cars::new(n, 0);
+    let (from, to) = movement((0, -1), (0, 1));
+    let stuck = c.drive(from, to);
+    let south = at(10, 10, (0, 1), 1)
+        .resolve_on(&c.net, LaneMode::Car)
+        .unwrap()
+        .0;
+    let (from, to) = movement((-1, 0), (1, 0));
+    let car = c.drive(from, to);
+    let first = c.trips.get(car).unwrap().link();
+    put(&mut c, stuck, south, 500);
+    let mut entered = None;
+    for tick in 0..junction::RESCUE {
+        c.step();
+        put(&mut c, stuck, south, 500);
+        if entered.is_none() && c.trips.get(car).is_some_and(|t| t.link() != first) {
+            entered = Some(tick);
+        }
+    }
+    assert!(entered.is_some(), "抜ける前に救済が働く");
+    let r = c.trips.rescues();
+    assert_eq!(r.teleported, 0);
+    assert!(r.passed_stuck >= 1, "{r:?}");
+}
