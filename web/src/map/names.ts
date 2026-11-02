@@ -1,8 +1,19 @@
 // 道路、地区、施設の名前の規則。名前は状態に持たず、種と形から決まった規則で作る（docs/map-style.md「名前の付け方」）。
 // 表と規則を変えると、既存の街の名前も変わる。変えるときは PR に「名前が変わる」と書く。
 
-/** 種。中核の種は u64 なので、数、bigint、10 進の文字列のどれでも受ける。 */
+/** 種。中核の種は u64 なので、安全な整数の数、bigint、10 進の文字列のどれでも受ける。 */
 export type Seed = number | bigint | string;
+
+/** 種を、先頭の 0 や型の違いによらない 10 進の文字列にそろえる。安全な整数でない数と、10 進でない文字列は例外にする。 */
+export function normalizeSeed(seed: Seed): string {
+  if (typeof seed === "bigint") return seed.toString();
+  if (typeof seed === "number") {
+    if (!Number.isSafeInteger(seed)) throw new RangeError(`種が安全な整数ではない: ${seed}`);
+    return BigInt(seed).toString();
+  }
+  if (!/^-?\d+$/.test(seed)) throw new RangeError(`種が 10 進の整数ではない: ${seed}`);
+  return BigInt(seed).toString();
+}
 
 /** 名前の前半に使う和語の地名風の語。道路と地区で共有する。 */
 export const NAME_WORDS: readonly string[] = [
@@ -36,9 +47,9 @@ export const NAME_WORDS: readonly string[] = [
   "稲穂",
   "大和",
   "旭",
-  "朝日",
+  "磯辺",
   "夕日",
-  "緑",
+  "深山",
   "青葉",
   "白河",
   "黒川",
@@ -64,12 +75,12 @@ export const NAME_WORDS: readonly string[] = [
   "栄",
   "幸",
   "弥生",
-  "睦",
+  "鹿島",
   "三島",
   "八幡",
-  "芦原",
-  "紅葉",
-  "水無月",
+  "芦屋",
+  "桔梗",
+  "湊川",
 ];
 
 /** 地区の名前の後半。チャンクに水辺があるときは WATERSIDE_SUFFIX にする。 */
@@ -86,8 +97,6 @@ const KIND_HIGHWAY = 4;
 /** 施設の種類の番号（ServiceKind の値）と、名前の後半。 */
 const FACILITY_NAMES: Record<number, string> = { 1: "発電所", 2: "浄水場" };
 const FACILITY_FALLBACK = "施設";
-
-const ORDINALS = ["", "第二", "第三", "第四", "第五", "第六", "第七", "第八", "第九", "第十"];
 
 const encoder = new TextEncoder();
 
@@ -133,7 +142,7 @@ export function roadSuffix(kindCode: number): string {
 
 /** 道路の名前。前半は直線の鍵と種で決まり、種類を上げたときは末尾だけが変わる。 */
 export function roadName(seed: Seed, lineKey: string, kindCode: number): string {
-  const word = pick(NAME_WORDS, fnv1a(`${seed}/road/${lineKey}`));
+  const word = pick(NAME_WORDS, fnv1a(`${normalizeSeed(seed)}/road/${lineKey}`));
   return `${word}${roadSuffix(kindCode)}`;
 }
 
@@ -151,7 +160,7 @@ const permutations = new Map<string, readonly number[]>();
 
 /** 種ごとの語の並べ替え。Fisher-Yates を、種から決まるハッシュで回す。 */
 function wordPermutation(seed: Seed): readonly number[] {
-  const key = String(seed);
+  const key = normalizeSeed(seed);
   const cached = permutations.get(key);
   if (cached) return cached;
   const perm = NAME_WORDS.map((_, i) => i);
@@ -173,14 +182,19 @@ const STEP_Y = 9;
 /**
  * 地区の名前。地区はチャンク（64 × 64 マス）である。
  * 前半の語は、種から決まる並べ替えの表を、チャンクの座標に応じて進んで選ぶ。8 近傍のチャンクは必ず別の語になる。
- * 後半は、種とチャンクの座標のハッシュで選ぶ。`waterside` は、チャンクに水辺があるとき。後半が「浜」になる。
+ * 後半は、チャンクの x 座標を種でずらして選ぶ。語が同じになるチャンクは、
+ * 座標が (dx, dy) = (-9, 1)、(1, 7) などの格子でずれた位置にあり、その x の差が 6 の倍数にならないので、
+ * 一辺 16 チャンクの範囲では、地区名がそっくり同じにならない。
+ * `waterside` は、チャンクに水辺があるとき。後半が「浜」になる。
  */
 export function districtName(seed: Seed, cx: number, cy: number, waterside = false): string {
-  const offset = fnv1a(`${seed}/district-offset`);
+  const key = normalizeSeed(seed);
+  const offset = fnv1a(`${key}/district-offset`);
   const index = mod(offset + cx * STEP_X + cy * STEP_Y, NAME_WORDS.length);
-  const word = NAME_WORDS[wordPermutation(seed)[index] as number] as string;
+  const word = NAME_WORDS[wordPermutation(key)[index] as number] as string;
   if (waterside) return `${word}${WATERSIDE_SUFFIX}`;
-  return `${word}${pick(DISTRICT_SUFFIXES, fnv1a(`${seed}/district/${cx},${cy}`))}`;
+  const shift = fnv1a(`${key}/district-suffix`);
+  return `${word}${DISTRICT_SUFFIXES[mod(shift + cx, DISTRICT_SUFFIXES.length)]}`;
 }
 
 /** 施設の種類の名前。 */
@@ -190,7 +204,19 @@ export function facilityKindName(kind: number): string {
 
 /** 同じ地区の同じ種類の中での順番（0 から）による、種類の前に付ける語。0 番目は付けない。 */
 export function ordinalPrefix(ordinal: number): string {
-  return ORDINALS[ordinal] ?? `第${ordinal + 1}`;
+  if (ordinal <= 0) return "";
+  return `第${kanjiNumber(ordinal + 1)}`;
+}
+
+const DIGITS = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+
+/** 2 から 99 までの漢数字。範囲の外は算用数字のまま返す。 */
+function kanjiNumber(n: number): string {
+  if (!Number.isInteger(n) || n < 1 || n > 99) return String(n);
+  const tens = Math.floor(n / 10);
+  const ones = n % 10;
+  const head = tens === 0 ? "" : tens === 1 ? "十" : `${DIGITS[tens]}十`;
+  return `${head}${DIGITS[ones]}`;
 }
 
 /** 施設の名前。`ordinal` は、同じ地区の同じ種類のまとまりの中での順番（0 から）。 */
@@ -204,7 +230,7 @@ export type FacilityGroup = { x: number; y: number; kind: number };
 /**
  * 施設のまとまりの名前を、入力と同じ順で返す。
  * 地区は、まとまりの左上のマスのチャンクで決める。同じ地区の同じ種類が 2 つ以上あるときは、
- * 左上の座標の順（x、同じなら y）に「第二」「第三」を付ける。
+ * 左上の座標の、地図の読み順（上の行が先で、同じ行なら左が先）に「第二」「第三」を付ける。
  */
 export function facilityGroupNames(
   seed: Seed,
@@ -223,7 +249,7 @@ export function facilityGroupNames(
     list.sort((i, j) => {
       const a = groups[i] as FacilityGroup;
       const b = groups[j] as FacilityGroup;
-      return a.x - b.x || a.y - b.y;
+      return a.y - b.y || a.x - b.x;
     });
     list.forEach((index, ordinal) => {
       const g = groups[index] as FacilityGroup;
