@@ -45,6 +45,9 @@ function make<K extends keyof HTMLElementTagNameMap>(
   return el;
 }
 
+/** 保存の知らせを出しておく長さ。 */
+const NOTICE_MS = 8000;
+
 export function setupSaves(worker: Worker, controls: HTMLElement): void {
   const send = (message: SaveToWorker, transfer: Transferable[] = []) =>
     worker.postMessage(message, transfer);
@@ -84,8 +87,19 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
     saveDialog.showModal();
   });
   controls.append(saveButton);
-  const notice = make("p", "", { id: "save-notice", "aria-live": "polite" });
-  controls.after(notice);
+  // 保存の知らせは、地図を覆い続けないよう、数秒で消す。要素は残すので、文面は消えるまで読める
+  const noticeEl = make("p", "", { id: "save-notice", "aria-live": "polite", role: "status" });
+  noticeEl.hidden = true;
+  (document.querySelector("#notices") ?? controls).append(noticeEl);
+  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  const showNotice = (text: string) => {
+    noticeEl.textContent = text;
+    noticeEl.hidden = false;
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => {
+      noticeEl.hidden = true;
+    }, NOTICE_MS);
+  };
   document.body.append(startDialog, saveDialog);
 
   const BROKEN = "壊れている";
@@ -194,7 +208,7 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
     try {
       autoSave = await lockPromise;
       if (!autoSave) {
-        notice.textContent = "別のタブで遊んでいるので、このタブでは自動保存しない";
+        showNotice("別のタブで遊んでいるので、このタブでは自動保存しない");
       }
       try {
         ({ records, broken } = await (await storePromise).list());
@@ -235,7 +249,7 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
       await (await storePromise).put(record);
     } catch (error) {
       const text = `${SLOT_NAMES[message.slot]}に保存できなかった：${String(error)}`;
-      notice.textContent = text;
+      showNotice(text);
       saveResult.textContent = text;
       return;
     }
@@ -285,9 +299,11 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
           saveButton.dataset.fromState = String(loaded.fromState);
           saveButton.dataset.loadedHash = loaded.meta.stateHash;
           saveButton.dataset.loadedMoney = loaded.meta.money;
-          notice.textContent = loaded.rulesChanged
-            ? `${SLOT_NAMES[loading.slot]}を読み込んだが、シミュレーションの規則が変わったので、保存したときと違う街になった`
-            : `${SLOT_NAMES[loading.slot]}を読み込んだ`;
+          showNotice(
+            loaded.rulesChanged
+              ? `${SLOT_NAMES[loading.slot]}を読み込んだが、シミュレーションの規則が変わったので、保存したときと違う街になった`
+              : `${SLOT_NAMES[loading.slot]}を読み込んだ`,
+          );
         }
         break;
       }

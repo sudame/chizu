@@ -9,6 +9,7 @@ import {
   setupFinance,
 } from "./finance.ts";
 import { parseGrowthBlocks, renderGrowthNotice } from "./growth-notice.ts";
+import { setupHudPanel, trackToolbarHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
 import { Camera, type ChunkRange, chunksByDistance, type Viewport } from "./map/camera.ts";
@@ -135,20 +136,28 @@ function describeClock(header: SnapshotHeader): string {
 function draw(ctx: CanvasRenderingContext2D, header: SnapshotHeader): void {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = "#222";
-  ctx.font = "20px sans-serif";
-  ctx.fillText(describeClock(header), 12, 30);
-  const moneyText = `お金 ${header.money.toLocaleString("ja-JP")}`;
-  ctx.fillText(moneyText, 12, 58);
+  ctx.font = "17px sans-serif";
+  ctx.textBaseline = "middle";
+  const y = canvas.height / 2;
+  const gap = 14;
+  // 日時、お金、速度を 1 行に左から並べる
+  let x = 4;
+  const put = (text: string) => {
+    ctx.fillText(text, x, y);
+    x += ctx.measureText(text).width + gap;
+  };
+  put(describeClock(header));
+  put(`お金 ${header.money.toLocaleString("ja-JP")}`);
   // 収支が赤字のあいだは、所持金の横に知らせる
   const note = deficitNote(finance);
   if (note !== "") {
     ctx.fillStyle = "#b00020";
-    ctx.fillText(note, 12 + ctx.measureText(moneyText).width + 12, 58);
+    put(note);
     ctx.fillStyle = "#222";
   }
   canvas.dataset.deficit = String(note !== "");
   const speed = shownSpeed(header.speed, workerPace);
-  ctx.fillText(header.paused ? "一時停止中" : describeSpeed(speed), 12, 86);
+  put(header.paused ? "一時停止中" : describeSpeed(speed));
   // test:wasm が読む
   canvas.dataset.tick = String(header.tick);
   canvas.dataset.speed = String(speed);
@@ -187,6 +196,8 @@ let roads: RoadMeshes | null = null;
 let buildings: Geometry | null = null;
 let signals: Geometry | null = null;
 let activeLayers: number[] = [];
+setupHudPanel(element<HTMLButtonElement>("#hud-toggle"), element<HTMLElement>("#hud-details"));
+trackToolbarHeight(element<HTMLElement>("#toolbar"));
 setupLayerPanel(element<HTMLElement>("#layers"), (active) => {
   activeLayers = active;
   renderer?.layers.setActive(active);

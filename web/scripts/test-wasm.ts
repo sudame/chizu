@@ -64,6 +64,60 @@ const url = givenUrl ?? server?.resolvedUrls?.local[0];
 if (url === undefined) {
   throw new Error("preview の URL が分からない");
 }
+// 左上の帯：日時、お金、速度はたたんでも見え、たためる欄は閉じて始まり、開閉が覚えられる。
+// 幅 1280 と 500 で、帯と欄が地図の広い範囲を覆わないことも見る
+async function checkHudPanel(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  const hud = page.locator("#hud");
+  await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  const details = page.locator("#hud-details");
+  const toggle = page.locator("#hud-toggle");
+  check(
+    (await hud.isVisible()) &&
+      (await page.locator("#pause").isVisible()) &&
+      !(await details.isVisible()),
+    "日時、お金、速度の帯は見え、たためる欄は閉じて始まる",
+  );
+  const covered = async () =>
+    page.evaluate(() => {
+      const r = document.querySelector("#overlay")?.getBoundingClientRect();
+      return r === undefined ? 0 : r.width * r.height;
+    });
+  const closedArea = await covered();
+  await toggle.click();
+  check(
+    (await details.isVisible()) &&
+      (await page.locator("#city-numbers").isVisible()) &&
+      (await page.locator("#demand").isVisible()) &&
+      (await page.locator("#overview").isVisible()),
+    "「詳細」を押すと、建物、電気と水道、需要、人口と幸福度が出る",
+  );
+  await page.reload();
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  check(await details.isVisible(), "開いたことが覚えられ、読み直しても開いている");
+  await toggle.click();
+  await page.reload();
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  check(!(await details.isVisible()), "閉じたことが覚えられ、読み直しても閉じている");
+  const size = page.viewportSize() ?? { width: 1280, height: 720 };
+  const share = closedArea / (size.width * size.height);
+  check(share < 0.06, `たたんだ帯が覆う広さは画面の 6% に満たない（${(share * 100).toFixed(1)}%）`);
+  // 狭い画面でも、帯は画面の幅に収まり、道具の帯の上に出ない
+  await page.setViewportSize({ width: 500, height: 800 });
+  await page.waitForTimeout(200);
+  const narrow = await page.evaluate(() => {
+    const bar = document.querySelector("#hudbar")?.getBoundingClientRect();
+    const tool = document.querySelector("#toolbar")?.getBoundingClientRect();
+    return { right: bar?.right ?? 0, bottom: bar?.bottom ?? 0, toolTop: tool?.top ?? 0 };
+  });
+  check(
+    narrow.right <= 500 && narrow.bottom < 120 && narrow.bottom < narrow.toolTop,
+    `幅 500 でも帯は画面に収まり、地図の上の端に寄る（右 ${narrow.right}、下 ${narrow.bottom}）`,
+  );
+  await page.close();
+}
+
 // 開発用の道具で歩く人を出し、描かれること、時間を進めると動くこと、着くと消えることを確かめる。
 // 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その左寄りと右寄りのマスのあいだに出す
 async function checkDevWalks(page: Page, at: string): Promise<void> {
@@ -1151,6 +1205,7 @@ try {
 
   // 歩く人を出す道具は記録に入らず、上の再生の確かめと食い違うので、新しいページで確かめる
   await page.close();
+  await checkHudPanel(await browser.newPage(), url);
   await checkDevWalks(await browser.newPage(), url);
 } finally {
   await browser.close();
