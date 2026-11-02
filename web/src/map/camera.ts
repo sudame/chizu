@@ -4,7 +4,7 @@ import { CHUNK_SIDE } from "../protocol/messages.ts";
 
 /** 拡大の上限と下限（1 マスを何 CSS ピクセルで描くか）。下限では 1 チャンクが 64 ピクセルになる。 */
 export const MIN_ZOOM = 1;
-export const MAX_ZOOM = 32;
+export const MAX_ZOOM = 128;
 
 export type Viewport = { width: number; height: number };
 export type Point = { x: number; y: number };

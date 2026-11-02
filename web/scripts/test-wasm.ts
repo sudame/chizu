@@ -44,7 +44,7 @@ function mixHex(a: string, b: string, t: number): string {
 // 地面に買える土地の仮の表示（#1a73e8 の 10%）が重なった色
 const GROUND_ON_HINT_HEX = "#dee5ec";
 const MIN_ZOOM = 1;
-const MAX_ZOOM = 32;
+const MAX_ZOOM = 128;
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -1534,6 +1534,46 @@ try {
   );
   await page.locator('button[data-tool="none"]').click();
 
+  // 細部の段（倍率 32 から上）に入るまでは、細部の頂点を作らない。上限の 128 まで寄ると、住宅に寄棟の屋根の線を描き足す
+  check(
+    (await map.getAttribute("data-detail-builds")) === null,
+    "細部の段より引いているあいだは、細部の頂点を作らない",
+  );
+  // 本体の右下の角（マスの縁から 0.2 マス）から 45 度に隅棟が延びる。角から 0.15 マス先の、隅棟の上と脇を比べる。
+  // 左上のマスには電気と水道の印が重なることがあるので、右下のマスに寄って見る
+  const [, , bx1 = bx, by1 = by] = firstBuilding;
+  const corner = tilePoint(bx1, by1);
+  await page.mouse.move(corner.x, corner.y);
+  for (let i = 0; i < 20; i++) {
+    await page.mouse.wheel(0, -400);
+  }
+  await page.waitForFunction(
+    (max) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) === max,
+    MAX_ZOOM,
+    { timeout: TIMEOUT_MS },
+  );
+  await page.waitForTimeout(300);
+  const fine = await mapState();
+  const at = (wx: number, wy: number) => ({
+    x: cx + (wx - fine.x) * fine.zoom,
+    y: cy + (wy - fine.y) * fine.zoom,
+  });
+  const ridgeAt = at(bx1 + 0.65, by1 + 0.65);
+  const ridgeArea: number[][] = [];
+  for (const dx of [-1, 0, 1]) {
+    for (const dy of [-1, 0, 1]) {
+      ridgeArea.push(await pixel(ridgeAt.x + dx, ridgeAt.y + dy));
+    }
+  }
+  const besideRidge = at(bx1 + 0.62, by1 + 0.76);
+  const roofSide = await pixel(besideRidge.x, besideRidge.y);
+  check(
+    Number(await map.getAttribute("data-detail-roofs")) > 0 &&
+      ridgeArea.some((c) => near(c, "#a7c18e", 8)) &&
+      near(roofSide, "#d3e3c0", 8),
+    `上限の倍率 ${fine.zoom} まで寄れ、住宅に屋根の線を描き足す（線 ${ridgeArea.map((c) => c.join(",")).join(" ")}、脇 ${roofSide.join(", ")}）`,
+  );
+
   await page.mouse.move(cx, cy);
   for (let i = 0; i < 20; i++) {
     await page.mouse.wheel(0, 400);
@@ -1615,7 +1655,7 @@ try {
   check((await mapState()).zoom === MAX_ZOOM, `拡大は上限 ${MAX_ZOOM} で止まる`);
   // 拡大縮小のボタンは、画面の真ん中を動かさずに 1.5 倍ずつ変え、物差しも追う
   await page.waitForFunction(
-    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "20",
+    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "5",
     undefined,
     { timeout: TIMEOUT_MS },
   );
@@ -1624,7 +1664,7 @@ try {
     (await page.locator("#zoom-in").isDisabled()) &&
       !(await page.locator("#zoom-out").isDisabled()) &&
       (await scale.getAttribute("data-px")) === "80",
-    "上限では、拡大のボタンだけが押せず、物差しは 20 m（80px）を示す",
+    "上限では、拡大のボタンだけが押せず、物差しは 5 m（80px）を示す",
   );
   await page.locator("#zoom-out").click();
   await page.waitForFunction(
@@ -1640,14 +1680,14 @@ try {
     `縮小のボタンで画面の真ん中を動かさずに 1.5 分の 1 になる（${smaller.zoom.toFixed(2)}）`,
   );
   await page.waitForFunction(
-    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "50",
+    () => document.querySelector<HTMLElement>("#scale")?.dataset.meters === "10",
     undefined,
     { timeout: TIMEOUT_MS },
   );
   check(
-    (await scale.getAttribute("data-px")) === "133" &&
-      ((await scale.locator("[data-scale-label]").textContent()) ?? "") === "50 m",
-    "倍率が下がると、物差しは 50 m（133px）に変わる",
+    (await scale.getAttribute("data-px")) === "107" &&
+      ((await scale.locator("[data-scale-label]").textContent()) ?? "") === "10 m",
+    "倍率が下がると、物差しは 10 m（107px）に変わる",
   );
   await page.locator("#zoom-in").click();
   await page.waitForFunction(
