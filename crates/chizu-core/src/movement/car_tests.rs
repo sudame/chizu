@@ -671,6 +671,13 @@ fn stalled_cars_stay_stalled_when_the_road_is_split() {
     }
     let still = CarSample::of(&c.trips);
     assert_eq!(still.unmoved_since(&before), 4, "詰まった車が動いている");
+    // 道路の始まりに 2 台を同時に出すと、後の 1 台は車線に出られず路肩で待つ。止まっている車とは別に数える。
+    c.drive(at(0, 0, (1, 0), 0), at(59, 0, (1, 0), 0));
+    let late = c.drive(at(0, 0, (1, 0), 0), at(59, 0, (1, 0), 0));
+    assert!(c.trips.get(late).unwrap().waiting_to_depart());
+    let curb = CarSample::of(&c.trips);
+    assert_eq!(curb.waiting_at_curb(), 1);
+    assert_eq!(curb.stopped_on_road_since(&still), 4);
 
     // 止まっている後ろの車の真ん中に、道路を交差させて区間を分ける。
     let lanes: Vec<_> = followers

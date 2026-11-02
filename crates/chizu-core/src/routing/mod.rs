@@ -24,6 +24,7 @@ pub use graph::{
 };
 
 use crate::network::{LaneMode, LinkId, Network};
+use crate::units::LaneOffset;
 
 /// 1 日を分ける時間帯の数。重みは時間帯ごとに写す。
 pub const TIME_BANDS: u8 = 96;
@@ -93,7 +94,12 @@ pub struct AstarRouter {
     cache: BTreeMap<RouteRequest, Option<Arc<Route>>>,
     /// 車のグラフの費用に足している遅れ。グラフを作り直しても引き継ぐ。
     delays: Delays,
+    /// 2 点のあいだに経路があるか。費用によらないので、遅れが変わっても捨てず、網を作り直すまで覚える。
+    reach: BTreeMap<ReachKey, bool>,
 }
+
+/// 経路があるかを覚える鍵。手段と、出発と行き先のリンクの上の位置。
+pub type ReachKey = (LaneMode, (LinkId, LaneOffset), (LinkId, LaneOffset));
 
 /// 一括の探索で、1 本のスレッドが解く単位。
 enum Job {
@@ -126,6 +132,7 @@ impl AstarRouter {
             cache_limit: DEFAULT_CACHE_LIMIT,
             cache: BTreeMap::new(),
             delays: Delays::default(),
+            reach: BTreeMap::new(),
         })
     }
 
@@ -185,6 +192,25 @@ impl AstarRouter {
         self.delays.clone_from(delays);
         self.car.set_delays(delays);
         self.cache.retain(|r, _| r.mode != LaneMode::Car);
+    }
+
+    /// 手段 `mode` で、リンク `from` の終わりからリンク `to` へ必ず経路があると言えるか。
+    /// 費用によらず網の形だけで決まるので、探さずに答えられる。`false` なら探して確かめる。
+    pub fn surely_connected(&self, mode: LaneMode, from: LinkId, to: LinkId) -> bool {
+        self.graph(mode).surely_connected(from, to)
+    }
+
+    /// 覚えている、`key` の 2 点のあいだに経路があるか。
+    pub fn known_reach(&self, key: &ReachKey) -> Option<bool> {
+        self.reach.get(key).copied()
+    }
+
+    /// `key` の 2 点のあいだに経路があるかを覚える。上限を超えそうなら、先に全部捨てる。
+    pub fn remember_reach(&mut self, key: ReachKey, found: bool) {
+        if self.reach.len() >= self.cache_limit {
+            self.reach.clear();
+        }
+        self.reach.insert(key, found);
     }
 
     /// 車のリンクの費用に足している遅れ。

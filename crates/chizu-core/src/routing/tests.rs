@@ -638,3 +638,32 @@ fn delays_steer_cars_to_the_parallel_road_and_survive_a_rebuild() {
     router.set_delays(&Delays::default());
     assert_eq!(router.route_batch(&[req])[0], free[0]);
 }
+
+#[test]
+fn surely_connected_links_always_have_a_route() {
+    let mut n = grid(3);
+    // 離れた道路は、どこともつながらない。
+    road(&mut n, (100, 100), (110, 100), RoadKind::Small);
+    let router = AstarRouter::new(&n);
+    let mut s = Scratch::default();
+    let mut connected = 0;
+    for mode in [LaneMode::Car, LaneMode::Sidewalk] {
+        let links: Vec<LinkId> = n.links().filter(|l| l.mode == mode).collect();
+        for a in &links {
+            for b in &links {
+                if a != b && router.surely_connected(mode, *a, *b) {
+                    connected += 1;
+                    assert!(
+                        astar(router.graph(mode), *a, *b, &mut s).is_some(),
+                        "{a:?} から {b:?} への経路がない"
+                    );
+                }
+            }
+        }
+    }
+    assert!(connected > 0);
+    let far = link(&n, (100, 100), (110, 100), LaneMode::Car);
+    let near = link(&n, (0, 0), (4, 0), LaneMode::Car);
+    assert!(router.surely_connected(LaneMode::Car, near, link(&n, (4, 4), (0, 4), LaneMode::Car)));
+    assert!(!router.surely_connected(LaneMode::Car, near, far));
+}

@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::{Ends, SidewalkPos, Trip, Trips, car, lane_shift, make_trip, plan};
+use super::{Ends, SidewalkPos, Trip, Trips, candidates, car, lane_shift, make_trip, plan};
 use crate::building::{Building, Buildings};
 use crate::id::{BuildingId, TripId};
 use crate::network::{LaneMode, Network};
@@ -201,8 +201,24 @@ fn reachable(
     from: SidewalkPos,
     to: SidewalkPos,
 ) -> bool {
-    let ends = from.resolve_on(net, mode).zip(to.resolve_on(net, mode));
-    ends.is_some_and(|e| plan(router, net, mode, &[e], false)[0].is_some())
+    let Some(e) = from.resolve_on(net, mode).zip(to.resolve_on(net, mode)) else {
+        return false;
+    };
+    // 経路があるかは費用によらない。混み具合の遅れが変わるたびに探し直さないよう、まず網の形から確かめる。
+    if candidates(net, e, false)
+        .iter()
+        .any(|((a, _), (b, _))| router.surely_connected(mode, *a, *b))
+    {
+        return true;
+    }
+    // 網の形から言えなければ探す。探した答えも費用によらないので、網が変わるまで覚えておく。
+    let key = (mode, e.0, e.1);
+    if let Some(found) = router.known_reach(&key) {
+        return found;
+    }
+    let found = plan(router, net, mode, &[e], false)[0].is_some();
+    router.remember_reach(key, found);
+    found
 }
 
 impl Trip {

@@ -514,7 +514,10 @@ fn observe_gives_people_and_traffic_counts() {
     assert_eq!(sum, n(&o["population"]["citizens"]));
     assert!(sum > 0, "誰も住んでいない");
     let cars = &o["traffic"]["cars"];
-    assert_eq!(n(&cars["total"]), n(&cars["moving"]) + n(&cars["stopped"]));
+    assert_eq!(
+        n(&cars["total"]),
+        n(&cars["moving"]) + n(&cars["stopped"]) + n(&cars["waitingAtCurb"])
+    );
     assert_eq!(n(&cars["stoppedAfterTicks"]), 100);
     let trips = &o["traffic"]["trips"];
     let yesterday = &trips["yesterday"];

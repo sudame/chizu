@@ -64,8 +64,9 @@ const SAME_SPOT_MM: i64 = 5;
 
 /// ある tick の、走っている車のワールド座標の位置。止まっている車を見分けるのに使う。
 /// 車線の ID は、道路が分けられると変わるので、位置は車線によらない座標で持つ。
+/// 路肩で車線に出る順番を待っている車は、別に数える。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CarSample(BTreeMap<TripId, WorldPos>);
+pub struct CarSample(BTreeMap<TripId, (WorldPos, bool)>);
 
 impl CarSample {
     pub(crate) fn of(trips: &Trips) -> CarSample {
@@ -73,9 +74,19 @@ impl CarSample {
             trips
                 .iter()
                 .filter(|(_, t)| t.mode() == LaneMode::Car)
-                .map(|(id, t)| (id, t.position().world()))
+                .map(|(id, t)| (id, (t.position().world(), t.waiting_to_depart())))
                 .collect(),
         )
+    }
+
+    /// 路肩で、車線に出る順番を待っている車の台数。
+    pub fn waiting_at_curb(&self) -> usize {
+        self.0.values().filter(|(_, w)| *w).count()
+    }
+
+    /// 車線の上で、`earlier` から同じ場所（ずれは数 mm まで）にいる車の台数。路肩で待つ車は数えない。
+    pub fn stopped_on_road_since(&self, earlier: &CarSample) -> usize {
+        self.unmoved(earlier).filter(|(_, (_, w))| !*w).count()
     }
 
     /// 車の台数。車線に出る順番を待っている車も含む。
@@ -89,16 +100,20 @@ impl CarSample {
 
     /// 同じ場所（ずれは数 mm まで）にいる車の台数。`earlier` にいなかった車は、動いたものとして数えない。
     pub fn unmoved_since(&self, earlier: &CarSample) -> usize {
+        self.unmoved(earlier).count()
+    }
+
+    fn unmoved<'a>(
+        &'a self,
+        earlier: &'a CarSample,
+    ) -> impl Iterator<Item = (&'a TripId, &'a (WorldPos, bool))> + 'a {
         let near = |a: Mm, b: Mm| a.0.abs_diff(b.0) <= SAME_SPOT_MM.unsigned_abs();
-        self.0
-            .iter()
-            .filter(|(id, at)| {
-                earlier
-                    .0
-                    .get(id)
-                    .is_some_and(|p| near(p.x, at.x) && near(p.y, at.y))
-            })
-            .count()
+        self.0.iter().filter(move |(id, (at, _))| {
+            earlier
+                .0
+                .get(id)
+                .is_some_and(|(p, _)| near(p.x, at.x) && near(p.y, at.y))
+        })
     }
 }
 

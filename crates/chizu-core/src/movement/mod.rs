@@ -125,6 +125,11 @@ impl Trip {
         self.lane
     }
 
+    /// 路肩で、車線に出る順番を待っている車か。
+    pub fn waiting_to_depart(&self) -> bool {
+        self.mode == LaneMode::Car && self.waiting
+    }
+
     pub fn speed(&self) -> MmPerTick {
         self.speed
     }
@@ -446,17 +451,7 @@ fn plan(
 ) -> Vec<Option<(Arc<Route>, Ends, crossing::Walk)>> {
     let candidates: Vec<Vec<Ends>> = ends
         .iter()
-        .map(|(a, b)| {
-            let starts = [Some(*a), flip(net, *a).filter(|_| !fixed_start)];
-            let goals = [Some(*b), flip(net, *b)];
-            let all: Vec<Ends> = starts
-                .iter()
-                .flatten()
-                .flat_map(|s| goals.iter().flatten().map(|g| (*s, *g)))
-                .collect();
-            let ahead: Vec<Ends> = all.iter().filter(|e| !behind(e)).copied().collect();
-            if ahead.is_empty() { all } else { ahead }
-        })
+        .map(|e| candidates(net, *e, fixed_start))
         .collect();
     let flat: Vec<Ends> = candidates.iter().flatten().copied().collect();
     let mut found = plan_exact(router, mode, &flat).into_iter();
@@ -493,6 +488,19 @@ fn plan(
                 .map(|(_, r, e, jay)| (r, e, jay))
         })
         .collect()
+}
+
+/// [`plan`] が試す、出発と行き先の向きの組。同じリンクの手前へ戻る組は、ほかの組があれば除く。
+fn candidates(net: &Network, (a, b): Ends, fixed_start: bool) -> Vec<Ends> {
+    let starts = [Some(a), flip(net, a).filter(|_| !fixed_start)];
+    let goals = [Some(b), flip(net, b)];
+    let all: Vec<Ends> = starts
+        .iter()
+        .flatten()
+        .flat_map(|s| goals.iter().flatten().map(|g| (*s, *g)))
+        .collect();
+    let ahead: Vec<Ends> = all.iter().filter(|e| !behind(e)).copied().collect();
+    if ahead.is_empty() { all } else { ahead }
 }
 
 /// 行き先が出発と同じリンクの、出発より手前にあるか。
