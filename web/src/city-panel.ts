@@ -98,6 +98,44 @@ export function utilityShortage(stats: CityStats, unsupplied: number): UtilitySh
   };
 }
 
+/** 余りがこの割合（%）を切ったら、足りなくなる前に知らせる。 */
+export const LOW_HEADROOM_PERCENT = 10;
+
+/**
+ * 届いていない建物がまだないが、電気か水道の余りが少なくなっているときの知らせ。余裕があるときは null。
+ * 余りは、道路網をまたいだ供給量の合計と需要の合計で見る。
+ */
+export function utilityLowHeadroom(stats: CityStats): UtilityShortage | null {
+  const reasons: string[] = [];
+  const add = (name: string, facility: string, supply: number) => {
+    if (supply <= 0 || stats.utilityDemand > supply) {
+      return;
+    }
+    const left = Math.floor(((supply - stats.utilityDemand) * 100) / supply);
+    if (left < LOW_HEADROOM_PERCENT) {
+      reasons.push(`${name}の余りが ${left}% になった。${facility}を足す用意をする`);
+    }
+  };
+  add("電気", "発電所", stats.power);
+  add("水道", "浄水場", stats.water);
+  if (reasons.length === 0) {
+    return null;
+  }
+  return { headline: "電気か水道の余りが少なくなっている", reasons };
+}
+
+/** 足りない知らせと、足りていないほうの余りの知らせを並べる。どちらもなければ null。 */
+export function utilityNotice(
+  stats: CityStats,
+  shortage: UtilityShortage | null,
+): UtilityShortage | null {
+  const low = utilityLowHeadroom(stats);
+  if (shortage !== null && low !== null) {
+    return { headline: shortage.headline, reasons: [...shortage.reasons, ...low.reasons] };
+  }
+  return shortage ?? low;
+}
+
 export type BarLayout = { value: number; top: number; height: number };
 
 /** 住宅・商業・工業・オフィスの順の棒の位置。正の需要は真ん中の線から上へ、負の需要は下へ伸ばす。 */
@@ -121,16 +159,17 @@ export function renderCityStats(stats: CityStats, unsupplied = 0): void {
     utilities.textContent = formatUtilities(stats);
   }
   const shortage = utilityShortage(stats, unsupplied);
+  const shown = utilityNotice(stats, shortage);
   const notice = document.querySelector<HTMLElement>("#city-shortage");
   if (notice !== null) {
-    notice.hidden = shortage === null;
+    notice.hidden = shown === null;
     notice.dataset.unsupplied = String(unsupplied);
     notice.replaceChildren();
-    if (shortage !== null) {
+    if (shown !== null) {
       const head = document.createElement("strong");
-      head.textContent = shortage.headline;
+      head.textContent = shown.headline;
       notice.append(head);
-      for (const reason of shortage.reasons) {
+      for (const reason of shown.reasons) {
         const line = document.createElement("div");
         line.textContent = reason;
         notice.append(line);

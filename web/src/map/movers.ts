@@ -5,6 +5,7 @@
 import { CHUNK_SIDE, type MoverArea } from "../protocol/messages.ts";
 import { layout, type SnapshotHeader } from "../protocol/snapshot.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
+import { MoverInterpolator } from "./mover-interpolation.ts";
 
 /** 種類の番号。chizu-wasm の movers::KIND_WALK などと同じ。 */
 export const KIND_WALK = 1;
@@ -69,6 +70,7 @@ export class MoverLayer {
   // WebGL に SharedArrayBuffer を直に渡せないブラウザがあるので、枠の中身をここに写してから送る
   readonly #copy = new Uint32Array(layout.maxMovers * layout.moverWords);
   readonly #floats = new Float32Array(this.#copy.buffer);
+  readonly #interpolator = new MoverInterpolator();
   /** 最後に描いた枠の、最初の移動体のワールド座標（マス）。test:wasm が位置の変化を見るのに使う。 */
   first: { x: number; y: number } | null = null;
   /** 最後に描いた枠の、種類ごとの最初の移動体のワールド座標（マス）。test:wasm が画素を見るのに使う。 */
@@ -109,8 +111,17 @@ export class MoverLayer {
     gl.bindVertexArray(null);
   }
 
-  /** 枠の移動体を描き、描いた数を返す。縮小しすぎているときは描かない。 */
-  draw(camera: Camera, viewport: Viewport, header: SnapshotHeader, words: Uint32Array): number {
+  /**
+   * 枠の移動体を描き、描いた数を返す。縮小しすぎているときは描かない。
+   * 位置は前の tick と今の tick のあいだを、時刻 `now`（ミリ秒）に合わせて補間する。
+   */
+  draw(
+    camera: Camera,
+    viewport: Viewport,
+    header: SnapshotHeader,
+    words: Uint32Array,
+    now: number,
+  ): number {
     const count = Math.min(header.moverCount, Math.floor(words.length / layout.moverWords));
     this.firstOf.clear();
     if (!showsMovers(camera.zoom) || count === 0) {
@@ -120,6 +131,20 @@ export class MoverLayer {
     const gl = this.#gl;
     const used = count * layout.moverWords;
     this.#copy.set(words.subarray(0, used));
+    this.#interpolator.apply(
+      {
+        tick: header.tick,
+        speed: header.speed,
+        paused: header.paused,
+        baseCx: header.baseCx,
+        baseCy: header.baseCy,
+        count,
+        words: this.#copy,
+        floats: this.#floats,
+      },
+      now,
+      this.#floats,
+    );
     const at = (i: number) => ({
       x: header.baseCx * CHUNK_SIDE + (this.#floats[i * layout.moverWords + layout.mover.x] ?? 0),
       y: header.baseCy * CHUNK_SIDE + (this.#floats[i * layout.moverWords + layout.mover.y] ?? 0),
