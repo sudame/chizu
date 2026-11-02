@@ -28,8 +28,6 @@ const INITIAL_MONEY = 500_000;
 // web/src/map/camera.ts の値
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 32;
-// web/src/map/layers.ts の交通のレイヤーの番号
-const TRAFFIC_LAYER = 3;
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -139,8 +137,55 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
 
   // どの幅でも、帯と地図の部品のボタンは覆われず、帯と欄、知らせ、右上と四隅の部品が重ならない。
   // 欄は、詳細を開いたときと、収支を開いたときに分けて見る
-  for (const open of [toggle, financeToggle]) {
-    await open.click();
+  const showInspector = (visible: boolean) =>
+    page.evaluate((on) => {
+      const el = document.querySelector<HTMLElement>("#inspector");
+      if (el === null) {
+        return;
+      }
+      el.hidden = !on;
+      const title = el.querySelector("[data-inspector-title]");
+      const rows = el.querySelector("[data-inspector-rows]");
+      if (on && title !== null && rows !== null) {
+        title.textContent = "確かめ用の建物";
+        rows.innerHTML = "<dt>人口</dt><dd>4</dd><dt>電気</dt><dd>届いている</dd>";
+      }
+    }, visible);
+  const roadToggle = page.locator('button[data-menu="road"]');
+  const zoneToggle = page.locator('button[data-menu="zone"]');
+  const layerToggle = page.locator("#layers-open");
+  const states: { open: () => Promise<void>; close: () => Promise<void> }[] = [
+    { open: () => toggle.click(), close: () => toggle.click() },
+    { open: () => financeToggle.click(), close: () => financeToggle.click() },
+    // 道具の 2 段目とレイヤーのパネルは、開いているあいだ隅の部品と重ならない
+    { open: () => roadToggle.click(), close: () => page.keyboard.press("Escape") },
+    { open: () => zoneToggle.click(), close: () => page.keyboard.press("Escape") },
+    { open: () => layerToggle.click(), close: () => page.keyboard.press("Escape") },
+    // 建物の情報は、詳細や収支を開いたときも含めて、ほかの欄と重ならない
+    { open: () => showInspector(true), close: () => showInspector(false) },
+    {
+      open: async () => {
+        await toggle.click();
+        await showInspector(true);
+      },
+      close: async () => {
+        await showInspector(false);
+        await toggle.click();
+      },
+    },
+    {
+      open: async () => {
+        await financeToggle.click();
+        await showInspector(true);
+      },
+      close: async () => {
+        await showInspector(false);
+        await financeToggle.click();
+      },
+    },
+  ];
+  for (const [index, { open, close }] of states.entries()) {
+    await open();
     for (const width of [1280, 1000, 900, 860, 780, 640, 500, 390]) {
       await page.setViewportSize({ width, height: 800 });
       await page.waitForTimeout(300);
@@ -154,16 +199,22 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
           const el = document.querySelector(sel);
           const r = el?.getBoundingClientRect();
           // hidden の部品は大きさが 0 なので、重なりの確かめから外す
-          return r === undefined || r.width === 0 || r.height === 0 ? null : r;
+          return r === undefined ||
+            r.width === 0 ||
+            r.height === 0 ||
+            (el !== null && getComputedStyle(el).visibility === "hidden")
+            ? null
+            : r;
         };
         const covered = [
           ...document.querySelectorAll<HTMLElement>(
-            "#hudbar button, #toolbar button, #map-controls button, #feedback-open",
+            "#hudbar button, #toolbar button, #map-controls button, #feedback-open, .tool-menu button, #layer-panel button",
           ),
         ]
           .filter((b) => {
             const r = b.getBoundingClientRect();
-            if (r.width === 0) {
+            // 隠した部品は、押せない代わりに覆いも起こさない
+            if (r.width === 0 || getComputedStyle(b).visibility === "hidden") {
               return false;
             }
             const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
@@ -176,6 +227,8 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
           "#hudbar",
           "#hud-details",
           "#finance",
+          "#inspector",
+          "#layer-panel",
           "#notices",
           "#feedback-open",
           "#toolstack",
@@ -197,13 +250,13 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
       });
       check(
         layout.covered.length === 0 && layout.pairs.length === 0,
-        `幅 ${width} で、帯と部品のボタンは覆われず、部品どうしが重ならない（覆われた ${layout.covered.join(",")}、重なり ${layout.pairs.join(",")}）`,
+        `幅 ${width}（状態 ${index}）で、帯と部品のボタンは覆われず、部品どうしが重ならない（覆われた ${layout.covered.join(",")}、重なり ${layout.pairs.join(",")}）`,
       );
       check(layout.right <= width, `幅 ${width} で帯は画面に収まる（右 ${layout.right}）`);
       check(layout.bottom <= 800, `幅 ${width} で道具の帯は画面に収まる（下 ${layout.bottom}）`);
     }
     await page.setViewportSize({ width: 1280, height: 720 });
-    await open.click();
+    await close();
   }
   await page.close();
 }
@@ -370,12 +423,10 @@ try {
 
   const hud = page.locator("#hud");
   await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
-  // 初めは交通のレイヤーを選んでいる。以降の色の確かめは、何も重ねない地図で行う
   check(
-    (await page.locator("#layers").getAttribute("data-active")) === String(TRAFFIC_LAYER),
-    "レイヤーは初めに交通を選んでいる",
+    (await page.locator("#layers").getAttribute("data-active")) === "",
+    "レイヤーは初めに「なし」を選んでいる",
   );
-  await chooseLayer(page, "none");
   const tick = async () => Number(await hud.getAttribute("data-tick"));
   const ticksIn = async (ms: number) => {
     const before = await tick();

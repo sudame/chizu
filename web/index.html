@@ -484,11 +484,8 @@
         display: none;
       }
       #inspector {
-        position: fixed;
-        top: calc(max(var(--hudbar-h, 40px), 40px) + 24px);
-        right: var(--edge);
         width: 248px;
-        max-width: calc(100vw - 2 * var(--edge));
+        max-width: 100%;
         font-size: 13px;
       }
       #inspector header {
@@ -810,6 +807,11 @@
         #map-meta {
           bottom: calc(var(--bar-h, 64px) + var(--edge) + var(--gap));
         }
+        /* 道具の 2 段目を開いているあいだは、隅の部品が 2 段目に重なるので隠す */
+        body[data-menu-open] #map-controls,
+        body[data-menu-open] #map-meta {
+          visibility: hidden;
+        }
         /* 左下の部品の上へ積む */
         #notices {
           top: auto;
@@ -820,6 +822,10 @@
           left: var(--edge);
           width: auto;
           max-width: none;
+        }
+        body[data-layers-open] #notices,
+        body[data-layers-open] #map-meta {
+          visibility: hidden;
         }
       }
       /* 幅 640px 以下では、道具の帯を絵だけにし、上の帯は折り返す */
@@ -917,6 +923,13 @@
           <div id="overview-parts"></div>
         </details>
       </div>
+      <aside id="inspector" class="panel" hidden>
+        <header>
+          <span data-inspector-title aria-live="polite"></span>
+          <button type="button" id="inspector-close" data-inspector-close aria-label="閉じる">×</button>
+        </header>
+        <dl data-inspector-rows></dl>
+      </aside>
     </div>
     <div id="notices">
       <div id="city-shortage" role="status" hidden></div>
@@ -969,10 +982,10 @@
       <div id="toolbar" role="toolbar" aria-label="道具">
         <button type="button" class="tool" data-tool="none" aria-pressed="true"><svg class="icon" aria-hidden="true"><use href="#i-select" /></svg><span>見る</span></button>
         <span class="vsep" aria-hidden="true"></span>
-        <button type="button" class="tool" data-menu="road" aria-pressed="false" aria-haspopup="true" aria-controls="menu-road" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-road" /></svg><span>道路</span></button>
-        <button type="button" class="tool" data-menu="zone" aria-pressed="false" aria-haspopup="true" aria-controls="menu-zone" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-zone" /></svg><span>区画</span></button>
-        <button type="button" class="tool" data-menu="service" aria-pressed="false" aria-haspopup="true" aria-controls="menu-service" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-service" /></svg><span>施設</span></button>
-        <button type="button" class="tool" data-menu="signal" aria-pressed="false" aria-haspopup="true" aria-controls="menu-signal" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-signal" /></svg><span>信号</span></button>
+        <button type="button" class="tool" data-menu="road" aria-pressed="false" aria-controls="menu-road" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-road" /></svg><span>道路</span></button>
+        <button type="button" class="tool" data-menu="zone" aria-pressed="false" aria-controls="menu-zone" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-zone" /></svg><span>区画</span></button>
+        <button type="button" class="tool" data-menu="service" aria-pressed="false" aria-controls="menu-service" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-service" /></svg><span>施設</span></button>
+        <button type="button" class="tool" data-menu="signal" aria-pressed="false" aria-controls="menu-signal" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-signal" /></svg><span>信号</span></button>
         <button type="button" class="tool" data-tool="buy" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-land" /></svg><span>土地</span></button>
         <span class="vsep" aria-hidden="true"></span>
         <button type="button" class="tool" data-tool="bulldoze" aria-pressed="false"><svg class="icon" aria-hidden="true"><use href="#i-bulldoze" /></svg><span>取り壊す</span></button>
@@ -980,7 +993,7 @@
     </div>
     <div id="map-controls">
       <div class="layer-wrap">
-        <button type="button" id="layers-open" class="map-button" aria-label="レイヤー" aria-haspopup="true" aria-controls="layer-panel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-layers" /></svg></button>
+        <button type="button" id="layers-open" class="map-button" aria-label="レイヤー" aria-controls="layer-panel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-layers" /></svg></button>
         <div id="layer-panel" class="panel" hidden>
           <h2>レイヤー</h2>
           <div id="layers"></div>
@@ -1017,13 +1030,6 @@
         <button type="submit" class="chip" value="close" formnovalidate>閉じる</button>
       </form>
     </dialog>
-    <aside id="inspector" class="panel" hidden>
-      <header>
-        <span data-inspector-title aria-live="polite"></span>
-        <button type="button" id="inspector-close" data-inspector-close aria-label="閉じる">×</button>
-      </header>
-      <dl data-inspector-rows></dl>
-    </aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

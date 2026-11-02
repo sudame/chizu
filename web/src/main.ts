@@ -233,6 +233,24 @@ popovers.add(element<HTMLElement>("#finance-toggle"), element<HTMLElement>("#fin
 const toolGroups = [...document.querySelectorAll<HTMLButtonElement>("button[data-menu]")].map(
   (toggle) => ({ toggle, menu: element<HTMLElement>(`#menu-${toggle.dataset.menu}`) }),
 );
+// 道具の 2 段目を開いているあいだは、狭い画面で下の隅の部品が 2 段目に重なるので、CSS で隠す
+const syncMenuOpen = () => {
+  document.body.toggleAttribute(
+    "data-menu-open",
+    toolGroups.some(({ menu }) => !menu.hidden),
+  );
+};
+for (const { menu } of toolGroups) {
+  new MutationObserver(syncMenuOpen).observe(menu, {
+    attributes: true,
+    attributeFilter: ["hidden"],
+  });
+}
+// レイヤーのパネルを開いているあいだも、狭い画面で左下の部品と知らせが重なるので、CSS で隠す
+const layerPanel = element<HTMLElement>("#layer-panel");
+new MutationObserver(() => {
+  document.body.toggleAttribute("data-layers-open", !layerPanel.hidden);
+}).observe(layerPanel, { attributes: true, attributeFilter: ["hidden"] });
 const zoomInButton = element<HTMLButtonElement>("#zoom-in");
 const zoomOutButton = element<HTMLButtonElement>("#zoom-out");
 setupLayerPanel(element<HTMLElement>("#layers"), (active) => {

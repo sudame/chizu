@@ -238,8 +238,8 @@ export class LayerOverlay {
         continue;
       }
       gl.uniform4fv(this.#u.palette, paletteArray(layer.palette));
-      // 下の地図を暗くするのは、最初に重ねるレイヤーだけにする。交通は道路の色で見せるので、暗くしない
-      gl.uniform1f(this.#u.dim, drawn === 0 && layer.code !== TRAFFIC_LAYER ? DIM : 0);
+      // 下の地図を暗くするのは、最初に重ねるレイヤーだけにする
+      gl.uniform1f(this.#u.dim, drawn === 0 ? DIM : 0);
       for (let cy = range.minCy; cy <= range.maxCy; cy++) {
         for (let cx = range.minCx; cx <= range.maxCx; cx++) {
           const entry = chunks.get(chunkKey(cx, cy));
@@ -263,9 +263,6 @@ export class LayerOverlay {
   }
 }
 
-/** 初めに選んでおくレイヤー。街全体を見たときに、流れの詰まりが道路の上に浮かぶようにする。 */
-export const DEFAULT_LAYER: LayerCode = TRAFFIC_LAYER;
-
 function cssColor([r, g, b]: Color): string {
   const channel = (v: number) => Math.round(v * 255);
   return `rgb(${channel(r)} ${channel(g)} ${channel(b)})`;
@@ -273,16 +270,19 @@ function cssColor([r, g, b]: Color): string {
 
 /**
  * レイヤーを選ぶパネルの中身を作る。地図アプリのレイヤーにならい、「なし」と電気、水道、交通のうち 1 つだけを選ぶ。
- * 初めは交通を選んでいて、作ったときにも onChange を呼ぶ。
+ * 初めは「なし」を選んでいる。
  */
 export function setupLayerPanel(
   container: HTMLElement,
   onChange: (active: LayerCode[]) => void,
 ): void {
-  let selected: LayerCode | null = DEFAULT_LAYER;
+  let selected: LayerCode | null = null;
   const entries: [LayerCode | null, string, string | null][] = [
     [null, "なし", null],
-    ...DATA_LAYERS.map((l): [LayerCode, string, string] => [l.code, l.label, cssColor(l.swatch)]),
+    // 並びは、なし、交通、電気、水道
+    ...[...DATA_LAYERS]
+      .sort((a, b) => Number(b.code === TRAFFIC_LAYER) - Number(a.code === TRAFFIC_LAYER))
+      .map((l): [LayerCode, string, string] => [l.code, l.label, cssColor(l.swatch)]),
   ];
   const active = (): LayerCode[] => (selected === null ? [] : [selected]);
   const buttons = entries.map(([code, label, color]) => {
@@ -315,5 +315,4 @@ export function setupLayerPanel(
   };
   container.replaceChildren(...buttons);
   show();
-  onChange(active());
 }
