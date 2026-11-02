@@ -81,8 +81,10 @@ export const TILE_WATER = 1;
 export const TILE_ROAD = 1 << 1;
 /** 区画を塗れる。 */
 export const TILE_ZONABLE = 1 << 2;
-/** 区画の種類（1 住宅、2 商業、3 工業、4 オフィス、なければ 0）を置くビットの位置。 */
+/** 区画の種類（1 住宅、2 商業、3 工業、4 オフィス、なければ 0）を置くビットの位置。3 ビットを使う。 */
 export const TILE_ZONE_SHIFT = 3;
+/** 区画に建った建物がある。施設のマスには立たない。 */
+export const TILE_BUILDING = 1 << 6;
 
 export type ChunkCoordMessage = { cx: number; cy: number };
 export type TileMessage = { x: number; y: number };
