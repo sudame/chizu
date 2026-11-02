@@ -24,6 +24,7 @@ pub const LEGEND: &str = "\
 凡例（重なったときは上のものを出す）
   P W      公共施設（P 発電所、W 浄水場）
   S        信号のある交差点（--layer traffic では混み具合の文字を先に出す）
+  Z        信号のない交差点。高速道路でないどの腕にも横断歩道がある（--layer traffic では混み具合の文字を先に出す）
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
   R C I O  建物（住宅、商業、工業、オフィスの区画に建っている）
   r c i o  建物のない区画（同じ並び）
@@ -70,6 +71,8 @@ struct Cell {
     facility: [u32; 2],
     /// 信号のある交差点があるか。
     signal: bool,
+    /// 横断歩道のある交差点（3 本以上の区間が集まるノード）があるか。
+    crosswalk: bool,
     /// 道路の最大の種類。0 は道路なし。
     road: u8,
     building: [u32; 4],
@@ -107,7 +110,7 @@ fn facility_letter(k: ServiceKind) -> char {
 }
 
 impl Cell {
-    /// 載せる文字。公共施設、信号（交通の層では道路のあと）、道路、建物、区画、水辺、買っていない土地、空きマスの順に選び、
+    /// 載せる文字。公共施設、信号、横断歩道のある交差点（この 2 つは交通の層では道路のあと）、道路、建物、区画、水辺、買っていない土地、空きマスの順に選び、
     /// 同じ種類の中では数の多いものを選ぶ（道路は種類の大きいもの）。
     fn glyph(&self) -> char {
         if let Some(i) = argmax(&self.facility) {
@@ -116,6 +119,9 @@ impl Cell {
         // 交通の層では、道路の混み具合を信号より先に出す。
         if self.signal && self.congestion.is_none() {
             return 'S';
+        }
+        if self.crosswalk && self.congestion.is_none() {
+            return 'Z';
         }
         match self.road {
             0 => {}
@@ -316,10 +322,16 @@ pub fn render(
     }
 
     for (_, n) in world.network().nodes() {
-        if n.control == NodeControl::Signal
-            && let Some(cell) = grid.cell_mut(n.tile())
-        {
-            cell.signal = true;
+        if let Some(cell) = grid.cell_mut(n.tile()) {
+            cell.signal |= n.control == NodeControl::Signal;
+            // 高速道路の腕には横断歩道がないので、ほかの腕がある交差点だけを数える。
+            let roads = n.segments.iter().filter(|s| {
+                world
+                    .network()
+                    .segment(**s)
+                    .is_some_and(|s| s.kind != SegmentKind::Highway)
+            });
+            cell.crosswalk |= n.segments.len() >= 3 && roads.count() > 0;
         }
     }
 
@@ -427,7 +439,7 @@ mod tests {
             .join("../chizu-core/tests/gridlock/city.rec");
         let log = CommandLog::decode(&std::fs::read(path).unwrap()).unwrap();
         let mut world = World::new(0);
-        replay(&mut world, &log, 66 * TICKS_PER_DAY + 3_000);
+        replay(&mut world, &log, 66 * TICKS_PER_DAY + 2_000);
         world
     }
 
@@ -439,21 +451,40 @@ mod tests {
         row.chars().rev().nth(2).unwrap()
     }
 
-    /// 区間は座標で選ぶ。この街を再生した結果は決まっているので、段階ごとのマスが決まった文字になる。
-    /// (59, 70) は詰まった道、(68, 97) は混んだ道、(20, 97) は車のいない道、(41, 500) は高速道路である。
+    /// 混み具合の段階ごとに、その段階の区間の途中のマスを選び、段階の文字になることを見る。
+    /// 区間の途中のマスはノードでなく、ほかの区間も通らない。(41, 500) は高速道路である。
     #[test]
     fn traffic_layer_marks_jammed_and_free_roads() {
         let world = jammed_city();
-        let at = |x: i64, y: i64, layer| glyph_at(&world, TilePos::new(x, y), layer);
-        assert_eq!(at(59, 70, MapLayer::Traffic), 'X');
-        assert_eq!(at(68, 97, MapLayer::Traffic), '#');
-        assert_eq!(at(20, 97, MapLayer::Traffic), '-');
-        assert_eq!(at(41, 500, MapLayer::Traffic), 'H');
+        let at = |t: TilePos, layer| glyph_at(&world, t, layer);
+        let levels = world.road_congestion();
+        let mut seen = Vec::new();
+        let mut jammed = None;
+        for (id, seg) in world.network().segments() {
+            let line = world.network().segment_line(id).unwrap();
+            if line.len < 2 || seg.kind == SegmentKind::Highway {
+                continue;
+            }
+            let level = levels.get(&id).copied().unwrap_or_default();
+            let t = line.tile(1);
+            assert_eq!(at(t, MapLayer::Traffic), congestion_glyph(level), "{t:?}");
+            seen.push(level);
+            if level == Congestion::Jammed {
+                jammed = Some(t);
+            }
+        }
+        // 詰まった道と、車のいない道がある街である。
+        assert!(seen.contains(&Congestion::Free));
+        let jammed = jammed.expect("詰まった道がない");
+        assert_eq!(at(TilePos::new(41, 500), MapLayer::Traffic), 'H');
         // 層を付けなければ、道路の種類のまま
-        assert!(matches!(at(59, 70, MapLayer::Terrain), '1'..='3'));
+        assert!(matches!(at(jammed, MapLayer::Terrain), '1'..='3'));
         let text = render(
             &world,
-            TileRect::from_corners(TilePos::new(57, 70), TilePos::new(61, 70)),
+            TileRect::from_corners(
+                TilePos::new(jammed.x - 2, jammed.y),
+                TilePos::new(jammed.x + 2, jammed.y),
+            ),
             1,
             MapLayer::Traffic,
         )

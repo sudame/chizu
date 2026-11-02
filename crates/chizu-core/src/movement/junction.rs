@@ -42,6 +42,8 @@
 //! 入口は少し進めた所、出口は少し戻した所に置く。2 つの動きの弦の端が円の上で互い違いに
 //! 並べば、道筋が交わる。
 //!
+//! 入ってくる腕か出ていく腕の横断歩道を人が渡っている候補は、止まりきれない車を除いて止める（`crossing`）。
+//!
 //! 信号（`signal`）のある交差点では、先に黄と赤の腕から来た候補を、止まりきれない車を除いて
 //! ノードの手前で止め、残りの候補をこの順で決める。止めた候補は動きを置かないので、青の腕の車を
 //! 待たせない。信号で止めたあいだも、待った tick 数に数える。交差点の中で止まった車をすり抜ける
@@ -54,7 +56,9 @@ use serde::{Deserialize, Serialize};
 
 use super::signal::{self, Light};
 use crate::command::{NodeId, RoadKind};
-use crate::network::{LaneId, LinkId, Network, SegmentKind};
+use std::collections::BTreeSet;
+
+use crate::network::{LaneId, LinkId, Network, SegmentId, SegmentKind};
 use crate::units::Tick;
 
 /// この tick 数より長く待った車は、道路の格に関わらず先に入れる。
@@ -186,11 +190,13 @@ pub(super) struct Held {
 }
 
 /// 交差点ごとに候補を優先の順に見て、tick `now` にノードの手前で止める候補を決める。
+/// `walks` は人のいる横断歩道（交差点と腕の区間）で、入ってくる腕か出ていく腕の横断歩道に人がいる候補は止める。
 pub(super) fn holds(
     net: &Network,
     mut cands: Vec<Approach>,
     mut inside: Vec<Inside>,
     now: Tick,
+    walks: &BTreeSet<(NodeId, SegmentId)>,
 ) -> Held {
     let mut passed = 0_u64;
     cands.sort_unstable_by_key(|c| (c.node, c.id));
@@ -218,10 +224,16 @@ pub(super) fn holds(
                 !stop
             });
         }
+        // 入ってくる腕か出ていく腕の横断歩道に人がいる。
+        let peds = |c: &Approach| {
+            !walks.is_empty()
+                && (walks.contains(&(node, c.from.segment))
+                    || walks.contains(&(node, c.to.segment)))
+        };
         if group.len() <= 1 && lo == hi {
-            // ほかに車がいなければ、先の車線の空きだけで決まる。
+            // ほかに車がいなければ、先の車線の空きと横断歩道の人だけで決まる。
             if let Some((c, _)) = group.first()
-                && !(c.committed || c.room)
+                && !(c.committed || (c.room && !peds(c)))
             {
                 held.push(c.id);
             }
@@ -251,7 +263,7 @@ pub(super) fn holds(
                     .any(|(m, _)| m.conflicts(mv))
             };
             // 待ちすぎた車は、交差点の中で止まった車の脇をすり抜けて入る。
-            let free = c.room && !blocked(c.waited >= GIVE_UP);
+            let free = c.room && !blocked(c.waited >= GIVE_UP) && !peds(c);
             if !(c.committed || free) {
                 held.push(c.id);
             } else if !c.committed && blocked(false) {

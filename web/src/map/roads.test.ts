@@ -14,6 +14,7 @@ import {
   signalLampCenter,
   unsuppliedCount,
   VERTEX_FLOATS,
+  zebra,
 } from "./roads.ts";
 
 describe("建物", () => {
@@ -131,8 +132,8 @@ describe("車線ごとの道路", () => {
     // (4, 0) に 3 本が集まる
     const segments = new Float64Array([0, 0, 4, 0, 1, 4, 0, 8, 0, 1, 4, 0, 4, 4, 1]);
     const g = roadLaneGeometry(segments, nodesOf([0, 0], [4, 0], [8, 0], [4, 4]));
-    // 行き止まりの埋め 3、車道 3、歩道 6、ノードの四角 4、中央線 3
-    expect(g.vertexCount).toBe(6 * (3 + 3 + 6 + 4 + 3));
+    // 行き止まりの埋め 3、車道 3、歩道 6、ノードの四角 4、中央線 3、交差点の 3 つの腕の横断歩道の縞 3 本ずつ
+    expect(g.vertexCount).toBe(6 * (3 + 3 + 6 + 4 + 3 + 3 * 3));
     // 区間 (0,0)-(4,0) の中央線は、終点側が交差点の半分の幅（0.3）だけ手前で終わる
     expect(at(g, 16, 2).x).toBeCloseTo(4.5 - 0.3);
   });
@@ -210,5 +211,20 @@ describe("信号", () => {
     // 1 本めの灯火（7 番めの頂点から）は青、2 本めは赤
     expect(colorAt(6)).toEqual(Array.from(new Float32Array(SIGNAL_COLOR[0] ?? [])));
     expect(colorAt(18)).toEqual(Array.from(new Float32Array(SIGNAL_COLOR[2] ?? [])));
+  });
+});
+
+describe("横断歩道", () => {
+  test("交差点の四角の外に、車道の幅に縞を並べる", () => {
+    const g = new Geometry({ x: 0, y: 0 });
+    zebra(g, { x: 0, y: 0 }, { dx: 1, dy: 0 }, 0.3, 0.2);
+    // 車道の幅 0.4 マスに、0.14 マスおきの縞が 2 本
+    expect(g.vertexCount).toBe(2 * 6);
+    const data = g.build();
+    for (let v = 0; v < g.vertexCount; v++) {
+      const x = data[v * VERTEX_FLOATS] ?? 0;
+      expect(x).toBeGreaterThanOrEqual(0.5 + 0.3 - 1e-6);
+      expect(x).toBeLessThanOrEqual(0.5 + 0.3 + 0.16 + 1e-6);
+    }
   });
 });
