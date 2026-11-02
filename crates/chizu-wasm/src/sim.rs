@@ -4,7 +4,6 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use chizu_core::building::demand;
-use chizu_core::movement::signal;
 use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
 use chizu_core::world::economy::{chunk_slots, milestone_population};
@@ -254,17 +253,17 @@ impl Sim {
 
     /// 信号の腕を、1 本につき `[ノードの x, ノードの y, 腕の向きの x, 腕の向きの y, 灯火]` の 5 つの数で返す。
     /// 腕の向きはノードから出ていく 1 歩で、灯火は `Light` の値（0 が青、1 が黄、2 が赤）である。
-    /// 灯火は、次に進める tick の段階を表す。ノードの ID、区間の ID の順に並べる。
+    /// 灯火は、直前に進めた tick に効いた段階を表す。ノードの ID、区間の ID の順に並べる。
     pub fn signal_lights(&self) -> Vec<f64> {
-        let (net, now) = (self.world.network(), self.world.tick());
-        let demand = self.world.trips().signal_demand(net);
+        let net = self.world.network();
+        let lights = self.world.trips().lights();
         let mut out = Vec::new();
         for (id, node) in net.nodes() {
             if node.control != NodeControl::Signal {
                 continue;
             }
             let t = node.tile();
-            for ((dx, dy), light) in signal::arm_lights(net, id, now, &demand) {
+            for ((dx, dy), light) in lights.arm_lights(net, id) {
                 out.extend([t.x, t.y, dx, dy].map(|v| v as f64));
                 out.push(f64::from(light as u8));
             }

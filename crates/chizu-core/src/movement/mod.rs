@@ -345,6 +345,8 @@ pub struct Trips {
     rescues: junction::Rescues,
     /// 直前の `step` と `reroute` で消えた移動の結果。状態ハッシュには入れない。
     finished: BTreeMap<TripId, Finished>,
+    /// 直前の `step` の信号を決めた様子。画面に灯火を出すために控える。状態ハッシュには入れない。
+    lights: signal::Lights,
 }
 
 /// 網を変える前に控えた、主体ごとのリンクの中の車線の番号と描いていたずれ。[`Trips::note_before_change`] で作る。
@@ -551,10 +553,9 @@ impl Trips {
         self.rescues
     }
 
-    /// 信号の灯火を決める、いまの交差点の様子。次の `step` はこの様子で信号を決めるので、
-    /// [`signal::state`] にいまの tick と一緒に渡すと、次の tick に効く灯火になる。
-    pub fn signal_demand(&self, net: &Network) -> signal::Demand {
-        car::signal_demand(&self.rows, net)
+    /// 直前の `step` で信号の灯火を決めた tick と様子。画面とテストは、ここから効いた灯火を求める。
+    pub fn lights(&self) -> &signal::Lights {
+        &self.lights
     }
 
     /// 直前の `step` と `reroute` で消えた移動 `id` の結果。
@@ -734,6 +735,10 @@ impl Trips {
             &occupied,
             &gate.signals,
         ));
+        self.lights = signal::Lights {
+            now,
+            demand: gate.signals,
+        };
         arrived.sort_unstable();
         arrived
     }

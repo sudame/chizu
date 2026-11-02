@@ -14,17 +14,21 @@
 //!   次へ渡すので、`GREEN` は青の上限になる。
 //! - ただし、ほかの軸の腕の横断歩道を渡ろうと待つ人がいれば、段階の軸の青を渡さない。その人は、
 //!   段階の軸が青のあいだに渡る番だからである。
-//! - 青を段階の軸へ戻すときに、渡していた軸に止まりきれない車がいれば、その tick はその軸を黄にする。
-//!   黄と赤の段階でも、段階の軸に止まりきれない車がいれば黄のままにする。どの車も赤では入らない。
+//! - 止まりきれない車のいる軸は、どの段階でも、その tick は黄にする。青をほかの軸へ移すのは、
+//!   ほかの軸に止まりきれない車がいなくなってからにする。どの車も赤では入らない。止まりきれない車が
+//!   2 つの軸にいれば、どちらも黄になり、どちらの車も入る（止まりきれない車は譲り合いでも止めない）。
 //!
-//! 様子は、tick を進める前の車と歩く人の位置だけから作る。信号は状態を持たず、同じ状態からは
+//! 様子は、その tick に車と歩く人を動かす直前の位置だけから作る。信号は状態を持たず、同じ状態からは
 //! どこで計算しても同じ灯火になる。車も人もいなければ、固定の周期のとおりに回る。
+//! 画面に出す灯火は、移動の主体の表が控えた、直前の tick に効いた様子（[`Lights`]）から求める。
 //!
 //! 車は、青の腕からだけ交差点に入る。黄と赤の腕の車は、減速の上限の内で止まれるなら停止線
 //! （ノードの手前）で止まり、止まれないならそのまま入る。CS2 と同じく、黄は「止まれるなら止まる」の
 //! 合図である。青の腕どうしのあいだは、信号のない交差点と同じ譲り合いの規則で決める（`junction`）。
 
 use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
 
 use crate::command::NodeId;
 use crate::network::{Network, NodeControl};
@@ -56,7 +60,7 @@ pub enum Light {
 }
 
 /// 信号のある交差点の、軸ごとの様子。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AxisDemand {
     /// その軸の腕に、交差点の手前まで来た車がいる。
     pub cars: bool,
@@ -67,7 +71,7 @@ pub struct AxisDemand {
 }
 
 /// tick を進める前の、信号のある交差点ごとの軸の様子。状態には持たず、tick ごとに作り直す。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Demand(BTreeMap<NodeId, [AxisDemand; 4]>);
 
 impl Demand {
@@ -103,13 +107,31 @@ fn arm_step(net: &Network, node: NodeId, segment: crate::network::SegmentId) -> 
     })
 }
 
+/// 直前に進めた tick と、その tick の信号を決めた様子。灯火を画面に出すために控える。
+/// 読み取り用で、次の tick の動きには効かないので、状態ハッシュには入れない。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Lights {
+    pub now: Tick,
+    pub demand: Demand,
+}
+
+impl Lights {
+    /// 交差点 `node` の、直前の tick に効いた信号の段階。
+    pub fn state(&self, net: &Network, node: NodeId) -> Option<SignalState> {
+        state(net, node, self.now, &self.demand)
+    }
+
+    /// 交差点 `node` の腕ごとの、直前の tick に効いた灯火（[`arm_lights`]）。
+    pub fn arm_lights(&self, net: &Network, node: NodeId) -> Vec<((i64, i64), Light)> {
+        arm_lights(net, node, self.now, &self.demand)
+    }
+}
+
 /// ある tick の信号の段階。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SignalState {
-    /// いま灯火を受ける軸。
-    pub axis: u8,
-    /// その軸への灯火。ほかの軸はすべて赤である。
-    pub light: Light,
+    /// 軸ごとの灯火。交差点にない軸は赤である。
+    pub lights: [Light; 4],
     /// 1 つの腕が 1 周期のうちに青でない tick 数の上限。
     pub red_ticks: u32,
     /// 骨組みの周期で、いまの段階に入ってからの tick 数。
@@ -119,17 +141,15 @@ pub struct SignalState {
 impl SignalState {
     /// 軸 `axis` の腕から入る車への灯火。
     pub fn light_for(&self, axis: u8) -> Light {
-        if axis == self.axis {
-            self.light
-        } else {
-            Light::Red
-        }
+        self.lights[usize::from(axis)]
     }
 
     /// 軸 `axis` の腕の横断歩道を、歩く人が渡り始めてよいか。その腕の車が赤で、ほかの軸が青のあいだ、
     /// 骨組みの段階の青が終わる [`WALK_CLEAR`] tick 前までである。
     pub fn walk(&self, axis: u8) -> bool {
-        axis != self.axis && self.light == Light::Green && self.elapsed + WALK_CLEAR < GREEN
+        self.light_for(axis) == Light::Red
+            && self.lights.contains(&Light::Green)
+            && self.elapsed + WALK_CLEAR < GREEN
     }
 }
 
@@ -166,45 +186,41 @@ pub fn state(net: &Network, node: NodeId, now: Tick, demand: &Demand) -> Option<
     } else {
         Light::Red
     };
-    let (axis, light) = actuate(&order, phase, fixed, &demand.at(node));
     Some(SignalState {
-        axis,
-        light,
+        lights: actuate(&order, phase, fixed, &demand.at(node)),
         red_ticks: u32::try_from(cycle - GREEN).expect("赤の長さが u32 に収まらない"),
         elapsed: within,
     })
 }
 
-/// 骨組みの段階の軸 `order[phase]` と灯火 `fixed` から、交差点の様子 `d` に応じて、灯火を受ける軸と灯火を決める。
-fn actuate(order: &[u8], phase: usize, fixed: Light, d: &[AxisDemand; 4]) -> (u8, Light) {
+/// 骨組みの段階の軸 `order[phase]` と灯火 `fixed` から、交差点の様子 `d` に応じて、軸ごとの灯火を決める。
+fn actuate(order: &[u8], phase: usize, fixed: Light, d: &[AxisDemand; 4]) -> [Light; 4] {
     let own = order[phase];
     let at = |a: u8| d[usize::from(a)];
     // 車の来ている、次の順の軸。
     let next = (1..order.len())
         .map(|j| order[(phase + j) % order.len()])
         .find(|a| at(*a).cars);
-    if fixed != Light::Green {
-        // 黄と赤の段階では、止まりきれない車のいる軸だけを黄で通し、それ以外は次の軸へ早めに渡す。
-        if at(own).committed {
-            return (own, Light::Yellow);
+    // 止まりきれない車を考えずに決めた、灯火を受ける軸と灯火。
+    let (lit, light) = if fixed != Light::Green {
+        // 黄と赤の段階では、車の来ている次の軸へ早めに渡す。
+        next.map_or((own, fixed), |b| (b, Light::Green))
+    } else if at(own).cars || order.iter().any(|a| *a != own && at(*a).walkers) {
+        (own, Light::Green)
+    } else {
+        (next.unwrap_or(own), Light::Green)
+    };
+    let mut lights = [Light::Red; 4];
+    for &a in order {
+        if at(a).committed {
+            lights[usize::from(a)] = Light::Yellow;
         }
-        return next.map_or((own, fixed), |b| (b, Light::Green));
     }
-    let wanted = at(own).cars || order.iter().any(|a| *a != own && at(*a).walkers);
-    if !wanted {
-        return next.map_or((own, Light::Green), |b| (b, Light::Green));
+    // ほかの軸に止まりきれない車がいるあいだは、灯火を受ける軸を赤（止まりきれない車がいれば黄）のままにする。
+    if !order.iter().any(|a| *a != lit && at(*a).committed) && light != Light::Red {
+        lights[usize::from(lit)] = light;
     }
-    // 渡していた軸に止まりきれない車がいれば、抜けるまで黄にする。段階の軸にも止まりきれない車が
-    // いれば、段階の軸を青のままにする。
-    if !at(own).committed
-        && let Some(b) = order
-            .iter()
-            .copied()
-            .find(|a| *a != own && at(*a).committed)
-    {
-        return (b, Light::Yellow);
-    }
-    (own, Light::Green)
+    lights
 }
 
 /// ノード `node` の腕ごとの、tick `now` の灯火。`demand` は tick `now` を進める前の様子である。

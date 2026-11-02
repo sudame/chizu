@@ -235,10 +235,10 @@ fn walkers_obey_the_signal() {
     for _ in 0..1_500 {
         let before = t.occupied();
         let now = t.now;
-        let demand = t.trips.signal_demand(&t.net);
         t.step(node);
         // この tick に渡り始めた横断歩道は、渡ってよい灯火だった。
-        let st = signal::state(&t.net, node, now, &demand).unwrap();
+        assert_eq!(t.trips.lights().now, now);
+        let st = t.trips.lights().state(&t.net, node).unwrap();
         for (_, arm) in t.occupied().into_iter().filter(|o| !before.contains(o)) {
             let axis = signal::axis(t.net.segment_line(arm).unwrap().step);
             assert!(st.walk(axis), "渡ってはいけない灯火で渡り始めた {now:?}");
