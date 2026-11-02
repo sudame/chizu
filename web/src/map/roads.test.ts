@@ -4,8 +4,10 @@ import {
   asphaltHalfWidth,
   buildingColor,
   buildingGeometry,
+  crosswalkArms,
   FACILITY_COLOR,
   Geometry,
+  headingBit,
   MARKING_FULL_ZOOM,
   MARKING_ZOOM,
   MIN_PX,
@@ -116,7 +118,7 @@ describe("Geometry", () => {
   test("縮小したときの道路は、マスいっぱいの歩道の帯の上に車道の帯を重ね、ノードも同じ順に埋める", () => {
     const g = roadGeometry(
       new Float64Array([0, 0, 4, 0, 1]),
-      new Float64Array([0, 0, 1, 0, 4, 0, 1, 0]),
+      new Float64Array([0, 0, 1, 0, 0, 4, 0, 1, 0, 0]),
     );
     // 歩道の帯 1、ノードの歩道の四角 2、車道の帯 1、ノードの車道の四角 2
     expect(g.vertexCount).toBe(6 * 6);
@@ -130,7 +132,7 @@ describe("Geometry", () => {
     const minOf = (kind: number) =>
       roadGeometry(
         new Float64Array([0, 0, 4, 0, kind]),
-        new Float64Array([0, 0, 1, 0, 4, 0, 1, 0]),
+        new Float64Array([0, 0, 1, 0, 0, 4, 0, 1, 0, 0]),
       ).build()[18 * VERTEX_FLOATS + 5] ?? 0;
     const mins = [1, 2, 3, HIGHWAY_CODE].map(minOf);
     expect(mins).toEqual([...mins].sort((a, b) => a - b));
@@ -167,7 +169,7 @@ describe("道路の見た目", () => {
 
 describe("車線ごとの道路", () => {
   const nodesOf = (...tiles: [number, number][]) =>
-    new Float64Array(tiles.flatMap(([x, y]) => [x, y, 1, 0]));
+    new Float64Array(tiles.flatMap(([x, y]) => [x, y, 1, 0, 0]));
   // 6 頂点ごとの塊の、i 番めの頂点の x と y
   const at = (g: Geometry, block: number, vertex: number) => {
     const data = g.build();
@@ -320,18 +322,53 @@ describe("横断歩道", () => {
 
   test("縞は路面の線と同じく、拡大したときだけ描く", () => {
     const segments = new Float64Array([0, 0, 4, 0, 1, 4, 0, 8, 0, 1, 4, 0, 4, 4, 1]);
-    const nodes = new Float64Array([0, 0, 1, 0, 4, 0, 1, 0, 8, 0, 1, 0, 4, 4, 1, 0]);
+    const nodes = new Float64Array([0, 0, 1, 0, 0, 4, 0, 1, 0, 0, 8, 0, 1, 0, 0, 4, 4, 1, 0, 0]);
     // 車線ごとの道路には縞を入れず、路面の線の頂点に入れる
     expect(roadLaneGeometry(segments, nodes).vertexCount).toBe(6 * (4 + 6 + 6 + 1 + 9 + 3 + 4));
     const last = roadMarkingGeometry(segments, nodes).build();
     const v = last.length / VERTEX_FLOATS - 1;
     expect(last[v * VERTEX_FLOATS + 5]).toBe(THIN_PX);
   });
+
+  // (4, 0) に西、東、南の 3 本が集まる
+  const tee = new Float64Array([0, 0, 4, 0, 1, 4, 0, 8, 0, 1, 4, 0, 4, 4, 1]);
+  const teeNodes = (mask: number) =>
+    new Float64Array([0, 0, 1, 0, 0, 4, 0, 3, 0, mask, 8, 0, 1, 0, 0, 4, 4, 1, 0, 0]);
+  // 南の腕（Heading の S は 2）
+  const SOUTH = 1 << 2;
+
+  test("横断歩道を外した腕には縞を描かない", () => {
+    const all = roadMarkingGeometry(tee, teeNodes(0)).vertexCount;
+    const without = roadMarkingGeometry(tee, teeNodes(SOUTH)).vertexCount;
+    // 小さい道路の縞は 3 本
+    expect(all - without).toBe(3 * 6);
+  });
+
+  test("腕の向きのビットは chizu-core の Heading の順に並ぶ", () => {
+    expect(headingBit({ dx: 1, dy: 0 })).toBe(1);
+    expect(headingBit({ dx: Math.SQRT1_2, dy: Math.SQRT1_2 })).toBe(2);
+    expect(headingBit({ dx: 0, dy: 1 })).toBe(SOUTH);
+    expect(headingBit({ dx: 0, dy: -1 })).toBe(1 << 6);
+    expect(headingBit({ dx: Math.SQRT1_2, dy: -Math.SQRT1_2 })).toBe(1 << 7);
+  });
+
+  test("横断歩道を置ける腕を、外したかと縞の真ん中とともに並べる", () => {
+    const arms = crosswalkArms(tee, teeNodes(SOUTH));
+    expect(arms.map((a) => [a.x, a.y, a.dx, a.dy, a.removed])).toEqual([
+      [4, 0, -1, 0, false],
+      [4, 0, 1, 0, false],
+      [4, 0, 0, 1, true],
+    ]);
+    const south = arms[2];
+    expect(south?.cx).toBeCloseTo(4.5);
+    expect(south?.cy).toBeGreaterThan(0.5 + 0.3);
+    expect(south?.cy).toBeLessThan(0.5 + 0.3 + 0.16);
+  });
 });
 
 describe("斜めの道路", () => {
   const segments = new Float64Array([0, 0, 4, 4, 3]);
-  const nodes = new Float64Array([0, 0, 1, 0, 4, 4, 1, 0]);
+  const nodes = new Float64Array([0, 0, 1, 0, 0, 4, 4, 1, 0, 0]);
   // 頂点を広げたあとの位置（マス）
   const corners = (g: Geometry) => {
     const d = g.build();

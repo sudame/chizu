@@ -23,8 +23,9 @@ const HIGHWAY: u8 = 4;
 pub const LEGEND: &str = "\
 凡例（重なったときは上のものを出す）
   P W      公共施設（P 発電所、W 浄水場）
-  S        信号のある交差点（--layer traffic では混み具合の文字を先に出す）
-  Z        信号のない交差点。高速道路でないどの腕にも横断歩道がある（--layer traffic では混み具合の文字を先に出す）
+  S s      信号のある交差点（s は横断歩道を外した腕がある。--layer traffic では混み具合の文字を先に出す）
+  Z Y      信号のない交差点。Z は高速道路でないどの腕にも横断歩道があり、Y は横断歩道を外した腕がある
+           （--layer traffic では混み具合の文字を先に出す）
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
   * ^ %    電気か水が届いていない建物（* 電気だけ、^ 水だけ、% 両方。R C I O の代わりに出す）
   R C I O  建物（住宅、商業、工業、オフィスの区画に建っている。電気も水も届いている）
@@ -74,6 +75,8 @@ struct Cell {
     signal: bool,
     /// 横断歩道のある交差点（3 本以上の区間が集まるノード）があるか。
     crosswalk: bool,
+    /// 横断歩道を外した腕のある交差点があるか。
+    removed: bool,
     /// 道路の最大の種類。0 は道路なし。
     road: u8,
     building: [u32; 4],
@@ -123,10 +126,10 @@ impl Cell {
         }
         // 交通の層では、道路の混み具合を信号より先に出す。
         if self.signal && self.congestion.is_none() {
-            return 'S';
+            return if self.removed { 's' } else { 'S' };
         }
         if self.crosswalk && self.congestion.is_none() {
-            return 'Z';
+            return if self.removed { 'Y' } else { 'Z' };
         }
         match self.road {
             0 => {}
@@ -346,7 +349,9 @@ pub fn render(
                     .segment(**s)
                     .is_some_and(|s| s.kind != SegmentKind::Highway)
             });
-            cell.crosswalk |= n.segments.len() >= 3 && roads.count() > 0;
+            let junction = n.segments.len() >= 3 && roads.count() > 0;
+            cell.crosswalk |= junction;
+            cell.removed |= junction && n.no_crosswalk != 0;
         }
     }
 

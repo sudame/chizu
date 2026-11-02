@@ -38,13 +38,16 @@
 //! | 7 | `SetTaxRate` | zone `u8`、permille `u16` |
 //! | 8 | `SetSimSpeed` | 倍率 `u16` |
 //! | 9 | `UpgradeRoad` | from `TilePos`、to `TilePos`、kind `u8` |
+//! | 10 | `SetCrosswalk` | index `u32`、generation `u16`、arm `u8`（`Heading` の値）、on `u8`（0 か 1） |
 //!
 //! 形式を変えるときは版を上げる。種類の番号は使い回さない。種類を足すだけなら、古い記録はそのまま
 //! 読めるので版は上げない。
 
 use core::fmt;
 
-use crate::command::{Command, InvalidCommand, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
+use crate::command::{
+    Command, Heading, InvalidCommand, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind,
+};
 use crate::tile::{ChunkCoord, TilePos, TileRect};
 use crate::units::Tick;
 use crate::world::{ApplyOutcome, DenyReason, World};
@@ -428,6 +431,13 @@ fn encode_command(w: &mut Writer, c: &Command) {
             w.tile(to);
             w.u8(kind as u8);
         }
+        Command::SetCrosswalk { node, arm, on } => {
+            w.u8(10);
+            w.u32(node.index);
+            w.u16(node.generation);
+            w.u8(arm as u8);
+            w.u8(u8::from(on));
+        }
     }
 }
 
@@ -479,6 +489,16 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
             to: r.tile()?,
             kind: r.code("RoadKind", RoadKind::from_code)?,
         },
+        10 => {
+            let node = NodeId {
+                index: r.u32()?,
+                generation: r.u16()?,
+            };
+            let arm = r.code("Heading", Heading::from_code)?;
+            let on = r.u8()?;
+            let on = r.check(on <= 1, "SetCrosswalk の on", on == 1)?;
+            Command::SetCrosswalk { node, arm, on }
+        }
         other => return Err(DecodeError::UnknownCommand(other)),
     };
     Ok(c)
@@ -581,6 +601,14 @@ mod tests {
                 from: TilePos::new(-3, 4),
                 to: TilePos::new(5, -4),
                 kind: RoadKind::Large,
+            },
+            Command::SetCrosswalk {
+                node: NodeId {
+                    index: 42,
+                    generation: 2,
+                },
+                arm: Heading::NE,
+                on: false,
             },
         ]
     }
@@ -689,9 +717,19 @@ mod tests {
         rect.extend_from_slice(&0_i64.to_le_bytes());
         assert!(invalid_command(&rect));
         assert_eq!(
-            CommandLog::decode(&single(0, 0, &[10])),
-            Err(DecodeError::UnknownCommand(10))
+            CommandLog::decode(&single(0, 0, &[11])),
+            Err(DecodeError::UnknownCommand(11))
         );
+        // 腕の向きは 0〜7、on は 0 か 1 だけを読む。
+        let crosswalk = |arm: u8, on: u8| {
+            let mut c = vec![10];
+            c.extend_from_slice(&[0; 6]);
+            c.extend_from_slice(&[arm, on]);
+            c
+        };
+        assert!(CommandLog::decode(&single(0, 0, &crosswalk(7, 1))).is_ok());
+        assert!(invalid(&crosswalk(8, 0)));
+        assert!(invalid(&crosswalk(0, 2)));
     }
 
     #[test]
@@ -895,10 +933,10 @@ mod tests {
                 applied: 6,
                 not_implemented: 0,
                 rejected: 0,
-                denied: 4,
+                denied: 5,
                 denied_by: {
                     let mut by = [0; DenyReason::ALL.len()];
-                    by[DenyReason::NotJunction.index()] = 1;
+                    by[DenyReason::NotJunction.index()] = 2;
                     by[DenyReason::NoRoadAccess.index()] = 1;
                     by[DenyReason::NothingToBulldoze.index()] = 1;
                     by[DenyReason::NotAdjacent.index()] = 1;
@@ -989,6 +1027,13 @@ mod tests {
                     to: TilePos::new(x.saturating_add(sx * n), y.saturating_add(sy * n)),
                     kind: RoadKind::from_code(k).unwrap(),
                 }),
+            (any::<u32>(), any::<u16>(), 0_u8..8, any::<bool>()).prop_map(
+                |(index, generation, arm, on)| Command::SetCrosswalk {
+                    node: NodeId { index, generation },
+                    arm: Heading::from_code(arm).unwrap(),
+                    on,
+                }
+            ),
         ]
     }
 

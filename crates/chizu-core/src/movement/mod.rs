@@ -286,17 +286,24 @@ impl Trip {
     }
 
     /// 歩く人が、いまのリンクの終わりのノードから次のリンクへ移るときの、次のリンクでの歩道の側と、
-    /// 渡る腕。次のリンクが経路の最後なら、行き先の建物の側へ出る。
+    /// 渡る腕。次のリンクが経路の最後なら、行き先の建物の側へ出る。そうでなければ、その次の交差点で
+    /// 横断歩道を外した腕を越えずに済む側を選ぶ。
     fn departure(&self, net: &Network) -> (bool, crossing::Arms) {
         let link = self.link();
         let next = self.route.links[self.leg as usize + 1];
-        let need = (self.leg as usize + 2 == self.route.links.len()).then_some(self.walk.far_end);
+        let len = self.route.links.len();
+        let need = (self.leg as usize + 2 == len).then_some(self.walk.far_end);
+        let then = self.route.links.get(self.leg as usize + 2).map(|l| {
+            let need = (self.leg as usize + 3 == len).then_some(self.walk.far_end);
+            (*l, need)
+        });
         crossing::depart(
             net,
             car::end_node(net, link),
             (link, self.walk.far),
             next,
             need,
+            then,
         )
     }
 

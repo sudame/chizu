@@ -6,11 +6,13 @@ import {
   buyChunkCommand,
   chooseRotation,
   clampArea,
+  crosswalkCommand,
   MAX_ROAD_TILES,
   MAX_ZONE_SIDE,
   paintZoneCommand,
   parseRoadCostTable,
   parseServiceTable,
+  pickCrosswalk,
   placeServiceCommand,
   roadCost,
   screenToTile,
@@ -225,6 +227,39 @@ describe("施設", () => {
       atX: -3,
       atY: 4,
       rotation: 2,
+    });
+  });
+});
+
+describe("横断歩道の道具", () => {
+  const arm = (x: number, removed: boolean) => ({
+    x,
+    y: 0,
+    dx: 0,
+    dy: 1,
+    removed,
+    cx: x + 0.5,
+    cy: 0.95,
+  });
+  const arms = [arm(0, false), arm(1, true), arm(5, false)];
+
+  test("外す道具は横断歩道のある腕を、戻す道具は外した腕を、近いものから選ぶ", () => {
+    expect(pickCrosswalk(arms, { x: 0.6, y: 1 }, false)).toBe(arms[0]);
+    expect(pickCrosswalk(arms, { x: 0.9, y: 1 }, false)).toBe(arms[0]);
+    expect(pickCrosswalk(arms, { x: 1.2, y: 1 }, true)).toBe(arms[1]);
+    expect(pickCrosswalk(arms, { x: 0.5, y: 1 }, true)).toBeNull();
+    // 縞から離れたところでは選ばない
+    expect(pickCrosswalk(arms, { x: 3, y: 1 }, false)).toBeNull();
+  });
+
+  test("交差点のマスと腕の向きを送る", () => {
+    expect(crosswalkCommand({ ...arm(3, false), dx: -1, dy: 1 }, false)).toEqual({
+      kind: "SetCrosswalk",
+      x: 3,
+      y: 0,
+      dx: -1,
+      dy: 1,
+      on: false,
     });
   });
 });

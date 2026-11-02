@@ -47,7 +47,12 @@ export type CommandMessage =
   | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear">; permille: number }
   | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number }
   /** マス (x, y) の交差点に信号を置くか（on が true）、外す。chizu-wasm がマスのノードを引く。 */
-  | { kind: "SetSignal"; x: number; y: number; on: boolean };
+  | { kind: "SetSignal"; x: number; y: number; on: boolean }
+  /**
+   * マス (x, y) の交差点の、(dx, dy) の向きの腕の横断歩道を戻すか（on が true）、外す。
+   * 向きは交差点から出ていく 1 歩で、chizu-wasm がマスのノードと腕の向きを引く。
+   */
+  | { kind: "SetCrosswalk"; x: number; y: number; dx: number; dy: number; on: boolean };
 
 /** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
 export type Outcome = "Applied" | "Denied" | "Rejected" | "NotImplemented";
@@ -62,7 +67,7 @@ export const SUPPLY_WATER = 2;
 /** 施設 1 つの数の個数。chizu-wasm の facilities と同じ。 */
 export const FACILITY_STRIDE = 5;
 /** ノード 1 つの数の個数。chizu-wasm の road_nodes と同じ。 */
-export const NODE_STRIDE = 4;
+export const NODE_STRIDE = 5;
 /** 信号の腕 1 本の数の個数。chizu-wasm の signal_lights と同じ。 */
 export const SIGNAL_STRIDE = 5;
 

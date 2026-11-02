@@ -498,7 +498,8 @@ const edgeColorOf = (node: RoadNode): Color => (node.sidewalk ? SIDEWALK_COLOR :
 
 type RoadNet = {
   ends: RoadNodes;
-  nodeList: { x: number; y: number; node: RoadNode }[];
+  /** `noCrosswalk` は横断歩道を外した腕の向きのビット（chizu-wasm の road_nodes の 5 つめ）である。 */
+  nodeList: { x: number; y: number; node: RoadNode; noCrosswalk: number }[];
   /** 区間ごとの両端と種類。 */
   each: (fn: (a: Tile, b: Tile, kind: number, index: number) => void) => void;
 };
@@ -508,9 +509,10 @@ function roadNet(segments: Float64Array, nodes: Float64Array): RoadNet {
   const nodeList: RoadNet["nodeList"] = [];
   for (let i = 0; i + NODE_STRIDE <= nodes.length; i += NODE_STRIDE) {
     const [x = 0, y = 0] = nodes.subarray(i, i + 2);
+    const noCrosswalk = nodes[i + 4] ?? 0;
     const node = ends.get(nodeKey(x, y));
     if (node !== undefined) {
-      nodeList.push({ x, y, node });
+      nodeList.push({ x, y, node, noCrosswalk });
     }
   }
   const each: RoadNet["each"] = (fn) => {
@@ -718,14 +720,14 @@ export function roadMarkingGeometry(segments: Float64Array, nodes: Float64Array)
       geometry.strip(a, b, strip.offset, strip.half, color, THIN_PX, trimA, trimB);
     }
   });
-  // 交差点の腕ごとに、交差点の手前の車道を横切る横断歩道の縞を描く。高速道路の腕には横断歩道がない
-  for (const { x, y, node } of nodeList) {
+  // 交差点の腕ごとに、交差点の手前の車道を横切る横断歩道の縞を描く。高速道路の腕と、横断歩道を外した腕には描かない
+  for (const { x, y, node, noCrosswalk } of nodeList) {
     if (node.arms.length < 3) {
       continue;
     }
     for (const arm of node.arms) {
       const kind = segments[arm.segment * SEGMENT_STRIDE + 4] ?? 0;
-      if (kind !== HIGHWAY_CODE) {
+      if (kind !== HIGHWAY_CODE && (noCrosswalk & headingBit(arm)) === 0) {
         const diagonal = arm.dx !== 0 && arm.dy !== 0;
         const carriage = carriagewayHalfWidth(kind);
         const width = diagonal ? Math.min(carriage, DIAGONAL_ASPHALT_HALF) : carriage;
@@ -734,6 +736,72 @@ export function roadMarkingGeometry(segments: Float64Array, nodes: Float64Array)
     }
   }
   return geometry;
+}
+
+// 腕の向きの並び。chizu-core の Heading の値の順（東から南回り）で、マスの y は下へ増える
+const HEADINGS = [
+  [1, 0],
+  [1, 1],
+  [0, 1],
+  [-1, 1],
+  [-1, 0],
+  [-1, -1],
+  [0, -1],
+  [1, -1],
+] as const;
+
+/** 腕の向きの、chizu-wasm の road_nodes の横断歩道を外した腕の数でのビット。8 方向でなければ 0。 */
+export function headingBit(arm: { dx: number; dy: number }): number {
+  const sx = Math.sign(Math.round(arm.dx * 2));
+  const sy = Math.sign(Math.round(arm.dy * 2));
+  const i = HEADINGS.findIndex(([x, y]) => x === sx && y === sy);
+  return i < 0 ? 0 : 1 << i;
+}
+
+/**
+ * 交差点の、横断歩道を置ける腕。`x`、`y` は交差点のマス、`dx`、`dy` は交差点から出ていく 1 歩、
+ * `removed` は横断歩道を外してあるか、`cx`、`cy` は縞の真ん中のワールド座標（マスの単位）である。
+ */
+export type CrosswalkArm = {
+  x: number;
+  y: number;
+  dx: number;
+  dy: number;
+  removed: boolean;
+  cx: number;
+  cy: number;
+};
+
+/** 3 本以上が集まる交差点の、高速道路でない腕を、横断歩道を外したかと縞の真ん中の位置とともに並べる。 */
+export function crosswalkArms(segments: Float64Array, nodes: Float64Array): CrosswalkArm[] {
+  const { nodeList } = roadNet(segments, nodes);
+  const out: CrosswalkArm[] = [];
+  for (const { x, y, node, noCrosswalk } of nodeList) {
+    if (node.arms.length < 3) {
+      continue;
+    }
+    for (const arm of node.arms) {
+      const kind = segments[arm.segment * SEGMENT_STRIDE + 4] ?? 0;
+      if (kind === HIGHWAY_CODE) {
+        continue;
+      }
+      const diagonal = arm.dx !== 0 && arm.dy !== 0;
+      const along = (diagonal ? node.half * Math.SQRT2 : node.half) + ZEBRA_LENGTH / 2;
+      const len = Math.hypot(Math.sign(arm.dx), Math.sign(arm.dy));
+      const dx = Math.sign(arm.dx);
+      const dy = Math.sign(arm.dy);
+      out.push({
+        x,
+        y,
+        dx,
+        dy,
+        removed: (noCrosswalk & headingBit(arm)) !== 0,
+        cx: x + 0.5 + (dx / len) * along,
+        cy: y + 0.5 + (dy / len) * along,
+      });
+    }
+  }
+  return out;
 }
 
 export const ZEBRA_COLOR: Color = [0.95, 0.95, 0.95, 0.9];

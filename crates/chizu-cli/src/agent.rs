@@ -19,8 +19,8 @@ use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
-    DayTraffic, DenyReason, GameTime, Line, MigrationOutlook, NodeControl, ServiceKind, TilePos,
-    TileRect, Traffic, World, ZoneKind, replay,
+    DayTraffic, DenyReason, GameTime, Heading, Line, MigrationOutlook, NodeControl, ServiceKind,
+    TilePos, TileRect, Traffic, World, ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -69,10 +69,14 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  交差点の、高速道路でないどの腕にも自動で置かれ、人が渡っているあいだ、その腕から入る車と出る車は止まる。
                  区間の途中を横切る人の手前でも車は止まる。歩く人は、近くの横断歩道までの遠回りが 100m より
                  短ければ横切らない。信号のある交差点では、歩く人も信号に従う。
+                 横断歩道は SetCrosswalk で腕ごとに外せる。外した腕は渡らずに交差点のまわりを回り、
+                 どちらに回っても越えるときだけ、横断歩道があるときと同じく車を止めて渡る。
   traffic.trips  通勤や買い物の移動。inProgress 移動中の数（歩くのも含む）。today と yesterday は
                  ゲーム内の日ごとの結果で、arrived 着いた数、abandoned 道路が変わるなどして途中で着けなくなった数、
                  noRoute 出発のときに経路がなく始められなかった数、avgTravelTicks と avgTravelMinutes 着いた移動の平均の移動時間
                  （1 tick は 12 秒）。着いた移動がなければ null。yesterday は始まって 1 日たつまでは null。
+                 walkingTicks その日の tick ごとの歩いている人の数の合計（人・tick。通勤に限らない）、
+                 walkingMinutesPerArrived それを着いた移動の数で割った分。横断歩道を外して遠回りが増えると増える。
   migration      転入。wantingHouseholds 移住の処理（60 tick ごと）1 回で外から来ようとする世帯の数、
                  vacantHomes 外の世界と道路でつながった住宅の空き戸数、homelessHouseholds と homelessCitizens 家がなく空き家を待つ世帯と住民、
                  blockedHouseholds 来ようとしても空き家が足りず入れない世帯の数。
@@ -90,11 +94,14 @@ observe の signals:
   信号のある交差点ごとに、at マス、node ノードの ID、arms 腕ごとの toward（交差点から出ていく 1 歩の向き）と
   light（Green、Yellow、Red。次の tick に効く灯火）。
 
+observe の removedCrosswalks:
+  横断歩道を外した腕のある交差点ごとに、at マス、node ノードの ID、arms 外した腕の向き（SetCrosswalk の arm と同じ名前）。
+
 地図（map）:
   observe と同じく何も書かず、フィードバックのディレクトリにも打てる。角 (x0,y0)〜(x1,y1) は両端を含み、順番は問わない。
   1 文字が 1 マスで、先頭に凡例、上に x、行頭に y の目盛りが付く。座標は act のコマンドと同じである。
   --scale N を付けると、N×N マスを 1 文字にまとめる（既定は 1）。まとめた文字は、
-  公共施設、信号のある交差点、信号のない交差点、道路、建物、区画、水辺、買っていない土地、空きマスの順で、
+  公共施設、信号のある交差点（S s）、信号のない交差点（Z Y）、道路、建物、区画、水辺、買っていない土地、空きマスの順で、
   最初に当てはまるものにする。ただし --layer traffic では、道路の混み具合を交差点の文字より先に出す。
   建物は、電気か水が届いていないものが 1 つでもあれば * ^ % にする（まとめた文字では、セルの中の建物のうち 1 つでも届いていなければ印が付く）。
   どの網の電気や水が足りないかは observe の utilities の shortAt を見て、その at を map で眺める。
@@ -143,6 +150,17 @@ observe の signals:
       マスにノードがなければ Invalid、交差点でなければ Denied（NotJunction）、変わらなければ Denied（SignalUnchanged）。
       信号は交差点の腕を向き（東西、南北、2 つの斜め）ごとにまとめ、順に青 20 tick、黄 3 tick、全方向の赤 2 tick にする。
       黄と赤の腕の車は、止まれるかぎり交差点の手前で止まる。いまの灯火は observe の signals にある。
+  {"type":"SetCrosswalk","at":[x,y],"arm":"E"|"SE"|"S"|"SW"|"W"|"NW"|"N"|"NE","on":true|false}
+      マス at の交差点の、向き arm の腕の横断歩道を外す（on が false）か、戻す（on が true）。費用はかからない。
+      arm は交差点から出ていく 1 歩の向きで、E は x+1、S は y+1、W は x-1、N は y-1、SE は x+1 と y+1 である。
+      at の代わりに "node":{"index":n,"generation":g} でノードを指してもよい（記録に入るのはこの形）。
+      マスにノードがなければ Invalid、交差点でなければ Denied（NotJunction）、その向きに高速道路でない腕がなければ
+      Denied（NoCrosswalkArm）、変わらなければ Denied（CrosswalkUnchanged）。
+      外した腕では、歩く人のために車が止まらなくなる。歩く人はその腕を渡らずに交差点のまわりを回るので、遠回りになる。
+      どちらに回っても越えるとき（向かい合う 2 本の腕を外して、その間を抜けるときなど）だけ、横断歩道があるときと
+      同じく車を止めて渡る。経路を選ぶときは、そうして越える腕 1 本ごとに 100m 歩くぶんの時間を足すので、ほかの交差点を
+      回る遠回りがそれより短ければ、その交差点を避ける。外した腕は、区間を分けても種類を変えても外したまま残り、
+      腕を取り壊すと印も消える。外した腕は observe の removedCrosswalks と、map の Y と s で分かる。
   {"type":"BuyChunk","chunk":[cx,cy]}
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
   {"type":"SetTaxRate","zone":"Residential"|...,"permille":0..300}
@@ -411,7 +429,7 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
         .map(|(i, value)| {
             let kind = value.get("type").cloned().unwrap_or(Value::Null);
             let invalid = |message: String| json!({"index": i, "type": kind, "outcome": "Invalid", "message": message});
-            let value = match command_json::resolve_signal_at(value, |t| world.network().node_at(t)) {
+            let value = match command_json::resolve_node_at(value, |t| world.network().node_at(t)) {
                 Ok(v) => v,
                 Err(e) => return invalid(e),
             };
@@ -583,16 +601,22 @@ fn day_traffic(d: Option<DayTraffic>) -> Value {
         abandoned,
         no_route,
         travel_ticks,
+        walking_ticks,
     } = d;
-    let avg = (arrived > 0).then(|| travel_ticks as f64 / arrived as f64);
+    let per_arrived = |ticks: u64| (arrived > 0).then(|| ticks as f64 / arrived as f64);
+    let avg = per_arrived(travel_ticks);
+    let walk = per_arrived(walking_ticks);
+    // 1 tick は 12 秒である。
+    let minutes = |t: Option<f64>| t.map(|t| (t * 12.0 / 60.0 * 10.0).round() / 10.0);
     json!({
         "day": day + 1,
         "arrived": arrived,
         "abandoned": abandoned,
         "noRoute": no_route,
         "avgTravelTicks": avg.map(|t| (t * 10.0).round() / 10.0),
-        // 1 tick は 12 秒である。
-        "avgTravelMinutes": avg.map(|t| (t * 12.0 / 60.0 * 10.0).round() / 10.0),
+        "avgTravelMinutes": minutes(avg),
+        "walkingTicks": walking_ticks,
+        "walkingMinutesPerArrived": minutes(walk),
     })
 }
 
@@ -835,7 +859,31 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "outward": [highway.step.0, highway.step.1],
         },
         "signals": signals(world),
+        "removedCrosswalks": removed_crosswalks(world),
     })
+}
+
+/// 横断歩道を外した腕のある交差点と、外した腕の向き。
+fn removed_crosswalks(world: &World) -> Value {
+    let net = world.network();
+    let out = net
+        .nodes()
+        .filter(|(_, n)| n.no_crosswalk != 0)
+        .map(|(id, n)| {
+            let t = n.tile();
+            let arms: Vec<Value> = Heading::ALL
+                .into_iter()
+                .filter(|h| n.crosswalk_removed(*h))
+                .map(|h| json!(format!("{h:?}")))
+                .collect();
+            json!({
+                "at": [t.x, t.y],
+                "node": {"index": id.index, "generation": id.generation},
+                "arms": arms,
+            })
+        })
+        .collect();
+    Value::Array(out)
 }
 
 /// 信号のある交差点と、腕ごとのいまの灯火。
