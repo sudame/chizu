@@ -11,6 +11,8 @@ import {
   SHORE_COLOR,
   UNOWNED_COLOR,
   UNOWNED_HATCH_COLOR,
+  UNOWNED_SHORE_COLOR,
+  UNOWNED_WATER_COLOR,
   WATER_COLOR,
 } from "./palette.ts";
 import {
@@ -41,6 +43,8 @@ function roadSurfaces(): number[][] {
     UNOWNED_HATCH_COLOR,
     WATER_COLOR,
     SHORE_COLOR,
+    UNOWNED_WATER_COLOR,
+    UNOWNED_SHORE_COLOR,
     SIDEWALK_COLOR,
     SIDEWALK_EDGE_COLOR,
     PLANTING_COLOR,
