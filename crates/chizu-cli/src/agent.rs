@@ -35,6 +35,12 @@ act と advance は、記録を再生したハッシュが state.json の stateH
 <commands.json> に - を渡すと標準入力から読む。中身はコマンドの配列か、コマンド 1 つである。
 map のほかのサブコマンドは、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
 
+observe の utilities（power と water）:
+  capacity と demand 道路網をまたいだ供給量と需要の合計、headroom その差（負なら足りない）、
+  headroomPermille 供給量に対する余りの千分率（供給量 0 なら null）、lowHeadroom 余りが 0 以上 1 割未満（画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）。
+  shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at
+  （網の中で需要が最も大きい建物の道路に面したマス）。at を map で見れば、どの網かが分かる。
+
 observe の人と車の欄（原因が交通にあるかを見分けるためのもの）:
   citizenPlaces  住民のいまの居場所ごとの人数。atHome 家、atWork 職場か学校、atShop 帰りに寄った店、
                  walking 歩いて移動中（車を降りて歩く区切りを含む）、driving 車で移動中、homeless 家のない世帯の住民。
@@ -505,14 +511,35 @@ fn observe(world: &World, before: &CarSample) -> Value {
     let count = |f: &dyn Fn(&Building) -> bool| buildings.iter().filter(|(_, b)| f(b)).count();
     let balance = supply_balance(world.network(), world.facilities(), buildings);
     let utility = |slot: usize| {
-        let (mut capacity, mut need, mut short, mut bare) = (0, 0, 0, 0);
-        for c in &balance.components {
+        let (mut capacity, mut need, mut bare) = (0_u64, 0_u64, 0_u64);
+        let mut short = Vec::new();
+        for (i, c) in balance.components.iter().enumerate() {
             capacity += c[slot].capacity;
             need += c[slot].demand;
-            short += u64::from(c[slot].demand > 0 && !c[slot].enough());
             bare += u64::from(c[slot].demand > 0 && c[slot].capacity == 0);
+            if c[slot].demand > 0 && !c[slot].enough() {
+                let at = balance.spots[i].map(|p| json!([p.x, p.y]));
+                short.push(json!({
+                    "capacity": c[slot].capacity,
+                    "demand": c[slot].demand,
+                    "at": at,
+                }));
+            }
         }
-        json!({"capacity": capacity, "demand": need, "shortNetworks": short, "networksWithoutFacility": bare})
+        // 余りは供給量から需要を引いた値で、負なら足りない。割合は供給量に対する千分率で、
+        // 供給量が 0 なら null。余りが 1 割を切ったら lowHeadroom を立てる（画面の知らせと同じ基準）。
+        let headroom = i128::from(capacity) - i128::from(need);
+        let permille = (capacity > 0).then(|| headroom * 1000 / i128::from(capacity));
+        json!({
+            "capacity": capacity,
+            "demand": need,
+            "headroom": headroom,
+            "headroomPermille": permille,
+            "lowHeadroom": need > 0 && headroom >= 0 && permille.is_some_and(|p| p < 100),
+            "shortNetworks": short.len(),
+            "networksWithoutFacility": bare,
+            "shortAt": short,
+        })
     };
     let growth = world.growth_blocks();
     let facilities = by_service(|k| world.facilities().iter().filter(|f| f.kind == k).count());
