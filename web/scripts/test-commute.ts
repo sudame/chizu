@@ -14,6 +14,7 @@ import { chromium } from "playwright-core";
 import { preview } from "vite";
 // 移動体の画素は、車か歩く人の色のどれかに近い。道路の色は、どの移動体の色からも離してある
 import { moverColorAt } from "../src/map/mover-colors.ts";
+import { zoomInTo } from "./ui.ts";
 
 const TIMEOUT_MS = 30_000;
 // chizu-core の clock.rs と world/people.rs の値
@@ -133,7 +134,8 @@ try {
     `${WHEN}の記録を読み込むと、chizu-cli と同じ状態ハッシュになる（${stateHash}）`,
   );
 
-  // 歩く人と車が描かれるまで待ち、止めてから画素を読む
+  // 歩く人と車は寄りの段でだけ描くので、濃さがそろう倍率まで寄る。描かれるまで待ち、止めてから画素を読む
+  await zoomInTo(page, 16);
   await page.waitForFunction(
     (both) => {
       const d = document.querySelector<HTMLElement>("#map")?.dataset;
@@ -150,7 +152,8 @@ try {
     .waitFor({ timeout: TIMEOUT_MS });
   await page.waitForTimeout(200);
   const map = page.locator("#map");
-  const d = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  const dataset = () => map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  let d = await dataset();
   const size = page.viewportSize() ?? { width: 1280, height: 720 };
   const zoom = Number(d.zoom);
   const screenOf = (at: string) => {
@@ -159,6 +162,30 @@ try {
       x: size.width / 2 + ((x ?? 0) - Number(d.cameraX)) * zoom,
       y: size.height / 2 + ((y ?? 0) - Number(d.cameraY)) * zoom,
     };
+  };
+  const onScreen = (p: { x: number; y: number }) =>
+    p.x >= 10 && p.y >= 10 && p.x <= size.width - 10 && p.y <= size.height - 10;
+  // 寄ると画面に入る範囲が狭いので、移動体が画面の外にいれば、中のボタンで地図を引きずって真ん中へ寄せる。
+  // 引きずると Worker に頼む範囲が変わり、最初の移動体が入れ替わることがあるので、読み直してから確かめる
+  const bringIntoView = async (key: "firstWalker" | "firstCar") => {
+    for (let i = 0; i < 10; i++) {
+      d = await dataset();
+      const at = d[key] ?? "";
+      if (at === "" || onScreen(screenOf(at))) {
+        return at;
+      }
+      const p = screenOf(at);
+      const limitX = size.width / 2 - 20;
+      const limitY = size.height / 2 - 20;
+      const dx = Math.max(-limitX, Math.min(limitX, size.width / 2 - p.x));
+      const dy = Math.max(-limitY, Math.min(limitY, size.height / 2 - p.y));
+      await page.mouse.move(size.width / 2, size.height / 2);
+      await page.mouse.down({ button: "middle" });
+      await page.mouse.move(size.width / 2 + dx, size.height / 2 + dy, { steps: 4 });
+      await page.mouse.up({ button: "middle" });
+      await page.waitForTimeout(300);
+    }
+    return (await dataset())[key] ?? "";
   };
   const pixel = (p: { x: number; y: number }) =>
     map.evaluate((el, q) => {
@@ -174,7 +201,7 @@ try {
     ["firstWalker", "歩く人"],
     ["firstCar", "車"],
   ] as const) {
-    const at = d[key] ?? "";
+    const at = await bringIntoView(key);
     if (!NEED_BOTH && at === "") {
       continue;
     }

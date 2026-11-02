@@ -8,17 +8,11 @@ import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { SIDEWALK_WIDTH } from "./lanes.ts";
 import { CAR_COLORS, WALKER_COLOR } from "./mover-colors.ts";
 import { MoverInterpolator } from "./mover-interpolation.ts";
+import { showsMovers, stageWeights } from "./stages.ts";
 
 /** 種類の番号。chizu-wasm の movers::KIND_WALK などと同じ。 */
 export const KIND_WALK = 1;
 export const KIND_CAR = 2;
-
-/** これより縮小したら（1 マスがこのピクセル数より小さいと）移動体を描かず、Worker にも求めない。 */
-export const MIN_MOVER_ZOOM = 2;
-
-export function showsMovers(zoom: number): boolean {
-  return zoom >= MIN_MOVER_ZOOM;
-}
 
 const glslVec3 = ([r, g, b]: readonly number[]) => `vec3(${r}, ${g}, ${b})`;
 
@@ -70,6 +64,7 @@ in vec2 v_corner;
 in vec2 v_half_px;
 flat in uint v_kind;
 flat in vec3 v_color;
+uniform float u_alpha;
 out vec4 color;
 void main() {
   if (v_kind == ${KIND_CAR}u) {
@@ -80,7 +75,7 @@ void main() {
     } else if (v_half_px.x >= 4.0 && v_corner.x > 0.25 && v_corner.x < 0.6) {
       c = mix(c, vec3(1.0), 0.55);
     }
-    color = vec4(c, 1.0);
+    color = vec4(c, u_alpha);
     return;
   }
   float r = length(v_corner);
@@ -88,7 +83,7 @@ void main() {
     discard;
   }
   bool rim = v_half_px.x >= 2.0 && (1.0 - r) * v_half_px.x < 1.0;
-  color = vec4(rim ? vec3(1.0) : v_color, 1.0);
+  color = vec4(rim ? vec3(1.0) : v_color, u_alpha);
 }`;
 
 export class MoverLayer {
@@ -96,7 +91,7 @@ export class MoverLayer {
   readonly #program: WebGLProgram;
   readonly #vao: WebGLVertexArrayObject;
   readonly #instances: WebGLBuffer;
-  readonly #u: Record<"offset" | "zoom" | "viewport", WebGLUniformLocation | null>;
+  readonly #u: Record<"offset" | "zoom" | "viewport" | "alpha", WebGLUniformLocation | null>;
   // WebGL に SharedArrayBuffer を直に渡せないブラウザがあるので、枠の中身をここに写してから送る
   readonly #copy = new Uint32Array(layout.maxMovers * layout.moverWords);
   readonly #floats = new Float32Array(this.#copy.buffer);
@@ -117,6 +112,7 @@ export class MoverLayer {
       offset: gl.getUniformLocation(program, "u_offset"),
       zoom: gl.getUniformLocation(program, "u_zoom"),
       viewport: gl.getUniformLocation(program, "u_viewport"),
+      alpha: gl.getUniformLocation(program, "u_alpha"),
     };
     this.#vao = gl.createVertexArray();
     gl.bindVertexArray(this.#vao);
@@ -146,7 +142,8 @@ export class MoverLayer {
   }
 
   /**
-   * 枠の移動体を描き、描いた数を返す。縮小しすぎているときは描かない。
+   * 枠の移動体を描き、描いた数を返す。寄りの段より引いているときは描かない。
+   * 寄りの段に入るあいだ（stages.ts の MOVER_BAND）は、薄く出す。
    * 位置は前の tick と今の tick のあいだを、時刻 `now`（ミリ秒）に合わせて補間する。
    */
   draw(
@@ -194,6 +191,7 @@ export class MoverLayer {
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.#copy, 0, used);
     gl.useProgram(this.#program);
     gl.uniform1f(this.#u.zoom, camera.zoom);
+    gl.uniform1f(this.#u.alpha, stageWeights(camera.zoom).movers);
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     gl.uniform2f(
       this.#u.offset,
@@ -201,7 +199,8 @@ export class MoverLayer {
       (header.baseCy * CHUNK_SIDE - camera.y) * camera.zoom,
     );
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // 色だけを重ね、フレームバッファのアルファは 1 のまま保つ（キャンバスがページの背景と混ざって白く飛ばないように）
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
     gl.bindVertexArray(this.#vao);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);
     gl.bindVertexArray(null);
@@ -210,7 +209,7 @@ export class MoverLayer {
   }
 }
 
-/** 移動体を求めるマスの範囲。見えているチャンクの範囲をマスに直す。縮小しすぎているときは null。 */
+/** 移動体を求めるマスの範囲。見えているチャンクの範囲をマスに直す。寄りの段より引いているときは null。 */
 export function moverArea(range: ChunkRange, zoom: number): MoverArea | null {
   if (!showsMovers(zoom)) {
     return null;

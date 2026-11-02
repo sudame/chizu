@@ -15,7 +15,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright-core";
 import { preview } from "vite";
-import { chooseLayer, pickSpeed, pickTool } from "./ui.ts";
+import { stageWeights } from "../src/map/stages.ts";
+import { chooseLayer, pickSpeed, pickTool, zoomInTo } from "./ui.ts";
 
 const TIMEOUT_MS = 30_000;
 const MIN_THREADS = 2;
@@ -28,6 +29,18 @@ const INITIAL_MONEY = 500_000;
 // web/src/map/camera.ts の値
 // 買った土地の地面の色（docs/map-style.md の色の表）
 const GROUND_HEX = "#f4f2ec";
+
+/** 色の表の 2 つの値（`#rrggbb`）を、b を t の割合で重ねた色にする。 */
+function mixHex(a: string, b: string, t: number): string {
+  const ch = (code: string, at: number) => Number.parseInt(code.slice(at, at + 2), 16);
+  return `#${[1, 3, 5]
+    .map((at) =>
+      Math.round(ch(a, at) * (1 - t) + ch(b, at) * t)
+        .toString(16)
+        .padStart(2, "0"),
+    )
+    .join("")}`;
+}
 // 地面に買える土地の仮の表示（#1a73e8 の 10%）が重なった色
 const GROUND_ON_HINT_HEX = "#dee5ec";
 const MIN_ZOOM = 1;
@@ -76,6 +89,23 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
   const hud = page.locator("#hud");
   await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  // 選んだ主題図はブラウザに覚えさせ、読み直しても同じ主題図になる
+  const activeTheme = () => page.locator("#layers").getAttribute("data-active");
+  check((await activeTheme()) === "traffic", "初めて開いたときは、主題図に交通を選んでいる");
+  for (const theme of ["water", "demand", "none", "traffic"]) {
+    await chooseLayer(page, theme);
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+    check(
+      (await activeTheme()) === theme &&
+        (await page
+          .locator(`#layers button[data-layer="${theme}"]`)
+          .getAttribute("aria-pressed")) === "true" &&
+        (await page.locator("#theme-legend").isVisible()) === (theme !== "none"),
+      `主題図に ${theme} を選ぶと覚えられ、読み直しても ${theme} のまま（${await activeTheme()}）`,
+    );
+  }
   const details = page.locator("#hud-details");
   const toggle = page.locator("#hud-toggle");
   const finance = page.locator("#finance");
@@ -238,6 +268,7 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
           "#finance",
           "#inspector",
           "#layer-panel",
+          "#theme-legend",
           "#notices",
           "#feedback-open",
           "#toolstack",
@@ -270,6 +301,59 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   await page.close();
 }
 
+// 地図のラベル。起動した直後の画面には高速道路が入らないので、引きの段（倍率 4 未満で、戻る側は 3.5 未満）
+// まで引いてから、高速道路の名前が、地図の上に重ねたラベルの canvas に緑の盾で出ることを確かめる
+async function checkLabels(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  const labels = page.locator("#labels");
+  const zoom = async () => Number(await page.locator("#map").getAttribute("data-zoom"));
+  for (let i = 0; i < 10 && (await zoom()) >= 3; i++) {
+    const before = await zoom();
+    await page.locator("#zoom-out").click();
+    await page.waitForFunction(
+      (z) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) < z,
+      before,
+    );
+  }
+  await labels.and(page.locator("[data-label-stage='0']")).waitFor({
+    state: "attached",
+    timeout: TIMEOUT_MS,
+  });
+  check(true, `引きの段まで引く（倍率 ${(await zoom()).toFixed(2)}）`);
+  // 高速道路は開始地点から下へ延び、画面の下の道具の帯に隠れるので、地図を上へ引きずって画面の真ん中に出す
+  await page.mouse.move(640, 560);
+  await page.mouse.down({ button: "middle" });
+  await page.mouse.move(640, 160, { steps: 8 });
+  await page.mouse.up({ button: "middle" });
+  await page.waitForFunction(
+    () =>
+      (document.querySelector<HTMLElement>("#labels")?.dataset.labels ?? "").includes("自動車道"),
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  // ラベルは 200ms かけて現れる
+  await page.waitForTimeout(400);
+  // 盾の緑（#1e7b4a）の画素を数える
+  const shield = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLCanvasElement>("#labels");
+    const ctx = canvas?.getContext("2d");
+    if (canvas === null || canvas === undefined || ctx === null || ctx === undefined) return 0;
+    const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    const near = (i: number, v: number) => Math.abs((data[i] ?? 0) - v) <= 6;
+    let n = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] === 255 && near(i, 0x1e) && near(i + 1, 0x7b) && near(i + 2, 0x4a)) n++;
+    }
+    return n;
+  });
+  check(
+    shield > 20,
+    `高速道路の名前が緑の盾で描かれる（${await labels.getAttribute("data-labels")}、緑の画素 ${shield}）`,
+  );
+  await page.close();
+}
+
 // 開発用の道具で歩く人を出し、描かれること、時間を進めると動くこと、着くと消えることを確かめる。
 // 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その左寄りと右寄りのマスのあいだに出す
 async function checkDevWalks(page: Page, at: string): Promise<void> {
@@ -297,6 +381,8 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   };
   // 外部接続の高速道路が届いてから、引く前の区間の数を読む
   await waitMap("roadSegments", "0", "gt");
+  // 歩く人は寄りの段でだけ描くので、濃さがそろう倍率まで寄ってから引く
+  await zoomInTo(page, 16);
   const size = page.viewportSize() ?? { width: 1280, height: 720 };
   const d0 = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
   const zoom = Number(d0.zoom);
@@ -349,7 +435,9 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   check(true, `時間を進めると移動体の位置が変わる（${spawned.firstMover} → ${moved}）`);
   // 補間そのものは Vitest（mover-interpolation.test.ts）で確かめる。ここでは、画面に補間が効いていることだけを見る。
   // tick が変わらない続きの 2 枠のあいだで位置が変わっていれば、tick に頼らず補間で動いている。
-  // 枠の回数や間隔には頼らず、見つかるまで待つ。CI が重くても、いずれ同じ tick の枠が続く
+  // 枠の回数や間隔には頼らず、見つかるまで待つ。寄りの段は描画が重く、CI では 1 枠のあいだに tick が
+  // 進みきって同じ tick の枠が続かないことがあるので、0.25 倍に落として 1 tick を長くしてから見る
+  await setSpeed(0.25);
   const interpolated = await page.evaluate(
     (timeoutMs) =>
       new Promise<boolean>((resolve) => {
@@ -433,8 +521,17 @@ try {
   const hud = page.locator("#hud");
   await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
   check(
-    (await page.locator("#layers").getAttribute("data-active")) === "",
-    "レイヤーは初めに「なし」を選んでいる",
+    (await page.locator("#layers").getAttribute("data-active")) === "traffic" &&
+      (await page.locator("#theme-legend").isVisible()) &&
+      (await page.locator("#theme-legend").getAttribute("data-theme")) === "traffic",
+    "主題図は初めに「交通」を選び、レイヤーのボタンの左に交通の凡例が出る",
+  );
+  // 地図の色の確かめは主題図を重ねずに行う。交通の主題図はあとで確かめる
+  await chooseLayer(page, "none");
+  await page.keyboard.press("Escape");
+  check(
+    !(await page.locator("#theme-legend").isVisible()),
+    "「なし」を選ぶと、主題図の凡例は消える",
   );
   const tick = async () => Number(await hud.getAttribute("data-tick"));
   const ticksIn = async (ms: number) => {
@@ -537,8 +634,10 @@ try {
       },
       { x, y },
     );
-  // 画素の色（0〜255）が、色の表の値（`#rrggbb`）に近いか
+  // 画素の色（0〜255）が、色の表の値（`#rrggbb`）に近いか。キャンバスのアルファが 1 を切ると、
+  // ページの背景と混ざって白く飛ぶので、アルファが 255 のままであることも確かめる
   const near = (c: number[], code: string, tolerance = 6) =>
+    c[3] === 255 &&
     [1, 3, 5].every(
       (at, i) => Math.abs((c[i] ?? 0) - Number.parseInt(code.slice(at, at + 2), 16)) <= tolerance,
     );
@@ -561,7 +660,6 @@ try {
     initialSegments > 0,
     `起動すると、外部接続の高速道路のある道路網が届く（${initialSegments} 本）`,
   );
-
   // 道路を引く道具で、画面の中心の行に横の道路を引く
   const message = page.locator("#tool-message");
   const outcomeCount = async () => Number((await message.getAttribute("data-count")) ?? 0);
@@ -638,8 +736,10 @@ try {
   // カーソルのある道路には始点の印が重なるので、道路から離れたところへ動かしてから色を読む
   await page.mouse.move(cx, cy - 120, { steps: 2 });
   await page.waitForTimeout(100);
-  // 小さい道路は白の塗り、地面は淡い地面の色（#f4f2ec）で、白とは青の強さで見分けられる
-  const isRoad = (c: number[]) => near(c, "#ffffff", 4);
+  // 小さい道路は白の塗り、地面は淡い地面の色（#f4f2ec）で、白とは青の強さで見分けられる。
+  // 引きの段では、小さい道路の色を地面の色に寄せて薄くする（stages.ts）。区間の途中もノードも同じ色になる
+  const minorRoadHex = mixHex(GROUND_HEX, "#ffffff", stageWeights(zoom).minorRoad);
+  const isRoad = (c: number[]) => near(c, minorRoadHex, 3);
   const isGround = (c: number[]) => near(c, GROUND_HEX, 4);
   const colorAt = async (x: number, y: number) => {
     const p = tileCenter(x, y);
@@ -943,10 +1043,43 @@ try {
     { timeout: TIMEOUT_MS },
   );
   const commercial = await colorOfTile(45, 34);
+  // 引きと標準のあいだでは、区画の地面に街区の面（空き）を重ねる
+  const blocks = stageWeights(view.zoom).blocks;
   check(
-    near(commercial, "#eaf0f8", 4),
+    near(commercial, mixHex("#eaf0f8", "#dde6f3", blocks), 4),
     `塗ったマスが商業の淡い青の地面で描かれる（${commercial.join(", ")}）`,
   );
+  // 需要の主題図では、建物のない区画を、その種類の需要の高さで、白から区画の縁の色へ寄せて濃く塗る
+  {
+    const away = tilePoint(45, 45);
+    await page.mouse.move(away.x, away.y);
+    await chooseLayer(page, "demand");
+    // 区画の道具を選んだままにするので、Esc ではなくボタンでパネルを閉じる
+    await page.locator("#layers-open").click();
+    const expected = async () => {
+      const raw = Number(await page.locator("#demand .bar").nth(1).getAttribute("data-demand"));
+      const level = Math.min(Math.max(raw / 100, 0), 1);
+      return mixHex("#ffffff", "#91a9d4", 0.15 + 0.85 * level);
+    };
+    let painted = await colorOfTile(45, 34);
+    let want = await expected();
+    for (let i = 0; i < 50 && !near(painted, want, 3); i++) {
+      await page.waitForTimeout(100);
+      painted = await colorOfTile(45, 34);
+      want = await expected();
+    }
+    // 塗る前の区画の地面とは見分けられる
+    const differs = Math.abs((painted[0] ?? 0) - (commercial[0] ?? 0)) > 4;
+    check(
+      near(painted, want, 3) &&
+        differs &&
+        (await page.locator("#theme-legend").getAttribute("data-theme")) === "demand" &&
+        (await page.locator("#theme-legend li").count()) === 4,
+      `需要の主題図では、建物のない商業の区画を需要の高さの濃さで塗り、凡例に 4 種類の棒が並ぶ（${painted.join(", ")}、期待 ${want}、塗る前 ${commercial.join(", ")}）`,
+    );
+    await chooseLayer(page, "none");
+    await page.locator("#layers-open").click();
+  }
   const farZone = await (async () => {
     const before = await outcomeCount();
     const a = tilePoint(45, 45);
@@ -998,8 +1131,14 @@ try {
     cx + (bx + 0.5 - view.x) * view.zoom,
     cy + (by + 0.8 - view.y) * view.zoom,
   );
+  // 引きと標準のあいだでは、街区の面（建物）の上に、建物のまとまりを薄く重ねる
+  const houseHex = mixHex(
+    mixHex("#eef4e6", "#cde0b9", stageWeights(view.zoom).blocks),
+    "#d3e3c0",
+    stageWeights(view.zoom).clusters,
+  );
   check(
-    near(house, "#d3e3c0", 4),
+    near(house, houseHex, 4),
     `建物が住宅の緑の色で描かれる（マス (${bx}, ${by})、${house.join(", ")}）`,
   );
   const residentialDemand = await page.locator("#demand .bar").first().getAttribute("data-demand");
@@ -1115,8 +1254,10 @@ try {
   // 電気のデータレイヤーに切り替えると、建物が届いているかどうかの色で塗られる
   const layerPixel = () =>
     pixel(cx + (bx + 0.5 - view.x) * view.zoom, cy + (by + 0.8 - view.y) * view.zoom);
-  const isRed = (c: number[]) => (c[0] ?? 0) > 180 && (c[1] ?? 0) < 100 && (c[2] ?? 0) < 100;
-  const isGreen = (c: number[]) => (c[1] ?? 0) > (c[0] ?? 0) + 80 && (c[1] ?? 0) > 150;
+  // 主題図の色（docs/map-style.md の色の表）。値のあるマスは不透明に塗るので、色はほぼそのまま出る。
+  // 届いていない建物は #f28b82 に #d93025 の斜線
+  const isRed = (c: number[]) => near(c, "#f28b82", 12) || near(c, "#d93025", 12);
+  const isGreen = (c: number[]) => near(c, "#81c995", 12);
   const waitColor = async (test: (c: number[]) => boolean) => {
     const until = Date.now() + TIMEOUT_MS;
     let c = await layerPixel();
@@ -1126,10 +1267,10 @@ try {
     }
     return c;
   };
-  await chooseLayer(page, "1");
+  await chooseLayer(page, "power");
   const layerOff = await waitColor(isRed);
   check(
-    isRed(layerOff) && (await page.locator("#layers").getAttribute("data-active")) === "1",
+    isRed(layerOff) && (await page.locator("#layers").getAttribute("data-active")) === "power",
     `電気のレイヤーでは、届いていない建物が赤で塗られる（${layerOff.join(", ")}）`,
   );
   // 道路を (52, 32) から (60, 32) へ延ばし、その下に発電所と浄水場を置く
@@ -1199,54 +1340,151 @@ try {
   );
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
-  // 発電所は電気のレイヤーで黄に塗る。水道を選ぶと電気は外れ（一度に 1 つだけ）、発電所の黄が消える
+  // 電気の主題図では地図を白で薄めるが、発電所は薄めずにそのまま（橙）出す。
+  // 水道を選ぶと電気は外れ（一度に 1 つだけ）、発電所は白で薄まる
   const plantPixel = () => {
     const p = tilePoint(54, 34);
     return pixel(p.x, p.y);
   };
+  const isPlainPlant = (c: number[]) =>
+    (c[0] ?? 0) > 200 && (c[1] ?? 0) > 100 && (c[1] ?? 0) < 160 && (c[2] ?? 0) < 60;
+  // 白の 50% で薄めた発電所。青が 255 の半分ほどまで上がる
+  const isWashedPlant = (c: number[]) =>
+    (c[0] ?? 0) > 230 && (c[1] ?? 0) > 170 && (c[2] ?? 0) > 120 && (c[2] ?? 0) < 160;
   let plantElectric = await plantPixel();
-  for (let i = 0; i < 100 && !isYellow(plantElectric); i++) {
+  for (let i = 0; i < 100 && !isPlainPlant(plantElectric); i++) {
     await page.waitForTimeout(100);
     plantElectric = await plantPixel();
   }
   check(
-    isYellow(plantElectric),
-    `電気のレイヤーでは、発電所が黄に塗られる（${plantElectric.join(", ")}）`,
+    isPlainPlant(plantElectric),
+    `電気の主題図では、発電所を薄めずにそのまま出す（${plantElectric.join(", ")}）`,
   );
-  await chooseLayer(page, "2");
+  // 主題図と関係のない地面は白の 50% で薄める
+  const groundPoint = tilePoint(45, 45);
+  const washedGround = await pixel(groundPoint.x, groundPoint.y);
+  check(
+    (washedGround[0] ?? 0) >= 245 && (washedGround[1] ?? 0) >= 245 && (washedGround[2] ?? 0) >= 240,
+    `電気の主題図では、下の地図を白で薄める（${washedGround.join(", ")}）`,
+  );
+  check(
+    (await page.locator("#theme-legend").getAttribute("data-theme")) === "power" &&
+      (await page.locator("#theme-legend li").count()) === 5,
+    "電気の主題図の凡例に、建物の届き方と道路の網の釣り合いの 5 つが並ぶ",
+  );
+  await chooseLayer(page, "water");
   let plantWater = await plantPixel();
-  for (let i = 0; i < 100 && isYellow(plantWater); i++) {
+  for (let i = 0; i < 100 && !isWashedPlant(plantWater); i++) {
     await page.waitForTimeout(100);
     plantWater = await plantPixel();
   }
   check(
-    !isYellow(plantWater) &&
-      (await page.locator("#layers").getAttribute("data-active")) === "2" &&
-      (await page.locator('#layers button[data-layer="1"]').getAttribute("aria-pressed")) ===
+    isWashedPlant(plantWater) &&
+      (await page.locator("#layers").getAttribute("data-active")) === "water" &&
+      (await page.locator("#theme-legend").getAttribute("data-theme")) === "water" &&
+      (await page.locator('#layers button[data-layer="power"]').getAttribute("aria-pressed")) ===
         "false",
-    `水道を選ぶと電気は外れ、一度に 1 つだけ出る（発電所 ${plantWater.join(", ")}）`,
+    `水道を選ぶと電気は外れ、一度に 1 つだけ出る。発電所は白で薄まる（発電所 ${plantWater.join(", ")}）`,
   );
-  // 交通のレイヤーを選ぶと、車のいない道路は「空いている」の緑に塗られる
+  // 交通の主題図。(52, 32)〜(60, 32) の小の道路を画面の真ん中に寄せ、段ごとの見せ方を確かめる。
+  // 画面の真ん中を中心に拡大縮小するので、カメラの位置は動かない
   await chooseLayer(page, "none");
-  const roadPoint = tilePoint(56, 32);
-  const roadPixel = () => pixel(roadPoint.x, roadPoint.y);
+  const roadX = 56.5;
+  const roadY = 32.5;
+  const panned = { x: roadX - view.x, y: roadY - view.y };
+  await panCameraBy(panned.x, panned.y);
+  const roadAt = async (across: number) => {
+    const s = await mapState();
+    return pixel(cx + (roadX - s.x) * s.zoom, cy + (roadY + across - s.y) * s.zoom);
+  };
   // 電気のレイヤーの青い道路と見分けるため、青が弱い緑だけを数える
   const isTrafficGreen = (c: number[]) =>
-    isGreen(c) && (c[1] ?? 0) > (c[0] ?? 0) + 100 && (c[1] ?? 0) > (c[2] ?? 0) + 60;
-  await chooseLayer(page, "3");
+    (c[1] ?? 0) > 150 && (c[1] ?? 0) > (c[0] ?? 0) + 100 && (c[1] ?? 0) > (c[2] ?? 0) + 60;
+  const clickZoom = async (button: string, times: number) => {
+    for (let i = 0; i < times; i++) {
+      const before = Number(await map.getAttribute("data-zoom"));
+      await page.locator(button).click();
+      await page.waitForFunction(
+        (z) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) !== z,
+        before,
+      );
+    }
+    await page.waitForTimeout(600);
+    return Number(await map.getAttribute("data-zoom"));
+  };
+  // 標準の段（倍率 6 から「空いている」の緑が濃さをそろえる）。空いている道路も緑の線で、道路の中に重ねる
+  const hyojunZoom = await clickZoom("#zoom-in", 2);
+  await chooseLayer(page, "traffic");
+  await page.keyboard.press("Escape");
   const untilRoad = Date.now() + TIMEOUT_MS;
-  let roadColor = await roadPixel();
+  let roadColor = await roadAt(0);
   while (!isTrafficGreen(roadColor) && Date.now() < untilRoad) {
     await page.waitForTimeout(100);
-    roadColor = await roadPixel();
+    roadColor = await roadAt(0);
   }
+  // 道路の線の外寄り（中心から 0.3 マス）は、マスいっぱいに塗らないので道路の色のまま
+  const besideLine = await roadAt(0.3);
   check(
-    isTrafficGreen(roadColor) &&
-      (await page.locator("#layers").getAttribute("data-active")) === "3",
-    `交通のレイヤーでは、道路が混み具合の色（空いていれば緑）で塗られる（${roadColor.join(", ")}）`,
+    hyojunZoom >= 6 &&
+      hyojunZoom < 10 &&
+      isTrafficGreen(roadColor) &&
+      !isTrafficGreen(besideLine) &&
+      (await page.locator("#layers").getAttribute("data-active")) === "traffic",
+    `交通の主題図では、標準の段（倍率 ${hyojunZoom.toFixed(2)}）で空いている道路の中に緑の線を重ねる（中心 ${roadColor.join(", ")}、線の外 ${besideLine.join(", ")}）`,
   );
+  // 線は、交通の値が変わったときだけ作り直し、毎フレームは作らない
+  const builds = async () => Number(await map.getAttribute("data-traffic-builds"));
+  const buildsBefore = await builds();
+  const startedAt = await page.evaluate(() => performance.now());
+  await page.waitForTimeout(2_000);
+  const buildsAfter = await builds();
+  const elapsed = (await page.evaluate(() => performance.now())) - startedAt;
+  const perSecond = ((buildsAfter - buildsBefore) * 1000) / elapsed;
+  check(
+    buildsAfter > 0 && perSecond <= 4,
+    `交通の線は毎フレームではなく、値が変わったときだけ作り直す（${perSecond.toFixed(1)} 回/秒、これまでに ${buildsAfter} 回）`,
+  );
+  // 引きの段では「空いている」を描かない。凡例からも外す
+  const hikiZoom = await clickZoom("#zoom-out", 4);
+  const hiki = await roadAt(0);
+  const hikiLegend = await page.locator("#theme-legend li").allTextContents();
+  check(
+    hikiZoom < 4 && !isTrafficGreen(hiki) && !hikiLegend.join().includes("空いている"),
+    `引きの段（倍率 ${hikiZoom.toFixed(2)}）では、空いている道路に緑の線を描かず、凡例にも出さない（${hiki.join(", ")}、凡例 ${hikiLegend.join("・")}）`,
+  );
+  // 寄りの段では、道路の中の線をやめ、車道の両端の縁石の内側に帯を引く
+  const yoriZoom = await clickZoom("#zoom-in", 6);
+  await page.waitForTimeout(500);
+  // 小の道路の車道の半分の幅は 0.22 マスで、帯の真ん中はその 0.03 マス内側
+  const bandPixels = [await roadAt(-0.19), await roadAt(0.19)];
+  const isBandGreen = (c: number[]) =>
+    (c[1] ?? 0) > (c[0] ?? 0) + 50 && (c[1] ?? 0) > (c[2] ?? 0) + 50;
+  const yori = await roadAt(0);
+  check(
+    yoriZoom >= 14 && bandPixels.every(isBandGreen) && !isTrafficGreen(yori),
+    `寄りの段（倍率 ${yoriZoom.toFixed(2)}）では、車道の両端に緑の帯を引き、道路の中の線は描かない（帯 ${bandPixels.map((c) => c.join(",")).join(" ")}、中心 ${yori.join(", ")}）`,
+  );
+  const restoredZoom = await clickZoom("#zoom-out", 4);
+  await panCameraBy(-panned.x, -panned.y);
+  const back = await mapState();
+  check(
+    Math.abs(restoredZoom - view.zoom) < 1e-6 &&
+      Math.abs(back.x - view.x) < 0.2 &&
+      Math.abs(back.y - view.y) < 0.2,
+    `倍率とカメラを元に戻した（倍率 ${restoredZoom}、カメラ ${back.x.toFixed(2)}, ${back.y.toFixed(2)}）`,
+  );
+  // 交通から離すと、線は消える
   await chooseLayer(page, "none");
+  await page.keyboard.press("Escape");
   await page.waitForTimeout(100);
+  const offRoad = await (async () => {
+    const p = tilePoint(56, 32);
+    return pixel(p.x, p.y);
+  })();
+  check(
+    !isTrafficGreen(offRoad),
+    `主題図を「なし」に戻すと、交通の線は消える（${offRoad.join(", ")}）`,
+  );
   const markAfter = await markPixels();
   const plantColor = await colorOfTile(54, 34);
   check(
@@ -1503,9 +1741,9 @@ try {
   await page.locator("#layers-open").click();
   check(
     (await page.locator("#layer-panel").isVisible()) &&
-      (await page.locator("#layers button").count()) === 4 &&
+      (await page.locator("#layers button").count()) === 5 &&
       (await page.locator("#layer-panel #legend").count()) === 1,
-    "レイヤーのボタンで、なし、電気、水道、交通を選ぶパネルが開き、凡例も中にある",
+    "レイヤーのボタンで、なし、交通、電気、水道、需要を選ぶパネルが開き、凡例も中にある",
   );
   await page.mouse.click(cx, cy);
   check(!(await page.locator("#layer-panel").isVisible()), "パネルの外（地図）を押すと閉じる");
@@ -1571,6 +1809,7 @@ try {
   await page.close();
   await checkHudPanel(await browser.newPage(), url);
   await checkDevWalks(await browser.newPage(), url);
+  await checkLabels(await browser.newPage(), url);
 } finally {
   await browser.close();
   await server?.close();

@@ -3,13 +3,11 @@ import {
   carriagewayHalfWidth,
   crossSection,
   HIGHWAY_CODE,
-  LANE_DETAIL_ZOOM,
   laneCenter,
   lanesPerSide,
   laneWidth,
   roadHalfWidth,
   SIDEWALK_WIDTH,
-  showsLanes,
 } from "./lanes.ts";
 
 describe("道路の断面", () => {
@@ -65,10 +63,5 @@ describe("道路の断面", () => {
     expect(laneCenter(1, 0)).toBeCloseTo(880 / 8_000);
     // 範囲を越えた番号は端の車線に丸める
     expect(laneCenter(2, 9)).toBeCloseTo(laneCenter(2, 1));
-  });
-
-  test("縮小しすぎると車線ごとには描かない", () => {
-    expect(showsLanes(LANE_DETAIL_ZOOM)).toBe(true);
-    expect(showsLanes(LANE_DETAIL_ZOOM - 0.1)).toBe(false);
   });
 });

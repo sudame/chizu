@@ -1,68 +1,95 @@
 // データレイヤー（CS2 の情報表示）。Worker から届いたマスごとの値を、チャンクごとの整数テクスチャに入れ、
-// 値ごとの色で地図の上に半透明で重ねる。値の意味は chizu-wasm の layers.rs が決め、ここは色だけを決める。
+// 下の地図を白で薄めてから、値ごとの色で塗る。値の意味は chizu-wasm の layers.rs が決め、ここは色だけを決める。
+// 交通は道路に沿った線で描くので、ここでは塗らない（traffic.ts）。
 
 import { CHUNK_SIDE, type LayerCode } from "../protocol/messages.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { chunkKey } from "./chunk-sync.ts";
-import type { Color } from "./roads.ts";
+import { type Color, hex } from "./palette.ts";
 
 /** 色の表の長さ。値はこれより小さくする。 */
 export const PALETTE_SIZE = 8;
 
-/** データレイヤー 1 枚。palette[v] が値 v の色で、0 の値は塗らない。 */
+/**
+ * 値の塗り方。`fill` は色で塗る、`hatch` は色の上に `accent` の斜線を引く、`dash` は色と下地の薄めた地図を
+ * 斜めの縞で交互にする（破線の代わり）、`through` は薄めずに下の地図をそのまま見せる（施設の記号）。
+ */
+export type ValueStyle =
+  | { kind: "none" }
+  | { kind: "fill"; color: Color }
+  | { kind: "hatch"; color: Color; accent: Color }
+  | { kind: "dash"; color: Color }
+  | { kind: "through" };
+
+/** データレイヤー 1 枚。styles[v] が値 v の塗り方で、0 の値は下の地図を薄めるだけにする。 */
 export type DataLayer = {
   code: LayerCode;
   label: string;
-  palette: readonly Color[];
-  /** レイヤーを選ぶパネルで、名前の横に出す見本の色。 */
-  swatch: Color;
+  styles: readonly ValueStyle[];
 };
 
-const NONE: Color = [0, 0, 0, 0];
-// 電気と水道の値の色。値は chizu-wasm の layers::SUPPLY_BUILDING_ON などと同じ並び。
-// 届いている建物は緑、届いていない建物は赤、道路は網の釣り合い（足りる、足りない、施設がない）で塗る
-const supplyPalette = (facility: Color): Color[] => [
-  NONE,
-  [0.2, 0.85, 0.4, 0.9],
-  [0.95, 0.2, 0.2, 0.9],
-  [0.3, 0.75, 0.95, 0.9],
-  [1, 0.55, 0.1, 0.9],
-  [0.45, 0.45, 0.5, 0.9],
-  facility,
+/** 主題図の色（docs/map-style.md の色の表の「主題図」）。 */
+export const THEME_COLORS = {
+  suppliedBuilding: hex("#81c995"),
+  unsuppliedBuilding: hex("#f28b82"),
+  unsuppliedHatch: hex("#d93025"),
+  enoughRoad: hex("#1a73e8"),
+  shortRoad: hex("#f29900"),
+  unconnectedRoad: hex("#9aa0a6"),
+} as const;
+
+/** 電気、水道、需要の主題図を出すあいだ、下の地図をこの割合だけ白で薄める。 */
+export const WASH = 0.5;
+
+// 電気と水道の値の塗り方。値は chizu-wasm の layers::SUPPLY_BUILDING_ON などと同じ並び。
+// 届いている建物は緑、届いていない建物は赤に斜線、道路は網の釣り合い（足りる、足りない、施設がない）で塗る。
+// そのレイヤーの施設は、薄めずにそのまま出す
+const SUPPLY_STYLES: readonly ValueStyle[] = [
+  { kind: "none" },
+  { kind: "fill", color: THEME_COLORS.suppliedBuilding },
+  {
+    kind: "hatch",
+    color: THEME_COLORS.unsuppliedBuilding,
+    accent: THEME_COLORS.unsuppliedHatch,
+  },
+  { kind: "fill", color: THEME_COLORS.enoughRoad },
+  { kind: "fill", color: THEME_COLORS.shortRoad },
+  { kind: "dash", color: THEME_COLORS.unconnectedRoad },
+  { kind: "through" },
 ];
 
 /**
  * 交通の値の色と凡例の名前。値は chizu-wasm の layers::TRAFFIC_FREE などと同じ並びで、
- * 空いている、やや混んでいる、混んでいる、詰まっている。緑、黄、橙、赤で、一目で混み具合が分かるようにする。
+ * 空いている、やや混んでいる、混んでいる、詰まっている。色相に加えて明るさも段々に暗くし、明るさの順でも読めるようにする。
  */
 export const TRAFFIC_LEVELS: readonly { label: string; color: Color }[] = [
-  { label: "空いている", color: [0.2, 0.8, 0.35, 0.9] },
-  { label: "やや混んでいる", color: [0.98, 0.88, 0.15, 0.9] },
-  { label: "混んでいる", color: [1, 0.5, 0.05, 0.9] },
-  { label: "詰まっている", color: [0.9, 0.12, 0.12, 0.95] },
+  { label: "空いている", color: hex("#63d668") },
+  { label: "やや混んでいる", color: hex("#ff974d") },
+  { label: "混んでいる", color: hex("#f23c32") },
+  { label: "詰まっている", color: hex("#811f1f") },
 ];
 
-/** 交通のレイヤーの番号。chizu-wasm の layers::LAYERS の 3 番めである。 */
+/** 交通のレイヤーの番号。chizu-wasm の layers::LAYERS の 3 番めである。交通は線で描くので、ここの面では塗らない。 */
 export const TRAFFIC_LAYER: LayerCode = 3;
 
+/** マスの面で塗るデータレイヤー（電気と水道）。 */
 export const DATA_LAYERS: readonly DataLayer[] = [
-  {
-    code: 1,
-    label: "電気",
-    palette: supplyPalette([1, 0.85, 0.1, 0.95]),
-    swatch: [1, 0.85, 0.1, 1],
-  },
-  { code: 2, label: "水道", palette: supplyPalette([0.2, 0.5, 1, 0.95]), swatch: [0.2, 0.5, 1, 1] },
-  {
-    code: TRAFFIC_LAYER,
-    label: "交通",
-    palette: [NONE, ...TRAFFIC_LEVELS.map((l) => l.color)],
-    swatch: TRAFFIC_LEVELS[0]?.color ?? [0.2, 0.8, 0.35, 1],
-  },
+  { code: 1, label: "電気", styles: SUPPLY_STYLES },
+  { code: 2, label: "水道", styles: SUPPLY_STYLES },
 ];
 
-/** レイヤーを出しているあいだ、下の地図をこの割合だけ暗くして、重ねた色を見やすくする。 */
-export const DIM = 0.45;
+// 塗り方の番号。シェーダーの u_style と同じ
+const STYLE_CODE: Record<ValueStyle["kind"], number> = {
+  none: 0,
+  fill: 1,
+  hatch: 2,
+  dash: 3,
+  through: 4,
+};
+// 斜線と縞の周期と太さ（画面のピクセル、x + y の方向）
+const HATCH_PERIOD_PX = 6;
+const HATCH_WIDTH_PX = 2;
+const DASH_PERIOD_PX = 8;
 
 const VERTEX = `#version 300 es
 in vec2 a_corner;
@@ -80,32 +107,48 @@ const FRAGMENT = `#version 300 es
 precision mediump float;
 uniform mediump usampler2D u_values;
 uniform vec4 u_palette[${PALETTE_SIZE}];
-uniform float u_dim;
-// 重ねたレイヤーの数と、このレイヤーの順番。各マスを縦の帯に等分し、このレイヤーは u_slot 番目の帯だけを塗る
-uniform int u_slots;
-uniform int u_slot;
+uniform vec4 u_accent[${PALETTE_SIZE}];
+uniform int u_style[${PALETTE_SIZE}];
+uniform float u_wash;
 in vec2 v_uv;
 out vec4 color;
 void main() {
   uint v = texture(u_values, v_uv).r;
-  int band = int(floor(fract(v_uv.x * ${CHUNK_SIDE}.0) * float(u_slots)));
-  if (v == 0u || v >= ${PALETTE_SIZE}u || min(band, u_slots - 1) != u_slot) {
-    if (u_dim == 0.0) {
-      discard;
-    }
-    color = vec4(0.0, 0.0, 0.0, u_dim);
-  } else {
+  int style = v < ${PALETTE_SIZE}u ? u_style[v] : 0;
+  vec4 wash = vec4(1.0, 1.0, 1.0, u_wash);
+  highp float diagonal = gl_FragCoord.x + gl_FragCoord.y;
+  if (style == 4) {
+    discard;
+  } else if (style == 1) {
     color = u_palette[v];
+  } else if (style == 2) {
+    color = mod(diagonal, ${HATCH_PERIOD_PX}.0) < ${HATCH_WIDTH_PX}.0 ? u_accent[v] : u_palette[v];
+  } else if (style == 3) {
+    color = mod(diagonal, ${DASH_PERIOD_PX}.0) < ${DASH_PERIOD_PX / 2}.0 ? u_palette[v] : wash;
+  } else {
+    color = wash;
   }
 }`;
 
-/** 色の表を uniform に渡す並びにする。足りない分は透明で埋める。 */
-export function paletteArray(palette: readonly Color[]): Float32Array {
-  const out = new Float32Array(PALETTE_SIZE * 4);
-  palette.slice(0, PALETTE_SIZE).forEach((c, i) => {
-    out.set(c, i * 4);
+/** 塗り方の並びを、uniform に渡す色、斜線の色、塗り方の番号の並びにする。足りない分は塗らない。 */
+export function styleArrays(styles: readonly ValueStyle[]): {
+  palette: Float32Array;
+  accent: Float32Array;
+  style: Int32Array;
+} {
+  const palette = new Float32Array(PALETTE_SIZE * 4);
+  const accent = new Float32Array(PALETTE_SIZE * 4);
+  const style = new Int32Array(PALETTE_SIZE);
+  styles.slice(0, PALETTE_SIZE).forEach((s, i) => {
+    style[i] = STYLE_CODE[s.kind];
+    if (s.kind === "fill" || s.kind === "hatch" || s.kind === "dash") {
+      palette.set(s.color, i * 4);
+    }
+    if (s.kind === "hatch") {
+      accent.set(s.accent, i * 4);
+    }
   });
-  return out;
+  return { palette, accent, style };
 }
 
 type Entry = { texture: WebGLTexture; version: number };
@@ -115,12 +158,12 @@ export class LayerOverlay {
   readonly #program: WebGLProgram;
   readonly #vao: WebGLVertexArrayObject;
   readonly #u: Record<
-    "offset" | "size" | "viewport" | "values" | "palette" | "dim" | "slots" | "slot",
+    "offset" | "size" | "viewport" | "values" | "palette" | "accent" | "style" | "wash",
     WebGLUniformLocation | null
   >;
   /** レイヤーの番号ごとの、チャンクのテクスチャ。 */
   readonly #textures = new Map<LayerCode, Map<string, Entry>>();
-  /** 出すレイヤー。並びの順に重ねる。 */
+  /** 出すレイヤー。面で塗るのは一度に 1 つだけである。 */
   active: LayerCode[] = [];
 
   constructor(
@@ -136,9 +179,9 @@ export class LayerOverlay {
       viewport: u("u_viewport"),
       values: u("u_values"),
       palette: u("u_palette"),
-      dim: u("u_dim"),
-      slots: u("u_slots"),
-      slot: u("u_slot"),
+      accent: u("u_accent"),
+      style: u("u_style"),
+      wash: u("u_wash"),
     };
     this.#vao = gl.createVertexArray();
     gl.bindVertexArray(this.#vao);
@@ -213,106 +256,48 @@ export class LayerOverlay {
   }
 
   /**
-   * 出しているレイヤーを、範囲の中のチャンクについて重ねて描き、描いたテクスチャの数を返す。
-   * 2 枚以上を出しているときは、どのレイヤーも読めるよう、各マスを縦の帯に分けて 1 枚ずつ塗る。
+   * 出しているレイヤーを、範囲の中のチャンクについて描き、描いたテクスチャの数を返す。
+   * 値のないマスは下の地図を白で薄め、値のあるマスは値の塗り方で塗る。
    */
   draw(camera: Camera, viewport: Viewport, range: ChunkRange): number {
     const gl = this.#gl;
-    const layers = DATA_LAYERS.filter((l) => this.active.includes(l.code));
-    if (layers.length === 0) {
+    const layer = DATA_LAYERS.find((l) => this.active.includes(l.code));
+    const chunks = layer === undefined ? undefined : this.#textures.get(layer.code);
+    if (layer === undefined || chunks === undefined) {
       return 0;
     }
     gl.useProgram(this.#program);
     gl.bindVertexArray(this.#vao);
     gl.enable(gl.BLEND);
-    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+    // 色だけを重ね、フレームバッファのアルファは 1 のまま保つ（キャンバスがページの背景と混ざって白く飛ばないように）
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
     gl.uniform1i(this.#u.values, 0);
     gl.uniform2f(this.#u.viewport, viewport.width, viewport.height);
     gl.uniform1f(this.#u.size, CHUNK_SIDE * camera.zoom);
-    gl.uniform1i(this.#u.slots, layers.length);
+    gl.uniform1f(this.#u.wash, WASH);
+    const arrays = styleArrays(layer.styles);
+    gl.uniform4fv(this.#u.palette, arrays.palette);
+    gl.uniform4fv(this.#u.accent, arrays.accent);
+    gl.uniform1iv(this.#u.style, arrays.style);
     let drawn = 0;
-    for (const [slot, layer] of layers.entries()) {
-      gl.uniform1i(this.#u.slot, slot);
-      const chunks = this.#textures.get(layer.code);
-      if (chunks === undefined) {
-        continue;
-      }
-      gl.uniform4fv(this.#u.palette, paletteArray(layer.palette));
-      // 下の地図を暗くするのは、最初に重ねるレイヤーだけにする
-      gl.uniform1f(this.#u.dim, drawn === 0 ? DIM : 0);
-      for (let cy = range.minCy; cy <= range.maxCy; cy++) {
-        for (let cx = range.minCx; cx <= range.maxCx; cx++) {
-          const entry = chunks.get(chunkKey(cx, cy));
-          if (entry === undefined) {
-            continue;
-          }
-          gl.uniform2f(
-            this.#u.offset,
-            (cx * CHUNK_SIDE - camera.x) * camera.zoom,
-            (cy * CHUNK_SIDE - camera.y) * camera.zoom,
-          );
-          gl.bindTexture(gl.TEXTURE_2D, entry.texture);
-          gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-          drawn++;
+    for (let cy = range.minCy; cy <= range.maxCy; cy++) {
+      for (let cx = range.minCx; cx <= range.maxCx; cx++) {
+        const entry = chunks.get(chunkKey(cx, cy));
+        if (entry === undefined) {
+          continue;
         }
+        gl.uniform2f(
+          this.#u.offset,
+          (cx * CHUNK_SIDE - camera.x) * camera.zoom,
+          (cy * CHUNK_SIDE - camera.y) * camera.zoom,
+        );
+        gl.bindTexture(gl.TEXTURE_2D, entry.texture);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        drawn++;
       }
     }
     gl.disable(gl.BLEND);
     gl.bindVertexArray(null);
     return drawn;
   }
-}
-
-function cssColor([r, g, b]: Color): string {
-  const channel = (v: number) => Math.round(v * 255);
-  return `rgb(${channel(r)} ${channel(g)} ${channel(b)})`;
-}
-
-/**
- * レイヤーを選ぶパネルの中身を作る。地図アプリのレイヤーにならい、「なし」と電気、水道、交通のうち 1 つだけを選ぶ。
- * 初めは「なし」を選んでいる。
- */
-export function setupLayerPanel(
-  container: HTMLElement,
-  onChange: (active: LayerCode[]) => void,
-): void {
-  let selected: LayerCode | null = null;
-  const entries: [LayerCode | null, string, string | null][] = [
-    [null, "なし", null],
-    // 並びは、なし、交通、電気、水道
-    ...[...DATA_LAYERS]
-      .sort((a, b) => Number(b.code === TRAFFIC_LAYER) - Number(a.code === TRAFFIC_LAYER))
-      .map((l): [LayerCode, string, string] => [l.code, l.label, cssColor(l.swatch)]),
-  ];
-  const active = (): LayerCode[] => (selected === null ? [] : [selected]);
-  const buttons = entries.map(([code, label, color]) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    const dot = document.createElement("span");
-    dot.className = "layer-dot";
-    dot.setAttribute("aria-hidden", "true");
-    if (color !== null) {
-      dot.style.background = color;
-    }
-    const text = document.createElement("span");
-    text.textContent = label;
-    b.append(dot, text);
-    b.dataset.layer = code === null ? "none" : String(code);
-    b.addEventListener("click", () => {
-      selected = code;
-      show();
-      onChange(active());
-    });
-    return b;
-  });
-  const show = () => {
-    buttons.forEach((b, i) => {
-      const code = entries[i]?.[0] ?? null;
-      b.setAttribute("aria-pressed", String(code === selected));
-    });
-    // test:wasm が読む
-    container.dataset.active = selected === null ? "" : String(selected);
-  };
-  container.replaceChildren(...buttons);
-  show();
 }

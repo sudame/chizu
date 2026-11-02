@@ -9,7 +9,7 @@
 //!    移る先の車線の最後尾との車間が足りなければ、リンクの終わりで止める。
 //!
 //! 1. の前に、前の tick の状態だけを読んで、交差点ごとに手前で止める車をノードの順に決める。
-//!    信号のある交差点では、tick から決まる信号の段階も読む。
+//!    信号のある交差点では、tick と前の tick の車と歩く人の様子から決まる信号の段階も読む（[`signal_demand`]）。
 
 use std::collections::BTreeMap;
 
@@ -404,9 +404,15 @@ fn room_clear_of(
 /// 譲った tick 数を添える。信号のある交差点で譲った車は、その腕が青のときだけ数える。赤で待つあいだは、
 /// 歩く人が渡る番だからである。最後に、[`crossing::PED_WAIT`] tick より長く待った人のいる横断歩道を、
 /// 譲った車と待った長さを比べて `claimed` に入れる。
-pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing::Gate {
+pub(super) fn gate(
+    rows: &[Option<Trip>],
+    net: &Network,
+    now: Tick,
+    signals: signal::Demand,
+) -> crossing::Gate {
     let mut g = crossing::Gate {
         now,
+        signals,
         ..Default::default()
     };
     // 区間の途中で横切る人のいる区間と、車の主体を 1 度に集める。
@@ -502,7 +508,7 @@ pub(super) fn gate(rows: &[Option<Trip>], net: &Network, now: Tick) -> crossing:
             let axis = net
                 .segment_line(link.segment)
                 .map_or(0, |l| signal::axis(l.step));
-            signal::state(net, node, now)
+            signal::state(net, node, now, &g.signals)
                 .is_none_or(|st| st.light_for(axis) == signal::Light::Green)
         };
         let stopped = t.speed == MmPerTick::ZERO;
@@ -628,6 +634,61 @@ fn near_end(net: &Network, t: &Trip) -> bool {
     left <= vmax + i64::from(CAR_ACCEL) + braking_distance(vmax) + i64::from(SPACING)
 }
 
+/// 信号のある交差点ごとの、軸の様子。交差点の手前まで来た車（[`near_end`]）と、そのうち止まりきれない車と、
+/// 腕の横断歩道を渡り始めようと待つ人を、腕の軸ごとに集める。tick を進める前の行だけを読む。
+pub(super) fn signal_demand(rows: &[Option<Trip>], net: &Network) -> signal::Demand {
+    let mut d = signal::Demand::default();
+    let signalled = |node: NodeId| {
+        net.node(node)
+            .is_some_and(|n| n.control == crate::network::NodeControl::Signal)
+    };
+    if !net
+        .nodes()
+        .any(|(_, n)| n.control == crate::network::NodeControl::Signal)
+    {
+        return d;
+    }
+    for t in rows.iter().flatten() {
+        if t.last_leg() {
+            continue;
+        }
+        if t.mode == LaneMode::Sidewalk {
+            // 渡り始めるのを待つ人は、渡る所の始まりにいる（`gate` の長く待った人と同じ）。
+            if t.walk.jay.is_some() || t.offset < t.link_len {
+                continue;
+            }
+            let node = end_node(net, t.link());
+            if !signalled(node) {
+                continue;
+            }
+            let mut at = t.link_len.0;
+            for s in t.departure(net).1 {
+                if t.offset.0 == at {
+                    if let Some(l) = net.segment_line(s) {
+                        d.note(node, signal::axis(l.step), |a| a.walkers = true);
+                    }
+                    break;
+                }
+                at = at.saturating_add(crossing::width(net, s));
+            }
+        } else if on_road(t) && near_end(net, t) {
+            let node = end_node(net, t.link());
+            if !signalled(node) {
+                continue;
+            }
+            let Some(l) = net.segment_line(t.link().segment) else {
+                continue;
+            };
+            let committed = stop_speed(t) < i64::from(t.speed.0) - i64::from(CAR_DECEL);
+            d.note(node, signal::axis(l.step), |a| {
+                a.cars = true;
+                a.committed |= committed;
+            });
+        }
+    }
+    d
+}
+
 #[cfg(test)]
 fn check_lane(rows: &[Option<Trip>], lane: LaneId) {
     let mut at: Vec<u32> = rows
@@ -650,6 +711,7 @@ pub(super) fn step(
     rescues: &mut junction::Rescues,
     now: Tick,
     occupied: &crossing::Occupied,
+    signals: &signal::Demand,
 ) -> Vec<usize> {
     // 出発を待っている車を、主体の番号の順に置き直す。
     let waiting: Vec<usize> = (0..rows.len())
@@ -693,7 +755,7 @@ pub(super) fn step(
         acc.1.extend(l.inside);
         acc
     });
-    let stop = junction::holds(net, cands, inside, now, &occupied.crosswalks);
+    let stop = junction::holds(net, cands, inside, now, &occupied.crosswalks, signals);
     rescues.passed_stuck = rescues.passed_stuck.saturating_add(stop.passed);
     for k in stop.ids {
         held[k] = true;

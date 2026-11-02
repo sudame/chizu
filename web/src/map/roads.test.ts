@@ -4,20 +4,19 @@ import {
   asphaltHalfWidth,
   buildingColor,
   buildingEdgeColor,
-  buildingGeometry,
+  buildingMeshes,
+  CLUSTER_INSET,
   crosswalkArms,
   FACILITY_COLOR,
   footprintOutline,
   Geometry,
   headingBit,
   MARKING_COLORS,
-  MARKING_FULL_ZOOM,
-  MARKING_ZOOM,
   MIN_PX,
   markCenter,
-  markingAlpha,
   miterTrim,
   ROAD_VISUAL_HALF,
+  roadDrawOrder,
   roadFootprint,
   roadGeometry,
   roadLaneGeometry,
@@ -60,13 +59,15 @@ describe("建物", () => {
     }
   });
 
-  test("建物ごとに影、縁、本体の 3 つの長方形を、少し内側に縮めて描く", () => {
-    const g = buildingGeometry(
+  test("寄りの段では、建物ごとに影、縁、本体の 3 つの長方形を、少し内側に縮めて描く", () => {
+    const m = buildingMeshes(
       new Float64Array([10, 20, 12, 21, 1, 1, 3, 30, 20, 30, 20, 3, 5, 3]),
       new Float64Array(),
     );
-    expect(g.vertexCount).toBe(2 * 3 * 6);
-    const data = g.build();
+    // 影 2 つと縁 2 つ、本体 2 つ
+    expect(m.details.vertexCount).toBe(2 * 2 * 6);
+    expect(m.bodies.vertexCount).toBe(2 * 6);
+    const data = m.details.build();
     // 影が先に 2 つ並び、本体と同じ位置から、右下へ画面で 2px ずれる（縮尺によらない）
     expect(data[0]).toBeCloseTo(0.15);
     expect([data[2], data[3], data[5]]).toEqual([1, 1, 2]);
@@ -75,39 +76,51 @@ describe("建物", () => {
     expect(data[13 * VERTEX_FLOATS]).toBeCloseTo(3 - 0.15);
   });
 
+  test("標準の段の建物のまとまりは、縁を付けず、隣との隙間を細くする", () => {
+    const m = buildingMeshes(new Float64Array([10, 20, 12, 21, 1, 1, 3]), new Float64Array());
+    expect(m.clusters.vertexCount).toBe(6);
+    const data = m.clusters.build();
+    expect(data[0]).toBeCloseTo(CLUSTER_INSET);
+    expect(data[1 * VERTEX_FLOATS]).toBeCloseTo(3 - CLUSTER_INSET);
+    expect(CLUSTER_INSET).toBeLessThan(0.15);
+    expect(Array.from(data.subarray(6, 9))).toEqual(
+      Array.from(new Float32Array(buildingColor(1).slice(0, 3))),
+    );
+  });
+
   test("建物の縁は本体より暗く、色は区画の表の値にそろう", () => {
-    const g = buildingGeometry(new Float64Array([0, 0, 0, 0, 1, 3, 3]), new Float64Array());
-    const data = g.build();
-    const colorAt = (vertex: number) =>
-      Array.from(data.subarray(vertex * VERTEX_FLOATS + 6, vertex * VERTEX_FLOATS + 9));
-    const [edge, body] = [colorAt(6), colorAt(12)];
+    const m = buildingMeshes(new Float64Array([0, 0, 0, 0, 1, 3, 3]), new Float64Array());
+    const colorOf = (g: Geometry, vertex: number) =>
+      Array.from(g.build().subarray(vertex * VERTEX_FLOATS + 6, vertex * VERTEX_FLOATS + 9));
+    const [edge, body] = [colorOf(m.details, 6), colorOf(m.bodies, 0)];
     expect(brightness(edge)).toBeLessThan(brightness(body));
     expect(body).toEqual(Array.from(new Float32Array(buildingColor(1).slice(0, 3))));
     expect(edge).toEqual(Array.from(new Float32Array(buildingEdgeColor(1).slice(0, 3))));
   });
 
-  test("施設を先に描き、電気か水道の届かない建物には印を足す", () => {
+  test("施設はどの段でも縁と本体を描き、電気か水道の届かない建物には印を足す", () => {
     const facilities = new Float64Array([0, 0, 3, 3, 1]);
     // 電気も水道も届く、電気だけ届く、どちらも届かない
     const supplies = [3, 1, 0];
     const buildings = new Float64Array(
       supplies.flatMap((supply, i) => [10 + 2 * i, 20, 10 + 2 * i, 20, 1, 1, supply]),
     );
-    const g = buildingGeometry(buildings, facilities);
-    // 施設 1 つと建物 3 つに、影、縁、本体。印は水滴 2 つ（9 頂点）と稲妻 1 つ（6 頂点）
-    expect(g.vertexCount).toBe(6 * 3 * (1 + 3) + 9 * 2 + 6);
+    const m = buildingMeshes(buildings, facilities);
+    // 影は施設 1 つと建物 3 つ、縁は建物 3 つ
+    expect(m.details.vertexCount).toBe(6 * (4 + 3));
+    expect(m.facilities.vertexCount).toBe(6 * 2);
+    // 印は水滴 2 つ（9 頂点）と稲妻 1 つ（6 頂点）
+    expect(m.marks.vertexCount).toBe(9 * 2 + 6);
     expect(unsuppliedCount(buildings)).toBe(2);
-    const data = g.build();
-    // 影 4 つと施設の縁のあとが、施設の本体
-    const body = (4 + 1) * 6 * VERTEX_FLOATS;
-    expect([...data.subarray(body + 6, body + 10)]).toEqual(
+    const body = 6 * VERTEX_FLOATS;
+    expect([...m.facilities.build().subarray(body + 6, body + 10)]).toEqual(
       [...(FACILITY_COLOR[1] ?? [])].map(Math.fround),
     );
     // 印の最初が、電気だけ届く建物の水道の印。基準のマスは最初の建物の左上 (10, 20)
     const water = markCenter({ x: 12, y: 20 }, "water");
-    const mark = 6 * 3 * 4 * VERTEX_FLOATS;
-    expect(data[mark]).toBeCloseTo(water.x - 10);
-    expect(data[mark + 1]).toBeCloseTo(water.y - 20);
+    const data = m.marks.build();
+    expect(data[0]).toBeCloseTo(water.x - 10);
+    expect(data[1]).toBeCloseTo(water.y - 20);
     expect(water).toEqual({ x: 12.75, y: 20.3 });
   });
 });
@@ -213,14 +226,53 @@ describe("道路の見た目", () => {
     expect(asphaltHalfWidth(HIGHWAY_CODE)).toBeLessThan(ROAD_VISUAL_HALF);
   });
 
-  test("路面の線は拡大したときだけ、だんだん濃く描く", () => {
-    expect(markingAlpha(MARKING_ZOOM)).toBe(0);
-    expect(markingAlpha(MARKING_ZOOM - 4)).toBe(0);
-    expect(markingAlpha(MARKING_FULL_ZOOM)).toBe(1);
-    expect(markingAlpha(32)).toBe(1);
-    const mid = markingAlpha((MARKING_ZOOM + MARKING_FULL_ZOOM) / 2);
-    expect(mid).toBeGreaterThan(0);
-    expect(mid).toBeLessThan(1);
+  test("段ごとに描くものを替え、段の境目の幅でだけ両方を描く", () => {
+    const drawn = (zoom: number) =>
+      new Map(
+        roadDrawOrder(zoom)
+          .filter(([, alpha]) => alpha > 0)
+          .map(([name, alpha]) => [name, alpha]),
+      );
+    const fadeOf = (zoom: number, name: string) =>
+      roadDrawOrder(zoom).find(([n]) => n === name)?.[2];
+    // 引き：線の道路だけ。小の道路は不透明のまま、色を地面に寄せて薄くする。
+    // 建物は街区の面（シェーダー）で塗るので、まとまりも描かない
+    const hiki = drawn(2);
+    expect(hiki.get("minor")).toBe(1);
+    expect(fadeOf(2, "minor")).toBeCloseTo(0.55);
+    expect(fadeOf(8, "minor")).toBe(1);
+    expect(fadeOf(2, "major")).toBe(1);
+    expect(hiki.get("major")).toBe(1);
+    for (const name of ["clusters", "bodies", "details", "lanes", "markings", "signals", "marks"]) {
+      expect(hiki.has(name as never)).toBe(false);
+    }
+    // 標準：建物のまとまりと線の道路
+    const hyojun = drawn(8);
+    expect(hyojun.get("clusters")).toBe(1);
+    expect(hyojun.get("minor")).toBe(1);
+    for (const name of ["bodies", "details", "lanes", "markings", "signals"]) {
+      expect(hyojun.has(name as never)).toBe(false);
+    }
+    // 寄り：1 軒ずつの建物と車線ごとの道路、路面の線と信号
+    const yori = drawn(20);
+    for (const name of ["bodies", "details", "lanes", "markings", "signals"]) {
+      expect(yori.get(name as never)).toBe(1);
+    }
+    for (const name of ["clusters", "minor", "major"]) {
+      expect(yori.has(name as never)).toBe(false);
+    }
+    // 標準と寄りのあいだは、両方を薄く重ねる
+    const between = drawn(12);
+    expect(between.get("major")).toBe(1);
+    expect(between.get("lanes")).toBeGreaterThan(0);
+    expect(between.get("lanes")).toBeLessThan(1);
+    expect(between.get("clusters")).toBeGreaterThan(0);
+    expect(between.get("bodies")).toBe(1);
+    // 下から順に、建物、道路、路面の線、信号、仮の表示
+    const order = roadDrawOrder(12).map(([name]) => name);
+    expect(order.indexOf("bodies")).toBeLessThan(order.indexOf("major"));
+    expect(order.indexOf("major")).toBeLessThan(order.indexOf("lanes"));
+    expect(order.at(-1)).toBe("preview");
   });
 });
 
@@ -326,7 +378,17 @@ describe("車線ごとの道路", () => {
 
   test("縮小用と拡大用と路面の線の頂点を作る", () => {
     const meshes = roadMeshes(new Float64Array([0, 0, 4, 0, 1]), nodesOf([0, 0], [4, 0]));
-    expect(meshes.simple.vertexCount).toBe(36);
+    // 小の道路は、縮小用の小の道路の側にだけ入る
+    expect(meshes.minor.vertexCount).toBe(36);
+    expect(meshes.major.vertexCount).toBe(0);
+    // 小と中が集まるノードは、中の側に入れ、薄い小の道路の上に濃く描く
+    const mixed = roadMeshes(
+      new Float64Array([0, 0, 4, 0, 1, 4, 0, 8, 0, 2]),
+      nodesOf([0, 0], [4, 0], [8, 0]),
+    );
+    // 小：縁と塗りの帯 2、ノード (0, 0) の四角 2。中：帯 2、ノード (4, 0) と (8, 0) の四角 4
+    expect(mixed.minor.vertexCount).toBe(6 * 4);
+    expect(mixed.major.vertexCount).toBe(6 * 6);
     expect(meshes.lanes.vertexCount).toBeGreaterThan(36);
     // 小の道路には路面の線がない
     expect(meshes.markings.vertexCount).toBe(0);

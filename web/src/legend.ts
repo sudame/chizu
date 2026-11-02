@@ -1,7 +1,6 @@
-// 地図の色と印の凡例。色と形は描画で使う定数（map/roads.ts）から取る。
+// 地図の色と印の凡例。色と形は描画で使う定数（map/roads.ts）から取る。主題図の凡例は map/themes.ts が作る。
 
 import { HIGHWAY_CODE } from "./map/lanes.ts";
-import { TRAFFIC_LEVELS } from "./map/layers.ts";
 import { CAR_COLORS, WALKER_COLOR } from "./map/mover-colors.ts";
 import {
   BOLT_SHAPE,
@@ -78,10 +77,6 @@ export function legendSections(): LegendSection[] {
           icon: { triangles: DROP_SHAPE },
         },
       ],
-    },
-    {
-      title: "交通（データレイヤー、道路の色）",
-      items: TRAFFIC_LEVELS.map((l) => ({ label: l.label, color: cssColor(l.color) })),
     },
     {
       title: "公共施設",

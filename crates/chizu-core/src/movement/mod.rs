@@ -350,6 +350,8 @@ pub struct Trips {
     rescues: junction::Rescues,
     /// 直前の `step` と `reroute` で消えた移動の結果。状態ハッシュには入れない。
     finished: BTreeMap<TripId, Finished>,
+    /// 直前の `step` の信号を決めた様子。画面に灯火を出すために控える。状態ハッシュには入れない。
+    lights: signal::Lights,
 }
 
 /// 網を変える前に控えた、主体ごとのリンクの中の車線の番号と描いていたずれ。[`Trips::note_before_change`] で作る。
@@ -559,6 +561,11 @@ impl Trips {
         self.rescues
     }
 
+    /// 直前の `step` で信号の灯火を決めた tick と様子。画面とテストは、ここから効いた灯火を求める。
+    pub fn lights(&self) -> &signal::Lights {
+        &self.lights
+    }
+
     /// 直前の `step` と `reroute` で消えた移動 `id` の結果。
     pub fn finished(&self, id: TripId) -> Option<Finished> {
         self.finished.get(&id).copied()
@@ -701,8 +708,8 @@ impl Trips {
 
     /// 歩く人と車を 1 tick 進め、区切りの終わりに着いた行を番号の順に返す。
     fn advance(&mut self, net: &Network, connectors: &[Connector], now: Tick) -> Vec<usize> {
-        // 歩く人が渡り始めてよいかは、前の tick の車の様子だけから決める。
-        let gate = car::gate(&self.rows, net, now);
+        // 信号の灯火と、歩く人が渡り始めてよいかは、前の tick の車と歩く人の様子だけから決める。
+        let gate = car::gate(&self.rows, net, now, car::signal_demand(&self.rows, net));
         let advance = |(i, t): (usize, &mut Option<Trip>)| {
             let t = t.as_mut().filter(|t| t.mode == LaneMode::Sidewalk)?;
             let (arrived, occ) = t.advance(net, &gate);
@@ -734,7 +741,12 @@ impl Trips {
             &mut self.rescues,
             now,
             &occupied,
+            &gate.signals,
         ));
+        self.lights = signal::Lights {
+            now,
+            demand: gate.signals,
+        };
         arrived.sort_unstable();
         arrived
     }
