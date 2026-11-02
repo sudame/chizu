@@ -1,4 +1,4 @@
-import { parseCityStats, renderCityStats } from "./city-panel.ts";
+import { demandBar, parseCityStats, renderCityStats } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
 import {
@@ -23,7 +23,6 @@ import {
 } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { LabelLayer } from "./map/label-layer.ts";
-import { setupLayerPanel } from "./map/layers.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
 import {
   BULLDOZE_EDGE_COLOR,
@@ -68,6 +67,16 @@ import {
   roadEndpoints,
 } from "./map/snap.ts";
 import {
+  loadTheme,
+  renderThemeLegend,
+  saveTheme,
+  setupThemePanel,
+  type ThemeId,
+  themeLegend,
+  themeOf,
+  themeStorage,
+} from "./map/themes.ts";
+import {
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
@@ -92,6 +101,7 @@ import {
   upgradePlan,
   upgradeRoadCommand,
 } from "./map/tools.ts";
+import { TrafficLines } from "./map/traffic.ts";
 import { parseOverview, renderOverview } from "./overview.ts";
 import { createPopovers } from "./popover.ts";
 import {
@@ -240,7 +250,24 @@ const labels = new LabelLayer(element<HTMLCanvasElement>("#labels"));
 let roads: RoadMeshes | null = null;
 let buildings: BuildingMeshes | null = null;
 let signals: Geometry | null = null;
-let activeLayers: number[] = [];
+// 主題図。選んだものはブラウザに覚えさせ、次に開いたときも同じものにする
+let theme: ThemeId = loadTheme(themeStorage());
+const layersOf = (id: ThemeId): number[] => {
+  const layer = themeOf(id).layer;
+  return layer === null ? [] : [layer];
+};
+let activeLayers: number[] = layersOf(theme);
+// 交通の主題図の線。区間ごとの値か道路網が変わったときだけ作り直す
+const trafficLines = new TrafficLines();
+let trafficBuilds = 0;
+// 需要の主題図と凡例に使う、住宅・商業・工業・オフィスの需要（街の数字の値）
+let demand: number[] | null = null;
+// 主題図の凡例。レイヤーのボタンの左に浮かべるものと、レイヤーのパネルの中のもの
+const themeLegendElements = [
+  element<HTMLElement>("#theme-legend"),
+  element<HTMLElement>("#layer-theme-legend"),
+];
+let themeLegendShown = "";
 setupHudPanel(element<HTMLButtonElement>("#hud-toggle"), element<HTMLElement>("#hud-details"));
 // 道具の帯と、その上の見積もりと 2 段目の高さ。狭い画面で、下の知らせをその上へ積むのに使う
 trackHeight(element<HTMLElement>("#toolstack"), "--toolbar-h");
@@ -278,11 +305,26 @@ new MutationObserver(() => {
 }).observe(layerPanel, { attributes: true, attributeFilter: ["hidden"] });
 const zoomInButton = element<HTMLButtonElement>("#zoom-in");
 const zoomOutButton = element<HTMLButtonElement>("#zoom-out");
-setupLayerPanel(element<HTMLElement>("#layers"), (active) => {
-  activeLayers = active;
-  renderer?.layers.setActive(active);
-  send({ kind: "layers", active });
+/** 主題図を画面と Worker に伝える。 */
+function applyTheme(): void {
+  activeLayers = layersOf(theme);
+  renderer?.layers.setActive(activeLayers);
+  send({ kind: "layers", active: activeLayers });
+  trafficLines.clear();
+  updateDemandTheme();
+  updateThemeLegend();
+}
+function updateDemandTheme(): void {
+  if (renderer !== null) {
+    renderer.demand = theme === "demand" ? (demand ?? [0, 0, 0, 0]).map(demandBar) : null;
+  }
+}
+setupThemePanel(element<HTMLElement>("#layers"), theme, (id) => {
+  theme = id;
+  saveTheme(themeStorage(), id);
+  applyTheme();
 });
+applyTheme();
 
 // コンテキストが戻ったら作り直し、手元のチャンクを貼り直す
 mapCanvas.addEventListener("webglcontextlost", (event) => {
@@ -306,8 +348,7 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
   if (signals !== null) {
     renderer?.roads.setSignals(signals);
   }
-  renderer?.layers.setActive(activeLayers);
-  send({ kind: "layers", active: activeLayers });
+  applyTheme();
   updatePreview();
 });
 
@@ -345,6 +386,8 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   const vp = viewport();
   const range = camera.visibleChunks(vp);
   sendView(range);
+  rebuildTraffic();
+  updateThemeLegend();
   const drawn = renderer?.draw(camera, vp, range) ?? 0;
   labels.frame(camera, vp, performance.now());
   const movers =
@@ -378,6 +421,35 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   updateScale(camera.zoom);
   zoomInButton.disabled = camera.zoom >= MAX_ZOOM;
   zoomOutButton.disabled = camera.zoom <= MIN_ZOOM;
+}
+
+/** 交通の値か道路網が変わっていれば、交通の主題図の線を作り直す。毎フレームは作らない。 */
+function rebuildTraffic(): void {
+  const meshes = trafficLines.take();
+  if (meshes === undefined) {
+    return;
+  }
+  renderer?.roads.setTraffic(meshes);
+  if (meshes !== null) {
+    trafficBuilds++;
+    // test:wasm が読む
+    mapCanvas.dataset.trafficBuilds = String(trafficBuilds);
+  }
+}
+
+/** 主題図の凡例を、中身が変わったときだけ描き直す。 */
+function updateThemeLegend(): void {
+  const items = themeLegend(theme, camera.zoom, demand);
+  const key = `${theme}:${JSON.stringify(items)}`;
+  if (key === themeLegendShown) {
+    return;
+  }
+  themeLegendShown = key;
+  for (const container of themeLegendElements) {
+    renderThemeLegend(container, items);
+    // test:wasm が読む
+    container.dataset.theme = theme;
+  }
 }
 
 function startDrawing(reader: SnapshotReader): void {
@@ -960,10 +1032,18 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     }
     return;
   }
+  if (message.kind === "traffic") {
+    if (theme === "traffic") {
+      trafficLines.setValues(message.revision, new Uint8Array(message.values));
+    }
+    return;
+  }
   if (message.kind === "roads") {
     roads = roadMeshes(message.segments, message.nodes);
     roadIndex = buildRoadIndex(message.segments, message.nodes);
     roadSegments = message.segments;
+    // 道路網が変わったら、交通の主題図の線も作り直す。新しい網の値が届くまでは描かない
+    trafficLines.setRoads(message.revision, message.segments, message.nodes);
     crosswalks = crosswalkArms(message.segments, message.nodes);
     // test:wasm が読む
     mapCanvas.dataset.removedCrosswalks = String(crosswalks.filter((arm) => arm.removed).length);
@@ -986,7 +1066,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     buildings = buildingMeshes(message.buildings, message.facilities);
     renderer?.roads.setBuildings(buildings);
     labels.setBuildings(message.buildings, message.facilities);
-    renderCityStats(parseCityStats(message.stats), unsuppliedCount(message.buildings));
+    const stats = parseCityStats(message.stats);
+    renderCityStats(stats, unsuppliedCount(message.buildings));
+    demand = [...stats.demand];
+    updateDemandTheme();
     // test:wasm が読む
     mapCanvas.dataset.firstBuilding = Array.from(message.buildings.subarray(0, 4)).join(",");
     mapCanvas.dataset.unsupplied = String(unsuppliedCount(message.buildings));

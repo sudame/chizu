@@ -706,6 +706,93 @@
         border: 1px solid var(--line);
         border-radius: 50%;
       }
+      /* 主題図の凡例。レイヤーのボタンの左に浮かべ、パネルの中にも同じものを出す */
+      .theme-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px 12px;
+        align-items: center;
+        margin: 0;
+        padding: 0;
+        font-size: 12px;
+        list-style: none;
+      }
+      .theme-legend[hidden] {
+        display: none;
+      }
+      #theme-legend {
+        position: absolute;
+        top: 0;
+        right: calc(100% + var(--gap));
+        box-sizing: border-box;
+        width: max-content;
+        max-width: calc(100vw - 2 * var(--edge) - 40px - var(--gap));
+        min-height: 40px;
+        padding: 6px 12px;
+        background: var(--panel);
+        border-radius: var(--r-panel);
+        box-shadow: var(--shadow);
+      }
+      #layer-theme-legend {
+        margin-top: 8px;
+      }
+      /* 凡例は押せる部品ではないので、下の地図への操作を妨げない。
+         道具の 2 段目とレイヤーのパネルを開いているあいだは、重なるので隠す */
+      #theme-legend {
+        pointer-events: none;
+      }
+      body[data-layers-open] #theme-legend,
+      body[data-menu-open] #theme-legend {
+        display: none;
+      }
+      .theme-legend li {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        white-space: nowrap;
+      }
+      .theme-sample {
+        display: inline-block;
+        box-sizing: border-box;
+        width: 20px;
+        height: 4px;
+        border-radius: 2px;
+        background: var(--c);
+      }
+      .theme-dash {
+        background: repeating-linear-gradient(90deg, var(--c) 0 5px, var(--a, transparent) 5px 8px);
+      }
+      .theme-fill,
+      .theme-hatch {
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+      }
+      .theme-hatch {
+        background: repeating-linear-gradient(45deg, var(--a) 0 1.5px, var(--c) 1.5px 5px);
+      }
+      /* 需要の棒。真ん中の線が需要 0 で、正は右へ、負は左へ伸ばす */
+      .theme-bar {
+        position: relative;
+        width: 40px;
+        height: 10px;
+        background: linear-gradient(var(--line), var(--line)) center / 1px 100% no-repeat;
+        border-radius: 0;
+      }
+      .theme-bar::after {
+        position: absolute;
+        top: 1px;
+        bottom: 1px;
+        width: calc(var(--v) * 50%);
+        background: var(--c);
+        content: "";
+      }
+      .theme-bar[data-sign="pos"]::after {
+        left: 50%;
+      }
+      .theme-bar[data-sign="neg"]::after {
+        right: 50%;
+      }
       #legend {
         margin-top: 8px;
         padding-top: 8px;
@@ -834,6 +921,10 @@
         body[data-layers-open] #notices,
         body[data-layers-open] #map-meta {
           visibility: hidden;
+        }
+        /* 狭い画面では浮かべた凡例が左下の部品と知らせに届くので、レイヤーのパネルの中の凡例だけにする */
+        #theme-legend {
+          display: none;
         }
       }
       /* 幅 640px 以下では、道具の帯を絵だけにし、上の帯は折り返す */
@@ -1005,9 +1096,11 @@
     <div id="map-controls">
       <div class="layer-wrap">
         <button type="button" id="layers-open" data-map-panel class="map-button" aria-label="レイヤー" aria-controls="layer-panel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-layers" /></svg></button>
+        <ul id="theme-legend" data-map-panel class="theme-legend" aria-label="主題図の凡例" hidden></ul>
         <div id="layer-panel" data-map-panel class="panel" hidden>
           <h2>レイヤー</h2>
           <div id="layers"></div>
+          <ul id="layer-theme-legend" class="theme-legend" aria-label="主題図の凡例" hidden></ul>
           <details id="legend">
             <summary>凡例</summary>
             <div id="legend-body"></div>

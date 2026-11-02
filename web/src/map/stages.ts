@@ -17,6 +17,8 @@ export const BLOCK_BAND: Band = [3, 5];
 export const DETAIL_BAND: Band = [10, 14];
 /** 車と人が現れる幅。 */
 export const MOVER_BAND: Band = [12, 16];
+/** 交通の主題図の「空いている」（緑）が現れる幅。引きでは、やや混んでいる以上だけを描く。 */
+export const TRAFFIC_FREE_BAND: Band = [4, 6];
 
 /** これより引いたら移動体を描かず、Worker にも移動体の範囲を頼まない。 */
 export const MIN_MOVER_ZOOM = MOVER_BAND[0];
@@ -43,6 +45,8 @@ export type StageWeights = {
   movers: number;
   /** 電気や水道が届いていない印の濃さ。引きでは描かない。 */
   marks: number;
+  /** 交通の主題図の「空いている」の濃さ。引きで 0、標準で 1。 */
+  trafficFree: number;
 };
 
 export function stageWeights(zoom: number): StageWeights {
@@ -55,6 +59,7 @@ export function stageWeights(zoom: number): StageWeights {
     detail,
     movers: showsMovers(zoom) ? weight(MOVER_BAND, zoom) : 0,
     marks: block,
+    trafficFree: weight(TRAFFIC_FREE_BAND, zoom),
   };
 }
 
