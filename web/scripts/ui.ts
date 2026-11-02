@@ -9,6 +9,7 @@ const MENUS: Record<string, string> = {
   zone: "zone",
   service: "service",
   signal: "signal",
+  crosswalk: "signal",
 };
 
 /** 2 段目の中にある道具の名前から、それを開く帯のボタンの名前を引く。帯に直接ある道具は null。 */

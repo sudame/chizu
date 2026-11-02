@@ -4,7 +4,10 @@
 //! 歩く人はそのリンクの進む向きの右（`far` なら左）の歩道にいる。建物の出入口は、建物の側の歩道の
 //! 上にある（`lane_shift` と `growth` の側の決め方と同じ）。
 //!
-//! 横断歩道は、CS2 と同じく 3 本以上の区間が集まる交差点の、高速道路でないすべての腕に、自動で置く。交差点で
+//! 横断歩道は、CS2 と同じく 3 本以上の区間が集まる交差点の、高速道路でないすべての腕に、自動で置く。
+//! プレイヤーは腕ごとに外せる（[`Network::set_crosswalk`]）。外した腕は、高速道路の腕と同じく渡らずに回る。
+//! どちらに回っても越えるときだけ、横断歩道があるときと同じく渡る。経路を選ぶときは、そうして越える腕
+//! 1 本ごとに [`JAYWALK_DETOUR_MM`] を足すので、ほかの交差点を回る遠回りがそれより短ければ遠回りする。交差点で
 //! 腕 A の歩道から腕 B の歩道へ移る人は、交差点のまわりを時計回りか反時計回りに回り、通る腕の
 //! 横断歩道を順に渡る。回る向きは渡る腕の少ないほうで、同じなら時計回り（マスの y は下向きなので、
 //! 向きの角度の増える向き）にする。腕 B のどちらの側へ出るかは、渡る腕の少ないほう（同じなら右）にする。
@@ -85,57 +88,71 @@ pub struct Walk {
     pub hold: bool,
 }
 
-/// 1 歩の向きの角度。x の正の向きを 0 とし、y の正の向きへ 45 度ごとに 1 ずつ増える。
-fn heading(step: (i64, i64)) -> u8 {
-    match step {
-        (1, 0) => 0,
-        (1, 1) => 1,
-        (0, 1) => 2,
-        (-1, 1) => 3,
-        (-1, 0) => 4,
-        (-1, -1) => 5,
-        (0, -1) => 6,
-        (1, -1) => 7,
-        _ => panic!("8 方向でない向き {step:?}"),
-    }
-}
-
 /// ノード `node` から区間 `segment` へ出ていく向きの角度。
 fn arm_heading(net: &Network, node: NodeId, segment: SegmentId) -> Option<u8> {
-    let s = net.segment(segment)?;
-    let other = if s.a == node { s.b } else { s.a };
-    let (p, q) = (net.node(node)?.tile(), net.node(other)?.tile());
-    Some(heading(((q.x - p.x).signum(), (q.y - p.y).signum())))
+    net.arm_heading(node, segment).map(|h| h as u8)
 }
 
 /// 交差点のまわりを回るときに渡る腕。渡る順に並べる。
 pub type Arms = SmallVec<[SegmentId; 4]>;
 
+/// 交差点の腕の、歩く人から見た渡り方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Arm {
+    /// 横断歩道がある。
+    Crosswalk,
+    /// プレイヤーが横断歩道を外した。
+    Removed,
+    /// 高速道路で、横断歩道がない。
+    Highway,
+}
+
 /// ノード `node` のまわりの歩道の角の位置。腕を向きの角度の順に並べ、腕 i の反時計回りの側を 2i、
 /// 時計回りの側を 2i+1 とする。2i から 2i+1 へ回るとき腕 i を渡り、2i+1 から次の腕の 2(i+1) へは
 /// 渡らずに角を回る。
 struct Corners {
-    /// 腕の区間と、高速道路か。
-    arms: SmallVec<[(SegmentId, bool); 8]>,
+    arms: SmallVec<[(SegmentId, Arm); 8]>,
 }
 
-/// 角から角へ回る道筋。越える高速道路の腕の数と、渡る腕。
-type Way = (usize, Arms);
+/// 角から角へ回る道筋。
+struct Way {
+    /// 越える高速道路の腕の数。
+    highways: usize,
+    /// 越える、横断歩道を外した腕の数。
+    removed: usize,
+    /// 渡る腕。横断歩道のある腕と、ほかに回れずに越える、横断歩道を外した腕である。
+    arms: Arms,
+}
+
+impl Way {
+    /// 道筋を比べる鍵。越える高速道路の腕が少なく、次に越える横断歩道を外した腕が少なく、次に渡る腕の
+    /// 少ないものを選ぶ。高速道路の腕は車を止めずに越えるので、外した腕を渡って済むなら、そちらを選ぶ。
+    fn key(&self) -> (usize, usize, usize) {
+        (self.highways, self.removed, self.arms.len())
+    }
+}
 
 impl Corners {
     fn of(net: &Network, node: NodeId) -> Option<Corners> {
         let n = net.node(node)?;
-        let mut arms: SmallVec<[(u8, SegmentId, bool); 8]> = n
+        let mut arms: SmallVec<[(u8, SegmentId, Arm); 8]> = n
             .segments
             .iter()
             .filter_map(|s| {
-                let highway = net.segment(*s)?.kind == SegmentKind::Highway;
-                Some((arm_heading(net, node, *s)?, *s, highway))
+                let h = net.arm_heading(node, *s)?;
+                let arm = if net.segment(*s)?.kind == SegmentKind::Highway {
+                    Arm::Highway
+                } else if n.crosswalk_removed(h) {
+                    Arm::Removed
+                } else {
+                    Arm::Crosswalk
+                };
+                Some((h as u8, *s, arm))
             })
             .collect();
-        arms.sort_unstable();
+        arms.sort_unstable_by_key(|a| (a.0, a.1));
         Some(Corners {
-            arms: arms.into_iter().map(|(_, s, h)| (s, h)).collect(),
+            arms: arms.into_iter().map(|(_, s, a)| (s, a)).collect(),
         })
     }
 
@@ -143,20 +160,28 @@ impl Corners {
         self.arms.iter().position(|x| x.0 == s)
     }
 
-    /// 角 `p` から角 `q` へ回る道筋のうち、越える高速道路の腕が少なく、次に渡る腕の少ないもの。
-    /// 高速道路の腕には横断歩道がないので、渡る腕には入れない。
+    /// 角 `p` から角 `q` へ回る道筋のうち、`Way::key` のいちばん小さいもの。
+    /// 高速道路の腕は、横断歩道なしに越えるので、渡る腕には入れない。横断歩道を外した腕は、越えるなら
+    /// 横断歩道があるときと同じく渡る（車道に人が出るので、車はその前で止まる）。
     fn walk(&self, p: usize, q: usize) -> Way {
         let m = 2 * self.arms.len();
         let way = |forward: bool| {
-            let (mut highways, mut arms) = (0, Arms::new());
+            let mut w = Way {
+                highways: 0,
+                removed: 0,
+                arms: Arms::new(),
+            };
             let mut at = p;
             while at != q {
                 if at % 2 == usize::from(!forward) {
-                    let (s, highway) = self.arms[at / 2];
-                    if highway {
-                        highways += 1;
-                    } else {
-                        arms.push(s);
+                    let (s, arm) = self.arms[at / 2];
+                    match arm {
+                        Arm::Crosswalk => w.arms.push(s),
+                        Arm::Removed => {
+                            w.removed += 1;
+                            w.arms.push(s);
+                        }
+                        Arm::Highway => w.highways += 1,
                     }
                 }
                 at = if forward {
@@ -165,42 +190,120 @@ impl Corners {
                     (at + m - 1) % m
                 };
             }
-            (highways, arms)
+            w
         };
         let (cw, ccw) = (way(true), way(false));
-        if (cw.0, cw.1.len()) <= (ccw.0, ccw.1.len()) {
-            cw
-        } else {
-            ccw
-        }
+        if cw.key() <= ccw.key() { cw } else { ccw }
     }
 }
 
+/// リンク `link` の終わりのノード。
+fn end_node(net: &Network, link: LinkId) -> Option<NodeId> {
+    let s = net.segment(link.segment)?;
+    Some(match link.dir {
+        Dir::Forward => s.b,
+        Dir::Backward => s.a,
+    })
+}
+
+/// 交差点 `node` で、区間 `from` の腕から入って区間 `to` の腕へ出る人が、ほかに回れずに越える、横断歩道を
+/// 外した腕の数。`from_far` は入る人の歩道の側（[`Walk::far`]）で、`None` なら少なく済むほうの側とする。
+/// 出る側は少なく済むほうを選ぶ。3 本より少ない区間のノードと、横断歩道を外していない交差点では 0 である。
+///
+/// 経路探索は歩道の側を持たないので、この数（側は `None`）に [`JAYWALK_DETOUR_MM`] を掛けた費用を、歩道の
+/// 曲がる費用に足す。外した腕を越えるより遠回りが短ければ、ほかの交差点を回る経路を選ぶ。
+pub(crate) fn removed_crossings(
+    net: &Network,
+    node: NodeId,
+    from: SegmentId,
+    from_far: Option<bool>,
+    to: SegmentId,
+) -> usize {
+    let Some(n) = net.node(node) else {
+        return 0;
+    };
+    if n.no_crosswalk == 0 || n.segments.len() < 3 {
+        return 0;
+    }
+    let Some(c) = Corners::of(net, node) else {
+        return 0;
+    };
+    let (Some(i), Some(j)) = (c.index(from), c.index(to)) else {
+        return 0;
+    };
+    let entries: SmallVec<[bool; 2]> = match from_far {
+        Some(f) => SmallVec::from_slice(&[f]),
+        None => SmallVec::from_slice(&[false, true]),
+    };
+    entries
+        .into_iter()
+        .flat_map(|f| {
+            let p = 2 * i + usize::from(f);
+            let c = &c;
+            [false, true]
+                .into_iter()
+                .map(move |far| c.walk(p, 2 * j + usize::from(!far)).removed)
+        })
+        .min()
+        .unwrap_or(0)
+}
+
 /// 歩道のリンク `from` の `from_far` の側からノード `node` を通ってリンク `to` へ移る人の、`to` での側と、
-/// 渡る腕。`need` があれば、その側へ出る。なければ、越える高速道路の腕が少なく、次に渡る腕の少ない
-/// 側（同じなら右）へ出る。3 本より少ない区間のノードでは渡る腕はない。
+/// 渡る腕。`need` があれば、その側へ出る。なければ、`Way::key` の小さい
+/// 側（同じなら右）へ出る。`then` は `to` の次に歩くリンクと、そこで出る側の決まりで、越える数には、
+/// `to` の終わりの交差点で越える、横断歩道を外した腕の数も足す。外した腕を避けられる側へ、先に移っておく
+/// ためである。3 本より少ない区間のノードでは渡る腕はない。
 ///
 /// 高速道路の腕は渡らずに回る。どちらに回っても高速道路の腕を越えるときだけ、横断歩道なしに越える。
 /// 外部接続の高速道路は買った土地の端の 1 本だけなので、そうなるノードはふつうはできない。
+/// 横断歩道を外した腕も渡らずに回る。どちらに回っても越えるときだけ、横断歩道があるときと同じく渡る。
 pub fn depart(
     net: &Network,
     node: NodeId,
     (from, from_far): (LinkId, bool),
     to: LinkId,
     need: Option<bool>,
+    then: Option<(LinkId, Option<bool>)>,
 ) -> (bool, Arms) {
     let junction = junction::is_junction(net, node);
     if let (false, Some(side)) = (junction, need) {
         return (side, Arms::new());
     }
+    // `to` の終わりの交差点で、側 `far` から入って越える、横断歩道を外した腕の数。
+    let ahead_node = then.and_then(|(next, need)| {
+        let end = end_node(net, to)?;
+        let n = net.node(end)?;
+        let c = (n.no_crosswalk != 0 && n.segments.len() >= 3)
+            .then(|| Corners::of(net, end))
+            .flatten()?;
+        Some((c.index(to.segment)?, c.index(next.segment)?, need, c))
+    });
+    let ahead = |far: bool| {
+        let Some((i, j, need, c)) = &ahead_node else {
+            return 0;
+        };
+        let p = 2 * i + usize::from(far);
+        let exits: SmallVec<[bool; 2]> = match need {
+            Some(side) => SmallVec::from_slice(&[*side]),
+            None => SmallVec::from_slice(&[false, true]),
+        };
+        exits
+            .into_iter()
+            .map(|side| c.walk(p, 2 * j + usize::from(!side)).removed)
+            .min()
+            .unwrap_or(0)
+    };
     let found = Corners::of(net, node).and_then(|c| {
         let (i, j) = (c.index(from.segment)?, c.index(to.segment)?);
         // 腕 i へ入ってくる人の右は反時計回りの側、腕 j から出ていく人の右は時計回りの側である。
         let p = 2 * i + usize::from(from_far);
         let q = |far: bool| 2 * j + usize::from(!far);
-        let key = |w: &Way| (w.0, w.1.len());
-        let side = need.unwrap_or_else(|| key(&c.walk(p, q(true))) < key(&c.walk(p, q(false))));
-        Some((side, c.walk(p, q(side)).1))
+        let key = |far: bool| {
+            let (highways, removed, arms) = c.walk(p, q(far)).key();
+            (highways, removed + ahead(far), arms)
+        };
+        let side = need.unwrap_or_else(|| key(true) < key(false));
+        Some((side, c.walk(p, q(side)).arms))
     });
     let (side, arms) = found.unwrap_or((need.unwrap_or(from_far), Arms::new()));
     if junction {

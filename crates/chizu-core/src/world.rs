@@ -94,10 +94,14 @@ pub enum DenyReason {
     NoRoadToChange = 16,
     /// 直線が通る道路が、どれもすでにその種類である。
     RoadKindUnchanged = 17,
+    /// 交差点の、その向きに、横断歩道を置ける腕（高速道路でない区間）がない。
+    NoCrosswalkArm = 18,
+    /// 腕の横断歩道が、もうその状態になっている。
+    CrosswalkUnchanged = 19,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 18] = [
+    pub const ALL: [DenyReason; 20] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -116,6 +120,8 @@ impl DenyReason {
         DenyReason::SignalUnchanged,
         DenyReason::NoRoadToChange,
         DenyReason::RoadKindUnchanged,
+        DenyReason::NoCrosswalkArm,
+        DenyReason::CrosswalkUnchanged,
     ];
 
     pub fn index(self) -> usize {
@@ -707,6 +713,12 @@ impl World {
                 Ok(()) => ApplyOutcome::Applied,
                 Err(reason) => ApplyOutcome::Denied(reason),
             },
+            Command::SetCrosswalk { node, arm, on } => {
+                match self.network.set_crosswalk(node, arm, on) {
+                    Ok(()) => ApplyOutcome::Applied,
+                    Err(reason) => ApplyOutcome::Denied(reason),
+                }
+            }
         }
     }
 
@@ -811,10 +823,12 @@ mod tests {
             | DenyReason::NotJunction
             | DenyReason::SignalUnchanged
             | DenyReason::NoRoadToChange
-            | DenyReason::RoadKindUnchanged => DenyReason::ALL.contains(&r),
+            | DenyReason::RoadKindUnchanged
+            | DenyReason::NoCrosswalkArm
+            | DenyReason::CrosswalkUnchanged => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 18);
+        assert_eq!(DenyReason::ALL.len(), 20);
     }
     use crate::command::MAX_TAX_PERMILLE;
 

@@ -96,6 +96,56 @@ pub struct NodeId {
     pub generation: u16,
 }
 
+/// ノードから出ていく腕の向き。マスの x の正の向きを東、y の正の向きを南とし、東から南回りに 45 度ずつ並べる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum Heading {
+    E = 0,
+    SE = 1,
+    S = 2,
+    SW = 3,
+    W = 4,
+    NW = 5,
+    N = 6,
+    NE = 7,
+}
+
+impl Heading {
+    pub const ALL: [Heading; 8] = [
+        Heading::E,
+        Heading::SE,
+        Heading::S,
+        Heading::SW,
+        Heading::W,
+        Heading::NW,
+        Heading::N,
+        Heading::NE,
+    ];
+
+    pub fn from_code(code: u8) -> Option<Heading> {
+        Heading::ALL.get(usize::from(code)).copied()
+    }
+
+    /// 1 歩の向き。x と y はそれぞれ -1、0、1 のどれかである。
+    pub fn step(self) -> (i64, i64) {
+        match self {
+            Heading::E => (1, 0),
+            Heading::SE => (1, 1),
+            Heading::S => (0, 1),
+            Heading::SW => (-1, 1),
+            Heading::W => (-1, 0),
+            Heading::NW => (-1, -1),
+            Heading::N => (0, -1),
+            Heading::NE => (1, -1),
+        }
+    }
+
+    /// 1 歩の向き `step` の向き。8 方向でなければ `None`。
+    pub fn of_step(step: (i64, i64)) -> Option<Heading> {
+        Heading::ALL.into_iter().find(|h| h.step() == step)
+    }
+}
+
 /// シミュレーションの速度。等速の何倍で回すかを表す。
 ///
 /// 一時停止は tick を進めないだけなので、速度には含めない。
@@ -153,6 +203,12 @@ pub enum Command {
     },
     SetSignal {
         node: NodeId,
+        on: bool,
+    },
+    /// 交差点 `node` の、向き `arm` の腕の横断歩道を戻す（`on` が `true`）か、外す。
+    SetCrosswalk {
+        node: NodeId,
+        arm: Heading,
         on: bool,
     },
     BuyChunk {
@@ -246,6 +302,7 @@ impl Command {
             Command::PlaceBuilding { at, .. } => at.in_world(),
             Command::BuyChunk { coord } => coord.in_world(),
             Command::SetSignal { .. }
+            | Command::SetCrosswalk { .. }
             | Command::SetTaxRate { .. }
             | Command::SetSimSpeed { .. } => true,
         }
@@ -291,9 +348,10 @@ impl Command {
                 }
             }
             // 種類の enum と `SimSpeed` は、型そのものが範囲の外の値を持てない。
-            Command::SetSignal { .. } | Command::BuyChunk { .. } | Command::SetSimSpeed { .. } => {
-                Ok(())
-            }
+            Command::SetSignal { .. }
+            | Command::SetCrosswalk { .. }
+            | Command::BuyChunk { .. }
+            | Command::SetSimSpeed { .. } => Ok(()),
         }
     }
 }

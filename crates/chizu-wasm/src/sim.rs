@@ -268,7 +268,8 @@ impl Sim {
         out
     }
 
-    /// ノードを、1 つにつき `[x, y, つながる区間の数, 外の世界か（0 か 1）]` の 4 つの数で返す。
+    /// ノードを、1 つにつき `[x, y, つながる区間の数, 外の世界か（0 か 1）, 横断歩道を外した腕]` の 5 つの数で返す。
+    /// 横断歩道を外した腕は、腕の向き（`Heading` の値）のビットを立てた数である。
     pub fn road_nodes(&self) -> Vec<f64> {
         let mut out = Vec::new();
         for (_, node) in self.world.network().nodes() {
@@ -278,6 +279,7 @@ impl Sim {
                 t.y as f64,
                 node.segments.len() as f64,
                 f64::from(u8::from(node.outside)),
+                f64::from(node.no_crosswalk),
             ]);
         }
         out
@@ -522,6 +524,10 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::SignalUnchanged => "信号はもうその状態になっている",
         DenyReason::NoRoadToChange => "種類を変えられる道路がない（高速道路は変えない）",
         DenyReason::RoadKindUnchanged => "道路はもうその種類になっている",
+        DenyReason::NoCrosswalkArm => {
+            "その向きに、横断歩道を置ける道路の腕がない（高速道路には置かない）"
+        }
+        DenyReason::CrosswalkUnchanged => "横断歩道はもうその状態になっている",
     }
 }
 
@@ -1120,8 +1126,8 @@ mod tests {
         assert_eq!(segments[segments.len() - 5..], [0.0, 0.0, 4.0, 0.0, 1.0]);
         let nodes = sim.road_nodes();
         assert_eq!(
-            nodes[nodes.len() - 8..],
-            [0.0, 0.0, 1.0, 0.0, 4.0, 0.0, 1.0, 0.0]
+            nodes[nodes.len() - 10..],
+            [0.0, 0.0, 1.0, 0.0, 0.0, 4.0, 0.0, 1.0, 0.0, 0.0]
         );
 
         let far = (CHUNK_SIDE as i64) * 3;

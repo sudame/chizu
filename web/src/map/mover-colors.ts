@@ -1,22 +1,25 @@
-// 移動体の色。車は移動体の ID から決めた色にばらつかせ、歩く人は車にない赤紫にする。
-// 色はどれも鮮やかな色にし、道路の車道、歩道、路肩、路面の線（白、黄）のどの色からも離す。
-// 白や銀の車は、横断歩道の縞や歩道と見分けられないので使わない。
+// 移動体の色（docs/map-style.md の「移動体」）。車は移動体の ID から決めた色にばらつかせ、歩く人は車にない赤紫にする。
+// 色はどれも鮮やかな色にし、地面、道路の塗りと縁、歩道、路面の線のどの色からも離す。
+// 信号の台と灯火（青、黄、赤）の色からも離す（mover-colors.test.ts）。
+// 白、銀、黄、橙の車は、道路の白と黄、高速道路の橙、横断歩道の縞と見分けられないので使わない。
 // test:wasm と、画面のシェーダーの両方がこの値を使う。
 
-export type Rgb = readonly [number, number, number];
+import { hexRgb, type Rgb } from "./palette.ts";
+
+export type { Rgb };
 
 export const CAR_COLORS: readonly Rgb[] = [
-  [0.82, 0.2, 0.18],
-  [0.2, 0.42, 0.82],
-  [0.12, 0.62, 0.6],
-  [0.52, 0.3, 0.8],
-  [0.62, 0.86, 0.18],
-  [0.45, 0.76, 0.96],
-  [0.55, 0.32, 0.14],
-  [0.1, 0.45, 0.25],
-];
+  "#a82e25",
+  "#3b6fcf",
+  "#0f6f78",
+  "#7552c2",
+  "#6b8e23",
+  "#3e8bc0",
+  "#85593a",
+  "#6b7a90",
+].map(hexRgb);
 
-export const WALKER_COLOR: Rgb = [0.93, 0.27, 0.64];
+export const WALKER_COLOR: Rgb = hexRgb("#d6336c");
 
 /** 移動体の ID から、車の色の番号を決める。movers.ts のシェーダーと同じ計算である。 */
 export function carColorIndex(id: number): number {
