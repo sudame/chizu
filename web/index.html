@@ -49,15 +49,17 @@
         display: flex;
         gap: 4px;
         align-items: center;
-        margin-top: 4px;
+        padding-left: 8px;
+        border-left: 1px solid #888;
       }
       #layers button[aria-pressed="true"] {
         background: #2d6cdf;
         color: #fff;
       }
+      /* 右上の部品は、上の帯の下に積む。帯は幅が狭いと 2 行になるので、高さは --hudbar-h で測る */
       #feedback-open {
         position: fixed;
-        top: 8px;
+        top: calc(var(--hudbar-h, 30px) + 16px);
         right: 8px;
       }
       #feedback textarea {
@@ -66,9 +68,9 @@
       }
       #dev-tools {
         position: fixed;
-        top: 40px;
+        top: calc(var(--hudbar-h, 30px) + 48px);
         right: 8px;
-        max-width: 20em;
+        max-width: 14em;
         text-align: right;
       }
       #dev-tools button[aria-pressed="true"] {
@@ -95,40 +97,102 @@
         min-width: 10em;
         font-size: 14px;
       }
+      /* 上の端の細い帯。いつも見るもの（日時、お金、速度とその操作）だけを置く */
       #overlay {
         position: fixed;
         top: 8px;
         left: 8px;
-        padding: 4px 8px;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        max-width: calc(100vw - 16px);
+        box-sizing: border-box;
+      }
+      #hudbar,
+      #hud-details {
+        padding: 2px 8px;
         background: rgb(255 255 255 / 85%);
         border-radius: 4px;
       }
-      #status,
+      #hudbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 2px 10px;
+        align-items: center;
+      }
+      #hud {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0 14px;
+        margin: 0;
+        font-size: 17px;
+        color: #222;
+        white-space: nowrap;
+      }
+      #hud [hidden] {
+        display: none;
+      }
+      #hud-deficit {
+        color: #b00020;
+      }
+      #controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 3px;
+      }
+      #controls button,
+      #hud-toggle {
+        padding: 1px 6px;
+        font-size: 12px;
+      }
+      /* 開発者向けの表示。小さく、控えめに出す */
+      #status {
+        margin: 0;
+        font-size: 11px;
+        color: #666;
+      }
+      #status[data-state="error"] {
+        font-size: 13px;
+        font-weight: bold;
+        color: #a31515;
+      }
+      #hud-details {
+        width: max-content;
+        max-width: 100%;
+        box-sizing: border-box;
+        padding: 4px 8px;
+      }
+      #hud-details[hidden] {
+        display: none;
+      }
       #city-numbers,
       #city-utilities {
         margin: 0;
-      }
-      #city {
-        display: flex;
-        gap: 12px;
-        align-items: center;
-        margin: 4px 0;
       }
       #city-utilities.short {
         color: #a31515;
         font-weight: bold;
       }
+      #city {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin: 0 0 4px;
+      }
       #notices {
         position: fixed;
-        top: 8px;
-        left: 520px;
+        top: calc(var(--hudbar-h, 30px) + 16px);
+        left: 390px;
         display: flex;
         flex-direction: column;
         gap: 4px;
-        max-width: 24em;
+        width: max-content;
+        max-width: min(24em, calc(100vw - 610px));
       }
       #city-shortage,
-      #growth-notice {
+      #growth-notice,
+      #save-notice,
+      .save-alert {
         margin: 0;
         padding: 4px 8px;
         font-size: 13px;
@@ -138,22 +202,39 @@
         border-radius: 4px;
       }
       #city-shortage[hidden],
-      #growth-notice[hidden] {
+      #growth-notice[hidden],
+      #save-notice[hidden] {
         display: none;
       }
       @media (max-width: 900px) {
         #notices {
           top: auto;
           right: 8px;
-          bottom: 104px;
+          bottom: calc(var(--toolbar-h, 48px) + 56px);
           left: 8px;
+          width: auto;
           max-width: none;
         }
+      }
+      #save-alerts {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .save-alert {
+        display: flex;
+        gap: 8px;
+        align-items: flex-start;
+        justify-content: space-between;
+      }
+      #save-alerts button {
+        padding: 0 6px;
+        font-size: 12px;
       }
       #legend {
         position: fixed;
         right: 8px;
-        bottom: 56px;
+        bottom: calc(var(--toolbar-h, 48px) + 8px);
         max-width: 16em;
         padding: 4px 8px;
         font-size: 12px;
@@ -205,7 +286,7 @@
       }
       #milestone-notice {
         position: fixed;
-        bottom: 64px;
+        bottom: calc(var(--toolbar-h, 48px) + 16px);
         left: 50%;
         transform: translateX(-50%);
         max-width: 24em;
@@ -254,36 +335,45 @@
   <body>
     <canvas id="map" data-tool="none"></canvas>
     <div id="overlay">
-      <p id="status" data-state="loading">WASM を読み込んでいる</p>
-      <canvas id="hud" width="480" height="96"></canvas>
-      <p id="dev-flag" hidden>開発用の操作あり：再現不可</p>
-      <div id="city">
-        <div>
-          <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
-          <p id="city-utilities">電気 0 / 需要 0・水道 0 / 需要 0</p>
+      <div id="hudbar">
+        <p id="hud">
+          <span id="hud-clock">1 日目 00:00</span>
+          <span id="hud-money">お金 0</span>
+          <span id="hud-deficit" hidden></span>
+          <span id="hud-speed">速度 1 倍</span>
+        </p>
+        <div id="controls">
+          <button type="button" id="pause">一時停止</button>
+          <button type="button" data-speed="0.25">0.25 倍</button>
+          <button type="button" data-speed="0.5">0.5 倍</button>
+          <button type="button" data-speed="1">1 倍</button>
+          <button type="button" data-speed="4">4 倍</button>
+          <button type="button" data-speed="16">16 倍</button>
+          <button type="button" data-speed="48">48 倍</button>
         </div>
-        <div id="demand" title="区画の種類ごとの需要">
-          <div><div class="slot"><div class="bar" style="background: #26f226"></div></div><div class="label">住</div></div>
-          <div><div class="slot"><div class="bar" style="background: #4073f2"></div></div><div class="label">商</div></div>
-          <div><div class="slot"><div class="bar" style="background: #f2cc33"></div></div><div class="label">工</div></div>
-          <div><div class="slot"><div class="bar" style="background: #4dd9f2"></div></div><div class="label">オ</div></div>
+        <button type="button" id="hud-toggle" aria-controls="hud-details" aria-expanded="false">詳細<span aria-hidden="true"> ▸</span></button>
+        <p id="status" data-state="loading">WASM を読み込んでいる</p>
+        <p id="dev-flag" hidden>開発用の操作あり：再現不可</p>
+      </div>
+      <div id="hud-details" hidden>
+        <div id="city">
+          <div>
+            <p id="city-numbers">建物 0 棟・住める世帯 0・職場の枠 0</p>
+            <p id="city-utilities">電気 0 / 需要 0・水道 0 / 需要 0</p>
+          </div>
+          <div id="demand" title="区画の種類ごとの需要">
+            <div><div class="slot"><div class="bar" style="background: #26f226"></div></div><div class="label">住</div></div>
+            <div><div class="slot"><div class="bar" style="background: #4073f2"></div></div><div class="label">商</div></div>
+            <div><div class="slot"><div class="bar" style="background: #f2cc33"></div></div><div class="label">工</div></div>
+            <div><div class="slot"><div class="bar" style="background: #4dd9f2"></div></div><div class="label">オ</div></div>
+          </div>
         </div>
+        <details id="overview">
+          <summary><span id="overview-population">人口 0</span>・<span id="overview-happiness">幸福度 0 / 100</span>・<span id="overview-remaining">次の段階まで</span></summary>
+          <p id="overview-next"></p>
+          <div id="overview-parts"></div>
+        </details>
       </div>
-      <details id="overview">
-        <summary><span id="overview-population">人口 0</span>・<span id="overview-happiness">幸福度 0 / 100</span>・<span id="overview-remaining">次の段階まで</span></summary>
-        <p id="overview-next"></p>
-        <div id="overview-parts"></div>
-      </details>
-      <div id="controls">
-        <button type="button" id="pause">一時停止</button>
-        <button type="button" data-speed="0.25">0.25 倍</button>
-        <button type="button" data-speed="0.5">0.5 倍</button>
-        <button type="button" data-speed="1">1 倍</button>
-        <button type="button" data-speed="4">4 倍</button>
-        <button type="button" data-speed="16">16 倍</button>
-        <button type="button" data-speed="48">48 倍</button>
-      </div>
-      <div id="layers" title="データレイヤー"></div>
     </div>
     <div id="notices">
       <div id="city-shortage" role="status" hidden></div>
@@ -306,6 +396,7 @@
       <button type="button" data-tool="signal-on" aria-pressed="false">信号を置く</button>
       <button type="button" data-tool="signal-off" aria-pressed="false">信号を外す</button>
       <button type="button" data-tool="buy" aria-pressed="false">土地を買う</button>
+      <div id="layers" title="データレイヤー"></div>
       <span id="tool-info"></span>
       <span id="tool-message" aria-live="polite"></span>
     </div>
@@ -318,7 +409,7 @@
       #finance {
         position: fixed;
         left: 8px;
-        bottom: 56px;
+        bottom: calc(var(--toolbar-h, 48px) + 8px);
         width: 17em;
         max-height: 50vh;
         padding: 4px 8px;
@@ -393,7 +484,7 @@
       #inspector {
         position: fixed;
         right: 8px;
-        top: 48px;
+        top: calc(var(--hudbar-h, 30px) + 116px);
         min-width: 16em;
         padding: 4px 8px 8px;
         font-size: 14px;

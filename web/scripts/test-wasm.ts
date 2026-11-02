@@ -64,6 +64,99 @@ const url = givenUrl ?? server?.resolvedUrls?.local[0];
 if (url === undefined) {
   throw new Error("preview の URL が分からない");
 }
+// 左上の帯：日時、お金、速度はたたんでも見え、たためる欄は閉じて始まり、開閉が覚えられる。
+// 幅 1280 と 500 で、帯と欄が地図の広い範囲を覆わないことも見る
+async function checkHudPanel(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  const hud = page.locator("#hud");
+  await hud.and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  const details = page.locator("#hud-details");
+  const toggle = page.locator("#hud-toggle");
+  check(
+    (await hud.isVisible()) &&
+      (await page.locator("#pause").isVisible()) &&
+      !(await details.isVisible()),
+    "日時、お金、速度の帯は見え、たためる欄は閉じて始まる",
+  );
+  const covered = async () =>
+    page.evaluate(() => {
+      const r = document.querySelector("#overlay")?.getBoundingClientRect();
+      return r === undefined ? 0 : r.width * r.height;
+    });
+  const closedArea = await covered();
+  await toggle.click();
+  check(
+    (await details.isVisible()) &&
+      (await page.locator("#city-numbers").isVisible()) &&
+      (await page.locator("#demand").isVisible()) &&
+      (await page.locator("#overview").isVisible()),
+    "「詳細」を押すと、建物、電気と水道、需要、人口と幸福度が出る",
+  );
+  await page.reload();
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  check(await details.isVisible(), "開いたことが覚えられ、読み直しても開いている");
+  await toggle.click();
+  await page.reload();
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  check(!(await details.isVisible()), "閉じたことが覚えられ、読み直しても閉じている");
+  const size = page.viewportSize() ?? { width: 1280, height: 720 };
+  const share = closedArea / (size.width * size.height);
+  check(share < 0.06, `たたんだ帯が覆う広さは画面の 6% に満たない（${(share * 100).toFixed(1)}%）`);
+  // どの幅でも、帯のボタンは覆われず、帯と欄、知らせ、右上の部品が重ならない
+  await toggle.click();
+  for (const width of [1280, 1000, 900, 500]) {
+    await page.setViewportSize({ width, height: 800 });
+    await page.waitForTimeout(300);
+    const layout = await page.evaluate(() => {
+      const notice = document.querySelector<HTMLElement>("#save-notice");
+      if (notice !== null) {
+        notice.textContent = "確かめ用の知らせ";
+        notice.hidden = false;
+      }
+      const box = (sel: string) => {
+        const el = document.querySelector(sel);
+        const r = el?.getBoundingClientRect();
+        // hidden の部品は大きさが 0 なので、重なりの確かめから外す
+        return r === undefined || r.width === 0 || r.height === 0 ? null : r;
+      };
+      const covered = [...document.querySelectorAll<HTMLElement>("#hudbar button")]
+        .filter((b) => {
+          const r = b.getBoundingClientRect();
+          const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+          return hit !== b && !b.contains(hit);
+        })
+        .map((b) => b.textContent);
+      const overlaps = (a: DOMRect, b: DOMRect) =>
+        a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+      const bar = box("#hudbar");
+      const others = ["#hud-details", "#notices", "#feedback-open", "#dev-tools", "#toolbar"];
+      const hits = others.filter((sel) => {
+        const o = box(sel);
+        return bar !== null && o !== null && overlaps(bar, o);
+      });
+      const pairs = [
+        ["#hud-details", "#notices"],
+        ["#hud-details", "#feedback-open"],
+        ["#hud-details", "#dev-tools"],
+        ["#notices", "#feedback-open"],
+        ["#notices", "#dev-tools"],
+      ].filter(([x, y]) => {
+        const rx = box(x ?? "");
+        const ry = box(y ?? "");
+        return rx !== null && ry !== null && overlaps(rx, ry);
+      });
+      return { covered, hits, pairs, right: bar?.right ?? 0 };
+    });
+    check(
+      layout.covered.length === 0 && layout.hits.length === 0 && layout.pairs.length === 0,
+      `幅 ${width} で、帯のボタンは覆われず、帯と欄、知らせ、右上の部品が重ならない（覆われた ${layout.covered.join(",")}、帯と重なる ${layout.hits.join(",")}、ほかの重なり ${layout.pairs.join(",")}）`,
+    );
+    check(layout.right <= width, `幅 ${width} で帯は画面に収まる（右 ${layout.right}）`);
+  }
+  await page.close();
+}
+
 // 開発用の道具で歩く人を出し、描かれること、時間を進めると動くこと、着くと消えることを確かめる。
 // 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その左寄りと右寄りのマスのあいだに出す
 async function checkDevWalks(page: Page, at: string): Promise<void> {
@@ -1151,6 +1244,7 @@ try {
 
   // 歩く人を出す道具は記録に入らず、上の再生の確かめと食い違うので、新しいページで確かめる
   await page.close();
+  await checkHudPanel(await browser.newPage(), url);
   await checkDevWalks(await browser.newPage(), url);
 } finally {
   await browser.close();
