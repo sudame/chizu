@@ -697,6 +697,42 @@ describe("MoverInterpolator の道筋に沿う補間", () => {
     expect(r.get(1)?.y).toBeCloseTo(5.5, 4);
   });
 
+  it("補間が終わる近くで乗せ直しても、見えている位置と向きが跳ばない", () => {
+    const paths = corner();
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0, y: 0 }], {}, paths);
+    // 道筋 7 の s = 1（角）。前が道筋なしなので、この区間はまっすぐ動く
+    const f11 = { id: 1, x: 1, y: 0, path: 7, frac: 0.5 };
+    run(i, TICK_MS, 11, [f11], {}, paths);
+    // 補間が 95% ほど進んだ所で次の tick が届く
+    const later = TICK_MS * 1.95;
+    const before = run(i, later, 11, [f11], {}, paths).get(1);
+    expect(before?.x).toBeLessThan(0.99);
+    const f12 = { id: 1, x: 1, y: 1, path: 7, frac: 1 };
+    const after = run(i, later, 12, [f12], {}, paths).get(1);
+    expect(after?.x).toBeCloseTo(before?.x ?? Number.NaN, 3);
+    expect(after?.y).toBeCloseTo(before?.y ?? Number.NaN, 3);
+    expect(after?.heading).toBe(before?.heading);
+  });
+
+  it("補間の早いうちは乗せ直さず、次の tick が補間の終わり近くに来たら道筋に戻る", () => {
+    const paths = corner();
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0, y: 0 }], {}, paths);
+    const f11 = { id: 1, x: 0.5, y: 0, path: 7, frac: 0.25 };
+    run(i, TICK_MS, 11, [f11], {}, paths);
+    const f12 = { id: 1, x: 1, y: 1, path: 7, frac: 1 };
+    // 補間の半分で次の tick が来る: 乗せ直さず、この区間もまっすぐ動く
+    run(i, TICK_MS * 1.5, 12, [f12], {}, paths);
+    const end = TICK_MS * 2.35;
+    const before = run(i, end, 12, [f12], {}, paths).get(1);
+    expect(before?.x).toBeLessThan(0.99);
+    // 補間の終わり近くで次の tick が来る: 道筋の上へ乗せ直す
+    run(i, end, 13, [f12], {}, paths);
+    const r = run(i, end + TICK_MS * 0.5, 13, [f12], {}, paths).get(1);
+    expect(r?.x).toBeCloseTo(1, 4);
+  });
+
   it("補間の途中で次の tick が来ても、道筋の上の見えている所から続けて動かす", () => {
     const paths = corner();
     const i = new MoverInterpolator();

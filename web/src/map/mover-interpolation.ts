@@ -103,6 +103,29 @@ export function pathAt(
   return out;
 }
 
+/** 道筋の上で、(x, y) にいちばん近い点の始まりからの長さ `s`。その点の位置と向きを `out` に書く。 */
+function nearestOnPath(path: MoverPath, x: number, y: number, out: PathPoint): { s: number } {
+  const n = Math.floor(path.length / POINT_STRIDE);
+  const p = (k: number, i: number) => path[k * POINT_STRIDE + i] ?? 0;
+  let best = Number.POSITIVE_INFINITY;
+  let bestS = 0;
+  for (let k = 0; k + 1 < n; k++) {
+    const ax = p(k, 0);
+    const ay = p(k, 1);
+    const dx = p(k + 1, 0) - ax;
+    const dy = p(k + 1, 1) - ay;
+    const len2 = dx * dx + dy * dy;
+    const u = len2 === 0 ? 0 : Math.min(1, Math.max(0, ((x - ax) * dx + (y - ay) * dy) / len2));
+    const d = Math.hypot(ax + dx * u - x, ay + dy * u - y);
+    if (d < best) {
+      best = d;
+      bestS = p(k, 2) + (p(k + 1, 2) - p(k, 2)) * u;
+    }
+  }
+  pathAt(path, bestS, out);
+  return { s: bestS };
+}
+
 /** 道筋 `a` の終わりと道筋 `b` の始まりが同じ所にあるか。 */
 function joins(a: MoverPath, b: MoverPath): boolean {
   const n = a.length;
@@ -429,8 +452,11 @@ export class MoverInterpolator {
           const id = this.#path[i] ?? 0;
           const p = this.#paths.get(id);
           if (p !== undefined) {
+            // 見えている位置に最も近い道筋の点から始める。tick の終わりの位置から始めると、次の枠で前へ跳ぶ
+            const at = nearestOnPath(p, seen.x, seen.y, this.#point);
             this.#prevPath[i] = id;
-            this.#prevS[i] = (this.#frac[i] ?? 0) * pathLength(p);
+            this.#prevS[i] = at.s;
+            this.#prevH[i] = angleCode(this.#point.angle);
           }
         }
         this.#prevIndex.set(this.#keys[i] ?? 0, i);
