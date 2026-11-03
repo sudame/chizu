@@ -175,6 +175,36 @@ fn a_full_destination_sends_the_car_to_the_nearest_free_lot() {
 }
 
 #[test]
+fn cars_sent_to_another_lot_are_told_apart_until_they_park() {
+    let (mut s, ids) = Street::new(&[30, 5, 9]);
+    let (home, shop) = (ids[0], ids[1]);
+    let first = s.drive(home, shop).unwrap();
+    let second = s.drive(home, shop).unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..1_000 {
+        let (a, b) = (s.trips.get(first), s.trips.get(second));
+        if a.is_none() && b.is_none() {
+            break;
+        }
+        assert!(!a.is_some_and(Trip::parks_elsewhere));
+        if let Some(t) = b {
+            seen.push((t.mode(), t.parks_elsewhere()));
+        }
+        s.step();
+    }
+    seen.dedup();
+    // 車まで歩くあいだと走るあいだは、ほかの建物へ回された車と分かる。停めて歩き出したら分からなくてよい。
+    assert_eq!(
+        seen,
+        [
+            (LaneMode::Sidewalk, true),
+            (LaneMode::Car, true),
+            (LaneMode::Sidewalk, false),
+        ]
+    );
+}
+
+#[test]
 fn leaving_cars_do_not_free_spaces_held_for_arriving_cars() {
     let (mut s, ids) = Street::new(&[50, 5, 9]);
     let (home, shop, near) = (ids[0], ids[1], ids[2]);

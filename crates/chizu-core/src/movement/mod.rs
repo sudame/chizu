@@ -162,6 +162,17 @@ impl Trip {
         self.mode == LaneMode::Car && self.waiting && !self.rejoining
     }
 
+    /// 行き先の建物の駐車場が満車で、近くのほかの建物の駐車場に停めに向かっているか。
+    /// 駐車場の位置と行き先の出入口の位置が違えば、ほかの建物の駐車場である。
+    pub fn parks_elsewhere(&self) -> bool {
+        match self.then {
+            parking::Then::Arrive => false,
+            parking::Then::Drive { park_at, to, .. } => park_at != to,
+            // 車で走っている区切りで、いまの区切りの行き先が駐車場である。
+            parking::Then::Walk { to, .. } => self.dest != to,
+        }
+    }
+
     pub fn speed(&self) -> MmPerTick {
         self.speed
     }
