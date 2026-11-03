@@ -820,3 +820,101 @@ fn a_car_bound_for_a_removed_building_is_not_counted_as_parking_elsewhere() {
     let t = s.trips.get(id).unwrap();
     assert!(!t.parks_elsewhere(&s.net, &s.buildings));
 }
+
+#[test]
+fn residential_lots_take_only_their_own_residents() {
+    let (mut s, ids) = Street::new(&[30, 5]);
+    let (work, shop) = (ids[0], ids[1]);
+    let house = s
+        .buildings
+        .insert(wide(&s.net, ZoneKind::Residential, 9, (1, 1), 1));
+    let other = s
+        .buildings
+        .insert(wide(&s.net, ZoneKind::Residential, 8, (1, 1), 1));
+    assert!(s.buildings.get(house).unwrap().parking_spaces() > 0);
+    let drive = |s: &mut Street, home| {
+        let (net, router) = (&s.net, &mut s.router);
+        let id = s
+            .trips
+            .spawn_drive_taking(net, router, &s.buildings, (work, house), None, home, Tick::ZERO)
+            .unwrap();
+        s.trips.get(id).unwrap().parking_lot().unwrap()
+    };
+    // 住民でない人は、行き先の住宅にも、隣の住宅にも停めず、近くの店に停める。
+    assert_eq!(drive(&mut s, None), shop);
+    assert_eq!(lot(&s, other), (0, 0));
+    // 住民は、自分の家の駐車場に停める。隣の住宅の住民は、近くにある自分の家に停める。
+    assert_eq!(drive(&mut s, Some(house)), house);
+    assert_eq!(drive(&mut s, Some(other)), other);
+}
+
+#[test]
+fn a_household_shares_one_car() {
+    use crate::citizens::Activity;
+    use crate::id::{CitizenId, HouseholdId};
+    use crate::movement::parking::Then;
+    // 30 マスは 240m で、車を持つ世帯なら車で向かう。
+    let (mut s, ids) = Street::new(&[0, 30]);
+    let (home, work) = (ids[0], ids[1]);
+    let household = HouseholdId {
+        index: 0,
+        generation: 0,
+    };
+    let citizen = |index| CitizenId {
+        index,
+        generation: 0,
+    };
+    let request = |index, (from, to)| CommuteRequest {
+        who: Commuter {
+            citizen: citizen(index),
+            household,
+            to: Activity::Work,
+        },
+        from,
+        to,
+        home: None,
+        owns_car: true,
+    };
+    let start = |s: &mut Street, requests: &[CommuteRequest]| {
+        let (net, router) = (&s.net, &mut s.router);
+        s.trips
+            .start_commutes(net, router, &s.buildings, requests, Tick::ZERO)
+    };
+    let drives = |s: &Street, id: Option<TripId>| {
+        let t = s.trips.get(id.unwrap()).unwrap();
+        matches!(t.then, Then::Drive { .. })
+    };
+    // 同じ世帯の 2 人が同時に出ると、先の 1 人だけが車に乗り、もう 1 人は歩く。
+    let out = start(&mut s, &[request(0, (home, work)), request(1, (home, work))]);
+    assert!(drives(&s, out[0]));
+    assert!(!drives(&s, out[1]), "2 台目の車に乗った");
+    assert_eq!(s.trips.parking_tally().no_car, 1);
+    s.run(out[0].unwrap());
+    s.trips.take_commuter(out[0].unwrap());
+    assert_eq!(
+        s.trips.household_car(household),
+        Some(HouseholdCar::Parked {
+            lot: work,
+            by: citizen(0)
+        })
+    );
+    // 車が職場に停めてあるあいだ、家から出る人は車を使えない。
+    s.trips.cancel(out[1].unwrap());
+    let walk = start(&mut s, &[request(1, (home, work))]);
+    assert!(!drives(&s, walk[0]));
+    assert_eq!(s.trips.parking_tally().no_car, 2);
+    s.trips.cancel(walk[0].unwrap());
+    // 停めた本人は、職場から車で帰れる。
+    let back = start(&mut s, &[request(0, (work, home))]);
+    assert!(drives(&s, back[0]));
+    assert_eq!(lot(&s, work), (0, 0));
+    assert_eq!(
+        s.trips.household_car(household),
+        Some(HouseholdCar::InUse(back[0].unwrap()))
+    );
+    // 停めずに移動が終わったら、車はどこにもないものとし、次に出る人の出発の建物から現れる。
+    s.trips.cancel(back[0].unwrap());
+    assert_eq!(s.trips.household_car(household), None);
+    let again = start(&mut s, &[request(1, (home, work))]);
+    assert!(drives(&s, again[0]));
+}
