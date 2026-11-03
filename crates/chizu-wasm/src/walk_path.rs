@@ -17,6 +17,10 @@
 //! 角の位置は、横断歩道の縞（`web/src/map/roads.ts` の `zebra`）の真ん中の位置と、歩道の中心線に
 //! 合わせる。区間の途中の車と同じ式で道路の端を求める（`car_path`）。
 //!
+//! 補間も道筋に沿わせる。人の道筋（[`route`]）は、リンクの始まりから渡り終えるまでの描く位置を、リンクの上の
+//! 距離を長さにして結んだ折れ線で、車の道筋と同じ表（[`Paths`]）に覚える。三重バッファには、道筋の番号と、
+//! 道筋の上で進んだ割合を書く。画面は、tick と tick のあいだを道筋の上で距離に比例して動かす。
+//!
 //! 網が変わってから次の `step` で経路を探し直すまでのあいだは、網から位置を求められない人がいる
 //! （`WalkPath::stale`）。その人は、前の回に描いた位置に描き続ける（`movers::visible_movers`）。
 
@@ -26,8 +30,8 @@ use chizu_core::{Network, NodeId, SegmentId};
 use smallvec::SmallVec;
 
 use crate::car_path::{
-    Drawn, V, ZEBRA_LENGTH, arc_length, bezier, center, control, dist, geom, is_bend, is_junction,
-    mm, node_half,
+    Drawn, Path, Paths, V, WalkKey, ZEBRA_LENGTH, arc_length, bezier, center, control, dist, geom,
+    is_bend, is_junction, mm, node_half,
 };
 
 /// 窓の中で、角の位置を窓の長さの何割までに抑えるか。窓の中の人の進みが、中核の半分より遅くならず、
@@ -270,6 +274,156 @@ pub fn draw(net: &Network, wp: &WalkPath) -> Walk {
     }
 }
 
+/// 道筋を求めるとき、窓と横断歩道の中で位置を測る間隔（mm）。この間隔の折れ線で、曲がる所のずれは
+/// 数 mm に収まる。
+const SAMPLE_MM: u32 = 400;
+
+/// 折れ線が実際の位置から離れてよい量（mm）。これを超える所は、標本を足す。
+const MAX_CHORD_MM: f64 = 3.0;
+
+/// 歩く人を道筋の上に描いたときの、道筋の番号と、道筋の上で進んだ割合。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Route {
+    pub id: u32,
+    pub frac: f32,
+}
+
+/// 歩く人の道筋は、リンクの始まりからの距離を長さにして、始まりからノードを渡り終えるまでを覚える。
+/// 窓の外の中核の位置のまま描く所は、両端の 2 点を結ぶ。
+/// 同じリンク、同じ歩道、同じ窓の長さ、同じ道筋なら、人が違っても同じ道筋を使う。
+/// 窓を使わない人と、網から位置を求められない人は `None` である。
+pub fn route(net: &Network, paths: &mut Paths, wp: &WalkPath) -> Option<Route> {
+    if wp.stale {
+        return None;
+    }
+    let g = geom(net, wp.link)?;
+    let len = f64::from(wp.len.0);
+    if len <= 0.0 {
+        return None;
+    }
+    let (ws, we, ahead) = windows(net, wp, g.from, g.to, len);
+    if ws < 1.0 && ahead.is_none() {
+        return None;
+    }
+    let q = |v: f64| v.round() as i64;
+    let mut key = WalkKey::new();
+    key.extend([
+        i64::from(wp.link.segment.index),
+        i64::from(wp.link.segment.generation),
+        i64::from(wp.link.dir == chizu_core::Dir::Backward),
+        wp.lane_shift.0.0,
+        wp.lane_shift.1.0,
+        q(len),
+        q(ws),
+        q(we),
+    ]);
+    if let Some(a) = ahead {
+        key.extend([
+            i64::from(a.node.index),
+            i64::from(a.node.generation),
+            i64::from(a.next_len.0),
+            i64::from(a.next_end.0),
+            a.corners.len() as i64,
+        ]);
+        for &(seg, cw) in &a.corners {
+            key.extend([
+                i64::from(seg.index),
+                i64::from(seg.generation),
+                i64::from(cw),
+            ]);
+        }
+        for &seg in &a.arms {
+            key.extend([i64::from(seg.index), i64::from(seg.generation)]);
+        }
+    }
+    let id = paths.walk_id(key, || build(net, wp, len, ws, we, ahead))?;
+    let total = paths.get(id)?.length();
+    let frac = (f64::from(wp.offset.0) / total).clamp(0.0, 1.0);
+    Some(Route {
+        id,
+        frac: frac as f32,
+    })
+}
+
+/// 道筋を求める。リンクの始まり（距離 0）から、渡り終えるまで、`place` が描く位置を標本にして結ぶ。
+fn build(
+    net: &Network,
+    wp: &WalkPath,
+    len: f64,
+    ws: f64,
+    we: f64,
+    ahead: Option<&WalkAhead>,
+) -> Option<Path> {
+    let g = geom(net, wp.link)?;
+    let start = center(net, g.from)?;
+    let lat = mm(wp.lane_shift);
+    let on_link = |along: f64| Drawn {
+        x: start.0 + g.dir.0 * along + lat.0,
+        y: start.1 + g.dir.1 * along + lat.1,
+        angle: g.dir.1.atan2(g.dir.0),
+    };
+    // 横断歩道を順に並べた道のりの、区切りの距離。
+    let mut crossings: SmallVec<[f64; 8]> = SmallVec::new();
+    let mut across = 0.0;
+    for &arm in ahead.map_or(&[][..], |a| &a.arms[..]) {
+        across += f64::from(crossing::width(net, arm));
+        crossings.push(across);
+    }
+    let total = (len + across).round() as u32;
+    // 標本にする距離。窓と横断歩道の中は細かく、窓のあいだは両端だけを取る。
+    let mut at: Vec<u32> = vec![0, total];
+    let mut span = |from: f64, to: f64| {
+        let (a, b) = (
+            from.floor().max(0.0) as u32,
+            to.ceil().min(f64::from(total)) as u32,
+        );
+        at.extend((a..b).step_by(SAMPLE_MM as usize));
+        at.extend([a, b]);
+    };
+    if ws >= 1.0 {
+        span(0.0, ws);
+    }
+    if ahead.is_some() {
+        span(len - we, len + across);
+        for &c in &crossings {
+            let edge = len + c;
+            span(edge - 1.0, edge + 1.0);
+        }
+    }
+    at.sort_unstable();
+    at.dedup();
+    let mut probe = wp.clone();
+    let mut at_offset = |o: u32| -> Option<Drawn> {
+        probe.offset = chizu_core::LaneOffset(o);
+        Some(place(net, &probe)?.unwrap_or_else(|| on_link(f64::from(o))))
+    };
+    let mut samples: Vec<(u32, Drawn)> = Vec::with_capacity(at.len());
+    for o in at {
+        samples.push((o, at_offset(o)?));
+    }
+    // 折れ線が実際の位置から離れる所（区切りのつなぎ目など）は、間を割って標本を足す。
+    let mut k = 0;
+    while k + 1 < samples.len() {
+        let ((o0, d0), (o1, d1)) = (samples[k], samples[k + 1]);
+        if o1 - o0 > 1 {
+            let o = o0 + (o1 - o0) / 2;
+            let d = at_offset(o)?;
+            let t = f64::from(o - o0) / f64::from(o1 - o0);
+            let chord = (d0.x + (d1.x - d0.x) * t, d0.y + (d1.y - d0.y) * t);
+            if dist(chord, (d.x, d.y)) > MAX_CHORD_MM {
+                samples.insert(k + 1, (o, d));
+                continue;
+            }
+        }
+        k += 1;
+    }
+    Some(Path::from_samples(
+        samples
+            .into_iter()
+            .map(|(o, d)| ((d.x, d.y), d.angle, f64::from(o))),
+    ))
+}
+
 /// いまのリンクの上の、横断歩道の手前の角より交差点の側へは出ない位置。網が変わって道筋を求められない
 /// ときに、交差点の中心に描かないための代わりの位置である。リンクかノードがなくなっていれば `None`。
 fn curb(net: &Network, wp: &WalkPath) -> Option<Drawn> {
@@ -288,6 +442,33 @@ fn curb(net: &Network, wp: &WalkPath) -> Option<Drawn> {
     })
 }
 
+/// リンクの始まりの窓の長さ、終わりの窓の長さ、終わりの窓の道筋。始まりの窓は、ノードを抜けてきた人の
+/// ものである。歩き出す出入口と、歩き終わる出入口は、中核の位置と描く位置が合うように、窓の外に置く。
+/// 終わりの窓が使えない（1mm 未満の）ときは、道筋は `None` である。
+fn windows<'a>(
+    net: &Network,
+    wp: &'a WalkPath,
+    from: NodeId,
+    to: NodeId,
+    len: f64,
+) -> (f64, f64, Option<&'a WalkAhead>) {
+    let begin = f64::from(wp.from.0).min(len);
+    let end = wp.to.map_or(len, |t| f64::from(t.0).min(len));
+    let from_node = wp.entered && windowed(net, from);
+    let ws = if from_node { window(len, end) } else { 0.0 };
+    let ahead = wp
+        .ahead
+        .as_ref()
+        .filter(|a| a.node == to && windowed(net, to));
+    let we = ahead.map_or(0.0, |_| {
+        f64::from(WALK_WINDOW_MM)
+            .min(len - ws)
+            .min(len - begin)
+            .max(0.0)
+    });
+    (ws, we, ahead.filter(|_| we >= 1.0))
+}
+
 /// 描く位置と向き。写し替えない人は `Some(None)`、網から位置を求められなければ `None`。
 fn place(net: &Network, wp: &WalkPath) -> Option<Option<Drawn>> {
     let g = geom(net, wp.link)?;
@@ -303,27 +484,12 @@ fn place(net: &Network, wp: &WalkPath) -> Option<Option<Drawn>> {
         y: start.1 + g.dir.1 * along + lat.1,
         angle: g.dir.1.atan2(g.dir.0),
     };
-    // 歩き出す出入口と、歩き終わる出入口は、中核の位置と描く位置が合うように、窓の外に置く。
-    let begin = f64::from(wp.from.0).min(len);
-    let end = wp.to.map_or(len, |t| f64::from(t.0).min(len));
-    let from_node = wp.entered && windowed(net, g.from);
-    let ws = if from_node { window(len, end) } else { 0.0 };
-    if from_node && ws >= 1.0 && o < ws {
+    let (ws, we, ahead) = windows(net, wp, g.from, g.to, len);
+    if ws >= 1.0 && o < ws {
         let node = Node::of(net, g.from)?;
         let stop = capped(node.along(arm_step(net, g.from, wp.link.segment)?), ws);
         return Some(Some(on_link(stop + o * (ws - stop) / ws)));
     }
-    let ahead = wp
-        .ahead
-        .as_ref()
-        .filter(|a| a.node == g.to && windowed(net, g.to));
-    let we = ahead.map_or(0.0, |_| {
-        f64::from(WALK_WINDOW_MM)
-            .min(len - ws)
-            .min(len - begin)
-            .max(0.0)
-    });
-    let ahead = ahead.filter(|_| we >= 1.0);
     let crossing = o > len;
     let Some(ahead) = ahead else {
         if crossing {
@@ -456,6 +622,282 @@ mod tests {
             }
         }
         out
+    }
+
+    /// 画面に見せている人。位置と、道筋の上にいればその番号と距離。
+    #[derive(Clone, Copy, Debug)]
+    struct Shown {
+        p: V,
+        on: Option<(u32, f64)>,
+    }
+
+    /// 1 人の `tick` ごとの、中核の歩く道筋、描く位置、道筋。
+    struct Ride {
+        paths: Paths,
+        ticks: Vec<(WalkPath, Option<Drawn>, Option<Route>)>,
+        net: Network,
+    }
+
+    /// 歩く人を 1 人出して、`tick` ごとに描いた位置と道筋を集める。人は実際の速さで進む。
+    fn ride(from: (i64, i64), to: (i64, i64)) -> Ride {
+        let mut w = crossroads();
+        let n = spawn_dev_walks(
+            &mut w,
+            TilePos::new(from.0, from.1),
+            TilePos::new(to.0, to.1),
+            1,
+        );
+        assert_eq!(n, 1);
+        let mut paths = Paths::new();
+        let mut ticks = Vec::new();
+        for _ in 0..3_000 {
+            w.step();
+            paths.sync(w.network(), w.tick().0);
+            for m in w.movers_in(view()) {
+                let Some(walk) = w.walk_path(m.id) else {
+                    continue;
+                };
+                let d = draw(w.network(), &walk).position();
+                let r = route(w.network(), &mut paths, &walk);
+                ticks.push((walk, d, r));
+            }
+        }
+        Ride {
+            paths,
+            ticks,
+            net: w.network().clone(),
+        }
+    }
+
+    /// 画面の補間（`web/src/map/mover-interpolation.ts`）を写したもの。前に見せていた位置から、今の tick の
+    /// 道筋の割合 `t` の所を求める。道筋に沿えないときは `None`。
+    fn along(paths: &Paths, from: &Shown, to: &Route, t: f64) -> Option<Shown> {
+        let end = paths.get(to.id)?;
+        let s1 = f64::from(to.frac) * end.length();
+        let (a, s0) = from.on?;
+        let first = paths.get(a)?;
+        let at = |id: u32, s: f64| {
+            let (p, _) = paths.get(id).unwrap().at(s);
+            Shown {
+                p,
+                on: Some((id, s)),
+            }
+        };
+        if a == to.id {
+            return Some(at(a, s0 + (s1 - s0) * t));
+        }
+        if dist(first.at(first.length()).0, end.at(0.0).0) >= 40.0 {
+            return None;
+        }
+        let head = first.length() - s0;
+        let left = (head + s1) * t;
+        Some(if left <= head {
+            at(a, s0 + left)
+        } else {
+            at(to.id, (left - head).min(s1))
+        })
+    }
+
+    /// 実際の速さで歩く人を、tick のあいだを 0.1 刻みで補間して、見えた位置を集める。
+    /// 戻り値は、見えた位置と、道筋に沿えなかった tick の組の数。
+    fn interpolated(r: &Ride) -> (Vec<V>, usize) {
+        interpolated_by(r, true)
+    }
+
+    /// `follow` が偽なら、道筋を使わずまっすぐ補間する（これまでの補間）。
+    fn interpolated_by(r: &Ride, follow: bool) -> (Vec<V>, usize) {
+        let mut seen = Vec::new();
+        let mut straight = 0;
+        let mut shown: Option<Shown> = None;
+        for (wp, d, route) in &r.ticks {
+            let now = d.map_or_else(
+                || {
+                    let g = geom(&r.net, wp.link).unwrap();
+                    let c = center(&r.net, g.from).unwrap();
+                    let lat = mm(wp.lane_shift);
+                    let o = f64::from(wp.offset.0);
+                    (c.0 + g.dir.0 * o + lat.0, c.1 + g.dir.1 * o + lat.1)
+                },
+                |d| (d.x, d.y),
+            );
+            if let (Some(prev), Some(to)) = (shown, route) {
+                for k in 1..=10 {
+                    let t = f64::from(k) / 10.0;
+                    match along(&r.paths, &prev, to, t).filter(|_| follow) {
+                        Some(s) => seen.push(s.p),
+                        None => {
+                            straight += usize::from(k == 1);
+                            let p = (
+                                prev.p.0 + (now.0 - prev.p.0) * t,
+                                prev.p.1 + (now.1 - prev.p.1) * t,
+                            );
+                            seen.push(p);
+                        }
+                    }
+                }
+            }
+            shown = Some(Shown {
+                p: now,
+                on: route.map(|rt| {
+                    let total = r.paths.get(rt.id).map_or(0.0, Path::length);
+                    (rt.id, f64::from(rt.frac) * total)
+                }),
+            });
+        }
+        (seen, straight)
+    }
+
+    /// 東西に直進、東から北へ曲がる、南から西へ曲がる、北から東へ曲がる。
+    const WALKS: [((i64, i64), (i64, i64)); 4] = [
+        ((2, 10), (18, 10)),
+        ((18, 10), (10, 2)),
+        ((10, 18), (2, 10)),
+        ((10, 2), (18, 10)),
+    ];
+
+    #[test]
+    fn walkers_follow_their_path_between_ticks() {
+        for (from, to) in WALKS {
+            let r = ride(from, to);
+            let (seen, straight) = interpolated(&r);
+            assert!(!seen.is_empty());
+            assert_eq!(straight, 0, "{from:?}->{to:?}: 道筋に沿えなかった tick");
+            // 補間の途中の位置は、その距離で求めた描く位置と数 mm しかずれない。
+            let mut checked = 0;
+            for pair in r.ticks.windows(2) {
+                let (Some(a), Some(b)) = (pair[0].2, pair[1].2) else {
+                    continue;
+                };
+                if a.id != b.id {
+                    continue;
+                }
+                let total = r.paths.get(a.id).unwrap().length();
+                let (s0, s1) = (f64::from(a.frac) * total, f64::from(b.frac) * total);
+                for k in 0..=10 {
+                    let o = (s0 + (s1 - s0) * f64::from(k) / 10.0).round() as u32;
+                    let mut probe = pair[1].0.clone();
+                    probe.offset = chizu_core::LaneOffset(o);
+                    let Some(want) = draw(&r.net, &probe).position() else {
+                        continue;
+                    };
+                    let got = r.paths.get(a.id).unwrap().at(f64::from(o)).0;
+                    assert!(
+                        dist(got, (want.x, want.y)) < 15.0,
+                        "{from:?}->{to:?} o={o}: {got:?} {want:?}"
+                    );
+                    checked += 1;
+                }
+            }
+            assert!(checked > 20, "{from:?}->{to:?}: {checked}");
+        }
+    }
+
+    #[test]
+    fn interpolated_walkers_keep_off_the_middle_and_stay_on_the_path() {
+        for (from, to) in WALKS {
+            let (seen, _) = interpolated(&ride(from, to));
+            let nearest = seen.iter().map(|p| dist(*p, NODE)).fold(f64::MAX, f64::min);
+            // 歩道の中心線（交差点の中心から 3,520mm）より内側へは入らない。
+            assert!(nearest > 3_500.0, "{from:?}->{to:?}: {nearest}");
+            // まっすぐ補間すると、曲がる所で道筋から離れる。
+            let r = ride(from, to);
+            let off = |follow: bool| {
+                let dense: Vec<V> = r
+                    .ticks
+                    .iter()
+                    .filter_map(|t| t.2.map(|r| r.id))
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .flat_map(|id| {
+                        let p = r.paths.get(id).unwrap();
+                        (0..=(p.length() as u32))
+                            .step_by(20)
+                            .map(|s| p.at(f64::from(s)).0)
+                    })
+                    .collect();
+                interpolated_by(&r, follow)
+                    .0
+                    .iter()
+                    .map(|p| dense.iter().map(|d| dist(*d, *p)).fold(f64::MAX, f64::min))
+                    .fold(0.0, f64::max)
+            };
+            // 道筋に沿えば、折れ線の標本の粗さ（ここでは測る間隔の 20mm）の範囲に収まる。
+            // 直線だと 100mm を超えて離れる（倍率 128 で 1.6 ピクセル以上）。
+            let (follow, chord) = (off(true), off(false));
+            assert!(follow < 15.0, "{from:?}->{to:?}: {follow}");
+            assert!(chord > 100.0, "{from:?}->{to:?}: {chord}");
+        }
+    }
+
+    #[test]
+    fn interpolated_walkers_stay_on_the_stripes_while_crossing() {
+        let r = ride((2, 10), (18, 10));
+        let stripe = 0.4 * TILE + ZEBRA_LENGTH / 2.0;
+        let on_stripe = |d: V| {
+            let (dx, dy) = ((d.0 - NODE.0).abs(), (d.1 - NODE.1).abs());
+            ((dx - stripe).abs() < 1.0 && dy < 2_881.0)
+                || ((dy - stripe).abs() < 1.0 && dx < 2_881.0)
+        };
+        let mut checked = 0;
+        for pair in r.ticks.windows(2) {
+            let (Some(da), Some(db), Some(rb)) = (pair[0].1, pair[1].1, pair[1].2) else {
+                continue;
+            };
+            if !(on_stripe((da.x, da.y)) && on_stripe((db.x, db.y))) {
+                continue;
+            }
+            let a = pair[0].2.unwrap();
+            let from = Shown {
+                p: (da.x, da.y),
+                on: Some((
+                    a.id,
+                    f64::from(a.frac) * r.paths.get(a.id).unwrap().length(),
+                )),
+            };
+            for k in 0..=10 {
+                let t = f64::from(k) / 10.0;
+                let at = along(&r.paths, &from, &rb, t).expect("道筋に沿える");
+                assert!(on_stripe(at.p), "t={t}: {:?}", at.p);
+                checked += 1;
+            }
+        }
+        assert!(checked >= 22, "{checked}");
+    }
+
+    #[test]
+    fn walkers_share_a_path_and_forget_it_when_the_network_changes() {
+        let mut w = crossroads();
+        let n = spawn_dev_walks(&mut w, TilePos::new(2, 10), TilePos::new(18, 10), 3);
+        assert_eq!(n, 3);
+        let mut paths = Paths::new();
+        let mut ids = std::collections::BTreeSet::new();
+        for _ in 0..80 {
+            w.step();
+            paths.sync(w.network(), w.tick().0);
+            for m in w.movers_in(view()) {
+                let Some(wp) = w.walk_path(m.id) else {
+                    continue;
+                };
+                if let Some(r) = route(w.network(), &mut paths, &wp) {
+                    ids.insert(r.id);
+                }
+            }
+        }
+        // 同じリンクを歩く人どうしは、道筋を分け合う。
+        assert!(!ids.is_empty() && ids.len() < 3 * 4, "{ids:?}");
+        let sent = paths.take();
+        assert!(sent[2 + sent[1] as usize] > 0.0);
+        // 網が変わると、覚えた道筋は忘れ、画面にも忘れさせる。
+        let c = Command::BuildRoad {
+            from: TilePos::new(0, 3),
+            to: TilePos::new(20, 3),
+            kind: RoadKind::Small,
+        };
+        w.apply_recorded(9, &c);
+        paths.sync(w.network(), w.tick().0);
+        assert!(ids.iter().all(|&id| paths.get(id).is_none()));
+        let after = paths.take();
+        assert_eq!(after[1] as usize, ids.len());
     }
 
     #[test]

@@ -232,11 +232,17 @@ fn draw_movers(
         }
         // 歩く人は、交差点の前後で歩道の角を回る道筋の上に描く（`walk_path`）。道筋は、間引いたあとに
         // 残った人の分だけ求める。
-        let walk = match m.mode {
-            LaneMode::Sidewalk => {
-                (scene.walks)(m.id).map_or(Walk::Core, |w| walk_path::draw(net, &w))
+        let (walk, route) = match m.mode {
+            LaneMode::Sidewalk => (scene.walks)(m.id).map_or((Walk::Core, None), |w| {
+                (walk_path::draw(net, &w), walk_path::route(net, paths, &w))
+            }),
+            LaneMode::Car => (Walk::Core, None),
+        };
+        let with_route = |mut out: Mover| {
+            if let Some(r) = route {
+                (out.path, out.frac) = (r.id, r.frac);
             }
-            LaneMode::Car => Walk::Core,
+            out
         };
         if let Walk::Lost(_) = walk {
             let prev = prev.get_or_insert_with(|| before.positions(base));
@@ -246,19 +252,19 @@ fn draw_movers(
             }
         }
         if let Some(d) = walk.position() {
-            drawn.push(mover(
+            drawn.push(with_route(mover(
                 from_mm(d.x, ox),
                 from_mm(d.y, oy),
                 car_path::angle_code(d.angle),
-            ));
+            )));
             continue;
         }
         // 中心線の上の位置に、車線や歩道に寄せるずれを足して描く。
-        drawn.push(mover(
+        drawn.push(with_route(mover(
             tiles(m.pos.x.0.saturating_add(m.shift.0.0), ox),
             tiles(m.pos.y.0.saturating_add(m.shift.1.0), oy),
             heading_code(m.heading),
-        ));
+        )));
     }
     memory.drawn_tick = Some(tick);
 }

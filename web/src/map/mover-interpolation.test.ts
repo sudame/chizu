@@ -489,6 +489,36 @@ describe("MoverInterpolator の道筋に沿う補間", () => {
     expect(quarter.get(1)?.heading).toBe(angleCode(Math.PI / 4));
   });
 
+  it("歩く人も、道筋の上の距離に比例して、角を回りながら動かす", () => {
+    // 歩く人の道筋の長さは、リンクの始まりからの距離である。ここでは 3 マスぶんの距離のうち、
+    // 東へ 1 マス進んで南へ 1 マス曲がる所を、距離 1 から 2 に置く
+    const paths = new MoverPaths();
+    paths.receive(
+      new Float64Array(
+        [
+          [1, 0, 1],
+          [9, 4],
+          [0, 0, 0, EAST],
+          [1, 0, 1, EAST],
+          [1, 1, 2, SOUTH],
+          [1, 2, 3, SOUTH],
+        ].flat(),
+      ),
+    );
+    const walker = { id: 1, kind: 1, path: 9 };
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ ...walker, x: 0.5, y: 0, frac: 1 / 6 }], {}, paths);
+    // 距離 0.5 から 1.5 へ。弦なら (1, 0.5) の手前を通るが、道筋なら角 (1, 0) を通って曲がる
+    const to = [{ ...walker, x: 1, y: 0.5, frac: 0.5 }];
+    run(i, 0, 11, to, {}, paths);
+    const half = run(i, TICK_MS / 2, 11, to, {}, paths).get(1);
+    expect(half?.x).toBeCloseTo(1, 4);
+    expect(half?.y).toBeCloseTo(0, 4);
+    const end = run(i, TICK_MS, 11, to, {}, paths).get(1);
+    expect(end?.x).toBeCloseTo(1, 4);
+    expect(end?.y).toBeCloseTo(0.5, 4);
+  });
+
   it("前の道筋の終わりと今の道筋の始まりがつながっていれば、2 つをつないでたどる", () => {
     const paths = new MoverPaths();
     paths.receive(

@@ -31,6 +31,7 @@
 use chizu_core::movement::{CAR_LENGTH, MIN_GAP};
 use chizu_core::network::TILE_MM;
 use chizu_core::{CarPath, Dir, Heading, LinkId, Mm, Network, NodeId};
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap};
 
 /// ノードを越えてから曲線の上に描く距離（mm）。中核が交差点の中にいるとみなす距離（`JUNCTION_CLEAR`、
@@ -812,6 +813,19 @@ impl Path {
         Path { points, settled }
     }
 
+    /// 位置、向き、長さを順に並べた点から作る。長さは呼ぶ側が決める（歩く人の道筋では、リンクの
+    /// 始まりからの距離を使う）。長さは増えていかなければならない。
+    pub fn from_samples(at: impl IntoIterator<Item = (V, f64, f64)>) -> Path {
+        let points: Vec<Point> = at
+            .into_iter()
+            .map(|(p, angle, s)| Point { p, s, angle })
+            .collect();
+        Path {
+            points,
+            settled: 0.0,
+        }
+    }
+
     /// 道筋の長さ。
     pub fn length(&self) -> f64 {
         self.points.last().map_or(0.0, |p| p.s)
@@ -871,6 +885,9 @@ impl Key {
         }
     }
 }
+
+/// 歩く人の道筋を見分ける鍵。描く位置を決める値を、数に直して並べたもの（`walk_path::route`）。
+pub type WalkKey = SmallVec<[i64; 32]>;
 
 /// 速く引くための、リンクの ID を数に直したもの。
 type LinkBits = (u32, u16, u8);
@@ -1015,6 +1032,8 @@ pub struct Paths {
     /// 交差点の車道と、入る車線、出ていく車線の、ノードの中心からの位置と向きごとに選んだ曲線の形。
     /// 同じ形の交差点は多いので、網が変わっても選び直さずに済ませる。反復はしない。
     shapes: FastMap<Vec<u64>, Option<Shape>>,
+    /// 歩く人の道筋の番号。網の版が変わったら、すべて忘れる。
+    walks: FastMap<WalkKey, Option<u32>>,
 }
 
 impl Default for Paths {
@@ -1043,6 +1062,7 @@ impl Paths {
             tick: None,
             limit,
             shapes: FastMap::default(),
+            walks: FastMap::default(),
         }
     }
 
@@ -1060,7 +1080,11 @@ impl Paths {
             self.invalidate(net);
         }
         // 忘れるのは tick が変わったときだけにして、同じ tick に描き直す回では表を舐めない。
-        if next_tick && (self.paths.len() > self.limit || self.ids.len() > 2 * self.limit) {
+        if next_tick
+            && (self.paths.len() > self.limit
+                || self.ids.len() > 2 * self.limit
+                || self.walks.len() > 2 * self.limit)
+        {
             self.evict();
         }
     }
@@ -1088,6 +1112,15 @@ impl Paths {
             }
             keep
         });
+        // 歩く人の道筋は、ノードの腕や次のリンクの長さにも依るので、網が変わったらすべて求め直す。
+        for (_, id) in self.walks.drain() {
+            if let Some(id) = id {
+                paths.remove(&id);
+                if id < unsent {
+                    dropped.push(id);
+                }
+            }
+        }
         self.raw.retain(|raw, hit| {
             let unchanged = !changed.contains_key(&raw.link)
                 && raw.prev.is_none_or(|(p, _)| !changed.contains_key(&p));
@@ -1112,6 +1145,8 @@ impl Paths {
             .retain(|_, id| id.is_some_and(|id| paths.contains_key(&id)));
         self.raw
             .retain(|_, hit| matches!(hit, Some(Some((id, _))) if paths.contains_key(id)));
+        self.walks
+            .retain(|_, id| id.is_some_and(|id| paths.contains_key(&id)));
     }
 
     /// リンク `link` の形の決め手を、まだ覚えていなければ覚える。
@@ -1134,6 +1169,30 @@ impl Paths {
     /// 番号 `id` の道筋。
     pub fn get(&self, id: u32) -> Option<&Path> {
         self.paths.get(&id).map(|s| &s.path)
+    }
+
+    /// 歩く人の鍵 `key` の道筋の番号。まだなければ `build` で求めて覚える。求められなければ `None`。
+    pub fn walk_id(&mut self, key: WalkKey, build: impl FnOnce() -> Option<Path>) -> Option<u32> {
+        if let Some(&id) = self.walks.get(&key) {
+            if let Some(id) = id {
+                self.touch(id);
+            }
+            return id;
+        }
+        let id = build().map(|path| {
+            let id = self.next;
+            self.next = id.checked_add(1).expect("道筋の番号が尽きた");
+            self.paths.insert(
+                id,
+                Stored {
+                    path,
+                    used: self.era,
+                },
+            );
+            id
+        });
+        self.walks.insert(key, id);
+        id
     }
 
     /// 鍵 `key` の道筋の番号。まだなければ求めて覚える。求められなければ `None`。
