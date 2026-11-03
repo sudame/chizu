@@ -287,6 +287,42 @@ fn grid_run() -> (Vec<TripId>, u64) {
 }
 
 #[test]
+fn cars_from_one_street_spread_over_routes_of_the_same_cost() {
+    // 同じ道路の格子。南西の通りに並ぶ家から北東の角へ向かう経路は、費用の同じものがたくさんある。
+    let mut n = Network::new();
+    for i in 0..=5 {
+        road(&mut n, (0, i * 4), (20, i * 4), RoadKind::Small);
+        road(&mut n, (i * 4, 0), (i * 4, 20), RoadKind::Small);
+    }
+    let drives: Vec<_> = (1..4_i64)
+        .flat_map(|x| {
+            [0, 3_000, 6_000].map(|along| (at(x, 0, (1, 0), along), at(20, 19, (0, 1), 0)))
+        })
+        .collect();
+    let routes = |c: &mut Cars| -> Vec<Vec<LinkId>> {
+        let ids = c
+            .trips
+            .spawn_drives(&c.net, &mut c.router, &drives, Tick::ZERO);
+        ids.iter()
+            .map(|id| c.trips.get(id.unwrap()).unwrap().route().links.clone())
+            .collect()
+    };
+    let mut c = Cars::new(n.clone());
+    let got = routes(&mut c);
+    let mut distinct = got.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert!(
+        distinct.len() >= 3,
+        "経路が {} 本にしか分かれない",
+        distinct.len()
+    );
+    // 同じ 2 点のあいだは、覚えた結果があってもなくても同じ経路になる。
+    assert_eq!(routes(&mut c), got);
+    assert_eq!(routes(&mut Cars::new(n)), got);
+}
+
+#[test]
 fn cars_do_not_depend_on_the_thread_count() {
     let one = grid_run();
     assert!(one.0.len() > 60, "着いた車が少ない {}", one.0.len());

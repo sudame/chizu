@@ -3,6 +3,10 @@
 //! 網から車と歩行者のグラフを作り、A* か、根を共有する依頼を束ねた 1 対多の探索で解く。
 //! 網が変わったら [`Router::rebuild`] でグラフを作り直し、覚えた結果も捨てる。探索の結果は状態に入れない。同じ網と同じ依頼からは、
 //! 覚えた結果の有無やスレッドの数に関わらず同じ経路を返す。
+//!
+//! 碁盤の目の街には、費用の同じ経路がたくさんある。全員が同じ 1 本を選ぶと、その道だけが混む。そこで車の経路は、
+//! 1 回の探索から費用の同じ経路を [`ROUTE_VARIANTS`] 本の候補として取り出し、依頼の `variant` で選ぶ。
+//! 費用は変えないので、ヒューリスティックは下限のままで、覚える結果の数も探す回数も変わらない。
 
 mod astar;
 mod delay;
@@ -17,7 +21,7 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use astar::{Marks, extract, search_many};
-pub use astar::{Route, Scratch, Toward, astar, one_to_many};
+pub use astar::{Route, Scratch, Toward, astar, astar_variants, one_to_many};
 pub use delay::Delays;
 pub use graph::{
     Connector, Graph, GraphError, WALK_SPEED, connectors, speed_limit, try_connectors,
@@ -42,6 +46,17 @@ const PARALLEL_EXTRACT_MIN: usize = 256;
 /// 覚えておく結果の数の既定の上限。超えそうになったら、新しい結果を入れる前に全部捨てる。
 pub const DEFAULT_CACHE_LIMIT: usize = 1 << 18;
 
+/// 車の経路の、費用の同じ経路から選ぶ候補の数。
+pub const ROUTE_VARIANTS: u8 = 8;
+
+/// 手段 `mode` の経路の候補の数。歩く経路は散らさず、1 本にする。
+pub fn variants_of(mode: LaneMode) -> u8 {
+    match mode {
+        LaneMode::Car => ROUTE_VARIANTS,
+        LaneMode::Sidewalk => 1,
+    }
+}
+
 /// 探索の依頼。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RouteRequest {
@@ -49,6 +64,39 @@ pub struct RouteRequest {
     pub to: LinkId,
     /// 車で探すなら `Car`、歩いて探すなら `Sidewalk`。
     pub mode: LaneMode,
+    /// 費用の同じ経路のうち、どの候補を選ぶか。手段の候補の数（[`variants_of`]）で割った余りを使う。
+    pub variant: u8,
+}
+
+impl RouteRequest {
+    fn key(&self) -> Key {
+        Key {
+            from: self.from,
+            to: self.to,
+            mode: self.mode,
+        }
+    }
+}
+
+/// 探して覚える単位。候補は 1 回の探索からまとめて取り出すので、鍵に入れない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Key {
+    from: LinkId,
+    to: LinkId,
+    mode: LaneMode,
+}
+
+/// 1 つの鍵の、候補の順に並べた経路。同じ経路は 1 つを共有する。
+type Variants = Arc<[Arc<Route>]>;
+
+/// 候補の順に並べた経路から [`Variants`] を作る。
+fn share(routes: Vec<Route>) -> Variants {
+    let mut out: Vec<Arc<Route>> = Vec::with_capacity(routes.len());
+    for r in routes {
+        let same = out.iter().find(|o| ***o == r).cloned();
+        out.push(same.unwrap_or_else(|| Arc::new(r)));
+    }
+    out.into()
 }
 
 /// 探索の方式。A* と結果の再利用のほか、出発地の束ねや CCH に差し替えられるようにする。
@@ -91,7 +139,7 @@ pub struct AstarRouter {
     band: u8,
     bundle_min: usize,
     cache_limit: usize,
-    cache: BTreeMap<RouteRequest, Option<Arc<Route>>>,
+    cache: BTreeMap<Key, Option<Variants>>,
     /// 車のグラフの費用に足している遅れ。グラフを作り直しても引き継ぐ。
     delays: Delays,
     /// 2 点のあいだに経路があるか。費用によらないので、遅れが変わっても捨てず、網を作り直すまで覚える。
@@ -103,7 +151,7 @@ pub type ReachKey = (LaneMode, (LinkId, LaneOffset), (LinkId, LaneOffset));
 
 /// 一括の探索で、1 本のスレッドが解く単位。
 enum Job {
-    Single(RouteRequest),
+    Single(Key),
     Bundle {
         mode: LaneMode,
         root: LinkId,
@@ -112,7 +160,7 @@ enum Job {
     },
 }
 
-type Solved = Vec<(RouteRequest, Option<Arc<Route>>)>;
+type Solved = Vec<(Key, Option<Variants>)>;
 
 impl AstarRouter {
     /// 網からグラフを作る。網の中身が食い違っていたら panic する。
@@ -225,7 +273,7 @@ impl AstarRouter {
 
     /// 依頼を解く単位に分ける。手段ごとに、着くリンクと出発のリンクのどちらで束ねるかを決め、
     /// 下限に満たない組は 1 件ずつ A* で解く。
-    fn plan(&self, misses: &[RouteRequest]) -> Vec<Job> {
+    fn plan(&self, misses: &[Key]) -> Vec<Job> {
         let mut jobs = Vec::new();
         for mode in [LaneMode::Car, LaneMode::Sidewalk] {
             let mut by_to = BTreeMap::<LinkId, Vec<LinkId>>::new();
@@ -262,7 +310,7 @@ impl AstarRouter {
                         Toward::Backward => (o, root),
                         Toward::Forward => (root, o),
                     };
-                    Job::Single(RouteRequest { from, to, mode })
+                    Job::Single(Key { from, to, mode })
                 }));
             }
         }
@@ -273,7 +321,14 @@ impl AstarRouter {
         match job {
             Job::Single(r) => vec![(
                 *r,
-                astar(self.graph(r.mode), r.from, r.to, s.get(r.mode)).map(Arc::new),
+                astar_variants(
+                    self.graph(r.mode),
+                    r.from,
+                    r.to,
+                    s.get(r.mode),
+                    variants_of(r.mode),
+                )
+                .map(share),
             )],
             Job::Bundle {
                 mode,
@@ -283,10 +338,12 @@ impl AstarRouter {
             } => {
                 let g = self.graph(*mode);
                 let sc = s.get(*mode);
-                let routes: Vec<Option<Route>> = match search_many(g, *root, others, *toward, sc) {
-                    None => vec![None; others.len()],
-                    Some(r) => extract_all(g, sc, r, others, *toward),
-                };
+                let n = variants_of(*mode);
+                let routes: Vec<Option<Vec<Route>>> =
+                    match search_many(g, *root, others, *toward, sc) {
+                        None => vec![None; others.len()],
+                        Some(r) => extract_all(g, sc, r, others, *toward, n),
+                    };
                 others
                     .iter()
                     .zip(routes)
@@ -295,12 +352,12 @@ impl AstarRouter {
                             Toward::Backward => (*o, *root),
                             Toward::Forward => (*root, *o),
                         };
-                        let r = RouteRequest {
+                        let r = Key {
                             from,
                             to,
                             mode: *mode,
                         };
-                        (r, route.map(Arc::new))
+                        (r, route.map(share))
                     })
                     .collect()
             }
@@ -308,7 +365,7 @@ impl AstarRouter {
     }
 }
 
-/// 1 つの探索から、組の経路をすべて取り出す。組が大きければスレッドに分ける。
+/// 1 つの探索から、組の経路を候補ごとにすべて取り出す。組が大きければスレッドに分ける。
 /// 取り出しは探索の結果を読むだけなので、分け方で結果は変わらない。
 fn extract_all(
     g: &Graph,
@@ -316,10 +373,11 @@ fn extract_all(
     root: u32,
     others: &[LinkId],
     toward: Toward,
-) -> Vec<Option<Route>> {
+    variants: u8,
+) -> Vec<Option<Vec<Route>>> {
     let mut m = s.take_marks();
     let sc = &*s;
-    let one = |m: &mut Marks, o: &LinkId| extract(g, sc, m, root, *o, toward);
+    let one = |m: &mut Marks, o: &LinkId| extract(g, sc, m, root, *o, toward, variants);
     #[cfg(feature = "parallel")]
     let out = if others.len() >= PARALLEL_EXTRACT_MIN {
         others.par_iter().map_init(Marks::default, one).collect()
@@ -354,10 +412,10 @@ impl Router for AstarRouter {
 
     fn route_batch(&mut self, requests: &[RouteRequest]) -> Vec<Option<Arc<Route>>> {
         // 覚えていない依頼を、重複を除いて依頼の鍵の順に並べてから解く。
-        let misses: Vec<RouteRequest> = requests
+        let misses: Vec<Key> = requests
             .iter()
-            .filter(|r| !self.cache.contains_key(r))
-            .copied()
+            .map(RouteRequest::key)
+            .filter(|k| !self.cache.contains_key(k))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
@@ -376,7 +434,11 @@ impl Router for AstarRouter {
         let fresh: BTreeMap<_, _> = solved.into_iter().flatten().collect();
         let out = requests
             .iter()
-            .map(|r| self.cache.get(r).unwrap_or_else(|| &fresh[r]).clone())
+            .map(|r| {
+                let k = r.key();
+                let v = self.cache.get(&k).unwrap_or_else(|| &fresh[&k]).as_ref()?;
+                Some(v[usize::from(r.variant) % v.len()].clone())
+            })
             .collect();
         if self.cache.len() + fresh.len() > self.cache_limit {
             self.cache.clear();
