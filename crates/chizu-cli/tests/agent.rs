@@ -1210,3 +1210,53 @@ fn map_marks_a_signal_with_removed_crosswalks_only_from_the_same_junction() {
     cli(&["agent", "act", d, &more]);
     assert_eq!(cell(), "s");
 }
+
+/// 高速道路の端の隣から引いた道路は、端まで延びてつながる。延ばしたことは結果の joined に出る。
+#[test]
+fn act_joins_a_road_started_next_to_the_highway_end() {
+    let dir = session("agent-join-highway");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let seen = json(&cli(&["agent", "observe", d]));
+    let [x, y] = [
+        seen["highway"]["end"][0].as_i64().unwrap(),
+        seen["highway"]["end"][1].as_i64().unwrap(),
+    ];
+    let [ox, oy] = [
+        seen["highway"]["outward"][0].as_i64().unwrap(),
+        seen["highway"]["outward"][1].as_i64().unwrap(),
+    ];
+    let (from, to) = ([x - ox, y - oy], [x - ox * 11, y - oy * 11]);
+    let cmds = write(
+        &dir.join("c.json"),
+        &serde_json::json!([{"type":"BuildRoad","from":from,"to":to,"kind":"Small"}]).to_string(),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "Applied", "{acted}");
+    assert_eq!(r["joined"], serde_json::json!({"from": [x, y], "to": to}));
+    assert!(r.get("warning").is_none(), "{acted}");
+}
+
+/// 道路の隣から引いた道路は交差点でつながり、どれにもつながらない道路には warning が付く。
+#[test]
+fn act_joins_next_to_a_road_and_warns_about_an_isolated_road() {
+    let dir = session("agent-join-road");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[0,20],"kind":"Small"},
+            {"type":"BuildRoad","from":[1,10],"to":[11,10],"kind":"Small"},
+            {"type":"BuildRoad","from":[1,0],"to":[1,20],"kind":"Small"},
+            {"type":"BuildRoad","from":[30,30],"to":[40,30],"kind":"Small"}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let results = acted["results"].as_array().unwrap();
+    assert!(results.iter().all(|r| r["outcome"] == "Applied"), "{acted}");
+    assert_eq!(results[1]["joined"]["from"], serde_json::json!([0, 10]));
+    assert!(results[1].get("warning").is_none(), "{acted}");
+    // 平行に隣り合う道路は、つながらず、延ばしもしない。
+    assert!(results[2].get("joined").is_none(), "{acted}");
+    assert!(results[3]["warning"].is_string(), "{acted}");
+}

@@ -682,8 +682,21 @@ impl Network {
         self.bump_version();
     }
 
+    /// マス `t` に、新しい道路をつなげられるか。道路が通っているマスで、高速道路は内側の端だけである。
+    pub fn is_joinable(&self, t: TilePos) -> bool {
+        let through = self.segments_through(t);
+        !through.is_empty()
+            && through.iter().all(|s| {
+                let seg = &self.segments[*s];
+                seg.kind != SegmentKind::Highway
+                    || [seg.a, seg.b]
+                        .iter()
+                        .any(|n| self.nodes[*n].tile() == t && !self.nodes[*n].outside)
+            })
+    }
+
     /// 道路を引けるか確かめる。マスが建設できる土地かは呼ぶ側で確かめる。
-    fn check_road(&self, line: &Line) -> Result<(), DenyReason> {
+    pub(crate) fn check_road(&self, line: &Line) -> Result<(), DenyReason> {
         for t in line.tiles() {
             for s in self.segments_through(t) {
                 let seg = &self.segments[s];
