@@ -39,7 +39,8 @@ run = "jactionlint"
 
 [tasks."lint:rust"]
 # clippy は読んだ clippy.toml を依存のファイルとして記録するので、clippy.toml を書き換えれば検査し直す。
-# clippy.toml のなかった既存のクレートに置いたときは記録がないので、そのクレートを cargo clean してから回す
+# clippy.toml を読んでいないクレートには記録がない。そのクレートか、ルートなど親のディレクトリに clippy.toml を新しく置いたときは、
+# 読むことになるクレートを cargo clean してから回す
 run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets -- -D warnings",
