@@ -1,5 +1,6 @@
 // 街の数字の表示。建物の数、世帯と職場の上限、区画の種類ごとの需要（CS2 の RCI のような棒）を出す。
 
+import type { Notice } from "./notice-center.ts";
 import {
   CITY_STATS_LENGTH,
   FACTOR_KIND,
@@ -343,6 +344,29 @@ export function setupDemandFactors(): void {
   });
 }
 
+/** 電気と水道の知らせ。通知センターに渡す。件数は揺れるので、key は足りないか余りが少ないかだけで決める。 */
+/** 知らせの状態。どの理由が出ているか（電気か水道か、足りないか、孤立した網か、余りが少ないか）で決め、数は入れない。 */
+export function utilityKey(reasons: string[], short: boolean): string {
+  return `${short ? "short" : "low"}:${reasons.map((r) => r.replace(/[\d,]+/g, "#")).join("|")}`;
+}
+
+export function utilityNotices(stats: CityStats, unsupplied: number): Notice[] {
+  const shortage = utilityShortage(stats, unsupplied);
+  const shown = utilityNotice(stats, shortage);
+  if (shown === null) {
+    return [];
+  }
+  return [
+    {
+      id: "utility",
+      key: utilityKey(shown.reasons, shortage !== null),
+      headline: shown.headline,
+      details: shown.reasons,
+      jump: null,
+    },
+  ];
+}
+
 export function renderCityStats(stats: CityStats, unsupplied = 0): void {
   latestStats = stats;
   renderFactors();
@@ -357,23 +381,6 @@ export function renderCityStats(stats: CityStats, unsupplied = 0): void {
     utilities.textContent = formatUtilities(stats);
   }
   const shortage = utilityShortage(stats, unsupplied);
-  const shown = utilityNotice(stats, shortage);
-  const notice = document.querySelector<HTMLElement>("#city-shortage");
-  if (notice !== null) {
-    notice.hidden = shown === null;
-    notice.dataset.unsupplied = String(unsupplied);
-    notice.replaceChildren();
-    if (shown !== null) {
-      const head = document.createElement("strong");
-      head.textContent = shown.headline;
-      notice.append(head);
-      for (const reason of shown.reasons) {
-        const line = document.createElement("div");
-        line.textContent = reason;
-        notice.append(line);
-      }
-    }
-  }
   utilities?.classList.toggle("short", shortage !== null);
   const layouts = demandBars(stats);
   document.querySelectorAll<HTMLElement>("#demand .bar").forEach((bar, i) => {
