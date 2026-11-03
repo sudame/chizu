@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type EscapeState, type EscapeStep, nextEscapeStep } from "./escape";
+import { type EscapeState, type EscapeStep, handlesEscape, nextEscapeStep } from "./escape";
 
 describe("nextEscapeStep", () => {
   it("引きかけ、浮いたパネル、道具、検査の欄の順に、1 段ずつ戻る", () => {
@@ -55,5 +55,13 @@ describe("nextEscapeStep", () => {
         expect(seen).toContain("select-view");
       }
     }
+  });
+});
+
+describe("handlesEscape", () => {
+  it("ダイアログが開いているあいだと、押し続けの繰り返しでは扱わない", () => {
+    expect(handlesEscape({ repeat: false, dialogOpen: false })).toBe(true);
+    expect(handlesEscape({ repeat: false, dialogOpen: true })).toBe(false);
+    expect(handlesEscape({ repeat: true, dialogOpen: false })).toBe(false);
   });
 });

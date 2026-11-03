@@ -1,6 +1,6 @@
 import { demandBar, parseCityStats, renderCityStats, setupDemandFactors } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
-import { nextEscapeStep } from "./escape.ts";
+import { handlesEscape, nextEscapeStep } from "./escape.ts";
 import { setupFeedback } from "./feedback.ts";
 import {
   balanceNote,
@@ -849,7 +849,7 @@ function clickTile(at: Tile): void {
 /** Esc 1 回ぶん。順は escape.ts が決める */
 function escapeOnce(): void {
   const step = nextEscapeStep({
-    drawing: roadStart !== null || pointer?.mode === "area",
+    drawing: roadStart !== null || pointer?.mode === "area" || devWalks.pending(),
     popoverOpen: popovers.anyOpen(),
     toolSelected: mapCanvas.dataset.tool !== "none",
     inspectorOpen: inspected !== null,
@@ -880,7 +880,13 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape") {
-    escapeOnce();
+    // 保存やフィードバックのダイアログは、ブラウザが Esc で閉じる。裏の道具は戻さない
+    const dialogOpen =
+      document.querySelector("dialog[open]") !== null ||
+      (target instanceof Element && target.closest("dialog") !== null);
+    if (handlesEscape({ repeat: event.repeat, dialogOpen })) {
+      escapeOnce();
+    }
   } else if ((event.key === "r" || event.key === "R") && tool.kind === "service") {
     const current = cursor !== null ? serviceChoice(tool.service, cursor).rotation : 0;
     manualRotation = (current + 1) % 4;

@@ -20,6 +20,8 @@ export type DevWalks = {
   spawned: (count: number) => void;
   /** 道具を切り替えたときや取り消したときに呼ぶ。選んだ出発のマスを忘れる。 */
   cancel: () => void;
+  /** 出発のマスを選んだあとで、行き先をまだ選んでいない */
+  pending: () => boolean;
 };
 
 export function setupDevWalks(deps: {
@@ -53,6 +55,7 @@ export function setupDevWalks(deps: {
       send({ kind: "dev-spawn-walks", from: start, to: at, count: DEV_WALK_COUNT });
       start = null;
     },
+    pending: () => start !== null,
     cancel() {
       start = null;
       info.textContent = active() ? `出発のマスを選ぶ。${NOTICE}` : "";

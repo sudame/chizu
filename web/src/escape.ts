@@ -34,3 +34,11 @@ export function nextEscapeStep(state: EscapeState): EscapeStep {
   }
   return "nothing";
 }
+
+/**
+ * Esc の打鍵を道具の側で扱うか。ダイアログはブラウザが Esc で閉じるので、道具は戻さない。
+ * 押し続けた自動の繰り返しでは、全段を一気に進めない。
+ */
+export function handlesEscape(key: { repeat: boolean; dialogOpen: boolean }): boolean {
+  return !key.repeat && !key.dialogOpen;
+}
