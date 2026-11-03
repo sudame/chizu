@@ -77,7 +77,7 @@ jobs:
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
           cache_save: ${{ github.ref == 'refs/heads/main' }}
-          install_args: rust
+          install_args: rust aqua:nextest-rs/nextest/cargo-nextest
       - run: mise run test:rust
       - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.target-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

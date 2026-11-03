@@ -16,7 +16,7 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 
 1. 作業は、マネージャーが用意した worktree の中で行う。すでに worktree の中にいるので、新しく worktree を作らず、本体のディレクトリにも移らない。`git worktree add` と `gwq` は使わない。
 2. 作業の途中は、変えたところに絞って確かめる。`mise run test` と `mise run lint` は WASM の LTO を含む重いビルドを何本も回すので、PR を作る直前に 1 回だけ回し、両方が通ることを確かめる。
-   - Rust：`mise run cargo -- test -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ
+   - Rust：`mise run cargo -- nextest run -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ
    - 画面：`mise run test:web`、`mise run lint:web`
    - WASM の境目や描画を変えたときだけ：`mise run test:wasm`
 3. コミットメッセージは日本語で書き、末尾に `Co-Authored-By:` の行を付ける。
@@ -37,7 +37,7 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 mise run test          # テストをすべて回す
 mise run lint          # 静的検査をすべて回す
 mise run cargo -- ...  # mise の環境（sccache を含む）で cargo を回す
-mise run test:rust     # cargo test --workspace
+mise run test:rust     # cargo nextest run --workspace と doctest
 mise run lint:md       # markdown の検査（rumdl）
 mise run lint:actions  # ワークフローの検査（jactionlint）
 mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core と chizu-scenario の浮動小数点の検査

@@ -9,6 +9,8 @@ idiomatic_version_file_enable_tools = ["rust"]
 RUSTC_WRAPPER = "{% if get_env(name='CI', default='') == '' %}sccache{% endif %}"
 
 [tools]
+# test:rust でテストを回す
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.149"
 biome = "2.6.4"
 jactionlint = "2.4.0"
 node = "26.13.0"
@@ -70,7 +72,12 @@ description = "mise の環境で cargo を回す。shell に mise の [env] が�
 run = "cargo"
 
 [tasks."test:rust"]
-run = "cargo test --workspace"
+# cargo test はテストのバイナリを 1 本ずつ順に回すので、長いテストを持つバイナリが続くと待ちが積み重なる。
+# nextest はバイナリをまたいでテストを並べて回す。nextest は doctest を回さないので、doctest は cargo test で回す
+run = [
+  "cargo nextest run --workspace",
+  "cargo test --workspace --doc",
+]
 
 [tasks."test:web"]
 depends = ["install:web"]
