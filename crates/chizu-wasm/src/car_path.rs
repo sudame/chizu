@@ -10,11 +10,14 @@
 //!
 //! - 終わりの窓（`QUEUE_MM`）：ノードの中心（距離がリンクの長さ）を、車の前の端が停止線に
 //!   かかる所に写し、窓の中を一様に縮める。止まった列は、停止線の手前に詰めて並ぶ。
-//! - 始まりの窓（`TURN_MM`）：入ってきた車線の停止線の手前から、出ていく車線の交差点の出口までの
-//!   二次ベジエ曲線と、その先の窓の終わりまでのまっすぐな線に写す。向きは曲線の接線にする。
+//! - 始まりの窓（`TURN_MM`）：入ってきた車線の停止線の手前から、窓の終わりの出ていく車線までの
+//!   道筋（[`Turn`]）に写す。入る車線をまっすぐ進み、2 本の車線の交わる所を制御点にした曲線で
+//!   向きを変え、出ていく車線をまっすぐ進む。曲線の両端の離し方と車の向きの決め方は、描く車の絵が
+//!   画面の車道（ノードの車道の四角と腕の帯、[`Carriageway`]）からはみ出さないものを選ぶ。
+//!   まっすぐ進んで車線を移る車は、両端で車線に沿う S 字を通る。
 //! - 窓が重なる短いリンクでは、停止線の位置を保ったまま、あいだを一様に縮める。
 //!
-//! 2 本だけがつながるノードで向きが変わる角も、道路の端までを曲線でつなぐ。
+//! 2 本だけがつながるノードで向きが変わる角も、同じ道筋でつなぐ。
 //!
 //! 経路を探し直すと、中核は抜けてきたリンクを忘れる。曲線の途中の車が飛ばないよう、
 //! 描いた曲線の始まりを [`Entry`] として呼ぶ側に覚えさせ、次の回に渡してもらう。
@@ -22,6 +25,8 @@
 use chizu_core::movement::{CAR_LENGTH, MIN_GAP};
 use chizu_core::network::TILE_MM;
 use chizu_core::{CarPath, Dir, Heading, LinkId, Mm, Network, NodeId};
+use std::cell::RefCell;
+use std::collections::HashMap;
 
 /// ノードを越えてから曲線の上に描く距離（mm）。中核が交差点の中にいるとみなす距離（`JUNCTION_CLEAR`、
 /// 車の長さと車間）と同じにする。
@@ -55,12 +60,15 @@ pub struct Drawn {
 
 /// ノードを越えた車の曲線の始まり。`node` と `dir` は、いまのリンクの始まりのノードの中心と向き、
 /// `p0` と `d0` は、入ってきた車線の停止線の手前の点と、そこでの向きである。
+/// `arc` は、選んだ道筋の形と、そのときの出ていく車線のずれである。
+/// 毎回選び直さずに済むよう覚えておく。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Entry {
     node: V,
     dir: V,
     p0: V,
     d0: V,
+    arc: Option<(Shape, V)>,
 }
 
 type V = (f64, f64);
@@ -253,6 +261,405 @@ impl Layout {
     }
 }
 
+/// 描く車の幅の半分。web/src/map/movers.ts の車の半分の大きさ（0.065 マス）と同じにする。
+const CAR_SIDE: f64 = 0.065 * TILE_MM as f64;
+/// 高速道路の車道の半分の幅。web/src/map/roads.ts の HIGHWAY_ASPHALT_HALF と同じにする。
+const HIGHWAY_ASPHALT: f64 = 0.45 * TILE_MM as f64;
+/// 斜めの区間に描く車道の半分の幅の上限。web/src/map/roads.ts の DIAGONAL_ASPHALT_HALF と同じにする。
+const DIAGONAL_ASPHALT: f64 = 0.2 * TILE_MM as f64;
+
+/// 画面に描く車道の半分の幅（mm）。web/src/map/roads.ts の asphaltHalfWidth と同じ。
+fn asphalt_half(kind: chizu_core::SegmentKind) -> f64 {
+    if kind.has_sidewalks() {
+        (i64::from(kind.car_lanes_per_side()) * kind.lane_width_mm()) as f64
+    } else {
+        HIGHWAY_ASPHALT
+    }
+}
+
+/// ノードのまわりに画面で描く車道。ノードの車道の四角と、腕ごとの車道の帯を合わせた形である
+/// （web/src/map/roads.ts の roadLaneGeometry）。腕の帯は、ノードから腕の向きへ延びる半直線とみなす。
+struct Carriageway {
+    center: V,
+    square: f64,
+    /// 腕の向き（長さ 1）と、車道の半分の幅。
+    arms: Vec<(V, f64)>,
+    /// 車道の縁が内側へ折れる角。腕の帯の縁が、ノードの車道の四角の縁にぶつかる所である。
+    /// 曲がる車が角を削ると、この角が車の絵に食い込む。
+    corners: Vec<V>,
+}
+
+impl Carriageway {
+    fn of(net: &Network, n: NodeId) -> Option<Carriageway> {
+        let node = net.node(n)?;
+        let center = center(net, n)?;
+        let mut square: f64 = 0.0;
+        let mut arms = Vec::with_capacity(node.segments.len());
+        for &s in &node.segments {
+            let (Some(seg), Some(line)) = (net.segment(s), net.segment_line(s)) else {
+                continue;
+            };
+            let half = asphalt_half(seg.kind);
+            square = square.max(half);
+            let step = if seg.a == n {
+                line.step
+            } else {
+                (-line.step.0, -line.step.1)
+            };
+            let diagonal = step.0 != 0 && step.1 != 0;
+            let len = ((step.0 * step.0 + step.1 * step.1) as f64).sqrt();
+            let dir = (step.0 as f64 / len, step.1 as f64 / len);
+            arms.push((
+                dir,
+                if diagonal {
+                    half.min(DIAGONAL_ASPHALT)
+                } else {
+                    half
+                },
+            ));
+        }
+        let exit = |e: f64, d: f64| {
+            if d.abs() < 1e-9 {
+                f64::INFINITY
+            } else {
+                (square * d.signum() - e) / d
+            }
+        };
+        let mut corners = Vec::new();
+        for &(dir, half) in &arms {
+            for side in [-1.0, 1.0] {
+                // 帯の縁の線を、ノードの中心の横から腕の向きへたどり、四角の縁を出る所。
+                let e = scale((-dir.1, dir.0), side * half);
+                let r = add(e, scale(dir, exit(e.0, dir.0).min(exit(e.1, dir.1))));
+                // ほかの腕の帯に入っていれば、車道の縁ではない。
+                let covered = arms
+                    .iter()
+                    .any(|&(d, h)| d != dir && dot(r, d) > 1.0 && cross(d, r).abs() < h - 1.0);
+                if !covered {
+                    corners.push(add(center, r));
+                }
+            }
+        }
+        Some(Carriageway {
+            center,
+            square,
+            arms,
+            corners,
+        })
+    }
+
+    /// 点 `p` が車道の中にあるか。境目から `slack` mm までの外は中とみなす（負なら、その分内側に限る）。
+    fn contains(&self, p: V, slack: f64) -> bool {
+        let r = sub(p, self.center);
+        if r.0.abs() <= self.square + slack && r.1.abs() <= self.square + slack {
+            return true;
+        }
+        self.arms
+            .iter()
+            .any(|&(dir, half)| dot(r, dir) >= -slack && cross(dir, r).abs() <= half + slack)
+    }
+
+    /// 中心 `c`、向き `h`（長さ 1）に描く車の絵が車道からはみ出す所の数。車の絵の 4 隅のうち車道の外に
+    /// 出るものと、車道の縁の角のうち車の絵に食い込むものを数える。境目から `slack` mm までは許す。
+    fn outside(&self, c: V, h: V, slack: f64) -> usize {
+        let l = (-h.1, h.0);
+        let corners = [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)]
+            .into_iter()
+            .filter(|&(u, v)| {
+                let p = add(add(c, scale(h, u * CAR_HALF)), scale(l, v * CAR_SIDE));
+                !self.contains(p, slack)
+            })
+            .count();
+        let bitten = self
+            .corners
+            .iter()
+            .filter(|&&p| {
+                let r = sub(p, c);
+                dot(r, h).abs() < CAR_HALF - slack && dot(r, l).abs() < CAR_SIDE - slack
+            })
+            .count();
+        corners + bitten
+    }
+}
+
+/// 曲線の両端を、2 本の車線の交わる所からどれだけ離すか。交わる所から `p0` まで、`q` までの距離に掛ける割合で、
+/// この中から入る側と出る側の組を選ぶ。
+const HANDLE_STEPS: [f64; 7] = [1.0, 0.75, 0.55, 0.4, 0.28, 0.18, 0.1];
+/// 曲線を選ぶときに、道筋の上で車の絵を確かめる所の数。
+const FIT_SAMPLES: usize = 48;
+/// 曲線を選ぶときは、車の絵の縁が車道の境目からこれだけ内側に収まるものを探す（mm）。確かめる所の
+/// あいだで縁がふくらむ分を見込む。
+const FIT_MARGIN: f64 = 30.0;
+
+/// 曲がる道筋の形。曲線の両端を交わる所から離す割合（[`HANDLE_STEPS`]）と、描く車の向きの決め方
+/// （[`Aim::Slide`] にするか）である。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Shape {
+    fa: f64,
+    fb: f64,
+    slide: bool,
+}
+
+/// 道筋の上の車を、どちらへ向けて描くか。
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Aim {
+    /// 道筋の接線の向き。
+    Tangent,
+    /// 車の長さの半分の弦の向き。弦は、曲線に入る前は車の長さの半分だけ戻った道筋の上から車の真ん中まで、
+    /// 曲線を抜けたあとは車の真ん中から同じだけ進んだ道筋の上までとし、曲線の上ではそのあいだを滑らかに
+    /// 移す。曲がり始めは後ろの端が、曲がり終わりは前の端が道筋の近くに残るので、狭い車線から曲がり
+    /// 始めても後ろが外へ振れず、狭い車線へ入るときも前が外へ振れない。
+    Slide,
+}
+
+/// 曲がる道筋。入る車線の `p0` から向き `d0` にまっすぐ進み、3 次ベジエ曲線 `c` で向きを `d2` に変え、
+/// 出ていく車線を `q` までまっすぐ進む。曲線の両端の接線は車線の向きなので、位置も向きも飛ばない。
+/// 曲がるときの曲線は、2 本の車線の交わる所を制御点にした二次ベジエ曲線を 3 次に直したものである。
+/// まっすぐ進んで車線を移るときは、両端で向きが車線に沿う S 字にする。
+#[derive(Clone, Copy, Debug)]
+struct Turn {
+    p0: V,
+    d0: V,
+    c: [V; 4],
+    d2: V,
+    /// 曲線の前と後ろのまっすぐな所の長さ。
+    before: f64,
+    after: f64,
+    /// 曲線を `ARC_SAMPLES` に分けた点までの、曲線に沿った長さ。
+    marks: [f64; ARC_SAMPLES + 1],
+    aim: Aim,
+}
+
+/// 3 次ベジエ曲線の、`t` の位置と接線。
+fn cubic(c: &[V; 4], t: f64) -> (V, V) {
+    let u = 1.0 - t;
+    let p = add(
+        add(scale(c[0], u * u * u), scale(c[1], 3.0 * u * u * t)),
+        add(scale(c[2], 3.0 * u * t * t), scale(c[3], t * t * t)),
+    );
+    let d = add(
+        add(
+            scale(sub(c[1], c[0]), 3.0 * u * u),
+            scale(sub(c[2], c[1]), 6.0 * u * t),
+        ),
+        scale(sub(c[3], c[2]), 3.0 * t * t),
+    );
+    (p, d)
+}
+
+fn dot(a: V, b: V) -> f64 {
+    a.0 * b.0 + a.1 * b.1
+}
+
+/// 長さ 1 にした向き。長さがほとんどなければ `None`。
+fn unit(v: V) -> Option<V> {
+    let n = v.0.hypot(v.1);
+    (n > 1e-6).then(|| scale(v, 1.0 / n))
+}
+
+impl Turn {
+    /// 2 本の車線の交わる所と、そこまでの `p0` からの距離、そこから `q` までの距離。
+    /// 車線が交わらないか、交わる所が `p0` の後ろか `q` の先なら `None`。折り返しに近いものも `None` にする。
+    fn corner(p0: V, d0: V, q: V, d2: V) -> Option<(V, f64, f64)> {
+        let den = cross(d0, d2);
+        if den.abs() < 1e-6 || dot(d0, d2) < -0.8 {
+            return None;
+        }
+        let a = cross(sub(q, p0), d2) / den;
+        let p = add(p0, scale(d0, a));
+        let b = dot(sub(q, p), d2);
+        (a > 0.0 && b > 0.0).then_some((p, a, b))
+    }
+
+    /// 形 `shape` の道筋。2 本の車線が同じ向きなら、形によらず [`Aim::Slide`] の S 字にする。
+    /// 作れなければ `None`。
+    fn new(p0: V, d0: V, q: V, d2: V, shape: Shape) -> Option<Turn> {
+        let (c, before, after, aim) = if let Some((p, a, b)) = Turn::corner(p0, d0, q, d2) {
+            let (ta, tb) = (a * shape.fa, b * shape.fb);
+            let ca = sub(p, scale(d0, ta));
+            let cb = add(p, scale(d2, tb));
+            let third = |e: V| add(e, scale(sub(p, e), 2.0 / 3.0));
+            let aim = if shape.slide {
+                Aim::Slide
+            } else {
+                Aim::Tangent
+            };
+            ([ca, third(ca), third(cb), cb], a - ta, b - tb, aim)
+        } else if dot(d0, d2) > 1.0 - 1e-9 && dot(sub(q, p0), d0) > 0.0 {
+            let h = scale(d0, dot(sub(q, p0), d0) / 3.0);
+            ([p0, add(p0, h), sub(q, h), q], 0.0, 0.0, Aim::Slide)
+        } else {
+            return None;
+        };
+        let mut marks = [0.0; ARC_SAMPLES + 1];
+        let mut last = c[0];
+        for k in 1..=ARC_SAMPLES {
+            let (pt, _) = cubic(&c, k as f64 / ARC_SAMPLES as f64);
+            marks[k] = marks[k - 1] + dist(last, pt);
+            last = pt;
+        }
+        Some(Turn {
+            p0,
+            d0,
+            c,
+            d2,
+            before,
+            after,
+            marks,
+            aim,
+        })
+    }
+
+    fn arc(&self) -> f64 {
+        self.marks[ARC_SAMPLES]
+    }
+
+    fn length(&self) -> f64 {
+        self.before + self.arc() + self.after
+    }
+
+    /// 道筋の始まりから `s` だけ進んだ所と、そこでの接線の向き（長さ 1）。始まりより手前は入る車線を
+    /// まっすぐ戻り、終わりより先は出ていく車線をまっすぐ進む。曲線の上は、長さの表から曲線の変数を求め、
+    /// 進む距離に合わせて動かす。
+    fn pos(&self, s: f64) -> (V, V) {
+        let arc = self.arc();
+        if s <= self.before {
+            return (add(self.p0, scale(self.d0, s)), self.d0);
+        }
+        if s >= self.before + arc || arc < 1.0 {
+            let s = (s - self.before - arc).max(0.0);
+            return (add(self.c[3], scale(self.d2, s)), self.d2);
+        }
+        let s = s - self.before;
+        let k = self
+            .marks
+            .partition_point(|&m| m <= s)
+            .clamp(1, ARC_SAMPLES);
+        let (m0, m1) = (self.marks[k - 1], self.marks[k]);
+        let within = if m1 > m0 { (s - m0) / (m1 - m0) } else { 0.0 };
+        let (p, d) = cubic(&self.c, ((k - 1) as f64 + within) / ARC_SAMPLES as f64);
+        (p, unit(d).unwrap_or(self.d0))
+    }
+
+    /// 道筋の始まりから `s` だけ進んだ所と、そこで描く車の向き（長さ 1、[`Aim`]）。
+    fn at(&self, s: f64) -> (V, V) {
+        let (p, tangent) = self.pos(s);
+        if self.aim == Aim::Tangent {
+            return (p, tangent);
+        }
+        let u = ((s - self.before) / self.arc().max(1.0)).clamp(0.0, 1.0);
+        let ahead = u * u * (3.0 - 2.0 * u) * CAR_HALF;
+        let chord = sub(self.pos(s + ahead).0, self.pos(s + ahead - CAR_HALF).0);
+        (p, unit(chord).unwrap_or(self.d0))
+    }
+
+    /// 曲線の前後の車の長さの半分を含めた `FIT_SAMPLES + 1` か所と道筋の両端で、車の絵が車道から
+    /// はみ出す所の数を足したもの。そのほかのまっすぐな所は車線の上なので見ない。`cap` に届いたら、
+    /// そこで数えるのをやめて `cap` を返す。
+    fn misfit(&self, cw: &Carriageway, cap: usize) -> usize {
+        let from = (self.before - CAR_HALF).max(0.0);
+        let span = (self.before + self.arc() + CAR_HALF).min(self.length()) - from;
+        let mut total = 0;
+        for s in (0..=FIT_SAMPLES)
+            .map(|k| from + span * k as f64 / FIT_SAMPLES as f64)
+            .chain([0.0, self.length()])
+        {
+            let (c, h) = self.at(s);
+            total += cw.outside(c, h, -FIT_MARGIN);
+            if total >= cap {
+                return cap;
+            }
+        }
+        total
+    }
+
+    /// 車の絵が車道 `cw` の外に出ない道筋の形を選ぶ。曲線の短いほうの端が交わる所から遠いもの
+    /// （緩く曲がるもの）を先に試し、同じ割合なら [`Aim::Slide`] を先に試す。
+    /// どれでも出るなら、出る所がいちばん少ないものにする。道筋を作れなければ `None`。
+    fn fit(cw: &Carriageway, p0: V, d0: V, q: V, d2: V) -> Option<Shape> {
+        let straight = Shape {
+            fa: 1.0,
+            fb: 1.0,
+            slide: true,
+        };
+        let Some((_, a, b)) = Turn::corner(p0, d0, q, d2) else {
+            return Turn::new(p0, d0, q, d2, straight).map(|_| straight);
+        };
+        let mut shapes: Vec<Shape> = HANDLE_STEPS
+            .iter()
+            .flat_map(|&fa| HANDLE_STEPS.iter().map(move |&fb| (fa, fb)))
+            .flat_map(|(fa, fb)| [true, false].map(|slide| Shape { fa, fb, slide }))
+            .collect();
+        let key = |s: &Shape| {
+            let (ta, tb) = (a * s.fa, b * s.fb);
+            (ta.min(tb), ta + tb)
+        };
+        // 並べ替えは安定なので、同じ割合の組では Slide が先に残る。
+        shapes.sort_by(|x, y| {
+            let (kx, ky) = (key(x), key(y));
+            ky.0.total_cmp(&kx.0).then(ky.1.total_cmp(&kx.1))
+        });
+        let mut best: Option<(usize, Shape)> = None;
+        for shape in shapes {
+            let Some(turn) = Turn::new(p0, d0, q, d2, shape) else {
+                continue;
+            };
+            let misfit = turn.misfit(cw, best.map_or(usize::MAX, |(m, _)| m));
+            if best.is_none_or(|(m, _)| misfit < m) {
+                best = Some((misfit, shape));
+            }
+            if misfit == 0 {
+                break;
+            }
+        }
+        best.map(|(_, s)| s)
+    }
+}
+
+/// 選んだ道筋の形を覚えておく数の上限。超えたら忘れて選び直す。
+const FITTED_LIMIT: usize = 4096;
+
+thread_local! {
+    /// 交差点の車道と、入る車線、出ていく車線ごとに選んだ道筋の形。同じ所を曲がる車は多いので、
+    /// 選び直さずに済ませる。描画のためだけに覚え、状態には入れない。反復はしない。
+    static FITTED: RefCell<HashMap<Vec<u64>, Option<Shape>>> = RefCell::new(HashMap::new());
+}
+
+/// [`Turn::fit`] の結果を、同じ車道と同じ車線の組について覚えておいて使う。
+fn fitted(cw: &Carriageway, p0: V, d0: V, q: V, d2: V) -> Option<Shape> {
+    let mut key: Vec<u64> = [
+        p0.0,
+        p0.1,
+        d0.0,
+        d0.1,
+        q.0,
+        q.1,
+        d2.0,
+        d2.1,
+        cw.center.0,
+        cw.center.1,
+        cw.square,
+    ]
+    .iter()
+    .map(|v| v.to_bits())
+    .collect();
+    for &(d, h) in &cw.arms {
+        key.extend([d.0.to_bits(), d.1.to_bits(), h.to_bits()]);
+    }
+    if let Some(shape) = FITTED.with(|m| m.borrow().get(&key).copied()) {
+        return shape;
+    }
+    let shape = Turn::fit(cw, p0, d0, q, d2);
+    FITTED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= FITTED_LIMIT {
+            m.clear();
+        }
+        m.insert(key, shape);
+    });
+    shape
+}
+
 fn link_len(net: &Network, link: LinkId) -> f64 {
     net.segment_line(link.segment)
         .and_then(|l| l.checked_length())
@@ -334,6 +741,7 @@ pub fn draw(
             dir: g.dir,
             p0: add(sub(start, scale(pg.dir, pstop)), mm(shown)),
             d0: pg.dir,
+            arc: None,
         })
     });
     let same_place = |e: &&Entry| dist(e.node, start) < 1.0 && dist(e.dir, g.dir) < 1e-6;
@@ -341,8 +749,36 @@ pub fn draw(
         // 抜けてきた所が分からなければ、ノードの中心から窓の終わりまでをまっすぐ描く。
         return Some((straight(lay.settle * o / lay.turn, mm(shift)), None));
     };
-    // 曲線の終わりから、窓の終わりまではまっすぐ進む。窓の中の距離を、曲線とまっすぐな所の長さで分ける。
     let lane = mm(path.lane_shift);
+    // 曲がる車は、入る車線から出ていく車線へ、車の絵が車道の外に出ない曲線でつなぎ、窓の終わり
+    // （中核の位置）までまっすぐ進む。同じ曲線の上にいる間は、前の回に選んだ曲線を使う。
+    let q = add(add(start, scale(g.dir, lay.settle)), lane);
+    let kept = remembered
+        .filter(|e| same_place(e) && dist(e.p0, entry.p0) < 1e-6 && dist(e.d0, entry.d0) < 1e-6)
+        .and_then(|e| e.arc)
+        .filter(|&(_, l)| dist(l, lane) < 1e-6)
+        .map(|(f, _)| f);
+    let shape = kept.or_else(|| {
+        let cw = Carriageway::of(net, g.from)?;
+        fitted(&cw, entry.p0, entry.d0, q, g.dir)
+    });
+    if let Some(t) = shape.and_then(|f| Turn::new(entry.p0, entry.d0, q, g.dir, f)) {
+        let (p, d) = t.at(o / lay.turn * t.length());
+        let entry = Entry {
+            arc: shape.map(|f| (f, lane)),
+            ..entry
+        };
+        return Some((
+            Drawn {
+                x: p.0,
+                y: p.1,
+                angle: d.1.atan2(d.0),
+            },
+            Some(entry),
+        ));
+    }
+    // まっすぐ進む車（車線を移る車を含む）は、曲線の終わりから窓の終わりまでまっすぐ進む。窓の中の距離を、
+    // 曲線とまっすぐな所の長さで分ける。
     let p2 = add(add(start, scale(g.dir, lay.exit)), lane);
     let p1 = control(entry.p0, entry.d0, p2, g.dir);
     let arc = arc_length(entry.p0, p1, p2);
@@ -618,6 +1054,187 @@ mod tests {
             assert!(close(d.y, NODE - 1_920.0), "{o}: {d:?}");
             assert!(close(d.angle, 0.0));
         }
+    }
+
+    /// リンク `link` の、端から数えて `index` 番目の車線のずれ。中核の `lane_shift::target` と同じ式である。
+    fn lane_of(net: &Network, link: LinkId, index: i64) -> (Mm, Mm) {
+        let kind = net.segment(link.segment).unwrap().kind;
+        let per_side = i64::from(kind.car_lanes_per_side());
+        let lane = kind.lane_width_mm();
+        let d = (per_side - index) * lane - lane / 2;
+        let (sx, sy) = geom(net, link).unwrap().step;
+        let (x, y) = if sx != 0 && sy != 0 {
+            let c = d * 70_711 / 100_000;
+            (c * sy, -c * sx)
+        } else {
+            (d * sy, -d * sx)
+        };
+        (Mm(x), Mm(y))
+    }
+
+    /// ノード `n` に入るリンクと出るリンクのすべての組（折り返しを除く）と、すべての車線の組で、
+    /// 停止線の手前から窓の終わりまで車を動かし、`check` に、入る車線、出るリンク、描いた位置の並びを渡す。
+    fn every_move(w: &World, n: NodeId, mut check: impl FnMut(LinkId, LinkId, &[Drawn])) {
+        let net = w.network();
+        let node = net.node(n).unwrap();
+        let links = |s: chizu_core::SegmentId| {
+            [Dir::Forward, Dir::Backward].map(|dir| LinkId {
+                segment: s,
+                dir,
+                mode: LaneMode::Car,
+            })
+        };
+        let all: Vec<LinkId> = node.segments.iter().flat_map(|&s| links(s)).collect();
+        for &inn in all.iter().filter(|l| geom(net, **l).unwrap().to == n) {
+            for &out in all.iter().filter(|l| geom(net, **l).unwrap().from == n) {
+                if out.segment == inn.segment {
+                    continue;
+                }
+                let lanes = |l: LinkId| {
+                    i64::from(net.segment(l.segment).unwrap().kind.car_lanes_per_side())
+                };
+                for i in 0..lanes(inn) {
+                    for j in 0..lanes(out) {
+                        let shown = lane_of(net, inn, i);
+                        let lane = lane_of(net, out, j);
+                        let in_len = link_len(net, inn) as u32;
+                        let mut wait = path(inn, in_len, None);
+                        wait.len = LaneOffset(in_len);
+                        let mut drawn = vec![at(net, &wait, shown)];
+                        let mut entry = None;
+                        for o in (0..=TURN_MM as u32).step_by(25) {
+                            let mut p = path(out, o, Some((inn, shown)));
+                            p.len = LaneOffset(link_len(net, out) as u32);
+                            p.lane_shift = lane;
+                            let (d, e) = draw(net, &p, lane, entry.as_ref()).unwrap();
+                            entry = e;
+                            drawn.push(d);
+                        }
+                        let mut p = path(out, TURN_MM as u32 + 25, None);
+                        p.len = LaneOffset(link_len(net, out) as u32);
+                        drawn.push(at(net, &p, lane));
+                        check(inn, out, &drawn);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 交差点の車道の外に、描く車の絵が出ないか。位置と向きが飛ばないか。
+    fn stays_on_the_carriageway(w: &World, node: (i64, i64)) {
+        let net = w.network();
+        let n = net
+            .node_at(TilePos::new(node.0, node.1))
+            .expect("ノードがない");
+        let cw = Carriageway::of(net, n).unwrap();
+        let mut moves = 0;
+        every_move(w, n, |inn, out, drawn| {
+            moves += 1;
+            for (k, d) in drawn.iter().enumerate() {
+                let h = (d.angle.cos(), d.angle.sin());
+                assert_eq!(
+                    cw.outside((d.x, d.y), h, 1.0),
+                    0,
+                    "{inn:?} -> {out:?} の {k} 番目 {d:?} が車道の外に出た"
+                );
+            }
+            let turn = |a: &Drawn, b: &Drawn| {
+                (b.angle - a.angle + core::f64::consts::PI).rem_euclid(core::f64::consts::TAU)
+                    - core::f64::consts::PI
+            };
+            for (k, p) in drawn.windows(2).enumerate() {
+                let step = (p[1].x - p[0].x).hypot(p[1].y - p[0].y);
+                // 25mm ずつ動かすので、曲線の上でも 1 回に動くのはその数倍までである。狭い車線から小さく
+                // 曲がる車も、1 回に回るのは 30 度より小さい。
+                assert!(
+                    step < 100.0,
+                    "{inn:?} -> {out:?} の {k} 番目で位置が飛んだ: {step}"
+                );
+                let t = turn(&p[0], &p[1]);
+                assert!(
+                    t.abs() < 0.5,
+                    "{inn:?} -> {out:?} の {k} 番目で向きが飛んだ: {t}"
+                );
+            }
+            // 曲がり始めは、停止線の手前で待っていた所と同じ。窓を抜けた所では、向きが出ていく車線に戻っている。
+            // 斜めのリンクの長さは 1 マス 11,314mm に丸めてあるので、位置は数 mm までずれる。
+            let (wait, first) = (&drawn[0], &drawn[1]);
+            let gap = (wait.x - first.x).hypot(wait.y - first.y);
+            assert!(
+                gap < 5.0 && turn(wait, first).abs() < 1e-9,
+                "{inn:?} -> {out:?}: {wait:?} {first:?}"
+            );
+            let [.., end, beyond] = drawn else {
+                unreachable!()
+            };
+            assert!(
+                turn(end, beyond).abs() < 1e-9,
+                "{inn:?} -> {out:?}: {end:?} {beyond:?}"
+            );
+        });
+        assert!(moves > 0);
+    }
+
+    #[test]
+    fn turning_cars_stay_on_the_carriageway_at_a_crossroads() {
+        stays_on_the_carriageway(&crossroads(), (10, 10));
+    }
+
+    #[test]
+    fn turning_cars_stay_on_the_carriageway_at_a_t_junction_of_two_kinds() {
+        // #209 の交差点と同じ形。南北の中くらいの道路に、東から小さい道路がつながる。
+        let w = town_of(&[
+            ((10, 0), (10, 20), RoadKind::Medium),
+            ((10, 10), (20, 10), RoadKind::Small),
+        ]);
+        stays_on_the_carriageway(&w, (10, 10));
+    }
+
+    #[test]
+    fn turning_cars_stay_on_the_carriageway_where_kinds_differ() {
+        // 大きい道路と小さい道路の十字路。車線の数も幅も違う。
+        let w = town_of(&[
+            ((0, 10), (20, 10), RoadKind::Large),
+            ((10, 0), (10, 20), RoadKind::Small),
+        ]);
+        stays_on_the_carriageway(&w, (10, 10));
+        // 大きい道路に、中くらいの道路が北からつながる T 字路。
+        let w = town_of(&[
+            ((0, 10), (20, 10), RoadKind::Large),
+            ((10, 0), (10, 10), RoadKind::Medium),
+        ]);
+        stays_on_the_carriageway(&w, (10, 10));
+    }
+
+    #[test]
+    fn turning_cars_stay_on_the_carriageway_with_a_diagonal_arm() {
+        // 中くらいの道路の十字路に、北西から斜めの小さい道路がつながる。
+        let w = town_of(&[
+            ((0, 10), (20, 10), RoadKind::Medium),
+            ((10, 0), (10, 20), RoadKind::Medium),
+            ((2, 2), (10, 10), RoadKind::Small),
+        ]);
+        stays_on_the_carriageway(&w, (10, 10));
+    }
+
+    /// 道路の始まりと終わりのマスと、道路の種類。
+    type KindedRoad = ((i64, i64), (i64, i64), RoadKind);
+
+    /// `roads` の順に、種類を指定して道路を引いた街。
+    fn town_of(roads: &[KindedRoad]) -> World {
+        let mut w = World::new(1);
+        for (seq, &(from, to, kind)) in roads.iter().enumerate() {
+            let c = Command::BuildRoad {
+                from: TilePos::new(from.0, from.1),
+                to: TilePos::new(to.0, to.1),
+                kind,
+            };
+            assert_eq!(
+                w.apply_recorded(seq as u64, &c),
+                chizu_core::ApplyOutcome::Applied
+            );
+        }
+        w
     }
 
     #[test]
