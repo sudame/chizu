@@ -274,6 +274,7 @@ fn movers_report_world_positions_in_the_area() {
             // 斜めなので、√2 で割って 1,470mm ずつ、右（左下）へずれる。
             shift: (Mm(-1_470), Mm(1_470)),
             path: None,
+            walk: None,
         }]
     );
     let none = w.trips.movers_in(

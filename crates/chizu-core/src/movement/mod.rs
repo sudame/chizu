@@ -46,6 +46,7 @@ pub use congestion::{Congestion, classify as classify_congestion};
 pub use parking::{Lot, PARK_RADIUS, building_spot};
 pub use pos::SidewalkPos;
 
+use crate::command::NodeId;
 use crate::id::{Slots, TripId};
 use crate::network::{Dir, LaneId, LaneMode, LinkId, Network, SegmentId};
 use crate::rng::{RngPurpose, mix_words};
@@ -230,6 +231,47 @@ impl Trip {
         })
     }
 
+    /// 歩く人の描くための道筋（[`WalkPath`]）。車なら `None`。区間の途中を横切っているあいだと、
+    /// リンクの両端から離れているあいだも `None` で、中核の位置のまま描く。
+    fn walk_path(&self, net: &Network) -> Option<WalkPath> {
+        if self.mode != LaneMode::Sidewalk || self.walk.jay.is_some() {
+            return None;
+        }
+        let entered = self.leg > 0;
+        let len = self.link_len.0;
+        let near_start = entered && self.offset.0 < WALK_WINDOW_MM;
+        let near_end = !self.last_leg() && self.offset.0.saturating_add(WALK_WINDOW_MM) >= len;
+        if !near_start && !near_end {
+            return None;
+        }
+        let ahead = near_end.then(|| self.walk_ahead(net)).flatten();
+        if !near_start && ahead.is_none() {
+            return None;
+        }
+        let (x, y) = self.lane_target(net, self.link());
+        Some(WalkPath {
+            link: self.link(),
+            offset: self.offset,
+            len: self.link_len,
+            lane_shift: (Mm(x), Mm(y)),
+            entered,
+            ahead,
+        })
+    }
+
+    fn walk_ahead(&self, net: &Network) -> Option<WalkAhead> {
+        let link = self.link();
+        let next = *self.route.links.get(self.leg as usize + 1)?;
+        let node = car::end_node(net, link);
+        let (far, arms) = self.departure(net);
+        let corners = crossing::corner_route(net, node, (link, self.walk.far), (next, far));
+        (corners.len() >= 2).then(|| WalkAhead {
+            node,
+            corners,
+            arms: arms.to_vec(),
+        })
+    }
+
     fn last_leg(&self) -> bool {
         self.leg as usize + 1 == self.route.links.len()
     }
@@ -397,7 +439,7 @@ pub struct Finished {
 }
 
 /// 画面に描く移動体。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mover {
     pub id: TripId,
     pub pos: WorldPos,
@@ -410,6 +452,40 @@ pub struct Mover {
     pub shift: (Mm, Mm),
     /// 車なら、ノードの前後を曲線でつないで描くための道筋。歩く人は `None`。
     pub path: Option<CarPath>,
+    /// 歩く人なら、交差点の前後で歩道の角を回って描くための道筋。車と、交差点の近くにいない人は `None`。
+    pub walk: Option<WalkPath>,
+}
+
+/// 歩く人の、ノードの前後で `WalkPath` を求める距離（mm）。リンクの両端からこの距離の中にいる人だけが
+/// 道筋を持つ。画面は、この中でだけ位置を写し替える。
+pub const WALK_WINDOW_MM: u32 = 10_000;
+
+/// 歩く人の、いまのリンクの上の位置と、リンクの終わりのノードを通る道筋。画面は、交差点の手前の人を
+/// 歩道の角を回る道筋の上に、横断歩道を渡る人を縞の上に描くのに使う。
+/// 描画のためだけの値で、状態にも状態ハッシュにも入らない。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalkPath {
+    pub link: LinkId,
+    /// いまのリンクの始まりからの距離と、リンクの長さ。交差点で車道を渡っているあいだは、
+    /// `offset` が `len` を超え、超えた分が渡る腕の横断歩道を順に並べた道のりの上の位置を表す。
+    pub offset: LaneOffset,
+    pub len: LaneOffset,
+    /// いまの歩道の、中心線からのずれ。歩道に寄せる移り変わりは含まない。
+    pub lane_shift: (Mm, Mm),
+    /// 前のリンクからノードを抜けてきたか。経路の最初のリンクなら `false` で、出入口から歩き出している。
+    pub entered: bool,
+    /// リンクの終わりのノードを抜ける道筋。終わりの近くにいないか、最後のリンクなら `None`。
+    pub ahead: Option<WalkAhead>,
+}
+
+/// 歩く人がノードを抜けるときの道筋。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalkAhead {
+    pub node: NodeId,
+    /// 回る角を通る順に並べたもの（[`crossing::corner_route`]）。
+    pub corners: Vec<(SegmentId, bool)>,
+    /// 渡る腕の区間。渡る順に並ぶ。
+    pub arms: Vec<SegmentId>,
 }
 
 /// 車の、いまのリンクの上の位置と、抜けてきたリンク。画面は、リンクの終わりのノードの手前で待つ車を
@@ -972,6 +1048,7 @@ impl Trips {
                     mode: t.mode,
                     shift: t.shift(net),
                     path: t.car_path(net),
+                    walk: t.walk_path(net),
                 })
             })
             .collect()

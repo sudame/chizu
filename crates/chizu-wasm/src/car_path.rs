@@ -36,7 +36,7 @@ const MIN_SCALE: f64 = 0.55;
 
 // 画面の停止線の位置。web/src/map/roads.ts の ZEBRA_LENGTH と、detail.ts の STOP_LINE_GAP、
 // STOP_LINE_WIDTH（マス）と同じにする。
-const ZEBRA_LENGTH: f64 = 0.16 * TILE_MM as f64;
+pub(crate) const ZEBRA_LENGTH: f64 = 0.16 * TILE_MM as f64;
 const STOP_LINE_GAP: f64 = 0.05 * TILE_MM as f64;
 const STOP_LINE_WIDTH: f64 = 0.04 * TILE_MM as f64;
 /// 描く車の長さの半分。web/src/map/movers.ts の車の半分の大きさ（0.2 マス）と同じにする。
@@ -63,17 +63,17 @@ pub struct Entry {
     d0: V,
 }
 
-type V = (f64, f64);
+pub(crate) type V = (f64, f64);
 
-fn add(a: V, b: V) -> V {
+pub(crate) fn add(a: V, b: V) -> V {
     (a.0 + b.0, a.1 + b.1)
 }
 
-fn sub(a: V, b: V) -> V {
+pub(crate) fn sub(a: V, b: V) -> V {
     (a.0 - b.0, a.1 - b.1)
 }
 
-fn scale(a: V, k: f64) -> V {
+pub(crate) fn scale(a: V, k: f64) -> V {
     (a.0 * k, a.1 * k)
 }
 
@@ -81,23 +81,23 @@ fn cross(a: V, b: V) -> f64 {
     a.0 * b.1 - a.1 * b.0
 }
 
-fn dist(a: V, b: V) -> f64 {
+pub(crate) fn dist(a: V, b: V) -> f64 {
     (a.0 - b.0).hypot(a.1 - b.1)
 }
 
-fn mm((x, y): (Mm, Mm)) -> V {
+pub(crate) fn mm((x, y): (Mm, Mm)) -> V {
     (x.0 as f64, y.0 as f64)
 }
 
 /// リンクの、始まりと終わりのノード、1 歩の向き（長さ 1 にしたもの）、腕の向き。
-struct LinkGeom {
-    from: NodeId,
-    to: NodeId,
-    dir: V,
-    step: (i64, i64),
+pub(crate) struct LinkGeom {
+    pub(crate) from: NodeId,
+    pub(crate) to: NodeId,
+    pub(crate) dir: V,
+    pub(crate) step: (i64, i64),
 }
 
-fn geom(net: &Network, link: LinkId) -> Option<LinkGeom> {
+pub(crate) fn geom(net: &Network, link: LinkId) -> Option<LinkGeom> {
     let seg = net.segment(link.segment)?;
     let line = net.segment_line(link.segment)?;
     let (from, to, step) = match link.dir {
@@ -113,7 +113,7 @@ fn geom(net: &Network, link: LinkId) -> Option<LinkGeom> {
     })
 }
 
-fn center(net: &Network, n: NodeId) -> Option<V> {
+pub(crate) fn center(net: &Network, n: NodeId) -> Option<V> {
     let p = net.node(n)?.pos;
     Some((p.x.0 as f64, p.y.0 as f64))
 }
@@ -124,7 +124,7 @@ fn heading_of(step: (i64, i64)) -> Option<Heading> {
 
 /// ノード `n` につながる区間の、道路の端（歩道を含む）までのいちばん広い半分の幅（mm）。
 /// web/src/map/roads.ts の RoadNode の half と同じ。
-fn node_half(net: &Network, n: NodeId) -> f64 {
+pub(crate) fn node_half(net: &Network, n: NodeId) -> f64 {
     let Some(node) = net.node(n) else {
         return 0.0;
     };
@@ -140,7 +140,7 @@ fn node_half(net: &Network, n: NodeId) -> f64 {
 }
 
 /// ノード `n` が、2 本の区間を向きを変えてつなぐ角か。
-fn is_bend(net: &Network, n: NodeId) -> bool {
+pub(crate) fn is_bend(net: &Network, n: NodeId) -> bool {
     let Some(node) = net.node(n) else {
         return false;
     };
@@ -162,12 +162,12 @@ fn is_bend(net: &Network, n: NodeId) -> bool {
     }
 }
 
-fn is_junction(net: &Network, n: NodeId) -> bool {
+pub(crate) fn is_junction(net: &Network, n: NodeId) -> bool {
     net.node(n).is_some_and(|x| x.segments.len() >= 3)
 }
 
 /// ノード `n` から腕の向き `arm`（ノードから出ていく 1 歩）へ、道路の端までの距離（mm）。
-fn edge(net: &Network, n: NodeId, arm: (i64, i64)) -> f64 {
+pub(crate) fn edge(net: &Network, n: NodeId, arm: (i64, i64)) -> f64 {
     let half = node_half(net, n);
     if arm.0 != 0 && arm.1 != 0 {
         half * core::f64::consts::SQRT_2
@@ -260,7 +260,7 @@ fn link_len(net: &Network, link: LinkId) -> f64 {
 }
 
 /// 二次ベジエ曲線の、`t` の位置と接線。
-fn bezier(p0: V, p1: V, p2: V, t: f64) -> (V, V) {
+pub(crate) fn bezier(p0: V, p1: V, p2: V, t: f64) -> (V, V) {
     let u = 1.0 - t;
     let p = add(
         add(scale(p0, u * u), scale(p1, 2.0 * u * t)),
@@ -289,7 +289,7 @@ pub fn control(p0: V, d0: V, p2: V, d2: V) -> V {
 }
 
 /// 二次ベジエ曲線の長さを、折れ線で近づけて求める。
-fn arc_length(p0: V, p1: V, p2: V) -> f64 {
+pub(crate) fn arc_length(p0: V, p1: V, p2: V) -> f64 {
     let mut total = 0.0;
     let mut last = p0;
     for k in 1..=ARC_SAMPLES {

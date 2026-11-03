@@ -8,6 +8,7 @@ pub mod movers;
 pub mod save;
 pub mod sim;
 pub mod snapshot;
+pub mod walk_path;
 
 use chizu_core::network::{DIAGONAL_TILE_MM, TILE_MM, road_cost_per_tile};
 use chizu_core::{ApplyOutcome, ChunkCoord, Command, RoadKind, ServiceKind, TilePos, TileRect};

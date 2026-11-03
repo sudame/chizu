@@ -116,6 +116,8 @@ struct Corners {
 
 /// 角から角へ回る道筋。
 struct Way {
+    /// 角の番号の増える向きに回るか。
+    forward: bool,
     /// 越える高速道路の腕の数。
     highways: usize,
     /// 越える、横断歩道を外した腕の数。
@@ -167,6 +169,7 @@ impl Corners {
         let m = 2 * self.arms.len();
         let way = |forward: bool| {
             let mut w = Way {
+                forward,
                 highways: 0,
                 removed: 0,
                 arms: Arms::new(),
@@ -195,6 +198,41 @@ impl Corners {
         let (cw, ccw) = (way(true), way(false));
         if cw.key() <= ccw.key() { cw } else { ccw }
     }
+}
+
+/// 歩道のリンク `from` の `from_far` の側からノード `node` に入り、リンク `to` の `to_far` の側へ出る人が
+/// 回る角を、通る順に並べる。角は、腕の区間と、その腕の時計回りの側かどうかで表す。
+/// 隣り合う 2 つの角が同じ腕のものなら、その腕の車道を渡る（高速道路の腕は、渡らずに越える）。
+/// 描画のためだけに使い、状態には影響しない。
+pub fn corner_route(
+    net: &Network,
+    node: NodeId,
+    (from, from_far): (LinkId, bool),
+    (to, to_far): (LinkId, bool),
+) -> Vec<(SegmentId, bool)> {
+    let Some(c) = Corners::of(net, node) else {
+        return Vec::new();
+    };
+    let (Some(i), Some(j)) = (c.index(from.segment), c.index(to.segment)) else {
+        return Vec::new();
+    };
+    let m = 2 * c.arms.len();
+    let (p, q) = (2 * i + usize::from(from_far), 2 * j + usize::from(!to_far));
+    let way = c.walk(p, q);
+    let mut out = Vec::new();
+    let mut at = p;
+    loop {
+        out.push((c.arms[at / 2].0, at % 2 == 1));
+        if at == q {
+            break;
+        }
+        at = if way.forward {
+            (at + 1) % m
+        } else {
+            (at + m - 1) % m
+        };
+    }
+    out
 }
 
 /// リンク `link` の終わりのノード。

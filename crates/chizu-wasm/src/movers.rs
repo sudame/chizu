@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::car_path;
 use crate::snapshot::{MAX_MOVERS, Mover};
+use crate::walk_path;
 
 /// 移動体の種類の番号。画面の `web/src/map/movers.ts` と同じ。
 pub const KIND_WALK: u16 = 1;
@@ -93,6 +94,17 @@ pub fn visible_movers(
             if let Some(e) = entry {
                 arcs.insert(m.id, e);
             }
+            return Mover {
+                x: from_mm(d.x, ox),
+                y: from_mm(d.y, oy),
+                heading: car_path::angle_code(d.angle),
+                kind: kind_of(m),
+                id: m.id.index,
+                generation: u32::from(m.id.generation),
+            };
+        }
+        // 歩く人は、交差点の前後で歩道の角を回る道筋の上に描く（`walk_path`）。
+        if let Some(d) = m.walk.as_ref().and_then(|w| walk_path::draw(net, w)) {
             return Mover {
                 x: from_mm(d.x, ox),
                 y: from_mm(d.y, oy),
@@ -275,6 +287,7 @@ mod tests {
             mode: LaneMode::Sidewalk,
             shift: (Mm(0), Mm(0)),
             path: None,
+            walk: None,
         };
         let mut found = vec![
             at(0, 9_000),
@@ -310,6 +323,7 @@ mod tests {
             mode,
             shift: (Mm(0), Mm(0)),
             path: None,
+            walk: None,
         };
         assert_eq!(kind_of(&m(LaneMode::Sidewalk)), KIND_WALK);
         assert_eq!(kind_of(&m(LaneMode::Car)), KIND_CAR);
