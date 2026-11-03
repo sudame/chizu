@@ -170,7 +170,7 @@ export function growthNotices(
     const sum = (f: (b: GrowthBlocks[number]) => number) => blocks.reduce((a, b) => a + f(b), 0);
     out.push({
       id: "stall",
-      key: `${sum((b) => b.noPower) > 0}:${sum((b) => b.noWater) > 0}`,
+      key: `${sum((b) => b.noPower) > 0}:${sum((b) => b.noWater) > 0}:${blocks.flatMap((b, z) => (b.blocked > 0 ? [z] : [])).join(",")}`,
       headline: growth.headline,
       details: [growth.action],
       jump:

@@ -18,12 +18,22 @@ export type Notice = {
   jump: { label: string; targets: Target[] } | null;
 };
 
-/** 出した知らせと、閉じた知らせを覚えておく。値は key。 */
-export type Memory = { announced: Map<string, string>; dismissed: Map<string, string> };
+/** 覚えている知らせ。key と、最後に見えたゲームの tick。 */
+type Seen = { key: string; seen: number };
+
+/** 出した知らせと、閉じた知らせを覚えておく。 */
+export type Memory = { announced: Map<string, Seen>; dismissed: Map<string, Seen> };
 
 export function emptyMemory(): Memory {
   return { announced: new Map(), dismissed: new Map() };
 }
+
+/**
+ * 解けた知らせを覚えておくゲームの中の長さ（tick）。ゲーム内の半日である（1 日は 7200 tick）。
+ * 区画の知らせは、建つたびに出入りしてちらつく。そのあいだに同じ状態で戻った知らせは、
+ * 新しい知らせとして札を出さず、閉じた印も残す。
+ */
+export const RESOLVED_MEMORY_TICKS = 3600;
 
 export type Reconciled = {
   memory: Memory;
@@ -33,36 +43,72 @@ export type Reconciled = {
   fresh: Notice[];
 };
 
+/** 解けた知らせの覚えを、RESOLVED_MEMORY_TICKS のあいだ引き継ぐ。tick が戻ったら（読み込みや新しい街）捨てる。 */
+function carry(
+  from: Map<string, Seen>,
+  into: Map<string, Seen>,
+  present: Set<string>,
+  now: number,
+) {
+  for (const [id, entry] of from) {
+    const age = now - entry.seen;
+    if (!present.has(id) && age >= 0 && age < RESOLVED_MEMORY_TICKS) {
+      into.set(id, entry);
+    }
+  }
+}
+
 /**
- * 今ある知らせと覚えておいたものを突き合わせる。
- * 解けた知らせは覚えから外れるので、また起きれば新しい知らせとして出る。
+ * 今ある知らせと覚えておいたものを突き合わせる。now はゲームの tick。
+ * 解けた知らせの覚えは、RESOLVED_MEMORY_TICKS が過ぎると外れ、そのあとまた起きれば新しい知らせとして出る。
  */
-export function reconcile(memory: Memory, notices: Notice[]): Reconciled {
-  const dismissed = new Map<string, string>();
-  const announced = new Map<string, string>();
+export function reconcile(previous: Memory, notices: Notice[], now: number): Reconciled {
+  // tick が戻ったら、別の街の覚えなので捨てる
+  const future = [...previous.announced.values(), ...previous.dismissed.values()].some(
+    (e) => e.seen > now,
+  );
+  const memory = future ? emptyMemory() : previous;
+  const dismissed = new Map<string, Seen>();
+  const announced = new Map<string, Seen>();
   const visible: Notice[] = [];
   const fresh: Notice[] = [];
   for (const n of notices) {
-    if (memory.dismissed.get(n.id) === n.key) {
-      dismissed.set(n.id, n.key);
+    if (memory.dismissed.get(n.id)?.key === n.key) {
+      dismissed.set(n.id, { key: n.key, seen: now });
       continue;
     }
     visible.push(n);
-    announced.set(n.id, n.key);
-    if (memory.announced.get(n.id) !== n.key) {
+    announced.set(n.id, { key: n.key, seen: now });
+    if (memory.announced.get(n.id)?.key !== n.key) {
       fresh.push(n);
     }
   }
+  const present = new Set(notices.map((n) => n.id));
+  carry(memory.announced, announced, present, now);
+  carry(memory.dismissed, dismissed, present, now);
   return { memory: { announced, dismissed }, visible, fresh };
 }
 
 /** 知らせを閉じる。いま出ている key のままなら、出し直さない。 */
-export function dismiss(memory: Memory, notice: Notice): Memory {
+export function dismiss(memory: Memory, notice: Notice, now: number): Memory {
   const announced = new Map(memory.announced);
   announced.delete(notice.id);
   const dismissed = new Map(memory.dismissed);
-  dismissed.set(notice.id, notice.key);
+  dismissed.set(notice.id, { key: notice.key, seen: now });
   return { announced, dismissed };
+}
+
+/**
+ * 項目を閉じたり解けたりして消えたとき、フォーカスを移す先。
+ * 次の項目、なければ前の項目、なければ null（鐘へ戻す）。order は消える前の並び。
+ */
+export function focusAfterRemoval(order: string[], removed: string): string | null {
+  const at = order.indexOf(removed);
+  if (at < 0) {
+    return null;
+  }
+  const rest = order.filter((id) => id !== removed);
+  return rest[at] ?? rest[at - 1] ?? null;
 }
 
 /** 札で知らせる文。1 件ならその見出し、複数なら件数。 */
@@ -111,6 +157,7 @@ export function setupNoticeCenter(
   jump: (x: number, y: number) => void,
   open: () => void,
   isOpen: () => boolean,
+  now: () => number,
 ): NoticeCenter {
   const bell = document.querySelector<HTMLElement>("#notice-bell");
   const badge = document.querySelector<HTMLElement>("#notice-count");
@@ -122,9 +169,13 @@ export function setupNoticeCenter(
   let memory = emptyMemory();
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
-  toast?.addEventListener("click", () => {
+  toast?.addEventListener("click", (event) => {
     toast.hidden = true;
     open();
+    // キーボードで押したときは、一覧の最初の項目へフォーカスを入れる
+    if (event.detail === 0) {
+      list?.querySelector<HTMLElement>("button:not([hidden])")?.focus();
+    }
   });
 
   const make = (notice: Notice): Item => {
@@ -162,7 +213,7 @@ export function setupNoticeCenter(
       jump(picked.x, picked.y);
     });
     close.addEventListener("click", () => {
-      memory = dismiss(memory, item.notice);
+      memory = dismiss(memory, item.notice, now());
       refresh();
     });
     return item;
@@ -170,11 +221,23 @@ export function setupNoticeCenter(
 
   const refresh = () => {
     const all = [...sources.values()].flat();
-    const result = reconcile(memory, all);
+    const result = reconcile(memory, all, now());
     memory = result.memory;
     const ids = new Set(result.visible.map((n) => n.id));
+    const before =
+      list === null ? [] : [...list.children].map((c) => (c as HTMLElement).dataset.notice ?? "");
+    // 項目が消えるとき、その中にあったフォーカスは、次の項目か鐘へ移す
+    let refocus: { id: string | null } | null = null;
     for (const [id, item] of items) {
       if (!ids.has(id)) {
+        if (item.li.contains(document.activeElement)) {
+          refocus = {
+            id: focusAfterRemoval(
+              before.filter((b) => ids.has(b) || b === id),
+              id,
+            ),
+          };
+        }
         item.li.remove();
         items.delete(id);
       }
@@ -214,10 +277,17 @@ export function setupNoticeCenter(
     }
     if (list !== null) {
       const want = result.visible.map((n) => items.get(n.id)?.li).filter((e) => e !== undefined);
-      const have = [...list.children];
-      if (want.length !== have.length || want.some((e, i) => e !== have[i])) {
-        list.replaceChildren(...want);
-      }
+      // 残る項目はそのまま残し、足りない所だけ差し込む。作り直すとフォーカスが外れる
+      want.forEach((li, i) => {
+        if (list.children[i] !== li) {
+          list.insertBefore(li, list.children[i] ?? null);
+        }
+      });
+    }
+    if (refocus !== null) {
+      const next = refocus.id === null ? undefined : items.get(refocus.id);
+      const target = next?.li.querySelector<HTMLElement>("button:not([hidden])") ?? bell;
+      target?.focus();
     }
     const count = result.visible.length;
     if (empty !== null) {

@@ -345,6 +345,11 @@ export function setupDemandFactors(): void {
 }
 
 /** 電気と水道の知らせ。通知センターに渡す。件数は揺れるので、key は足りないか余りが少ないかだけで決める。 */
+/** 知らせの状態。どの理由が出ているか（電気か水道か、足りないか、孤立した網か、余りが少ないか）で決め、数は入れない。 */
+export function utilityKey(reasons: string[], short: boolean): string {
+  return `${short ? "short" : "low"}:${reasons.map((r) => r.replace(/[\d,]+/g, "#")).join("|")}`;
+}
+
 export function utilityNotices(stats: CityStats, unsupplied: number): Notice[] {
   const shortage = utilityShortage(stats, unsupplied);
   const shown = utilityNotice(stats, shortage);
@@ -354,7 +359,7 @@ export function utilityNotices(stats: CityStats, unsupplied: number): Notice[] {
   return [
     {
       id: "utility",
-      key: shortage === null ? "low" : "short",
+      key: utilityKey(shown.reasons, shortage !== null),
       headline: shown.headline,
       details: shown.reasons,
       jump: null,

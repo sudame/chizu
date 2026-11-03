@@ -205,6 +205,27 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
       open: () => page.locator("#notice-bell").click(),
       close: () => page.keyboard.press("Escape"),
     },
+    // 一覧は、検査の欄や詳細の欄を開いたままでも、それらと重ならない（狭い幅では隠す）
+    {
+      open: async () => {
+        await showInspector(true);
+        await page.locator("#notice-bell").click();
+      },
+      close: async () => {
+        await page.keyboard.press("Escape");
+        await showInspector(false);
+      },
+    },
+    {
+      open: async () => {
+        await toggle.click();
+        await page.locator("#notice-bell").click();
+      },
+      close: async () => {
+        await page.keyboard.press("Escape");
+        await toggle.click();
+      },
+    },
     // 建物の情報は、詳細や収支を開いたときも含めて、ほかの欄と重ならない
     { open: () => showInspector(true), close: () => showInspector(false) },
     {
@@ -230,7 +251,7 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   ];
   for (const [index, { open, close }] of states.entries()) {
     await open();
-    for (const width of [1280, 1000, 900, 860, 780, 640, 500, 390]) {
+    for (const width of [1280, 1000, 900, 860, 780, 640, 500, 390, 360]) {
       await page.setViewportSize({ width, height: 800 });
       await page.waitForTimeout(300);
       const layout = await page.evaluate(() => {
@@ -1301,8 +1322,18 @@ try {
   // 閉じた知らせは、状態が変わるまで一覧にも数の印にも戻らない
   await openNotices();
   const countBeforeClose = Number(await bell.getAttribute("data-count"));
-  await shortage.getByRole("button", { name: "閉じる" }).click();
+  await shortage.getByRole("button", { name: "閉じる" }).focus();
+  await page.keyboard.press("Enter");
   await page.waitForTimeout(1500);
+  // 項目が消えても、フォーカスは一覧の中の次の項目か鐘に残る
+  check(
+    await page.evaluate(
+      () =>
+        (document.activeElement?.closest("#notice-list") ?? null) !== null ||
+        document.activeElement?.id === "notice-bell",
+    ),
+    "閉じて項目が消えても、フォーカスが一覧の中か鐘に残る",
+  );
   check(
     (await shortage.count()) === 0 &&
       Number(await bell.getAttribute("data-count")) === countBeforeClose - 1,

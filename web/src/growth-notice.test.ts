@@ -72,6 +72,14 @@ describe("止まっている網への移動", () => {
     expect(growthNotices(parseGrowthBlocks([]), stalls)).toEqual([]);
   });
 
+  test("止まっている区画の種類が変わっても key が変わる", () => {
+    const at = (zone: number) =>
+      parseGrowthBlocks(
+        Array.from({ length: 21 }, (_, i) => (i === 9 + zone * 3 || i === 10 + zone * 3 ? 4 : 0)),
+      );
+    expect(growthNotices(at(0), [])[0]?.key).not.toBe(growthNotices(at(1), [])[0]?.key);
+  });
+
   test("足りないものが変わると key が変わる", () => {
     const power = parseGrowthBlocks(
       Array.from({ length: 21 }, (_, i) => (i === 9 || i === 10 ? 4 : 0)),

@@ -313,6 +313,8 @@ const noticePopover = popovers.add(
   element<HTMLElement>("#notice-bell"),
   element<HTMLElement>("#notice-panel"),
 );
+// 知らせの覚えに使う、overview で届いた最後のゲームの tick
+let latestTick = 0;
 const noticeCenter = setupNoticeCenter(
   (x, y) => {
     camera.x = x + 0.5;
@@ -320,6 +322,7 @@ const noticeCenter = setupNoticeCenter(
   },
   () => noticePopover.open(),
   () => noticePopover.isOpen(),
+  () => latestTick,
 );
 const toolGroups = [...document.querySelectorAll<HTMLButtonElement>("button[data-menu]")].map(
   (toggle) => ({ toggle, menu: element<HTMLElement>(`#menu-${toggle.dataset.menu}`) }),
@@ -1169,6 +1172,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "overview") {
     renderOverview(parseOverview(message.overview));
     lotShortageSince = trackLotShortage(lotShortageSince, message.lotShortage, message.tick);
+    latestTick = message.tick;
     noticeCenter.set(
       "growth",
       growthNotices(
