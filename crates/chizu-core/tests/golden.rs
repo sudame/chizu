@@ -141,6 +141,13 @@ fn scenarios() -> Vec<Scenario> {
             money: None,
         },
         Scenario {
+            name: "long_run",
+            seed: 42,
+            ticks: LONG_RUN_TICKS,
+            log: long_run(),
+            money: None,
+        },
+        Scenario {
             name: "land_slots",
             seed: 42,
             ticks: 2 * TICKS_PER_DAY + 600,
@@ -307,6 +314,58 @@ fn growth() -> CommandLog {
         },
     );
     log
+}
+
+/// 長く回すシナリオの長さ。7 日目の始まりである。
+const LONG_RUN_TICKS: u64 = 6 * TICKS_PER_DAY;
+
+/// `growth` の街を何日も回す記録。3 日目の始まりに北の通りの東半分の住宅の区画を消して家を壊し、
+/// 家のない世帯を作る。空き家が足りないので、1 日たっても入れなかった世帯は街を出ていく。
+/// 4 日目に同じ区画を塗り直して、また育てる。通勤、段階の上がり、電気と水道も入る。
+/// test:wasm は、この記録をブラウザの中で読み込んで再生し、chizu-cli と同じ状態ハッシュになるかを見る。
+fn long_run() -> CommandLog {
+    let mut log = growth();
+    let area = TileRect::from_corners(TilePos::new(0, -6), TilePos::new(40, -1));
+    for (tick, zone) in [
+        (2 * TICKS_PER_DAY, None),
+        (3 * TICKS_PER_DAY + 600, Some(ZoneKind::Residential)),
+    ] {
+        log.record(Tick(tick), Command::PaintZone { area, zone })
+            .unwrap();
+    }
+    log
+}
+
+#[test]
+fn long_run_scenario_levels_up_and_sends_homeless_away() {
+    let log = long_run();
+    let mut world = World::new(42);
+    let mut homeless_before = Vec::new();
+    let mut left = 0;
+    let mut leveled = 0;
+    while world.tick().0 < LONG_RUN_TICKS {
+        replay(&mut world, &log, 60);
+        let p = world.population();
+        left += homeless_before
+            .iter()
+            .filter(|h| p.home(**h).is_none())
+            .count();
+        homeless_before = p
+            .household_ids()
+            .filter(|h| p.home(*h) == Some(None))
+            .collect();
+        leveled = leveled.max(
+            world
+                .buildings()
+                .iter()
+                .filter(|(_, b)| b.level >= 2)
+                .count(),
+        );
+    }
+    assert!(leveled > 0, "段階の上がった建物がない");
+    assert!(left > 0, "家のないまま街を出た世帯がない");
+    let yesterday = world.traffic().yesterday.expect("前の日の移動がない");
+    assert!(yesterday.arrived > 0, "通勤で着いた移動がない");
 }
 
 /// 2 本の通りに区画を塗り、片方にだけ発電所と浄水場を置く記録。道路に面さない場所と、
