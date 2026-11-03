@@ -2,6 +2,9 @@
 // 前の位置は移動体ごとに画面の側で覚える。三重バッファは今の tick の位置だけを持つ。
 // 位置は基準のチャンクが変わっても比べられるよう、ワールド座標（マス）の f64 で持つ。
 //
+// 向きも、前の tick の向きから今の tick の向きへ近いほうに回して補間する。交差点を曲がる車の向きが、
+// tick ごとに段になって変わらないようにする。
+//
 // 補間の区間の長さは、速度の値からではなく、tick が届いた時刻の差から測る。
 // Worker が tick を間引いて遅い速度を作るときや、重くて公称の速さで進めないときも、実際の間隔に追いつく。
 
@@ -19,6 +22,23 @@ const SMOOTHING = 0.2;
 const OUTLIER_RATIO = 3;
 /** 前の tick からこれより空いたら、止まっていたとみなし、測った間隔を使わない。 */
 const MAX_MEASURED_GAP_MS = 1000;
+/** 向きの 1 周の値。chizu-wasm の向きの値（x 軸から y 軸へ回る角度）と同じ。 */
+const FULL_TURN = 65536;
+/** 1 tick の向きの変わりがこれより大きければ（折り返しなど）、回さずにその場で変える。1 周の 3/8（135 度）。 */
+const MAX_TURN = (FULL_TURN * 3) / 8;
+
+/**
+ * 向き `from` から `to` へ、近いほうに `t` の割合だけ回した向き。変わりが MAX_TURN より大きければ、
+ * `t` が 1 になるまで `from` のままにする。
+ */
+export function turnHeading(from: number, to: number, t: number): number {
+  const diff = ((((to - from) % FULL_TURN) + FULL_TURN * 1.5) % FULL_TURN) - FULL_TURN / 2;
+  if (Math.abs(diff) > MAX_TURN) {
+    return t >= 1 ? to : from;
+  }
+  const h = Math.round(from + diff * t) % FULL_TURN;
+  return h < 0 ? h + FULL_TURN : h;
+}
 
 /** 補間の入力になる、1 枠ぶんの移動体の語の読み方。 */
 export type MoverFrame = {
@@ -49,13 +69,16 @@ export class MoverInterpolator {
   #keys = new Float64Array(0);
   #x = new Float64Array(0);
   #y = new Float64Array(0);
+  #h = new Float64Array(0);
   // 前の位置。今の並びと同じではなく、#prevIndex で鍵から引く
   #prevX = new Float64Array(0);
   #prevY = new Float64Array(0);
+  #prevH = new Float64Array(0);
   #prevIndex = new Map<number, number>();
   // 今の並びに合わせた前の位置
   #fromX = new Float64Array(0);
   #fromY = new Float64Array(0);
+  #fromH = new Float64Array(0);
   #aligned = false;
   // 今の tick に着いた時刻と、補間にかける時間（ミリ秒）
   #since = 0;
@@ -74,7 +97,8 @@ export class MoverInterpolator {
 
   /**
    * 補間した位置を `out`（f32 の並び、基準のチャンクからの相対）の x・y に書く。
-   * 向きと種類と ID は枠のままにするので、呼び出し側が先に `out` へ枠の語を写しておく。
+   * 向きは `out` と同じバッファの語に書く。種類と ID は枠のままにするので、呼び出し側が先に `out` へ
+   * 枠の語を写しておく。
    */
   apply(frame: MoverFrame, now: number, out: Float32Array): void {
     const n = frame.count;
@@ -111,6 +135,7 @@ export class MoverInterpolator {
       this.#keys[i] = keyAt(i);
       this.#x[i] = ox + (frame.floats[at + layout.mover.x] ?? 0);
       this.#y[i] = oy + (frame.floats[at + layout.mover.y] ?? 0);
+      this.#h[i] = (frame.words[at + layout.mover.headingKind] ?? 0) & 0xffff;
     }
     this.#count = n;
     if (!sameOrder) {
@@ -119,13 +144,19 @@ export class MoverInterpolator {
         // 前の位置がない（新しく出た）移動体は、その場に描く
         this.#fromX[i] = j === undefined ? (this.#x[i] ?? 0) : (this.#prevX[j] ?? 0);
         this.#fromY[i] = j === undefined ? (this.#y[i] ?? 0) : (this.#prevY[j] ?? 0);
+        this.#fromH[i] = j === undefined ? (this.#h[i] ?? 0) : (this.#prevH[j] ?? 0);
       }
       this.#aligned = true;
     }
 
     const t = this.fraction(now, frame.paused);
+    const words = new Uint32Array(out.buffer, out.byteOffset, out.length);
     for (let i = 0; i < n; i++) {
       const at = i * stride;
+      const h = this.#h[i] ?? 0;
+      const word = words[at + layout.mover.headingKind] ?? 0;
+      words[at + layout.mover.headingKind] =
+        ((word & 0xffff0000) | turnHeading(this.#fromH[i] ?? h, h, t)) >>> 0;
       const x = this.#x[i] ?? 0;
       const y = this.#y[i] ?? 0;
       const fx = this.#fromX[i] ?? x;
@@ -157,6 +188,8 @@ export class MoverInterpolator {
         const fy = this.#fromY[i] ?? y;
         this.#prevX[i] = fx + (x - fx) * t;
         this.#prevY[i] = fy + (y - fy) * t;
+        const h = this.#h[i] ?? 0;
+        this.#prevH[i] = turnHeading(this.#fromH[i] ?? h, h, t);
         this.#prevIndex.set(this.#keys[i] ?? 0, i);
       }
       this.#span = span;
@@ -195,10 +228,13 @@ export class MoverInterpolator {
     this.#keys = widen(this.#keys);
     this.#x = widen(this.#x);
     this.#y = widen(this.#y);
+    this.#h = widen(this.#h);
     this.#prevX = widen(this.#prevX);
     this.#prevY = widen(this.#prevY);
+    this.#prevH = widen(this.#prevH);
     this.#fromX = widen(this.#fromX);
     this.#fromY = widen(this.#fromY);
+    this.#fromH = widen(this.#fromH);
     this.#aligned = false;
   }
 }

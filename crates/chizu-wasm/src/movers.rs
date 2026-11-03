@@ -7,6 +7,7 @@ use chizu_core::{
     TilePos, TileRect, World,
 };
 
+use crate::car_path;
 use crate::snapshot::{MAX_MOVERS, Mover};
 
 /// 移動体の種類の番号。画面の `web/src/map/movers.ts` と同じ。
@@ -70,14 +71,29 @@ pub fn visible_movers(world: &World, view: TileRect, out: &mut Vec<Mover>) -> Ch
     // 基準の原点からの差は画面の広さに収まるので、f64 を経て f32 に直しても桁は足りる。
     let tiles = |v: i64, o: i64| (v.saturating_sub(o) as f64 / TILE_MM as f64) as f32;
     out.clear();
-    // 中心線の上の位置に、車線や歩道に寄せるずれを足して描く。
-    out.extend(found.iter().map(|m| Mover {
-        x: tiles(m.pos.x.0.saturating_add(m.shift.0.0), ox),
-        y: tiles(m.pos.y.0.saturating_add(m.shift.1.0), oy),
-        heading: heading_code(m.heading),
-        kind: kind_of(m),
-        id: m.id.index,
-        generation: u32::from(m.id.generation),
+    let net = world.network();
+    let from_mm = |v: f64, o: i64| ((v - o as f64) / TILE_MM as f64) as f32;
+    out.extend(found.iter().map(|m| {
+        // 車は、ノードの前後を曲線でつないだ道筋の上に描く（`car_path`）。
+        if let Some(d) = m.path.and_then(|p| car_path::draw(net, &p, m.shift)) {
+            return Mover {
+                x: from_mm(d.x, ox),
+                y: from_mm(d.y, oy),
+                heading: car_path::angle_code(d.angle),
+                kind: kind_of(m),
+                id: m.id.index,
+                generation: u32::from(m.id.generation),
+            };
+        }
+        // 中心線の上の位置に、車線や歩道に寄せるずれを足して描く。
+        Mover {
+            x: tiles(m.pos.x.0.saturating_add(m.shift.0.0), ox),
+            y: tiles(m.pos.y.0.saturating_add(m.shift.1.0), oy),
+            heading: heading_code(m.heading),
+            kind: kind_of(m),
+            id: m.id.index,
+            generation: u32::from(m.id.generation),
+        }
     }));
     base
 }
@@ -241,6 +257,7 @@ mod tests {
             heading: (1, 0),
             mode: LaneMode::Sidewalk,
             shift: (Mm(0), Mm(0)),
+            path: None,
         };
         let mut found = vec![
             at(0, 9_000),
@@ -275,6 +292,7 @@ mod tests {
             heading: (0, 1),
             mode,
             shift: (Mm(0), Mm(0)),
+            path: None,
         };
         assert_eq!(kind_of(&m(LaneMode::Sidewalk)), KIND_WALK);
         assert_eq!(kind_of(&m(LaneMode::Car)), KIND_CAR);
