@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// 配置の版。配置を変えたら上げる。
-pub const LAYOUT_VERSION: u32 = 3;
+pub const LAYOUT_VERSION: u32 = 4;
 
 pub const SLOT_COUNT: u32 = 3;
 /// 枠の前に置く制御の語の数。
@@ -58,8 +58,8 @@ pub mod header {
 /// 4 の倍数にする。バッファそのものの先頭の位置は 4 バイト境界にしか乗せていない。
 pub const SLOT_HEADER_WORDS: usize = 12;
 
-/// 移動体 1 体の語の数（20 バイト）。中の語の位置は [`mover`] にある。
-pub const MOVER_WORDS: usize = 5;
+/// 移動体 1 体の語の数（32 バイト）。中の語の位置は [`mover`] にある。
+pub const MOVER_WORDS: usize = 8;
 
 /// 移動体の、1 体の中での語の位置。
 pub mod mover {
@@ -73,6 +73,12 @@ pub mod mover {
     pub const ID: usize = 3;
     /// 移動の世代。
     pub const GENERATION: usize = 4;
+    /// 描いた道筋の番号（`car_path::Paths`）。道筋の上に描いていなければ 0。
+    pub const PATH: usize = 5;
+    /// 前の tick の道筋からこの道筋までのあいだに、丸ごと通り抜けた道筋の番号。なければ 0。
+    pub const VIA: usize = 6;
+    /// 道筋の上で進んだ割合（0〜1）。`f32` のビット列。
+    pub const FRAC: usize = 7;
 }
 
 /// 1 枠に入る移動体の上限。
@@ -109,6 +115,12 @@ pub struct Mover {
     pub kind: u16,
     pub id: u32,
     pub generation: u32,
+    /// 描いた道筋の番号。道筋の上に描いていなければ 0。
+    pub path: u32,
+    /// 前の tick の道筋からこの道筋までのあいだに、丸ごと通り抜けた道筋の番号。なければ 0。
+    pub via: u32,
+    /// 道筋の上で進んだ割合。
+    pub frac: f32,
 }
 
 /// 書き手の側の三重バッファ。
@@ -170,6 +182,9 @@ impl TripleBuffer {
             );
             put(at + mover::ID, m.id);
             put(at + mover::GENERATION, m.generation);
+            put(at + mover::PATH, m.path);
+            put(at + mover::VIA, m.via);
+            put(at + mover::FRAC, m.frac.to_bits());
         }
 
         let previous = self.words[LATEST].swap(self.writing | FRESH, Ordering::AcqRel);
@@ -216,7 +231,10 @@ pub fn layout_json() -> String {
     "y": {},
     "headingKind": {},
     "id": {},
-    "generation": {}
+    "generation": {},
+    "path": {},
+    "via": {},
+    "frac": {}
   }},
   "maxMovers": {MAX_MOVERS},
   "slotWords": {SLOT_WORDS},
@@ -240,6 +258,9 @@ pub fn layout_json() -> String {
         mover::HEADING_KIND,
         mover::ID,
         mover::GENERATION,
+        mover::PATH,
+        mover::VIA,
+        mover::FRAC,
     )
 }
 
@@ -378,6 +399,9 @@ mod tests {
             kind: 0xabcd,
             id: 7,
             generation: 3,
+            path: 11,
+            via: 5,
+            frac: 0.25,
         };
         buf.publish(&header(0), &[m]);
         let mut r = Reader {
@@ -391,5 +415,8 @@ mod tests {
         assert_eq!(r.word(&buf, at + mover::HEADING_KIND), 0xabcd_1234);
         assert_eq!(r.word(&buf, at + mover::ID), 7);
         assert_eq!(r.word(&buf, at + mover::GENERATION), 3);
+        assert_eq!(r.word(&buf, at + mover::PATH), 11);
+        assert_eq!(r.word(&buf, at + mover::VIA), 5);
+        assert_eq!(f32::from_bits(r.word(&buf, at + mover::FRAC)), 0.25);
     }
 }

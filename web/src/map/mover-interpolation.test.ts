@@ -2,8 +2,12 @@ import { describe, expect, it } from "vitest";
 import { CHUNK_SIDE } from "../protocol/messages.ts";
 import { layout } from "../protocol/snapshot.ts";
 import {
+  angleCode,
+  hasMoverPaths,
   type MoverFrame,
   MoverInterpolator,
+  MoverPaths,
+  pathAt,
   TICKS_PER_SECOND,
   turnHeading,
 } from "./mover-interpolation.ts";
@@ -15,6 +19,9 @@ type Spec = {
   generation?: number;
   kind?: number;
   heading?: number;
+  path?: number;
+  via?: number;
+  frac?: number;
 };
 
 function frame(
@@ -31,6 +38,9 @@ function frame(
     words[at + layout.mover.id] = m.id;
     words[at + layout.mover.generation] = m.generation ?? 0;
     words[at + layout.mover.headingKind] = (((m.kind ?? 2) << 16) | (m.heading ?? 0)) >>> 0;
+    words[at + layout.mover.path] = m.path ?? 0;
+    words[at + layout.mover.via] = m.via ?? 0;
+    floats[at + layout.mover.frac] = m.frac ?? 0;
   });
   return {
     frame: {
@@ -53,18 +63,26 @@ function run(
   tick: number,
   movers: Spec[],
   opts?: Parameters<typeof frame>[2],
-): Map<number, { x: number; y: number }> {
+  paths?: MoverPaths,
+): Map<number, { x: number; y: number; heading: number }> {
   const { frame: f, out } = frame(tick, movers, opts);
-  interp.apply(f, now, out);
-  const result = new Map<number, { x: number; y: number }>();
+  interp.apply(f, now, out, paths);
+  const words = new Uint32Array(out.buffer);
+  const result = new Map<number, { x: number; y: number; heading: number }>();
   movers.forEach((m, i) => {
     const at = i * layout.moverWords;
     result.set(m.id, {
       x: out[at + layout.mover.x] ?? Number.NaN,
       y: out[at + layout.mover.y] ?? Number.NaN,
+      heading: (words[at + layout.mover.headingKind] ?? 0) & 0xffff,
     });
   });
   return result;
+}
+
+/** 位置だけを取り出す。 */
+function xy(p: { x: number; y: number } | undefined): { x: number; y: number } | undefined {
+  return p === undefined ? undefined : { x: p.x, y: p.y };
 }
 
 const TICK_MS = 1000 / TICKS_PER_SECOND;
@@ -76,22 +94,23 @@ function arrive(
   movers: Spec[],
   later: number,
   opts?: Parameters<typeof frame>[2],
-): Map<number, { x: number; y: number }> {
-  run(i, 0, tick, movers, opts);
-  return run(i, later, tick, movers, opts);
+  paths?: MoverPaths,
+): Map<number, { x: number; y: number; heading: number }> {
+  run(i, 0, tick, movers, opts, paths);
+  return run(i, later, tick, movers, opts, paths);
 }
 
 describe("MoverInterpolator", () => {
   it("最初の枠はその場に描く", () => {
     const i = new MoverInterpolator();
     const r = run(i, 1000, 10, [{ id: 1, x: 5, y: 7 }]);
-    expect(r.get(1)).toEqual({ x: 5, y: 7 });
+    expect(xy(r.get(1))).toEqual({ x: 5, y: 7 });
   });
 
   it("tick が進むと、前の位置から今の位置へ時刻に合わせて動く", () => {
     const i = new MoverInterpolator();
     run(i, 1000, 10, [{ id: 1, x: 0, y: 0 }]);
-    const at = (dt: number) => run(i, 1000 + dt, 11, [{ id: 1, x: 10, y: 20 }]).get(1);
+    const at = (dt: number) => xy(run(i, 1000 + dt, 11, [{ id: 1, x: 10, y: 20 }]).get(1));
     expect(at(0)).toEqual({ x: 0, y: 0 });
     expect(at(TICK_MS / 2)?.x).toBeCloseTo(5, 4);
     expect(at(TICK_MS / 2)?.y).toBeCloseTo(10, 4);
@@ -186,7 +205,7 @@ describe("MoverInterpolator", () => {
     run(i, 0, 10, [{ id: 1, x: 0, y: 0 }]);
     run(i, 1, 11, [{ id: 1, x: 10, y: 0 }]);
     const r = run(i, 2, 11, [{ id: 1, x: 10, y: 0 }], { paused: true });
-    expect(r.get(1)).toEqual({ x: 10, y: 0 });
+    expect(xy(r.get(1))).toEqual({ x: 10, y: 0 });
   });
 
   it("同じ tick の枠を何度読んでも、時刻だけで進む", () => {
@@ -216,7 +235,7 @@ describe("MoverInterpolator", () => {
     );
     expect(r.has(1)).toBe(false);
     expect(r.get(2)?.x).toBeCloseTo(105, 4);
-    expect(r.get(3)).toEqual({ x: 50, y: 50 });
+    expect(xy(r.get(3))).toEqual({ x: 50, y: 50 });
   });
 
   it("並びが入れ替わっても ID で照合し、別の移動体と取り違えない", () => {
@@ -323,5 +342,305 @@ describe("turnHeading", () => {
   it("折り返しは回さず、すぐに新しい向きにする", () => {
     expect(turnHeading(0, 2 * quarter, 0)).toBe(2 * quarter);
     expect(turnHeading(0, 2 * quarter, 0.5)).toBe(2 * quarter);
+  });
+});
+
+/**
+ * 道筋の並び（chizu-wasm の take_mover_paths の形）。点は [x, y, 向き] で、長さは点のあいだの距離を足す。
+ * `dropped` は忘れさせる道筋の番号である。
+ */
+function pathData(
+  reset: boolean,
+  paths: [number, [number, number, number][]][],
+  dropped: number[] = [],
+): Float64Array {
+  const out = [reset ? 1 : 0, dropped.length, ...dropped, paths.length];
+  for (const [id, points] of paths) {
+    out.push(id, points.length);
+    let s = 0;
+    points.forEach(([x, y, a], k) => {
+      const prev = points[k - 1];
+      if (prev) {
+        s += Math.hypot(x - prev[0], y - prev[1]);
+      }
+      out.push(x, y, s, a);
+    });
+  }
+  return new Float64Array(out);
+}
+
+const EAST = 0;
+const SOUTH = Math.PI / 2;
+
+describe("pathAt", () => {
+  it("点のあいだは位置も向きもまっすぐ移し、両端の外は端の点にする", () => {
+    const paths = new MoverPaths();
+    paths.receive(
+      pathData(true, [
+        [
+          3,
+          [
+            [0, 0, EAST],
+            [1, 0, EAST],
+            [1, 1, SOUTH],
+          ],
+        ],
+      ]),
+    );
+    const p = paths.get(3);
+    if (!p) {
+      throw new Error("道筋がない");
+    }
+    expect(pathAt(p, 0.5)).toEqual({ x: 0.5, y: 0, angle: EAST });
+    const q = pathAt(p, 1.5);
+    expect(q.x).toBeCloseTo(1);
+    expect(q.y).toBeCloseTo(0.5);
+    expect(q.angle).toBeCloseTo(Math.PI / 4);
+    expect(pathAt(p, -1)).toEqual({ x: 0, y: 0, angle: EAST });
+    expect(pathAt(p, 9)).toEqual({ x: 1, y: 1, angle: SOUTH });
+  });
+});
+
+describe("MoverPaths", () => {
+  it("届いた道筋を足し、忘れさせる番号の道筋を忘れ、忘れる印があれば前の道筋をすべて忘れる", () => {
+    const paths = new MoverPaths();
+    paths.receive(
+      pathData(true, [
+        [
+          1,
+          [
+            [0, 0, 0],
+            [1, 0, 0],
+          ],
+        ],
+      ]),
+    );
+    paths.receive(
+      pathData(false, [
+        [
+          2,
+          [
+            [0, 0, 0],
+            [0, 1, 0],
+          ],
+        ],
+      ]),
+    );
+    expect(paths.size).toBe(2);
+    paths.receive(pathData(false, [], [1]));
+    expect(paths.get(1)).toBeUndefined();
+    expect(paths.get(2)?.length).toBe(8);
+    paths.receive(
+      pathData(true, [
+        [
+          3,
+          [
+            [0, 0, 0],
+            [2, 0, 0],
+          ],
+        ],
+      ]),
+    );
+    expect(paths.get(1)).toBeUndefined();
+    expect(paths.get(2)).toBeUndefined();
+    expect(paths.get(3)?.length).toBe(8);
+    expect(paths.get(0)).toBeUndefined();
+  });
+});
+
+describe("MoverInterpolator の道筋に沿う補間", () => {
+  // 東へ 1 マス進み、南へ曲がって 1 マス進む道筋。弦は (0, 0) から (1, 1) へ角を削る
+  const corner = () => {
+    const paths = new MoverPaths();
+    paths.receive(
+      pathData(true, [
+        [
+          7,
+          [
+            [0, 0, EAST],
+            [1, 0, EAST],
+            [1, 1, SOUTH],
+          ],
+        ],
+      ]),
+    );
+    return paths;
+  };
+
+  it("前の tick と今の tick が同じ道筋の上なら、道筋に沿って長さに比例して動かす", () => {
+    const paths = corner();
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0, y: 0, path: 7, frac: 0 }], {}, paths);
+    const mid = arrive(i, 11, [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }], TICK_MS / 2, {}, paths);
+    // 弦の真ん中 (0.5, 0.5) ではなく、道筋の角にいる
+    expect(mid.get(1)?.x).toBeCloseTo(1, 4);
+    expect(mid.get(1)?.y).toBeCloseTo(0, 4);
+    const quarter = run(
+      i,
+      TICK_MS * 0.75,
+      11,
+      [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }],
+      {},
+      paths,
+    );
+    expect(quarter.get(1)?.x).toBeCloseTo(1, 4);
+    expect(quarter.get(1)?.y).toBeCloseTo(0.5, 4);
+    // 向きは道筋の向き。東から南へ半分回っている
+    expect(quarter.get(1)?.heading).toBe(angleCode(Math.PI / 4));
+  });
+
+  it("前の道筋の終わりと今の道筋の始まりがつながっていれば、2 つをつないでたどる", () => {
+    const paths = new MoverPaths();
+    paths.receive(
+      pathData(true, [
+        [
+          1,
+          [
+            [0, 0, EAST],
+            [1, 0, EAST],
+          ],
+        ],
+        [
+          2,
+          [
+            [1, 0, SOUTH],
+            [1, 1, SOUTH],
+          ],
+        ],
+      ]),
+    );
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0.5, y: 0, path: 1, frac: 0.5 }], {}, paths);
+    const r = arrive(i, 11, [{ id: 1, x: 1, y: 0.5, path: 2, frac: 0.5 }], TICK_MS / 2, {}, paths);
+    expect(r.get(1)?.x).toBeCloseTo(1, 4);
+    expect(r.get(1)?.y).toBeCloseTo(0, 4);
+  });
+
+  it("あいだの道筋を丸ごと通り抜けたなら、その道筋もたどる", () => {
+    const paths = new MoverPaths();
+    paths.receive(
+      pathData(true, [
+        [
+          1,
+          [
+            [0, 0, EAST],
+            [1, 0, EAST],
+          ],
+        ],
+        [
+          2,
+          [
+            [1, 0, SOUTH],
+            [1, 1, SOUTH],
+          ],
+        ],
+        [
+          3,
+          [
+            [1, 1, EAST],
+            [2, 1, EAST],
+          ],
+        ],
+      ]),
+    );
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0.5, y: 0, path: 1, frac: 0.5 }], {}, paths);
+    const at = (t: number) =>
+      run(i, TICK_MS * t, 11, [{ id: 1, x: 1.5, y: 1, path: 3, via: 2, frac: 0.5 }], {}, paths).get(
+        1,
+      );
+    at(0);
+    // 全部で 0.5 + 1 + 0.5 = 2 マス。半分の所は、通り抜けた道筋の真ん中
+    expect(at(0.5)?.x).toBeCloseTo(1, 4);
+    expect(at(0.5)?.y).toBeCloseTo(0.5, 4);
+    expect(at(0.5)?.heading).toBe(angleCode(SOUTH));
+  });
+
+  it("つながらない道筋や、知らない道筋のあいだは、まっすぐ動かす", () => {
+    const paths = new MoverPaths();
+    paths.receive(
+      pathData(true, [
+        [
+          1,
+          [
+            [0, 0, EAST],
+            [1, 0, EAST],
+          ],
+        ],
+        [
+          2,
+          [
+            [5, 5, SOUTH],
+            [5, 6, SOUTH],
+          ],
+        ],
+      ]),
+    );
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0, y: 0, path: 1, frac: 0 }], {}, paths);
+    const r = arrive(i, 11, [{ id: 1, x: 5, y: 5, path: 2, frac: 0 }], TICK_MS / 2, {}, paths);
+    expect(r.get(1)?.x).toBeCloseTo(2.5, 4);
+    expect(r.get(1)?.y).toBeCloseTo(2.5, 4);
+    const j = new MoverInterpolator();
+    run(j, 0, 10, [{ id: 1, x: 0, y: 0, path: 1, frac: 0 }], {}, paths);
+    const u = arrive(j, 11, [{ id: 1, x: 1, y: 1, path: 99, frac: 1 }], TICK_MS / 2, {}, paths);
+    expect(u.get(1)?.x).toBeCloseTo(0.5, 4);
+    expect(u.get(1)?.y).toBeCloseTo(0.5, 4);
+  });
+
+  it("網が変わって前の道筋を忘れたら、前の道筋は使わない", () => {
+    const paths = corner();
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0, y: 0, path: 7, frac: 0 }], {}, paths);
+    run(i, 0, 11, [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }], {}, paths);
+    // 道筋 7 を忘れ、同じ所を通る別の番号の道筋だけが届いた
+    paths.receive(
+      pathData(true, [
+        [
+          8,
+          [
+            [0, 0, EAST],
+            [0, 1, SOUTH],
+            [1, 1, EAST],
+          ],
+        ],
+      ]),
+    );
+    const r = run(i, TICK_MS / 2, 11, [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }], {}, paths);
+    expect(r.get(1)?.x).toBeCloseTo(0.5, 4);
+    expect(r.get(1)?.y).toBeCloseTo(0.5, 4);
+  });
+
+  it("補間の途中で次の tick が来ても、道筋の上の見えている所から続けて動かす", () => {
+    const paths = corner();
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0, y: 0, path: 7, frac: 0 }], {}, paths);
+    run(i, 0, 11, [{ id: 1, x: 1, y: 0, path: 7, frac: 0.5 }], {}, paths);
+    run(i, TICK_MS, 11, [{ id: 1, x: 1, y: 0, path: 7, frac: 0.5 }], {}, paths);
+    // 次の tick が、前の区間の半分の所で届く
+    run(i, TICK_MS * 1.5, 12, [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }], {}, paths);
+    const r = run(i, TICK_MS * 2, 12, [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }], {}, paths);
+    expect(r.get(1)?.x).toBeCloseTo(1, 4);
+    expect(r.get(1)?.y).toBeGreaterThan(0);
+    expect(r.get(1)?.y).toBeLessThan(1);
+  });
+});
+
+describe("hasMoverPaths", () => {
+  it("忘れる番号がなくても、新しい道筋があれば送る", () => {
+    // [すべて忘れるか, 忘れる数, 新しい数, 番号, 点の数, 点…]
+    expect(hasMoverPaths(new Float64Array([0, 0, 1, 7, 0]))).toBe(true);
+  });
+
+  it("忘れる道筋があれば、新しい道筋がなくても送る", () => {
+    expect(hasMoverPaths(new Float64Array([0, 2, 3, 4, 0]))).toBe(true);
+  });
+
+  it("すべて忘れるときは送る", () => {
+    expect(hasMoverPaths(new Float64Array([1, 0, 0]))).toBe(true);
+  });
+
+  it("忘れるものも新しい道筋もないときは送らない", () => {
+    expect(hasMoverPaths(new Float64Array([0, 0, 0]))).toBe(false);
   });
 });

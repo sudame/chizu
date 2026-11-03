@@ -297,10 +297,23 @@ impl Simulation {
             .spawn_dev_walks(tile(from_x, from_y), tile(to_x, to_y), count)
     }
 
-    /// 一時停止していなければ `ticks` だけ進め、いまの状態を三重バッファに書く。
+    /// 一時停止していなければ `ticks` だけ進め、見える範囲の移動体を集める。三重バッファには
+    /// [`Simulation::publish`] で書く。あいだに [`Simulation::take_mover_paths`] で道筋を受け取って送ると、
+    /// 画面は枠より先に、枠が指す道筋を受け取れる。
     pub fn advance(&mut self, ticks: u32) {
         self.0.advance(ticks);
+        self.0.collect_movers();
+    }
+
+    /// いまの状態を三重バッファに書く。
+    pub fn publish(&mut self) {
         self.0.publish();
+    }
+
+    /// 前に呼んでから新しく求めた、車を描く道筋と、忘れた道筋の番号。並びは `car_path::Paths::take` の
+    /// とおりである。
+    pub fn take_mover_paths(&mut self) -> Vec<f64> {
+        self.0.take_mover_paths()
     }
 }
 

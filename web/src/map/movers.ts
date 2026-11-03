@@ -7,7 +7,7 @@ import { layout, type SnapshotHeader } from "../protocol/snapshot.ts";
 import type { Camera, ChunkRange, Viewport } from "./camera.ts";
 import { SIDEWALK_WIDTH } from "./lanes.ts";
 import { CAR_COLORS, WALKER_COLOR } from "./mover-colors.ts";
-import { MoverInterpolator } from "./mover-interpolation.ts";
+import { MoverInterpolator, type MoverPaths } from "./mover-interpolation.ts";
 import { hex, hexRgb } from "./palette.ts";
 import { showsMovers, stageWeights } from "./stages.ts";
 
@@ -223,7 +223,7 @@ export class MoverLayer {
   /**
    * 枠の移動体を描き、描いた数を返す。寄りの段より引いているときは描かない。
    * 寄りの段に入るあいだ（stages.ts の MOVER_BAND）は、薄く出す。
-   * 位置は前の tick と今の tick のあいだを、時刻 `now`（ミリ秒）に合わせて補間する。
+   * 位置は前の tick と今の tick のあいだを、時刻 `now`（ミリ秒）に合わせて補間する。車は `paths` の道筋に沿わせる。
    */
   draw(
     camera: Camera,
@@ -231,6 +231,7 @@ export class MoverLayer {
     header: SnapshotHeader,
     words: Uint32Array,
     now: number,
+    paths?: MoverPaths,
   ): number {
     const count = Math.min(header.moverCount, Math.floor(words.length / layout.moverWords));
     this.firstOf.clear();
@@ -254,6 +255,7 @@ export class MoverLayer {
       },
       now,
       this.#floats,
+      paths,
     );
     const at = (i: number) => ({
       x: header.baseCx * CHUNK_SIDE + (this.#floats[i * layout.moverWords + layout.mover.x] ?? 0),

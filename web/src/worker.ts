@@ -10,6 +10,7 @@ import init, {
 } from "../wasm/chizu_wasm.js";
 import { ChunkSync } from "./map/chunk-sync.ts";
 import { LayerSender, TrafficSender } from "./map/layer-sync.ts";
+import { hasMoverPaths } from "./map/mover-interpolation.ts";
 import type {
   ChunkData,
   CommandMessage,
@@ -96,6 +97,15 @@ function sendRoads(sim: Simulation): void {
   const segments = sim.road_segments();
   const nodes = sim.road_nodes();
   reply({ kind: "roads", revision, segments, nodes }, [segments.buffer, nodes.buffer]);
+}
+
+// 車を描く道筋は、新しく求めたものだけを送る。枠が指す道筋を画面が先に受け取れるよう、枠を書く前に送る
+function sendMoverPaths(sim: Simulation): void {
+  const data = sim.take_mover_paths();
+  if (!hasMoverPaths(data)) {
+    return;
+  }
+  reply({ kind: "mover-paths", data }, [data.buffer]);
 }
 
 // 信号の灯火は tick ごとに変わりうるので毎回求め、前と違うときだけ送る
@@ -198,6 +208,8 @@ function run(sim: Simulation): {
     budget = step.budget;
     last = now;
     sim.advance(step.ticks);
+    sendMoverPaths(sim);
+    sim.publish();
     sendOutcomes(sim);
     sendRoads(sim);
     sendSignals(sim);
@@ -228,6 +240,8 @@ const ready = (async () => {
   // 新しく始めるか、保存データから作り直すかは画面が決める
   const sim = await startSimulation();
   sim.advance(0);
+  sendMoverPaths(sim);
+  sim.publish();
   // 三重バッファを確保するとメモリが伸びることがある。伸びたあとの SharedArrayBuffer を渡す。
   // 枠の位置はこのあと変わらないので、のちにメモリが伸びても渡した SharedArrayBuffer の範囲に収まる
   const memory: unknown = wasm.memory.buffer;

@@ -4,7 +4,7 @@
 use chizu_core::network::{DIAGONAL_TILE_MM, TILE_MM};
 use chizu_core::{
     CHUNK_SIDE, ChunkCoord, Dir, LaneMode, LaneOffset, LinkId, Mover as CoreMover, SidewalkPos,
-    TilePos, TileRect, TripId, World,
+    TilePos, TileRect, World,
 };
 use std::collections::BTreeMap;
 
@@ -61,8 +61,37 @@ fn keep_nearest(found: &mut Vec<CoreMover>, view: TileRect, limit: usize) {
     found.truncate(limit);
 }
 
-/// 曲線の上に描いた車ごとの、曲線の始まり（`car_path::Entry`）。描画のためだけに覚える。
-pub type Arcs = BTreeMap<TripId, car_path::Entry>;
+/// 車ごとに、次の回に描くために覚えておくもの。描画のためだけに覚える。
+#[derive(Clone, Copy, Debug)]
+pub struct Memo {
+    /// 描いた tick と、そのとき描いた道筋。
+    tick: u64,
+    last: Option<car_path::Last>,
+    /// `tick` の前の tick に描いた道筋。
+    before: Option<car_path::Last>,
+}
+
+impl Memo {
+    /// 何も覚えていない覚え書き。
+    const NONE: Memo = Memo {
+        tick: u64::MAX,
+        last: None,
+        before: None,
+    };
+}
+
+/// 移動体を描くために、回をまたいで覚えておくもの。描画のためだけに覚え、状態には入れない。
+#[derive(Default)]
+pub struct Memory {
+    /// 車ごとの覚え書き。移動の添え字と世代で引く。並びは描く結果に効かない。
+    arcs: car_path::FastMap<(u32, u16), Memo>,
+    /// 曲線の上に描いた車の、曲線の始まり。曲線の上にいる車は少ないので、覚え書きとは分けて持つ。
+    entries: car_path::FastMap<(u32, u16), (u64, car_path::Entry)>,
+    /// 前の回に描いた tick。
+    drawn_tick: Option<u64>,
+    /// 求めた道筋。
+    pub paths: car_path::Paths,
+}
 
 /// 前の回に描いた移動体。`out` は前の回の `visible_movers` の結果で、`base` はそのときの基準のチャンクである。
 pub struct Before<'a> {
@@ -85,32 +114,73 @@ impl Before<'_> {
 
 /// `view` の移動体を、基準のチャンク（`view.min` のチャンク）の原点からのマスの座標に直して `out` に入れ、
 /// 基準のチャンクを返す。上限を超えたら、`view` の真ん中に近いものを残す。
-/// `arcs` は前の回に曲線の上に描いた車の曲線の始まりで、この回のものに入れ替える。
+/// `memory` は前の回までに覚えた車ごとの覚え書きと道筋で、この回のものに入れ替える。
 /// `before` は前の回に描いたもので、網が変わってから次の `step` までのあいだ、道筋を求められない歩く人を
 /// そこに描き続ける。
 pub fn visible_movers(
     world: &World,
     view: TileRect,
     out: &mut Vec<Mover>,
-    arcs: &mut Arcs,
+    memory: &mut Memory,
     before: Before<'_>,
 ) -> ChunkCoord {
     let base = view.min.chunk().unwrap_or_default();
+    let mut found = world.movers_in(view);
+    keep_nearest(&mut found, view, MAX_MOVERS);
+    let net = world.network();
+    let walks = |id| world.walk_path(id);
+    let scene = Scene {
+        net,
+        tick: world.tick().0,
+        walks: &walks,
+    };
+    draw_movers(&scene, &found, base, out, memory, before);
+    base
+}
+
+/// 移動体を描くのに使う、街の側のもの。
+struct Scene<'a> {
+    net: &'a chizu_core::Network,
+    tick: u64,
+    walks: &'a dyn Fn(chizu_core::TripId) -> Option<chizu_core::WalkPath>,
+}
+
+/// `found` の移動体を、基準のチャンク `base` の原点からのマスの座標に直して `out` に入れる。
+fn draw_movers(
+    scene: &Scene<'_>,
+    found: &[CoreMover],
+    base: ChunkCoord,
+    out: &mut Vec<Mover>,
+    memory: &mut Memory,
+    before: Before<'_>,
+) {
     let side = CHUNK_SIDE as i64;
     let origin = |c: i32| i64::from(c) * side * TILE_MM;
     let (ox, oy) = (origin(base.cx), origin(base.cy));
-    let mut found = world.movers_in(view);
-    keep_nearest(&mut found, view, MAX_MOVERS);
     // 基準の原点からの差は画面の広さに収まるので、f64 を経て f32 に直しても桁は足りる。
     let tiles = |v: i64, o: i64| (v.saturating_sub(o) as f64 / TILE_MM as f64) as f32;
-    let net = world.network();
+    let net = scene.net;
+    let tick = scene.tick;
     let from_mm = |v: f64, o: i64| ((v - o as f64) / TILE_MM as f64) as f32;
-    let prev_arcs = core::mem::take(arcs);
+    memory.paths.sync(net, tick);
+    // 覚え書きは、前の回か、この回と同じ tick に描いたものだけを使う。見えなくなった車の分は、
+    // 溜まったら捨てる。
+    let valid = |m: &Memo| m.tick == tick || Some(m.tick) == memory.drawn_tick;
+    if memory.arcs.len() > 2 * found.len() + 4_096 {
+        memory.arcs.retain(|_, m| valid(m));
+    }
+    let drawn_tick = memory.drawn_tick;
+    memory
+        .entries
+        .retain(|_, (t, _)| *t == tick || Some(*t) == drawn_tick);
+    let arcs = &mut memory.arcs;
+    let entries = &mut memory.entries;
+    let paths = &mut memory.paths;
     // 前の回の位置は、道筋を求められない人がいたときにだけ引く。
     let mut prev = None;
     out.clear();
     let drawn = out;
-    for m in &found {
+    for m in found {
         let mover = |x: f32, y: f32, heading: u16| Mover {
             x,
             y,
@@ -118,28 +188,54 @@ pub fn visible_movers(
             kind: kind_of(m),
             id: m.id.index,
             generation: u32::from(m.id.generation),
+            path: 0,
+            via: 0,
+            frac: 0.0,
         };
         // 車は、ノードの前後を曲線でつないだ道筋の上に描く（`car_path`）。
-        let car = m
-            .path
-            .and_then(|p| car_path::draw(net, &p, m.shift, prev_arcs.get(&m.id)));
-        if let Some((d, entry)) = car {
-            if let Some(e) = entry {
-                arcs.insert(m.id, e);
+        let car = m.path.and_then(|p| {
+            let id = (m.id.index, m.id.generation);
+            let slot = arcs.entry(id).or_insert(Memo::NONE);
+            let memo = Some(*slot).filter(valid);
+            // 同じ tick に描き直すときは、前の tick に描いた道筋を引き継ぐ。
+            let last = memo.and_then(|k| if k.tick == tick { k.before } else { k.last });
+            let entry = entries.get(&id).map(|(_, e)| *e);
+            let placed = car_path::draw(net, paths, &p, m.shift, entry.as_ref(), last.as_ref());
+            match placed.and_then(|p| p.entry) {
+                Some(e) => {
+                    entries.insert(id, (tick, e));
+                }
+                None if entry.is_some() => {
+                    entries.remove(&id);
+                }
+                None => {}
             }
-            drawn.push(mover(
+            *slot = Memo {
+                tick,
+                last: placed.and_then(|p| p.route.map(|r| r.last)),
+                before: last,
+            };
+            placed
+        });
+        if let Some(placed) = car {
+            let d = placed.drawn;
+            let mut out = mover(
                 from_mm(d.x, ox),
                 from_mm(d.y, oy),
                 car_path::angle_code(d.angle),
-            ));
+            );
+            if let Some(r) = placed.route {
+                (out.path, out.via, out.frac) = (r.id, r.via, r.frac);
+            }
+            drawn.push(out);
             continue;
         }
         // 歩く人は、交差点の前後で歩道の角を回る道筋の上に描く（`walk_path`）。道筋は、間引いたあとに
         // 残った人の分だけ求める。
         let walk = match m.mode {
-            LaneMode::Sidewalk => world
-                .walk_path(m.id)
-                .map_or(Walk::Core, |w| walk_path::draw(net, &w)),
+            LaneMode::Sidewalk => {
+                (scene.walks)(m.id).map_or(Walk::Core, |w| walk_path::draw(net, &w))
+            }
             LaneMode::Car => Walk::Core,
         };
         if let Walk::Lost(_) = walk {
@@ -164,7 +260,7 @@ pub fn visible_movers(
             heading_code(m.heading),
         ));
     }
-    base
+    memory.drawn_tick = Some(tick);
 }
 
 /// マス `t` の近くの歩道の位置を、反対側の歩道も含めて挙げる。
@@ -281,7 +377,7 @@ mod tests {
         let n = spawn_dev_walks(&mut w, TilePos::new(2, 10), TilePos::new(25, 10), 30);
         assert_eq!(n, 30);
         let mut first = Vec::new();
-        let base = visible_movers(&w, all(), &mut first, &mut Arcs::new(), none());
+        let base = visible_movers(&w, all(), &mut first, &mut Memory::default(), none());
         assert_eq!(base, ChunkCoord::new(-1, -1));
         assert_eq!(first.len(), 30);
         assert!(first.iter().all(|m| m.kind == KIND_WALK));
@@ -298,12 +394,12 @@ mod tests {
             w.step();
         }
         let mut later = Vec::new();
-        visible_movers(&w, all(), &mut later, &mut Arcs::new(), none());
+        visible_movers(&w, all(), &mut later, &mut Memory::default(), none());
         assert_ne!(first, later);
         for _ in 0..2_000 {
             w.step();
         }
-        visible_movers(&w, all(), &mut later, &mut Arcs::new(), none());
+        visible_movers(&w, all(), &mut later, &mut Memory::default(), none());
         assert!(later.is_empty());
     }
 

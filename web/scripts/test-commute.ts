@@ -187,6 +187,13 @@ try {
     }
     return (await dataset())[key] ?? "";
   };
+  // 車が走っていれば、網を変えていなくても、車を描く道筋が画面に届いている
+  if (NEED_BOTH) {
+    check(
+      Number(d.moverPaths) > 0,
+      `${WHEN}で、網を変えなくても車を描く道筋が画面に届く（${d.moverPaths} 本）`,
+    );
+  }
   const pixel = (p: { x: number; y: number }) =>
     map.evaluate((el, q) => {
       const canvas = el as HTMLCanvasElement;

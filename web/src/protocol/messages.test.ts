@@ -105,6 +105,9 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ kind: "chunks", chunks: [{ ...chunk, cx: 0.5 }] })).toBe(false);
     expect(isWorkerToMain({ ...roads, segments: new Float64Array(4) })).toBe(false);
     expect(isWorkerToMain({ ...roads, nodes: [0, 0, 1, 0, 0] })).toBe(false);
+    expect(isWorkerToMain({ kind: "mover-paths", data: new Float64Array([1, 0, 0]) })).toBe(true);
+    expect(isWorkerToMain({ kind: "mover-paths", data: [1, 0, 0] })).toBe(false);
+    expect(isWorkerToMain({ kind: "mover-paths", data: new Float64Array(2) })).toBe(false);
     expect(isWorkerToMain({ kind: "outcome", outcome: "Applied" })).toBe(false);
     expect(isWorkerToMain({ kind: "outcome", id: 1, seq: "1", outcome: "Applied" })).toBe(false);
     expect(isWorkerToMain({ type: "wasm_bindgen_worker_ready" })).toBe(false);
