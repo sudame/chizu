@@ -141,6 +141,10 @@ observe の removedCrosswalks:
   {"type":"BuildRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
       道路を引く。縦か横か 45 度の斜めの直線だけで、1 マスあたり 250、450、750 かかる。
       既存の道路に重ねると Denied（Overlap）になる。種類を変えるときは UpgradeRoad を使う。
+      始点か終点が道路のないマスで、引く向きの 1 歩外に道路（高速道路は内側の端だけ）があれば、そのマスまで 1 マス
+      延ばして交差点でつなぐ（延ばした 1 マスも費用がかかる）。延ばしたときは結果の joined に実際の from と to が出る。
+      平行に隣り合う道路や、1 マス離れた道路にはつながない。所持金が延ばしたぶんに足りないときも延ばさない。
+      "join":false を足すと延ばさない（道路の 1 マス手前で止める行き止まりを引くときに使う。省くと true）。どの道路にもつながらなければ結果に warning が出る。
   {"type":"UpgradeRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
       直線と同じ 1 歩を通る既存の道路の区間を、区間ごと kind に変える（上げるのにも下げるのにも使う）。
       直線の形は BuildRoad と同じ決まりで、直線が区間の一部しか通らなくても、ノードからノードまでの区間全体が変わる。
@@ -487,19 +491,42 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
         .map(|(i, value)| {
             let kind = value.get("type").cloned().unwrap_or(Value::Null);
             let invalid = |message: String| json!({"index": i, "type": kind, "outcome": "Invalid", "message": message});
-            let value = match command_json::resolve_node_at(value, |t| world.network().node_at(t)) {
+            // join は CLI だけが読む欄で、記録には入らない。
+            let (value, join) = match take_join(value) {
                 Ok(v) => v,
                 Err(e) => return invalid(e),
             };
-            let command = match command_json::parse(&value) {
+            let value = match command_json::resolve_node_at(&value, |t| world.network().node_at(t)) {
+                Ok(v) => v,
+                Err(e) => return invalid(e),
+            };
+            let mut command = match command_json::parse(&value) {
                 Ok(c) => c,
                 Err(e) => return invalid(e),
             };
+            // 端のすぐ外に道路があれば、そこまで延ばしてつなぐ。記録に入るのも延ばした形である。
+            let mut joined = None;
+            let mut isolated = false;
+            if let Command::BuildRoad { from, to, kind } = command {
+                let (f, t) = if join {
+                    world.joined_road(from, to, kind)
+                } else {
+                    (from, to)
+                };
+                if (f, t) != (from, to) {
+                    joined = Some(json!({"from": [f.x, f.y], "to": [t.x, t.y]}));
+                    command = Command::BuildRoad { from: f, to: t, kind };
+                }
+                isolated = !is_joined_to_network(world, f, t);
+            }
             let seq = match log.record(world.tick(), command) {
                 Ok(seq) => seq,
                 Err(e) => return invalid(e.to_string()),
             };
             let mut out = json!({"index": i, "type": kind});
+            if let Some(joined) = joined {
+                out["joined"] = joined;
+            }
             if verbose {
                 // 角の順番などをそろえたあとの、記録に入った形を返す。
                 out["command"] = command_json::to_json(command);
@@ -519,9 +546,38 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                 }
             };
             out["outcome"] = json!(outcome);
+            if isolated && outcome == "Applied" {
+                out["warning"] = json!(ISOLATED_ROAD_WARNING);
+            }
             out
         })
         .collect()
+}
+
+/// BuildRoad の `"join"`（延ばさない指定）を取り除いて返す。省くと true である。BuildRoad 以外には書けない。
+fn take_join(value: &Value) -> Result<(Value, bool), String> {
+    let mut out = value.clone();
+    let Some(join) = out.as_object_mut().and_then(|o| o.remove("join")) else {
+        return Ok((out, true));
+    };
+    if value.get("type").and_then(Value::as_str) != Some("BuildRoad") {
+        return Err("join は BuildRoad にだけ書ける".into());
+    }
+    join.as_bool()
+        .map(|b| (out, b))
+        .ok_or_else(|| "join は true か false で書く".into())
+}
+
+/// 引いた道路がどの道路ともつながらなかったときの知らせ。
+const ISOLATED_ROAD_WARNING: &str = "既存の道路につながっていない。電気と水道が届かず、区画が建たない（端を既存の道路や高速道路の端に合わせるとつながる）";
+
+/// 道路 `from` → `to` が、引く前の網のどこかにつながるか。道路が 1 本もない網では比べるものがないので真にする。
+fn is_joined_to_network(world: &World, from: TilePos, to: TilePos) -> bool {
+    let net = world.network();
+    if net.segments().count() == 0 {
+        return true;
+    }
+    Line::between(from, to).is_ok_and(|line| line.tiles().any(|t| net.is_joinable(t)))
 }
 
 /// `notOwned` に載せるマスとチャンクの数の上限。
