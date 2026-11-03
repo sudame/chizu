@@ -48,6 +48,7 @@ pub use pos::SidewalkPos;
 
 use crate::id::{Slots, TripId};
 use crate::network::{Dir, LaneId, LaneMode, LinkId, Network, SegmentId};
+use crate::rng::{RngPurpose, mix_words};
 use crate::routing::{
     AstarRouter, Connector, Graph, Route, RouteRequest, Router, Scratch, Toward, WALK_SPEED,
     one_to_many,
@@ -502,7 +503,14 @@ fn plan(
         .iter()
         .map(|e| candidates(net, *e, fixed_start))
         .collect();
-    let flat: Vec<Ends> = candidates.iter().flatten().copied().collect();
+    let flat: Vec<(Ends, u8)> = candidates
+        .iter()
+        .zip(ends)
+        .flat_map(|(c, e)| {
+            let v = variant(*e);
+            c.iter().map(move |c| (*c, v))
+        })
+        .collect();
     let mut found = plan_exact(router, mode, &flat).into_iter();
     let g = router.graph(mode);
     candidates
@@ -539,6 +547,19 @@ fn plan(
         .collect()
 }
 
+/// 2 点を結ぶ経路で、費用の同じ経路のどの候補を選ぶか。出発と行き先の位置だけから決めるので、同じ 2 点のあいだは
+/// いつも同じ経路を通り、同じ道に面した隣の家からは別の経路に分かれる。
+fn variant(((a, ao), (b, bo)): Ends) -> u8 {
+    let link =
+        |l: LinkId| (u64::from(l.segment.index) << 2) | ((l.dir as u64) << 1) | l.mode as u64;
+    let h = mix_words(
+        0,
+        RngPurpose::RouteVariant,
+        &[link(a), u64::from(ao.0), link(b), u64::from(bo.0)],
+    );
+    (h % u64::from(crate::routing::ROUTE_VARIANTS)) as u8
+}
+
 /// [`plan`] が試す、出発と行き先の向きの組。同じリンクの手前へ戻る組は、ほかの組があれば除く。
 fn candidates(net: &Network, (a, b): Ends, fixed_start: bool) -> Vec<Ends> {
     let starts = [Some(a), flip(net, a).filter(|_| !fixed_start)];
@@ -557,23 +578,28 @@ fn behind(((a, ao), (b, bo)): &Ends) -> bool {
     a == b && bo < ao
 }
 
-/// 手段 `mode` で 2 点を結ぶ経路を、まとめて探す。行き先が同じリンクの手前にあるときは、
+/// 手段 `mode` で 2 点を結ぶ経路を、それぞれの候補でまとめて探す。行き先が同じリンクの手前にあるときは、
 /// 次のリンクへ出て戻ってくる経路にする。
-fn plan_exact(router: &mut AstarRouter, mode: LaneMode, ends: &[Ends]) -> Vec<Option<Arc<Route>>> {
+fn plan_exact(
+    router: &mut AstarRouter,
+    mode: LaneMode,
+    ends: &[(Ends, u8)],
+) -> Vec<Option<Arc<Route>>> {
     let reqs: Vec<RouteRequest> = ends
         .iter()
-        .filter(|e| !behind(e))
-        .map(|((a, _), (b, _))| RouteRequest {
+        .filter(|(e, _)| !behind(e))
+        .map(|(((a, _), (b, _)), variant)| RouteRequest {
             from: *a,
             to: *b,
             mode,
+            variant: *variant,
         })
         .collect();
     let mut found = router.route_batch(&reqs).into_iter();
     let g = router.graph(mode);
     let mut s = Scratch::default();
     ends.iter()
-        .map(|e| {
+        .map(|(e, _)| {
             if !behind(e) {
                 return found.next().expect("探した経路の数が合わない");
             }
