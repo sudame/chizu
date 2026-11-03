@@ -169,8 +169,9 @@ fn a_minor_road_car_gets_in_after_waiting_long_enough() {
 }
 
 /// 十字路の 4 つの腕のうち `arms` から、それぞれ `per_arm` 台が直進して向こうの腕へ抜ける。
-/// 着いた台数と、どれかの腕の手前で止まって並んだ車のいちばん多い台数を返す。
-fn heavy_crossroads(arms: &[(i64, i64)], per_arm: usize) -> (usize, usize) {
+/// 着いた台数と、どれかの腕の手前で止まって並んだ車のいちばん多い台数と、停止線から詰めて並んだ車の
+/// いちばん多い台数を返す。
+fn heavy_crossroads(arms: &[(i64, i64)], per_arm: usize) -> (usize, usize, usize) {
     let mut c = Cars::new(crossroads());
     let mut drives = Vec::new();
     let mut incoming = Vec::new();
@@ -185,27 +186,49 @@ fn heavy_crossroads(arms: &[(i64, i64)], per_arm: usize) -> (usize, usize) {
         .trips
         .spawn_drives(&c.net, &mut c.router, &drives, Tick::ZERO);
     assert!(ids.iter().all(Option::is_some));
-    let (mut arrived, mut longest) = (0, 0);
+    let (mut arrived, mut longest, mut queued) = (0, 0, 0);
     for _ in 0..1_500 {
         arrived += c.step().len();
         for l in &incoming {
-            let stopped = c
+            let stop = stop_line::stop_line(&c.net, *l).0;
+            let mut stopped: Vec<u32> = c
                 .trips
                 .iter()
                 .filter(|(_, t)| car::on_road(t) && t.link() == *l && t.speed() == MmPerTick::ZERO)
-                .count();
-            longest = longest.max(stopped);
+                .map(|(_, t)| t.offset().0)
+                .collect();
+            // 待つ車は停止線より手前にいて、交差点の中では待たない。
+            assert!(
+                stopped.iter().all(|o| *o <= stop),
+                "停止線を越えて待った {stopped:?}"
+            );
+            // 先頭の車は停止線で待ち、列はその後ろに車間を空けて詰めて並ぶ。
+            stopped.sort_unstable_by(|a, b| b.cmp(a));
+            if stopped.first() == Some(&stop) {
+                for (k, w) in stopped.windows(2).enumerate() {
+                    if w[0] - w[1] != CAR_LENGTH + MIN_GAP {
+                        break;
+                    }
+                    queued = queued.max(k + 2);
+                }
+            }
+            longest = longest.max(stopped.len());
         }
-        // 交差点の中に、交わる向きの車が同時にいない。
+        // 交差点の中に、交わる向きの車が同時にいない。停止線を越えた車と、出ていくリンクの
+        // 交差点を抜けきっていない車が、交差点の中にいる。
         let inside: Vec<Move> = c
             .trips
             .iter()
-            .filter(|(_, t)| car::on_road(t) && t.leg > 0 && t.offset().0 < CAR_LENGTH + MIN_GAP)
-            .filter(|(_, t)| {
-                let prev = t.route().links[t.leg as usize - 1];
-                incoming.contains(&prev)
+            .filter(|(_, t)| car::on_road(t))
+            .filter_map(|(_, t)| {
+                if t.bound.is_some() && incoming.contains(&t.link()) {
+                    let next = t.route().links[t.leg as usize + 1];
+                    return Some(Move::new(&c.net, t.link(), next));
+                }
+                let prev = t.route().links[..t.leg as usize].last()?;
+                (incoming.contains(prev) && t.offset().0 < stop_line::clear_line(&c.net, t.link()))
+                    .then(|| Move::new(&c.net, *prev, t.link()))
             })
-            .map(|(_, t)| Move::new(&c.net, t.route().links[t.leg as usize - 1], t.link()))
             .collect();
         for a in &inside {
             assert!(
@@ -216,19 +239,20 @@ fn heavy_crossroads(arms: &[(i64, i64)], per_arm: usize) -> (usize, usize) {
     }
     assert_eq!(c.trips.rescues(), Default::default(), "救済が働いた");
     assert_eq!(c.hard_brakes, 0, "減速の上限を越えた");
-    (arrived, longest)
+    (arrived, longest, queued)
 }
 
 #[test]
 fn crossing_traffic_queues_before_the_intersection() {
-    let (arrived, longest) = heavy_crossroads(&[(-1, 0), (0, -1)], 25);
+    let (arrived, longest, queued) = heavy_crossroads(&[(-1, 0), (0, -1)], 25);
     assert_eq!(arrived, 50);
     assert!(longest >= 3, "列ができない {longest}");
+    assert!(queued >= 3, "停止線から詰めて並ばない {queued}");
 }
 
 #[test]
 fn traffic_from_every_arm_does_not_deadlock() {
-    let (arrived, longest) = heavy_crossroads(&[(-1, 0), (0, -1), (1, 0), (0, 1)], 20);
+    let (arrived, longest, _) = heavy_crossroads(&[(-1, 0), (0, -1), (1, 0), (0, 1)], 20);
     assert_eq!(arrived, 80);
     assert!(longest >= 3, "列ができない {longest}");
 }
@@ -236,7 +260,7 @@ fn traffic_from_every_arm_does_not_deadlock() {
 #[test]
 fn opposing_straight_traffic_does_not_wait() {
     // 対向の直進どうしは衝突しないので、どちらの腕でも止まらずに抜ける。
-    let (arrived, longest) = heavy_crossroads(&[(-1, 0), (1, 0)], 1);
+    let (arrived, longest, _) = heavy_crossroads(&[(-1, 0), (1, 0)], 1);
     assert_eq!(arrived, 2);
     assert_eq!(longest, 0);
 }

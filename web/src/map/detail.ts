@@ -183,7 +183,10 @@ export const STREET_TREE_COLOR = hex("#bcd6a4");
 export const SHRUB_COLOR = hex("#cfe3bb");
 export const STREET_TREE_HALF = 0.07;
 export const SHRUB_HALF = 0.04;
-/** 停止線の、腕の向きの太さ（マス）と、横断歩道の外側からのすき間（マス）。 */
+/**
+ * 停止線の、腕の向きの太さ（マス）と、横断歩道の外側からのすき間（マス）。
+ * 中核の `movement/stop_line.rs` の STOP_WIDTH_MM と STOP_GAP_MM と同じにする。車はそこで止まる。
+ */
 export const STOP_LINE_WIDTH = 0.04;
 const STOP_LINE_GAP = 0.05;
 // 低木を置く、マスの中心からの道路の向きの位置。0.5 マスおきに並べ、街路樹はそのあいだ（マスの中心）に立つ

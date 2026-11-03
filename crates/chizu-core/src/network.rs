@@ -207,8 +207,8 @@ impl SegmentKind {
     }
 
     /// 画面に描く車線 1 本の幅（mm）。道路が 1 マスに収まり、半分の幅が小 0.3、中 0.4、大 0.5、
-    /// 高速 0.5 マスになるよう、種類ごとに決める。シミュレーションには使わない。
-    /// 画面の `web/src/map/lanes.ts` と同じにする。
+    /// 高速 0.5 マスになるよう、種類ごとに決める。シミュレーションでは、交差点の停止線と出口の位置
+    /// （`movement::stop_line`）を決めるのにだけ使う。画面の `web/src/map/lanes.ts` と同じにする。
     pub fn lane_width_mm(self) -> i64 {
         match self {
             SegmentKind::Road(RoadKind::Small) => 1_760,

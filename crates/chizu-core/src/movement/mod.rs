@@ -4,7 +4,7 @@
 //! 1 tick に移動の 1 秒ぶん進み、行き先に着いたら消える。歩行者どうしはぶつからない。
 //! 歩行者は交差点の横断歩道と、区間の途中の横切りで車道を渡り、渡るあいだは車を止める（`crossing`）。
 //! 車は同じ車線の前の車との車間で速さを決め、ノードで次のリンクの車線へ移る。
-//! 交差点では、衝突する向きの車に譲ってノードの手前で待つ（`junction`）。
+//! 交差点では、衝突する向きの車に譲って停止線で待つ（`junction`、`stop_line`）。
 //! 建物から建物へ車で向かう移動は、歩く → 車 → 歩く の 3 つの区切りを順に進む（`parking`）。
 
 mod car;
@@ -26,6 +26,9 @@ mod pos;
 pub mod signal;
 #[cfg(test)]
 mod signal_tests;
+pub mod stop_line;
+#[cfg(test)]
+mod stop_line_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -93,6 +96,9 @@ pub struct Trip {
     yielded: u32,
     /// 車線の上で、位置が変わらないまま過ぎた tick 数。動いたら 0 に戻す。
     stalled: u32,
+    /// 車が終わりの交差点の停止線を越えたときに決めた、次のリンクで入る車線の番号（`Network::link_lanes` の並び）。
+    /// 交差点の中にいるあいだだけ持ち、次のリンクへ移ったら `None` に戻す。
+    bound: Option<u8>,
     /// いま歩いているリンクの、経路の中での番号。
     leg: u32,
     offset: LaneOffset,
@@ -210,23 +216,44 @@ impl Trip {
             return None;
         }
         let mm = |(x, y): (i64, i64)| (Mm(x), Mm(y));
+        let link = self.link();
         let prev = (self.leg as usize)
             .checked_sub(1)
             .map(|k| self.route.links[k])
             .and_then(|l| {
                 let (_, step, _) = pos::link_geometry(net, l)?;
+                net.segment(l.segment)?;
                 // ノードを越えたときに、越える前のずれを移り変わりの始まりとして控えてある。
                 let shown = self
                     .blend
                     .map_or_else(|| lane_shift::target(net, l, step, 0), |b| b.from);
-                Some((l, mm(shown)))
+                Some((l, stop_line::stop_line(net, l), mm(shown)))
             });
+        let here = self.shift_on_leg(net, self.leg as usize);
+        // 停止線を越えた車が、次のリンクの出口で描くずれ。ノードを越えたあとの移り変わり（`car::step`）と同じに求める。
+        let next = self.bound.and_then(|index| {
+            let l = *self.route.links.get(self.leg as usize + 1)?;
+            let (_, step, _) = pos::link_geometry(net, l)?;
+            let exit = stop_line::exit_line(net, l);
+            let target = lane_shift::target(net, l, step, usize::from(index));
+            let blend = lane_shift::Blend {
+                from: here,
+                start: 0,
+            };
+            let shift = lane_shift::blended(target, Some(blend), exit.0);
+            Some((l, exit, mm(shift)))
+        });
+        let exit = stop_line::exit_line(net, link);
+        let exit_shift = lane_shift::blended(self.lane_target(net, link), self.blend, exit.0);
         Some(CarPath {
-            link: self.link(),
+            link,
             offset: self.offset,
             len: self.link_len,
+            stop: stop_line::stop_line(net, link),
+            exit,
+            exit_shift: mm(exit_shift),
             prev,
-            lane_shift: mm(self.lane_target(net, self.link())),
+            next,
         })
     }
 
@@ -412,8 +439,8 @@ pub struct Mover {
     pub path: Option<CarPath>,
 }
 
-/// 車の、いまのリンクの上の位置と、抜けてきたリンク。画面は、リンクの終わりのノードの手前で待つ車を
-/// 停止線の手前に描き、ノードを抜けたばかりの車を曲線の上に描くのに使う。
+/// 車の、いまのリンクの上の位置と、交差点の中の通り抜けの区間（[`stop_line`]）。画面は、通り抜けの区間に
+/// いる車を、入ってきたリンクの停止線から出ていくリンクの出口までの曲線の上に描くのに使う。
 /// 描画のためだけの値で、状態にも状態ハッシュにも入らない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CarPath {
@@ -421,11 +448,16 @@ pub struct CarPath {
     /// いまのリンクの始まりからの距離と、リンクの長さ。
     pub offset: LaneOffset,
     pub len: LaneOffset,
-    /// 抜けてきたリンクと、ノードを越える直前に描いていたずれ。経路の最初のリンクにいるか、
+    /// いまのリンクの停止線（[`stop_line::stop_line`]）と、始まりの交差点の出口（[`stop_line::exit_line`]）。
+    pub stop: LaneOffset,
+    pub exit: LaneOffset,
+    /// 出口で描くずれ。
+    pub exit_shift: (Mm, Mm),
+    /// 抜けてきたリンクと、その停止線と、ノードを越える直前に描いていたずれ。経路の最初のリンクにいるか、
     /// 抜けてきたリンクが網から消えていれば `None`。
-    pub prev: Option<(LinkId, (Mm, Mm))>,
-    /// いまの車線のずれ。車線を移る前のずれからの移り変わりは含まない。
-    pub lane_shift: (Mm, Mm),
+    pub prev: Option<(LinkId, LaneOffset, (Mm, Mm))>,
+    /// 停止線を越えた車の、次のリンクと、その出口と、出口で描くずれ。越えていなければ `None`。
+    pub next: Option<(LinkId, LaneOffset, (Mm, Mm))>,
 }
 
 /// リンクと、その始まりからの距離。
@@ -997,6 +1029,7 @@ fn make_trip(
         waited: 0,
         yielded: 0,
         stalled: 0,
+        bound: None,
         route,
         leg: 0,
         offset: from,
@@ -1025,6 +1058,7 @@ impl StateHash for Trip {
         h.write(&self.waited);
         h.write(&self.yielded);
         h.write(&self.stalled);
+        h.write(&self.bound);
         h.write_len(self.route.links.len());
         for l in &self.route.links {
             h.write(&l.segment);

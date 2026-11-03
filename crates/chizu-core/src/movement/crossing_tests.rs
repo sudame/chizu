@@ -128,13 +128,15 @@ impl Town {
         out
     }
 
-    /// 1 tick 進め、交差点 `node` に入った車について、入ってくる腕か出ていく腕の横断歩道に人が
-    /// いなかったことを確かめる。着いた主体を返す。
+    /// 1 tick 進め、交差点 `node` に入った（停止線を越えた）車について、入ってくる腕か出ていく腕の
+    /// 横断歩道に人がいなかったことを確かめる。着いた主体を返す。
     fn step(&mut self, node: NodeId) -> Vec<TripId> {
         let before: Vec<(TripId, LinkId)> = self
             .trips
             .iter()
-            .filter(|(_, t)| car::on_road(t) && car::end_node(&self.net, t.link()) == node)
+            .filter(|(_, t)| {
+                car::on_road(t) && t.bound.is_none() && car::end_node(&self.net, t.link()) == node
+            })
             .map(|(id, t)| (id, t.link()))
             .collect();
         let arrived = self.trips.step(&self.net, &mut self.router, self.now);
@@ -143,8 +145,14 @@ impl Town {
             let Some(t) = self.trips.get(id).filter(|t| t.mode == LaneMode::Car) else {
                 continue;
             };
-            if t.link() != from {
-                for s in [from.segment, t.link().segment] {
+            // 停止線を越えた車は、交差点に入った。
+            if t.link() != from || t.bound.is_some() {
+                let to = if t.link() == from {
+                    t.route().links[t.leg as usize + 1]
+                } else {
+                    t.link()
+                };
+                for s in [from.segment, to.segment] {
                     assert!(
                         !walks.contains(&(node, s)),
                         "人のいる横断歩道を車が通った {:?}",
@@ -535,9 +543,9 @@ fn a_car_stuck_behind_a_blocked_exit_does_not_keep_walkers_waiting() {
     let block = t.drive(at(10, 11, (0, 1), 2_000), at(10, 19, (0, 1), 0));
     let stuck = t.drive(at(10, 2, (0, 1), 0), at(10, 19, (0, 1), 0));
     let hold = |t: &mut Town| {
-        // 交差点を抜けた所より先にいるが、後ろの車が交差点を抜けきるだけの空きはない。
+        // 交差点の出口より先にいるが、出口とのあいだに後ろの車 1 台ぶんの空きはない。
         let b = t.trips.rows[block.slot()].as_mut().unwrap();
-        (b.offset, b.speed, b.stalled) = (LaneOffset(10_000), MmPerTick::ZERO, 0);
+        (b.offset, b.speed, b.stalled) = (LaneOffset(8_000), MmPerTick::ZERO, 0);
     };
     hold(&mut t);
     let mut walker = None;

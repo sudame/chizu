@@ -1132,7 +1132,7 @@ export function crosswalkArms(segments: Float64Array, nodes: Float64Array): Cros
 
 /** 横断歩道の縞（と、入れるときの停止線）。白い車道の上でも黄の車道の上でも見える色にする。 */
 export const ZEBRA_COLOR = hex("#a9b3c2");
-// 縞の、腕の向きの長さと、横の間隔と太さの半分（マス）
+// 縞の、腕の向きの長さと、横の間隔と太さの半分（マス）。長さは中核の `movement/stop_line.rs` の ZEBRA_MM と同じにする
 export const ZEBRA_LENGTH = 0.16;
 const ZEBRA_SPACING = 0.14;
 const ZEBRA_HALF = 0.035;

@@ -1,46 +1,15 @@
-//! 車を、ノードの前後で曲線につないで描く。
+//! 車を、交差点の中の通り抜けの区間では曲線に沿って描く。
 //!
-//! 中核は、車の位置をリンクの上の距離で持ち、リンクはノードの中心からノードの中心までである。
-//! 交差点の手前で待つ車はノードの中心に止まり、ノードを越えると次のリンクの向きへ一度に変わる。
-//! そのまま描くと、待つ車が交差点の真ん中に重なり、曲がる車が直角に向きを変える。
+//! 中核は、車の位置をリンクの上の距離で持つ。交差点の手前で待つ車は停止線で止まり、停止線から
+//! 出ていくリンクの出口までが、交差点の中の通り抜けの区間である（`chizu_core::movement::stop_line`）。
+//! 通り抜けの区間の外は、中核の位置をそのまま描く。区間の途中を横切る人や、乗り降りする建物の前と位置がそろう。
 //!
-//! 画面では、リンクの両端の短い窓の中だけ、リンクの上の距離を描く位置に写し替える。窓の外は
-//! 中核の位置のまま描くので、区間の途中を横切る人や、乗り降りする建物の前と位置がそろう。
-//! 状態は変えない。
-//!
-//! - 終わりの窓（`QUEUE_MM`）：ノードの中心（距離がリンクの長さ）を、車の前の端が停止線に
-//!   かかる所に写し、窓の中を一様に縮める。止まった列は、停止線の手前に詰めて並ぶ。
-//! - 始まりの窓（`TURN_MM`）：入ってきた車線の停止線の手前から、出ていく車線の交差点の出口までの
-//!   二次ベジエ曲線と、その先の窓の終わりまでのまっすぐな線に写す。向きは曲線の接線にする。
-//! - 窓が重なる短いリンクでは、停止線の位置を保ったまま、あいだを一様に縮める。
-//!
-//! 2 本だけがつながるノードで向きが変わる角も、道路の端までを曲線でつなぐ。
-//!
-//! 経路を探し直すと、中核は抜けてきたリンクを忘れる。曲線の途中の車が飛ばないよう、
-//! 描いた曲線の始まりを [`Entry`] として呼ぶ側に覚えさせ、次の回に渡してもらう。
+//! 通り抜けの区間では、入ってきた車線の停止線の点から、出ていく車線の出口の点までの二次ベジエ曲線の上に、
+//! 区間の中で進んだ距離の割合で描く。向きは曲線の接線にする。まっすぐ進む車は、車線に沿って進む。
+//! ノードを越える前は、停止線を越えたときに決めた次のリンクを、越えたあとは抜けてきたリンクを使うので、
+//! ノードの前後で同じ曲線の上を進む。2 本の区間が向きを変えてつながる角も、道路の端から端までを曲線でつなぐ。
 
-use chizu_core::movement::{CAR_LENGTH, MIN_GAP};
-use chizu_core::network::TILE_MM;
-use chizu_core::{CarPath, Dir, Heading, LinkId, Mm, Network, NodeId};
-
-/// ノードを越えてから曲線の上に描く距離（mm）。中核が交差点の中にいるとみなす距離（`JUNCTION_CLEAR`、
-/// 車の長さと車間）と同じにする。
-const TURN_MM: f64 = (CAR_LENGTH + MIN_GAP) as f64;
-
-/// リンクの終わりで、停止線の手前に列を詰める窓の長さ（mm）。車間 3 台ぶんにする。いちばん奥の停止線
-/// （大きい道路の斜めの腕で 9.3m）まで寄せても、縮めた車間が描く車の長さより長く残る。
-const QUEUE_MM: f64 = 3.0 * (CAR_LENGTH + MIN_GAP) as f64;
-
-/// 窓が重なる短いリンクで、始まりの窓のあとを縮める割合の下限。列の車が重ならないようにする。
-const MIN_SCALE: f64 = 0.55;
-
-// 画面の停止線の位置。web/src/map/roads.ts の ZEBRA_LENGTH と、detail.ts の STOP_LINE_GAP、
-// STOP_LINE_WIDTH（マス）と同じにする。
-const ZEBRA_LENGTH: f64 = 0.16 * TILE_MM as f64;
-const STOP_LINE_GAP: f64 = 0.05 * TILE_MM as f64;
-const STOP_LINE_WIDTH: f64 = 0.04 * TILE_MM as f64;
-/// 描く車の長さの半分。web/src/map/movers.ts の車の半分の大きさ（0.2 マス）と同じにする。
-const CAR_HALF: f64 = 0.2 * TILE_MM as f64;
+use chizu_core::{CarPath, Dir, LinkId, Mm, Network, NodeId};
 
 /// 曲線の長さを測るときに分ける数。
 const ARC_SAMPLES: usize = 8;
@@ -51,16 +20,6 @@ pub struct Drawn {
     pub x: f64,
     pub y: f64,
     pub angle: f64,
-}
-
-/// ノードを越えた車の曲線の始まり。`node` と `dir` は、いまのリンクの始まりのノードの中心と向き、
-/// `p0` と `d0` は、入ってきた車線の停止線の手前の点と、そこでの向きである。
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Entry {
-    node: V,
-    dir: V,
-    p0: V,
-    d0: V,
 }
 
 type V = (f64, f64);
@@ -89,12 +48,20 @@ fn mm((x, y): (Mm, Mm)) -> V {
     (x.0 as f64, y.0 as f64)
 }
 
-/// リンクの、始まりと終わりのノード、1 歩の向き（長さ 1 にしたもの）、腕の向き。
+/// リンクの、始まりと終わりのノードの中心、1 歩の向き（長さ 1 にしたもの）、長さ（mm）。
 struct LinkGeom {
     from: NodeId,
     to: NodeId,
+    start: V,
     dir: V,
-    step: (i64, i64),
+    len: f64,
+}
+
+impl LinkGeom {
+    /// 始まりから `along` だけ進み、`side` だけずれた点。
+    fn at(&self, along: f64, side: V) -> V {
+        add(add(self.start, scale(self.dir, along)), side)
+    }
 }
 
 fn geom(net: &Network, link: LinkId) -> Option<LinkGeom> {
@@ -104,159 +71,15 @@ fn geom(net: &Network, link: LinkId) -> Option<LinkGeom> {
         Dir::Forward => (seg.a, seg.b, line.step),
         Dir::Backward => (seg.b, seg.a, (-line.step.0, -line.step.1)),
     };
-    let len = ((step.0 * step.0 + step.1 * step.1) as f64).sqrt();
+    let n = ((step.0 * step.0 + step.1 * step.1) as f64).sqrt();
+    let p = net.node(from)?.pos;
     Some(LinkGeom {
         from,
         to,
-        dir: (step.0 as f64 / len, step.1 as f64 / len),
-        step,
+        start: (p.x.0 as f64, p.y.0 as f64),
+        dir: (step.0 as f64 / n, step.1 as f64 / n),
+        len: line.checked_length()?.0 as f64,
     })
-}
-
-fn center(net: &Network, n: NodeId) -> Option<V> {
-    let p = net.node(n)?.pos;
-    Some((p.x.0 as f64, p.y.0 as f64))
-}
-
-fn heading_of(step: (i64, i64)) -> Option<Heading> {
-    Heading::ALL.into_iter().find(|h| h.step() == step)
-}
-
-/// ノード `n` につながる区間の、道路の端（歩道を含む）までのいちばん広い半分の幅（mm）。
-/// web/src/map/roads.ts の RoadNode の half と同じ。
-fn node_half(net: &Network, n: NodeId) -> f64 {
-    let Some(node) = net.node(n) else {
-        return 0.0;
-    };
-    node.segments
-        .iter()
-        .filter_map(|s| net.segment(*s))
-        .map(|s| {
-            let k = s.kind;
-            i64::from(k.car_lanes_per_side()) * k.lane_width_mm() + k.sidewalk_width_mm()
-        })
-        .max()
-        .unwrap_or(0) as f64
-}
-
-/// ノード `n` が、2 本の区間を向きを変えてつなぐ角か。
-fn is_bend(net: &Network, n: NodeId) -> bool {
-    let Some(node) = net.node(n) else {
-        return false;
-    };
-    let [s, t] = node.segments.as_slice() else {
-        return false;
-    };
-    let arm = |s: chizu_core::SegmentId| {
-        let seg = net.segment(s)?;
-        let line = net.segment_line(s)?;
-        Some(if seg.a == n {
-            line.step
-        } else {
-            (-line.step.0, -line.step.1)
-        })
-    };
-    match (arm(*s), arm(*t)) {
-        (Some(a), Some(b)) => a != (-b.0, -b.1),
-        _ => false,
-    }
-}
-
-fn is_junction(net: &Network, n: NodeId) -> bool {
-    net.node(n).is_some_and(|x| x.segments.len() >= 3)
-}
-
-/// ノード `n` から腕の向き `arm`（ノードから出ていく 1 歩）へ、道路の端までの距離（mm）。
-fn edge(net: &Network, n: NodeId, arm: (i64, i64)) -> f64 {
-    let half = node_half(net, n);
-    if arm.0 != 0 && arm.1 != 0 {
-        half * core::f64::consts::SQRT_2
-    } else {
-        half
-    }
-}
-
-/// リンクの上の距離を描く位置へ写すための、リンク 1 本の寸法（mm）。
-#[derive(Clone, Copy, Debug)]
-struct Layout {
-    len: f64,
-    /// 始まりの窓の長さ。始まりのノードで曲がらなければ 0。
-    turn: f64,
-    /// 始まりの窓の終わりを写す、始まりのノードからの距離。窓が重ならなければ `turn` と同じ。
-    settle: f64,
-    /// 曲線の終わり（交差点の出口）の、始まりのノードからの距離。
-    exit: f64,
-    /// 終わりのノードの手前で待つ車の中心までの、終わりのノードからの距離。
-    stop: f64,
-}
-
-impl Layout {
-    fn of(net: &Network, link: LinkId, g: &LinkGeom, len: f64) -> Layout {
-        let exit = if is_junction(net, g.from) || is_bend(net, g.from) {
-            edge(net, g.from, g.step)
-        } else {
-            0.0
-        };
-        let back = (-g.step.0, -g.step.1);
-        let stop = if is_junction(net, g.to) {
-            let kind = net.segment(link.segment).map(|s| s.kind);
-            let walks = kind.is_some_and(|k| k.has_sidewalks());
-            let zebra = walks
-                && heading_of(back)
-                    .and_then(|h| net.node(g.to).map(|n| !n.crosswalk_removed(h)))
-                    .unwrap_or(false);
-            edge(net, g.to, back)
-                + if zebra { ZEBRA_LENGTH } else { 0.0 }
-                + STOP_LINE_GAP
-                + STOP_LINE_WIDTH
-                + CAR_HALF
-        } else if is_bend(net, g.to) {
-            edge(net, g.to, back)
-        } else {
-            0.0
-        };
-        let stop = stop.min(len);
-        let turn = if exit > 0.0 {
-            TURN_MM.min(len / 2.0)
-        } else {
-            0.0
-        };
-        // 窓が重ならなければ、始まりの窓の終わりは中核の位置のまま。重なれば、停止線の位置を保ち、
-        // あいだを縮める割合が下限を下回らない所まで、始まりの窓の終わりを手前に寄せる。
-        let settle = if len - QUEUE_MM > turn {
-            turn
-        } else {
-            (len - stop - MIN_SCALE * (len - turn)).clamp(0.0, turn)
-        };
-        Layout {
-            len,
-            turn,
-            settle,
-            exit: exit.min(settle),
-            stop,
-        }
-    }
-
-    /// 始まりの窓のあとの距離 `o` を描く、始まりのノードからの距離。
-    fn along(&self, o: f64) -> f64 {
-        let queue = self.len - QUEUE_MM;
-        if queue > self.turn {
-            if o <= queue {
-                o
-            } else {
-                queue + (o - queue) * (QUEUE_MM - self.stop) / QUEUE_MM
-            }
-        } else {
-            let span = (self.len - self.turn).max(1.0);
-            self.settle + (o - self.turn) * (self.len - self.stop - self.settle) / span
-        }
-    }
-}
-
-fn link_len(net: &Network, link: LinkId) -> f64 {
-    net.segment_line(link.segment)
-        .and_then(|l| l.checked_length())
-        .map_or(0.0, |m| m.0 as f64)
 }
 
 /// 二次ベジエ曲線の、`t` の位置と接線。
@@ -300,70 +123,81 @@ fn arc_length(p0: V, p1: V, p2: V) -> f64 {
     total
 }
 
-/// 車を描く位置と向き。`shift` は中核が求めた、車線に寄せるずれである。`remembered` は、前の回に
-/// この車について返した曲線の始まりで、中核が抜けてきたリンクを忘れたときに代わりに使う。
-/// 描く位置と、曲線の上にいれば次の回に渡す曲線の始まりを返す。網から道筋を求められなければ `None`。
-pub fn draw(
-    net: &Network,
-    path: &CarPath,
-    shift: (Mm, Mm),
-    remembered: Option<&Entry>,
-) -> Option<(Drawn, Option<Entry>)> {
+/// 点 `p0`（向き `d0`）から点 `p2`（向き `d2`）への曲線の、長さの割合 `f` の所。
+fn on_curve(p0: V, d0: V, p2: V, d2: V, f: f64) -> Drawn {
+    let p1 = control(p0, d0, p2, d2);
+    let f = f.clamp(0.0, 1.0);
+    let arc = arc_length(p0, p1, p2);
+    // 曲線の上の距離が割合に比例するよう、折れ線の長さで t を求める。
+    let mut t = f;
+    if arc > 1.0 {
+        let want = f * arc;
+        let mut acc = 0.0;
+        let mut last = p0;
+        for k in 1..=ARC_SAMPLES {
+            let tk = k as f64 / ARC_SAMPLES as f64;
+            let (p, _) = bezier(p0, p1, p2, tk);
+            let piece = dist(last, p);
+            if acc + piece >= want || k == ARC_SAMPLES {
+                let into = if piece > 0.0 {
+                    ((want - acc) / piece).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                t = (tk - 1.0 / ARC_SAMPLES as f64) + into / ARC_SAMPLES as f64;
+                break;
+            }
+            acc += piece;
+            last = p;
+        }
+    }
+    let (p, d) = bezier(p0, p1, p2, t);
+    let d = if d.0.abs() + d.1.abs() < 1e-9 { d2 } else { d };
+    Drawn {
+        x: p.0,
+        y: p.1,
+        angle: d.1.atan2(d.0),
+    }
+}
+
+/// 車を描く位置と向き。`shift` は中核が求めた、車線に寄せるずれである。網から道筋を求められなければ `None`。
+pub fn draw(net: &Network, path: &CarPath, shift: (Mm, Mm)) -> Option<Drawn> {
     let g = geom(net, path.link)?;
-    let len = f64::from(path.len.0);
-    if len <= 0.0 {
-        return None;
+    let o = f64::from(path.offset.0).min(g.len);
+    let stop = f64::from(path.stop.0);
+    let exit = f64::from(path.exit.0);
+    // 停止線を越え、ノードの手前にいる。
+    if let Some((next, next_exit, next_shift)) = path.next
+        && o > stop
+        && let Some(ng) = geom(net, next).filter(|ng| ng.from == g.to)
+    {
+        let next_exit = f64::from(next_exit.0);
+        let span = g.len - stop + next_exit;
+        if span > 0.0 {
+            let p0 = g.at(stop, mm(shift));
+            let p2 = ng.at(next_exit, mm(next_shift));
+            return Some(on_curve(p0, g.dir, p2, ng.dir, (o - stop) / span));
+        }
     }
-    let o = f64::from(path.offset.0).min(len);
-    let lay = Layout::of(net, path.link, &g, len);
-    let start = center(net, g.from)?;
-    let straight = |along: f64, side: V| Drawn {
-        x: start.0 + g.dir.0 * along + side.0,
-        y: start.1 + g.dir.1 * along + side.1,
+    // ノードを越え、出口の手前にいる。
+    if o < exit
+        && let Some((prev, prev_stop, shown)) = path.prev
+        && let Some(pg) = geom(net, prev).filter(|pg| pg.to == g.from)
+    {
+        let before = pg.len - f64::from(prev_stop.0);
+        let span = before + exit;
+        if span > 0.0 {
+            let p0 = pg.at(f64::from(prev_stop.0), mm(shown));
+            let p2 = g.at(exit, mm(path.exit_shift));
+            return Some(on_curve(p0, pg.dir, p2, g.dir, (before + o) / span));
+        }
+    }
+    let p = g.at(o, mm(shift));
+    Some(Drawn {
+        x: p.0,
+        y: p.1,
         angle: g.dir.1.atan2(g.dir.0),
-    };
-    if o >= lay.turn {
-        return Some((straight(lay.along(o), mm(shift)), None));
-    }
-    let fresh = path.prev.and_then(|(prev, shown)| {
-        let pg = geom(net, prev)?;
-        (pg.to == g.from).then_some(())?;
-        let pstop = Layout::of(net, prev, &pg, link_len(net, prev)).stop;
-        Some(Entry {
-            node: start,
-            dir: g.dir,
-            p0: add(sub(start, scale(pg.dir, pstop)), mm(shown)),
-            d0: pg.dir,
-        })
-    });
-    let same_place = |e: &&Entry| dist(e.node, start) < 1.0 && dist(e.dir, g.dir) < 1e-6;
-    let Some(entry) = fresh.or_else(|| remembered.filter(same_place).copied()) else {
-        // 抜けてきた所が分からなければ、ノードの中心から窓の終わりまでをまっすぐ描く。
-        return Some((straight(lay.settle * o / lay.turn, mm(shift)), None));
-    };
-    // 曲線の終わりから、窓の終わりまではまっすぐ進む。窓の中の距離を、曲線とまっすぐな所の長さで分ける。
-    let lane = mm(path.lane_shift);
-    let p2 = add(add(start, scale(g.dir, lay.exit)), lane);
-    let p1 = control(entry.p0, entry.d0, p2, g.dir);
-    let arc = arc_length(entry.p0, p1, p2);
-    let s = o / lay.turn * (arc + lay.settle - lay.exit);
-    if s >= arc || arc < 1.0 {
-        return Some((straight(lay.exit + (s - arc).max(0.0), lane), Some(entry)));
-    }
-    let (p, d) = bezier(entry.p0, p1, p2, s / arc);
-    let d = if d.0.abs() + d.1.abs() < 1e-9 {
-        g.dir
-    } else {
-        d
-    };
-    Some((
-        Drawn {
-            x: p.0,
-            y: p.1,
-            angle: d.1.atan2(d.0),
-        },
-        Some(entry),
-    ))
+    })
 }
 
 /// 角度（ラジアン）を、x 軸から y 軸へ回る 1 周を 65536 とした値に直す。
@@ -376,6 +210,7 @@ pub fn angle_code(angle: f64) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chizu_core::movement::stop_line::{exit_line, stop_line};
     use chizu_core::{Command, LaneMode, LaneOffset, RoadKind, TilePos, World};
 
     fn close(a: f64, b: f64) -> bool {
@@ -463,145 +298,104 @@ mod tests {
             .expect("区間がない")
     }
 
-    fn path(link: LinkId, offset: u32, prev: Option<(LinkId, (Mm, Mm))>) -> CarPath {
+    const ZERO: (Mm, Mm) = (Mm(0), Mm(0));
+    const NODE: f64 = 10.0 * 8_000.0 + 4_000.0;
+
+    fn path(net: &Network, link: LinkId, offset: u32) -> CarPath {
         CarPath {
             link,
             offset: LaneOffset(offset),
             len: LaneOffset(80_000),
-            prev,
-            lane_shift: (Mm(0), Mm(0)),
+            stop: stop_line(net, link),
+            exit: exit_line(net, link),
+            exit_shift: ZERO,
+            prev: None,
+            next: None,
         }
     }
 
-    fn at(net: &Network, p: &CarPath, shift: (Mm, Mm)) -> Drawn {
-        draw(net, p, shift, None).unwrap().0
-    }
-
-    const ZERO: (Mm, Mm) = (Mm(0), Mm(0));
-    const NODE: f64 = 10.0 * 8_000.0 + 4_000.0;
-
-    #[test]
-    fn a_car_waiting_at_the_junction_is_drawn_behind_the_stop_line() {
-        let w = crossroads();
-        let net = w.network();
-        let east = link_toward(net, (0, 10), (10, 10));
-        let d = at(net, &path(east, 80_000, None), ZERO);
-        // 中くらいの道路の端は 0.4 マス、横断歩道 0.16、すき間 0.05、停止線 0.04、車の半分 0.2 マス。
-        let want = NODE - (0.4 + 0.16 + 0.05 + 0.04 + 0.2) * 8_000.0;
-        assert!(close(d.x, want), "{} != {want}", d.x);
-        assert!(close(d.angle, 0.0));
+    fn at(net: &Network, p: &CarPath) -> Drawn {
+        draw(net, p, ZERO).unwrap()
     }
 
     #[test]
-    fn a_car_in_the_middle_of_a_link_is_drawn_where_the_core_has_it() {
+    fn a_car_outside_the_junctions_is_drawn_where_the_core_has_it() {
         let w = crossroads();
         let net = w.network();
         let east = link_toward(net, (0, 10), (10, 10));
         let on = link_toward(net, (10, 10), (20, 10));
-        // 始まりが交差点のリンクでも、始まりの窓を過ぎれば中核の位置のまま描く。
-        for o in [7_000, 8_000, 40_000, 59_000] {
-            let d = at(net, &path(on, o, Some((east, ZERO))), ZERO);
-            assert!(close(d.x, NODE + f64::from(o)), "{o}: {}", d.x);
-        }
-        // 始まりが行き止まりのリンクも、終わりの窓の手前までは中核の位置のまま描く。
-        for o in [0, 8_000, 40_000, 59_000] {
-            let d = at(net, &path(east, o, None), ZERO);
+        // 停止線で待つ車も、中核の位置のまま描く。窓の中で縮めない。
+        let stop = stop_line(net, east).0;
+        for o in [0, 8_000, 40_000, 72_000, stop] {
+            let d = at(net, &path(net, east, o));
             assert!(close(d.x, 4_000.0 + f64::from(o)), "{o}: {}", d.x);
+            assert!(close(d.angle, 0.0));
+        }
+        let exit = exit_line(net, on).0;
+        for o in [exit, 8_000, 40_000, 79_000] {
+            let mut p = path(net, on, o);
+            p.prev = Some((east, LaneOffset(stop), ZERO));
+            let d = at(net, &p);
+            assert!(close(d.x, NODE + f64::from(o)), "{o}: {}", d.x);
         }
     }
 
     #[test]
-    fn a_queue_keeps_its_order_and_spacing() {
+    fn the_waiting_car_is_behind_the_stop_line() {
         let w = crossroads();
         let net = w.network();
         let east = link_toward(net, (0, 10), (10, 10));
-        let spacing = (CAR_LENGTH + MIN_GAP) as f64;
-        let xs: Vec<f64> = (0..8)
-            .map(|k| {
-                let o = 80_000 - k * (CAR_LENGTH + MIN_GAP);
-                at(net, &path(east, o, None), ZERO).x
-            })
-            .collect();
-        for p in xs.windows(2) {
-            // 並びは変わらず、描いた車の長さ（0.4 マス）より離れる。
-            assert!(p[0] - p[1] > 2.0 * CAR_HALF, "{xs:?}");
-            assert!(p[0] - p[1] <= spacing + 1e-6, "{xs:?}");
-        }
-    }
-
-    /// 1 マスのリンクの終わりで待つ車の前の端が、停止線（横断歩道の外側）の手前にあるか。
-    /// `before` は `from` の手前のノードで、そこから `from` へまっすぐ入ってくる。
-    fn stops_behind_the_line(w: &World, [before, from, to]: [(i64, i64); 3], len: u32, half: f64) {
-        let net = w.network();
-        let link = link_toward(net, from, to);
-        let came = link_toward(net, before, from);
-        let mut p = path(link, len, None);
-        p.len = LaneOffset(len);
-        let d = at(net, &p, ZERO);
-        let g = geom(net, link).unwrap();
-        let start = center(net, g.from).unwrap();
-        let along = (d.x - start.0) * g.dir.0 + (d.y - start.1) * g.dir.1;
-        let front = along + CAR_HALF;
-        // 停止線の外側の、終わりのノードからの距離。detail.ts の stopLine と同じ式である。
-        let line = half + ZEBRA_LENGTH + STOP_LINE_GAP + STOP_LINE_WIDTH;
-        assert!(
-            close(f64::from(len) - front, line),
-            "前の端 {front}、停止線 {}",
-            f64::from(len) - line
-        );
-        // 中核で車間を空けて後ろにいる車は、待つ車と重ならない。
-        let spacing = CAR_LENGTH + MIN_GAP;
-        for o in [0, (len - spacing) / 2, len - spacing] {
-            p.offset = LaneOffset(o);
-            p.prev = Some((came, ZERO));
-            let behind = at(net, &p, ZERO);
-            let gap = (d.x - behind.x).hypot(d.y - behind.y);
-            assert!(gap >= 2.0 * CAR_HALF, "{o}: {gap}");
-        }
+        // 中くらいの道路の端 3.2m、横断歩道 1.28m、すき間 0.4m、停止線 0.32m、車の長さの半分 2.25m。
+        let want = 80_000 - 3_200 - 1_280 - 400 - 320 - 2_250;
+        assert_eq!(stop_line(net, east).0, want);
+        assert_eq!(exit_line(net, east).0, 0);
+        let on = link_toward(net, (10, 10), (20, 10));
+        assert_eq!(exit_line(net, on).0, 3_200);
     }
 
     #[test]
-    fn on_a_one_tile_link_the_waiting_car_stays_behind_the_stop_line() {
-        let w = town(&[
-            ((0, 10), (20, 10)),
-            ((10, 0), (10, 20)),
-            ((11, 0), (11, 20)),
-        ]);
-        stops_behind_the_line(&w, [(0, 10), (10, 10), (11, 10)], 8_000, 3_200.0);
-        let w = town(&[((0, 0), (20, 20)), ((10, 0), (10, 20)), ((11, 0), (11, 20))]);
-        let diagonal = 11_314;
-        let half = 3_200.0 * core::f64::consts::SQRT_2;
-        stops_behind_the_line(&w, [(0, 0), (10, 10), (11, 11)], diagonal, half);
-    }
-
-    #[test]
-    fn a_turning_car_follows_a_smooth_arc() {
+    fn a_turning_car_follows_a_smooth_arc_across_the_node() {
         let w = crossroads();
         let net = w.network();
         let east = link_toward(net, (0, 10), (10, 10));
         let north = link_toward(net, (10, 10), (10, 0));
+        let stop = stop_line(net, east);
+        let exit = exit_line(net, north);
+        let lane = (Mm(-1_000), Mm(0));
         let shown = (Mm(0), Mm(-1_000));
+        let mut points = Vec::new();
+        // ノードの手前（停止線を越えて次のリンクを決めた車）。
+        for o in (stop.0..=80_000).step_by(200) {
+            let mut p = path(net, east, o);
+            p.next = Some((north, exit, lane));
+            points.push(draw(net, &p, shown).unwrap());
+        }
+        // ノードを越えたあと。
+        for o in (0..=exit.0 + 2_000).step_by(200) {
+            let mut p = path(net, north, o);
+            p.prev = Some((east, stop, shown));
+            p.exit_shift = lane;
+            points.push(draw(net, &p, lane).unwrap());
+        }
+        // 曲がり始めは、停止線で待っていた所と同じ。
+        let wait = draw(net, &path(net, east, stop.0), shown).unwrap();
+        assert!(close(points[0].x, wait.x) && close(points[0].y, wait.y));
         let mut last = 0.0_f64;
-        let mut prev_pos: Option<(f64, f64)> = None;
-        let wait = at(net, &path(east, 80_000, None), shown);
-        for o in (0..=7_000).step_by(250) {
-            let d = at(net, &path(north, o, Some((east, shown))), ZERO);
+        for w in points.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            assert!(
+                (a.x - b.x).hypot(a.y - b.y) < 600.0,
+                "位置が飛んだ {a:?} {b:?}"
+            );
             // 向きは東から北へ、少しずつ回る。
-            assert!(d.angle <= last + 1e-9, "{o}: {} > {last}", d.angle);
-            assert!(last - d.angle < 0.5, "{o}: 向きが飛んだ");
-            last = d.angle;
-            if let Some(p) = prev_pos {
-                assert!((d.x - p.0).hypot(d.y - p.1) < 1_000.0, "{o}: 位置が飛んだ");
-            } else {
-                // 曲がり始めは、停止線の手前で待っていた所と同じ。
-                assert!(close(d.x, wait.x) && close(d.y, wait.y), "{d:?} {wait:?}");
-            }
-            prev_pos = Some((d.x, d.y));
+            assert!(b.angle <= last + 1e-9, "{b:?} > {last}");
+            assert!(last - b.angle < 0.3, "向きが飛んだ {a:?} {b:?}");
+            last = b.angle;
         }
         assert!(close(last, -core::f64::consts::FRAC_PI_2));
-        // 窓を抜けた所は、中核の位置と同じ。
-        let p = prev_pos.unwrap();
-        assert!(close(p.0, NODE) && close(p.1, NODE - 7_000.0), "{p:?}");
+        // 出口を過ぎた所は、中核の位置と同じ。
+        let end = points.last().unwrap();
+        assert!(close(end.x, NODE - 1_000.0) && close(end.y, NODE - f64::from(exit.0 + 2_000)));
     }
 
     #[test]
@@ -610,32 +404,29 @@ mod tests {
         let net = w.network();
         let east = link_toward(net, (0, 10), (10, 10));
         let on = link_toward(net, (10, 10), (20, 10));
+        let stop = stop_line(net, east);
+        let exit = exit_line(net, on);
         let lane = (Mm(0), Mm(-1_920));
-        for o in (0..=7_000).step_by(500) {
-            let mut p = path(on, o, Some((east, lane)));
-            p.lane_shift = lane;
-            let d = at(net, &p, lane);
-            assert!(close(d.y, NODE - 1_920.0), "{o}: {d:?}");
-            assert!(close(d.angle, 0.0));
+        for o in (stop.0..=80_000).step_by(500) {
+            let mut p = path(net, east, o);
+            p.next = Some((on, exit, lane));
+            let d = draw(net, &p, lane).unwrap();
+            assert!(
+                close(d.y, NODE - 1_920.0) && close(d.angle, 0.0),
+                "{o}: {d:?}"
+            );
+            assert!(close(d.x, 4_000.0 + f64::from(o)), "{o}: {d:?}");
         }
-    }
-
-    #[test]
-    fn a_rerouted_car_keeps_to_the_arc_it_was_on() {
-        let w = crossroads();
-        let net = w.network();
-        let east = link_toward(net, (0, 10), (10, 10));
-        let north = link_toward(net, (10, 10), (10, 0));
-        let (on_arc, entry) =
-            draw(net, &path(north, 3_000, Some((east, ZERO))), ZERO, None).unwrap();
-        let entry = entry.expect("曲線の上にいる");
-        // 経路を探し直して、抜けてきたリンクを忘れても、覚えた曲線の始まりで同じ所に描く。
-        let (again, kept) = draw(net, &path(north, 3_000, None), ZERO, Some(&entry)).unwrap();
-        assert_eq!(again, on_arc);
-        assert_eq!(kept, Some(entry));
-        // 別のノードを越えたあとの車には使わない。
-        let other = link_toward(net, (10, 10), (20, 10));
-        let (d, _) = draw(net, &path(other, 3_000, None), ZERO, Some(&entry)).unwrap();
-        assert!(close(d.angle, 0.0));
+        for o in (0..=exit.0).step_by(500) {
+            let mut p = path(net, on, o);
+            p.prev = Some((east, stop, lane));
+            p.exit_shift = lane;
+            let d = draw(net, &p, lane).unwrap();
+            assert!(
+                close(d.y, NODE - 1_920.0) && close(d.angle, 0.0),
+                "{o}: {d:?}"
+            );
+            assert!(close(d.x, NODE + f64::from(o)), "{o}: {d:?}");
+        }
     }
 }
