@@ -11,6 +11,7 @@ import {
   parseCityStats,
   shownZone,
   togglePinned,
+  utilityKey,
   utilityLowHeadroom,
   utilityNotice,
   utilityShortage,
@@ -250,5 +251,15 @@ describe("city_stats の並びの形", () => {
 
   test("形の合わない並びでも、内訳は空になるだけで読める", () => {
     expect(parseCityStats([...fixed, 2, 0, 5]).demandFactors).toEqual([[], [], [], []]);
+  });
+});
+
+describe("utilityKey", () => {
+  test("理由が増えたら変わり、数だけ変わっても変わらない", () => {
+    const power = "電気が 3 足りない。発電所を足す";
+    const water = "水道が 5 足りない。浄水場を足す";
+    expect(utilityKey([power], true)).toBe(utilityKey([power.replace("3", "40")], true));
+    expect(utilityKey([power], true)).not.toBe(utilityKey([power, water], true));
+    expect(utilityKey([power], true)).not.toBe(utilityKey([power], false));
   });
 });

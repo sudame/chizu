@@ -447,8 +447,7 @@
         width: max-content;
         max-width: min(28em, calc(100vw - 520px));
       }
-      #city-shortage,
-      #growth-notice,
+      #notice-toast,
       #save-notice,
       #milestone-notice,
       .save-alert {
@@ -464,19 +463,53 @@
         color: #0d652d;
         background: #e6f4ea;
       }
-      #growth-notice button {
+      /* 新しい知らせの札。数秒で消え、押すと一覧が開く */
+      #notice-live {
+        display: contents;
+      }
+      #notice-toast {
         display: block;
-        margin-top: 4px;
-        padding: 2px 12px;
-        font-size: 13px;
-        color: #fff;
-        background: var(--accent);
+        font: inherit;
+        text-align: left;
         border: 0;
-        border-radius: var(--r-button);
         cursor: pointer;
       }
-      #growth-notice button:hover {
-        background: #1558b0;
+      /* 通知センターの一覧。右上の鐘の下に開く */
+      #notice-panel {
+        position: fixed;
+        top: calc(var(--edge) + 32px + var(--gap));
+        right: var(--edge);
+        width: min(24em, calc(100vw - 2 * var(--edge)));
+        max-height: calc(100vh - 2 * var(--edge) - 32px - var(--gap) - var(--bar-h, 64px));
+        overflow-y: auto;
+        font-size: 13px;
+      }
+      /* 開発用のフィードバックのボタンが鐘の下にあるときは、その下に開く */
+      body:has(#feedback-open:not([hidden])) #notice-panel {
+        top: calc(var(--edge) + 2 * (32px + var(--gap)));
+      }
+      #notice-empty {
+        margin: 0;
+        color: var(--ink-sub);
+      }
+      #notice-list {
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .notice-item + .notice-item {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid var(--line);
+      }
+      .notice-item > div {
+        color: var(--ink-sub);
+      }
+      .notice-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--gap);
+        margin-top: 6px;
       }
       #save-alerts {
         display: flex;
@@ -511,11 +544,19 @@
         height: 6em;
       }
 
-      /* 右上の小さな丸いボタン */
-      #feedback-open {
+      /* 右上の小さな丸いボタン。鐘の下にフィードバックを縦に並べる */
+      #corner {
         position: fixed;
         top: var(--edge);
         right: var(--edge);
+        display: flex;
+        flex-direction: column;
+        gap: var(--gap);
+        align-items: flex-end;
+      }
+      #notice-bell,
+      #feedback-open {
+        position: relative;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -529,8 +570,29 @@
         box-shadow: var(--shadow);
         cursor: pointer;
       }
+      #notice-bell:hover,
       #feedback-open:hover {
         background: var(--hover);
+      }
+      #notice-bell:not([data-count="0"]) {
+        color: var(--ink);
+      }
+      #notice-count {
+        position: absolute;
+        top: -4px;
+        right: -4px;
+        box-sizing: border-box;
+        min-width: 16px;
+        height: 16px;
+        padding: 0 4px;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 16px;
+        color: #fff;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+        background: var(--bad);
+        border-radius: 8px;
       }
       #dev-tools {
         max-width: 12em;
@@ -952,7 +1014,9 @@
       /* display を決めた部品も、hidden のときは隠す */
       .tool-menu[hidden],
       #feedback-open[hidden],
-      #growth-notice button[hidden] {
+      #notice-toast[hidden],
+      #notice-count[hidden],
+      #notice-empty[hidden] {
         display: none;
       }
 
@@ -967,6 +1031,17 @@
         body[data-menu-open] #map-meta {
           visibility: hidden;
         }
+        /* 上の帯が右の端まで届くので、通知センターの一覧は帯の下に開く */
+        body #notice-panel {
+          top: calc(var(--hudbar-h, 40px) + 2 * var(--edge) + var(--gap));
+          max-height: calc(100vh - var(--hudbar-h, 40px) - 3 * var(--edge) - var(--bar-h, 64px));
+        }
+        body:has(#feedback-open:not([hidden])) #notice-panel {
+          top: max(
+            calc(var(--hudbar-h, 40px) + 2 * var(--edge) + var(--gap)),
+            calc(var(--edge) + 2 * (32px + var(--gap)))
+          );
+        }
         /* 左下の部品の上へ積む */
         #notices {
           top: auto;
@@ -978,6 +1053,12 @@
           width: auto;
           max-width: none;
         }
+        /* 通知センターの一覧を開いているあいだも、隅の部品と知らせが一覧に重なるので隠す */
+        body[data-notices-open] #map-controls,
+        body[data-notices-open] #map-meta,
+        body[data-notices-open] #notices,
+        body[data-notices-open] #inspector,
+        body[data-notices-open] #hud-details,
         body[data-layers-open] #notices,
         body[data-layers-open] #map-meta {
           visibility: hidden;
@@ -1025,6 +1106,7 @@
         <symbol id="i-minus" viewBox="0 0 20 20"><path d="M4 10h12" /></symbol>
         <symbol id="i-pause" viewBox="0 0 20 20"><path d="M7 4.5v11M13 4.5v11" /></symbol>
         <symbol id="i-more" viewBox="0 0 20 20"><circle cx="4.5" cy="10" r="1" /><circle cx="10" cy="10" r="1" /><circle cx="15.5" cy="10" r="1" /></symbol>
+        <symbol id="i-bell" viewBox="0 0 20 20"><path d="M5 14.5V9a5 5 0 0110 0v5.5l1.5 1H3.5zM8.2 17.5h3.6" /></symbol>
         <symbol id="i-chat" viewBox="0 0 20 20"><path d="M4 4.5h12v8H9.5L6 15.5v-3H4z" /></symbol>
       </defs>
     </svg>
@@ -1091,11 +1173,7 @@
       </aside>
     </div>
     <div id="notices">
-      <div id="city-shortage" data-map-panel role="status" hidden></div>
-      <div id="growth-notice" data-map-panel hidden>
-        <div role="status"><strong id="growth-notice-head"></strong><div id="growth-notice-action"></div></div>
-        <button type="button" id="growth-notice-jump" hidden></button>
-      </div>
+      <div id="notice-live" role="status"><button type="button" id="notice-toast" data-map-panel hidden></button></div>
       <div id="milestone-notice" data-map-panel role="status" hidden></div>
     </div>
     <div id="toolstack" data-map-panel>
@@ -1183,7 +1261,15 @@
         <div data-scale-line></div>
       </div>
     </div>
-    <button type="button" id="feedback-open" data-map-panel aria-label="フィードバック" title="フィードバック" hidden><svg class="icon" aria-hidden="true"><use href="#i-chat" /></svg></button>
+    <div id="corner">
+      <button type="button" id="notice-bell" data-map-panel data-count="0" aria-label="知らせ" title="知らせ" aria-controls="notice-panel" aria-expanded="false"><svg class="icon" aria-hidden="true"><use href="#i-bell" /></svg><span id="notice-count" aria-hidden="true" hidden></span></button>
+      <button type="button" id="feedback-open" data-map-panel aria-label="フィードバック" title="フィードバック" hidden><svg class="icon" aria-hidden="true"><use href="#i-chat" /></svg></button>
+    </div>
+    <div id="notice-panel" data-map-panel class="panel" hidden>
+      <h2>知らせ</h2>
+      <p id="notice-empty">いまの知らせはない</p>
+      <ul id="notice-list"></ul>
+    </div>
     <dialog id="feedback">
       <form method="dialog">
         <p>気づいたことを書く。画面、状態、これまでの操作の記録と一緒に保存する。</p>
