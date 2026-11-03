@@ -527,12 +527,26 @@ impl World {
             self.seed,
             self.tick,
         ) {
+            let before = self
+                .population
+                .citizen(id)
+                .map(|r| (r.workplace, r.schedule));
             self.population.set_workplace(id, workplace);
             let schedule = match workplace {
-                Some(w) => ScheduleState {
-                    next: Activity::Work,
-                    depart_at: Some(self.next_leave_home(id, w)),
-                },
+                Some(w) => {
+                    // 勤め先を乗り換えた住民は、今日まだ来ていない出発の時刻をそのまま残す。
+                    // 引き直すと、時刻が今より前のときに出発が翌日になり、その日の出勤を飛ばしてしまう。
+                    let kept = match before {
+                        Some((Some(_), s)) if s.next == Activity::Work => {
+                            s.depart_at.filter(|t| *t > self.tick)
+                        }
+                        _ => None,
+                    };
+                    ScheduleState {
+                        next: Activity::Work,
+                        depart_at: Some(kept.unwrap_or_else(|| self.next_leave_home(id, w))),
+                    }
+                }
                 None => ScheduleState::default(),
             };
             self.population.set_schedule(id, schedule);
@@ -1310,5 +1324,68 @@ pub(crate) mod tests {
         assert!(same.len() > 30, "残った住民が少ない：{}", same.len());
         let (was, now): (u64, u64) = same.iter().fold((0, 0), |a, s| (a.0 + s.0, a.1 + s.1));
         assert!(now * 10 < was * 9, "通勤の距離が縮まない：{was} → {now}");
+    }
+
+    /// 乗り換えるのは、家で出発を待っている住民だけで、通勤の途中や、職場、店にいる住民は動かさない。
+    /// 乗り換えた住民は、今日まだ来ていない出発の時刻を変えない（引き直すと、その日の出勤を飛ばしうる）。
+    #[test]
+    fn only_waiting_workers_switch_and_keep_their_departure() {
+        let zones = [
+            ZoneKind::Residential,
+            ZoneKind::Residential,
+            ZoneKind::Residential,
+            ZoneKind::Industrial,
+        ];
+        let mut w = city(&zones);
+        run_days(&mut w, 5);
+        road(&mut w, (-60, 22), (20, 22));
+        for (y0, y1) in [(17, 21), (23, 27)] {
+            let area = TileRect::from_corners(TilePos::new(-59, y0), TilePos::new(19, y1));
+            let zone = Some(ZoneKind::Industrial);
+            apply(&mut w, Command::PaintZone { area, zone });
+        }
+        let snapshot = |w: &World| -> BTreeMap<CitizenId, crate::citizens::CitizenRow> {
+            let p = w.population();
+            p.citizen_ids()
+                .map(|id| (id, p.citizen(id).unwrap()))
+                .collect()
+        };
+        let (mut switched, mut kept, mut busy) = (0, 0, 0);
+        for _ in 0..8 * TICKS_PER_DAY {
+            let at_update = w.tick().0.is_multiple_of(JOB_INTERVAL);
+            let before = at_update.then(|| snapshot(&w));
+            let now = w.tick();
+            w.step();
+            let Some(before) = before else { continue };
+            let after = snapshot(&w);
+            for (id, was) in &before {
+                let Some(is) = after.get(id) else { continue };
+                let (Some(from), Some(to)) = (was.workplace, is.workplace) else {
+                    continue;
+                };
+                if from == to {
+                    continue;
+                }
+                switched += 1;
+                assert!(was.trip.is_none(), "移動の途中の住民が乗り換えた");
+                assert_eq!(
+                    was.schedule.next,
+                    Activity::Work,
+                    "家で待っていない住民が乗り換えた"
+                );
+                assert!(w.errands.at_shop(*id).is_none(), "店にいる住民が乗り換えた");
+                if let Some(t) = was.schedule.depart_at.filter(|t| *t > now) {
+                    assert_eq!(is.schedule.depart_at, Some(t), "出発の時刻が変わった");
+                    kept += 1;
+                }
+            }
+            busy += before
+                .values()
+                .filter(|r| r.workplace.is_some() && r.schedule.next != Activity::Work)
+                .count();
+        }
+        assert!(switched > 0, "誰も乗り換えない");
+        assert!(kept > 0, "出発の時刻を残した住民がいない");
+        assert!(busy > 0, "職場や店にいる住民がいない");
     }
 }

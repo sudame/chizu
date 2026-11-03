@@ -4,7 +4,7 @@
 //! 直線距離が近い順に [`JOB_CANDIDATES`] 件の空きのある職場を候補にし、近いほど選ばれやすく 1 件を選ぶ。
 //! 道のりは測らない。すでに勤めている住民の一部も、職場の更新のたびに、近い職場へ乗り換えるかを見直す。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::building::{Building, Buildings};
 use crate::citizens::{Activity, Population, WORKING_AGES};
@@ -39,6 +39,9 @@ pub fn workers_by_building(
 /// 空きを探す格子の 1 辺のマス数。
 const CELL: i64 = 16;
 
+/// 空きのあるセルがこの数以下なら、輪をたどらずに直接見る。
+const DIRECT_CELLS: usize = 64;
+
 /// 家から職場までの出入口の直線距離（m）。小数点以下は切り捨てる。
 /// 通勤の手段を決める距離（`movement::commute` の `far_enough`）と同じ式で測る。
 pub fn commute_meters(home: &Building, work: &Building) -> u64 {
@@ -72,6 +75,8 @@ struct OpenJobs {
     cells: Vec<Vec<(BuildingId, TilePos, u64)>>,
     /// 空きのある職場の数。
     open: usize,
+    /// 空きのある職場を持つセルの添え字。空きが少ないときに、格子をたどらず直接見るために持つ。
+    live: BTreeSet<usize>,
 }
 
 impl OpenJobs {
@@ -82,6 +87,7 @@ impl OpenJobs {
                 size: (0, 0),
                 cells: Vec::new(),
                 open: 0,
+                live: BTreeSet::new(),
             };
         }
         let mut lo = (i64::MAX, i64::MAX);
@@ -93,21 +99,29 @@ impl OpenJobs {
         }
         let size = (hi.0 - lo.0 + 1, hi.1 - lo.1 + 1);
         let mut cells = vec![Vec::new(); (size.0 * size.1) as usize];
+        let mut live = BTreeSet::new();
         for (id, (at, left)) in open {
             let c = cell_of(*at);
-            cells[((c.1 - lo.1) * size.0 + (c.0 - lo.0)) as usize].push((*id, *at, *left));
+            let idx = ((c.1 - lo.1) * size.0 + (c.0 - lo.0)) as usize;
+            cells[idx].push((*id, *at, *left));
+            live.insert(idx);
         }
         OpenJobs {
             origin: lo,
             size,
             cells,
             open: open.len(),
+            live,
         }
     }
 
     /// 1 つのセルの職場を、近い順の候補 `near`（長さ `k` まで）に入れる。
     fn scan(&self, cx: i64, cy: i64, from: TilePos, k: usize, near: &mut Vec<Candidate>) {
         let idx = ((cy - self.origin.1) * self.size.0 + (cx - self.origin.0)) as usize;
+        self.scan_cell(idx, from, k, near);
+    }
+
+    fn scan_cell(&self, idx: usize, from: TilePos, k: usize, near: &mut Vec<Candidate>) {
         for (id, at, _) in &self.cells[idx] {
             let key = (tile_distance_sq(from, *at), *id, idx);
             let pos = near.partition_point(|c| (c.0, c.1) < (key.0, key.1));
@@ -122,6 +136,13 @@ impl OpenJobs {
     fn nearest(&self, from: TilePos, k: usize) -> Vec<Candidate> {
         let mut near = Vec::with_capacity(k + 1);
         if self.open == 0 || k == 0 {
+            return near;
+        }
+        // 空きのあるセルが少ないときは、輪をたどらず、空きのあるセルだけを直接見る。
+        if self.open <= k || self.live.len() <= DIRECT_CELLS {
+            for idx in &self.live {
+                self.scan_cell(*idx, from, k, &mut near);
+            }
             return near;
         }
         let (hx, hy) = cell_of(from);
@@ -168,6 +189,9 @@ impl OpenJobs {
         if cell[pos].2 == 0 {
             cell.remove(pos);
             self.open -= 1;
+            if cell.is_empty() {
+                self.live.remove(&c.2);
+            }
         }
     }
 }
@@ -296,7 +320,7 @@ mod tests {
         }
     }
 
-    fn random_open(seed: u64) -> BTreeMap<BuildingId, (TilePos, u64)> {
+    fn random_open(seed: u64, n: u32) -> BTreeMap<BuildingId, (TilePos, u64)> {
         let mut state = seed;
         let mut next = |m: i64| {
             state = state
@@ -304,7 +328,7 @@ mod tests {
                 .wrapping_add(1442695040888963407);
             ((state >> 33) as i64) % m
         };
-        (0..60)
+        (0..n)
             .map(|i| {
                 let at = TilePos::new(next(300) - 100, next(200) - 50);
                 (id(i), (at, 1 + next(3) as u64))
@@ -312,15 +336,16 @@ mod tests {
             .collect()
     }
 
-    /// 格子で探した近い順の候補は、全部を見比べて並べた先頭と同じになる。空きが尽きれば短くなる。
-    #[test]
-    fn nearest_matches_brute_force() {
-        let open = random_open(12345);
+    /// 格子で探した近い順の候補は、全部を見比べて並べた先頭と同じになる。空きが尽きるまで続ける。
+    /// 建物が多いと輪をたどる探し方、少ない（または減った）と空きのあるセルを直接見る探し方を通る。
+    fn check_against_brute_force(n: u32) {
+        let open = random_open(12345, n);
         let mut brute: Vec<(BuildingId, TilePos, u64)> =
             open.iter().map(|(i, (p, n))| (*i, *p, *n)).collect();
         let mut jobs = OpenJobs::new(&open);
         let mut state = 7u64;
-        for _ in 0..200 {
+        let mut takes = 0;
+        loop {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
             let from = TilePos::new(
                 ((state >> 33) % 500) as i64 - 200,
@@ -335,12 +360,21 @@ mod tests {
             want.truncate(JOB_CANDIDATES);
             let got = jobs.nearest(from, JOB_CANDIDATES);
             assert_eq!(got.iter().map(|c| (c.0, c.1)).collect::<Vec<_>>(), want);
-            if let Some(c) = got.first().copied() {
-                jobs.take(c);
-                brute.iter_mut().find(|(i, _, _)| *i == c.1).unwrap().2 -= 1;
-            }
+            let Some(c) = got.first().copied() else {
+                break;
+            };
+            jobs.take(c);
+            brute.iter_mut().find(|(i, _, _)| *i == c.1).unwrap().2 -= 1;
+            takes += 1;
         }
-        assert!(jobs.nearest(TilePos::new(0, 0), JOB_CANDIDATES).is_empty());
+        assert!(takes > 0);
+    }
+
+    #[test]
+    fn nearest_matches_brute_force() {
+        check_against_brute_force(600);
+        check_against_brute_force(60);
+        check_against_brute_force(5);
     }
 
     /// 同じ距離の職場は、建物の ID の小さい順に並ぶ。
