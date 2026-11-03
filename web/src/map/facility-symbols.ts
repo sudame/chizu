@@ -91,78 +91,115 @@ export function facilitySymbols(groups: readonly SymbolGroup[], zoom: number): F
   return out;
 }
 
-/** 画面の外でも、この幅（CSS ピクセル）の余白の中の記号は、ずらす計算に入れる。 */
-const LAYOUT_MARGIN = 120;
+/** 画面の外でも、この幅（CSS ピクセル）の余白の中の記号は、出す記号に入れる。 */
+const VIEW_MARGIN = 120;
+/** ずらす先と間引く記号を決める倍率は、この刻みに丸める。パンでは変わらず、ズームでは刻みごとに決め直す。 */
+const LAYOUT_ZOOM_STEP = 0.25;
+
+/** ずらした量（CSS ピクセル）。null は、重なりを解けないので出さない記号である。 */
+type Shift = { dx: number; dy: number } | null;
 
 /**
- * 記号の画面の位置を求める。画面の中（少し余白を足した範囲）の記号だけを扱う。
- * まとまりの記号と 1 棟の記号は、ほかの記号と丸が重なるとき、丸の直径を上限にずらす。
+ * まとまりの記号と 1 棟の記号の、ずらす先と間引く記号。位置は地図の座標と丸めた倍率だけで決め、
+ * 画面の位置には頼らない。並べる順は地図の座標とまとまりの鍵である。
+ * ほかの記号と丸が重なるとき、あとの記号を、重ならない所までずらす（もとの位置から丸の直径まで）。
  * それでも重なるときは、あとの記号を出さない（引きでは間引く）。施設 1 つずつの記号は、敷地の中心に置いたままにする。
+ */
+export function symbolShifts(groups: readonly SymbolGroup[], zoom: number): Map<string, Shift> {
+  const bz = Math.max(LAYOUT_ZOOM_STEP, Math.round(zoom / LAYOUT_ZOOM_STEP) * LAYOUT_ZOOM_STEP);
+  const min = 2 * (symbolLook(bz).radius + SYMBOL_BORDER) + 1;
+  // どの倍率でも、まとまりの記号と 1 棟の記号が両方ある前提で決める（まとまりの記号が消える寄りでも同じ結果にする）
+  const items: { key: string; x: number; y: number }[] = [];
+  for (const g of groups) {
+    const owner = facilityOwner(g);
+    items.push({ key: `${owner}@${g.centerX},${g.centerY}`, x: g.centerX * bz, y: g.centerY * bz });
+  }
+  items.sort((a, b) => a.y - b.y || a.x - b.x || (a.key < b.key ? -1 : 1));
+  // 並べた記号を、格子（1 辺 min）に入れて、近くの記号とだけ比べる
+  const cells = new Map<string, { x: number; y: number }[]>();
+  const cell = (v: number) => Math.floor(v / min);
+  const near = (x: number, y: number) => {
+    const out: { x: number; y: number }[] = [];
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        out.push(...(cells.get(`${cell(x) + dx},${cell(y) + dy}`) ?? []));
+      }
+    }
+    return out;
+  };
+  const result = new Map<string, Shift>();
+  for (const item of items) {
+    let { x, y } = item;
+    const overlapping = () => near(x, y).filter((a) => Math.hypot(x - a.x, y - a.y) < min - 1e-6);
+    for (let pass = 0; pass < 4; pass++) {
+      const hits = overlapping();
+      if (hits.length === 0) break;
+      for (const a of hits) {
+        const d = Math.hypot(x - a.x, y - a.y);
+        const [ux, uy] = d === 0 ? [1, 0] : [(x - a.x) / d, (y - a.y) / d];
+        x = a.x + ux * min;
+        y = a.y + uy * min;
+        // もとの位置から、丸の直径より離さない
+        const away = Math.hypot(x - item.x, y - item.y);
+        if (away > min) {
+          x = item.x + ((x - item.x) / away) * min;
+          y = item.y + ((y - item.y) / away) * min;
+        }
+      }
+    }
+    if (overlapping().length > 0) {
+      result.set(item.key, null);
+      continue;
+    }
+    const k = `${cell(x)},${cell(y)}`;
+    const list = cells.get(k);
+    if (list === undefined) cells.set(k, [{ x, y }]);
+    else list.push({ x, y });
+    result.set(item.key, { dx: x - item.x, dy: y - item.y });
+  }
+  return result;
+}
+
+// ずらす先は、まとまりの並びと丸めた倍率ごとに 1 度だけ求め、パンでは求め直さない
+let shiftCache: {
+  groups: readonly SymbolGroup[];
+  zoom: number;
+  shifts: Map<string, Shift>;
+} | null = null;
+function cachedShifts(groups: readonly SymbolGroup[], zoom: number): Map<string, Shift> {
+  const bz = Math.round(zoom / LAYOUT_ZOOM_STEP);
+  if (shiftCache === null || shiftCache.groups !== groups || shiftCache.zoom !== bz) {
+    shiftCache = { groups, zoom: bz, shifts: symbolShifts(groups, zoom) };
+  }
+  return shiftCache.shifts;
+}
+
+/**
+ * 記号の画面の位置を求める。ずらし方はカメラの位置に頼らず（symbolShifts）、ここでは地図の位置に足して
+ * 画面の座標にするだけにする。画面と余白の中の記号だけを返す。
  */
 export function layoutSymbols(
   groups: readonly SymbolGroup[],
   camera: { x: number; y: number; zoom: number },
   viewport: { width: number; height: number },
 ): PlacedSymbol[] {
-  const m = LAYOUT_MARGIN;
+  const shifts = cachedShifts(groups, camera.zoom);
+  const m = VIEW_MARGIN;
   const placed: PlacedSymbol[] = [];
   for (const s of facilitySymbols(groups, camera.zoom)) {
-    const sx = (s.x - camera.x) * camera.zoom + viewport.width / 2;
-    const sy = (s.y - camera.y) * camera.zoom + viewport.height / 2;
+    let shift: Shift = { dx: 0, dy: 0 };
+    if (s.phase !== "member") {
+      // null は出さない記号、見つからないときはずらさない
+      shift = shifts.has(s.key) ? (shifts.get(s.key) ?? null) : { dx: 0, dy: 0 };
+      if (shift === null) continue;
+    }
+    const sx = (s.x - camera.x) * camera.zoom + viewport.width / 2 + shift.dx;
+    const sy = (s.y - camera.y) * camera.zoom + viewport.height / 2 + shift.dy;
     if (sx >= -m && sy >= -m && sx <= viewport.width + m && sy <= viewport.height + m) {
       placed.push({ ...s, sx, sy });
     }
   }
-  const min = 2 * (symbolLook(camera.zoom).radius + SYMBOL_BORDER) + 1;
-  // 並べた記号を、格子（1 辺 min）に入れて、近くの記号とだけ比べる
-  const cells = new Map<string, PlacedSymbol[]>();
-  const cell = (v: number) => Math.floor(v / min);
-  const add = (s: PlacedSymbol) => {
-    const k = `${cell(s.sx)},${cell(s.sy)}`;
-    const list = cells.get(k);
-    if (list === undefined) cells.set(k, [s]);
-    else list.push(s);
-  };
-  const near = (s: PlacedSymbol) => {
-    const out: PlacedSymbol[] = [];
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        out.push(...(cells.get(`${cell(s.sx) + dx},${cell(s.sy) + dy}`) ?? []));
-      }
-    }
-    return out;
-  };
-  const hidden = new Set<PlacedSymbol>();
-  const movable = placed
-    .filter((s) => s.phase !== "member")
-    .sort((a, b) => a.sy - b.sy || a.sx - b.sx || (a.key < b.key ? -1 : 1));
-  for (const s of movable) {
-    const [ox, oy] = [s.sx, s.sy];
-    const overlapping = () =>
-      near(s).filter((a) => Math.hypot(s.sx - a.sx, s.sy - a.sy) < min - 1e-6);
-    for (let pass = 0; pass < 4; pass++) {
-      const hits = overlapping();
-      if (hits.length === 0) break;
-      for (const a of hits) {
-        const dx = s.sx - a.sx;
-        const dy = s.sy - a.sy;
-        const d = Math.hypot(dx, dy);
-        const [ux, uy] = d === 0 ? [1, 0] : [dx / d, dy / d];
-        s.sx = a.sx + ux * min;
-        s.sy = a.sy + uy * min;
-        // もとの位置から、丸の直径より離さない
-        const away = Math.hypot(s.sx - ox, s.sy - oy);
-        if (away > min) {
-          s.sx = ox + ((s.sx - ox) / away) * min;
-          s.sy = oy + ((s.sy - oy) / away) * min;
-        }
-      }
-    }
-    const clear = overlapping().length === 0;
-    if (clear) add(s);
-    else hidden.add(s);
-  }
-  return placed.filter((s) => !hidden.has(s));
+  return placed;
 }
 
 /** 名前を置く段（寄りか）で、いま出している記号。標準まではまとまりの記号、寄りは 1 つずつの記号である。 */

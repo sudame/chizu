@@ -621,6 +621,8 @@ export function facilityText(f: FacilityLabel, stage: number): string {
 
 /** 1 つのまとまりの名前について試す候補の数の上限。 */
 const MAX_FACILITY_ALTERNATIVES = 12;
+/** 施設の名前の候補の数の上限。1 画面で調べる候補（MAX_CANDIDATES）の半分までにして、残りをほかの種類に残す。 */
+const MAX_FACILITY_CANDIDATES = 100;
 // 記号の下と上に置くときの、丸の縁から名前までの隙間（CSS ピクセル）。並んだ隣の記号の影と、
 // 名前の余白（LABEL_MARGIN の 4px）に当たらない広さにする
 const BELOW_GAP = 6;
@@ -640,7 +642,13 @@ export function facilityCandidates(
 ): Candidate[] {
   const ls = labelStyle("facility", stage);
   if (ls === null) return [];
-  const symbols = activeSymbols(placed, stage >= STAGE_NEAR);
+  // まとまりごとの記号を、1 度だけ引ける形にする
+  const byOwner = new Map<string, PlacedSymbol[]>();
+  for (const sym of activeSymbols(placed, stage >= STAGE_NEAR)) {
+    const list = byOwner.get(sym.owner);
+    if (list === undefined) byOwner.set(sym.owner, [sym]);
+    else list.push(sym);
+  }
   const reach = symbolLook(camera.zoom).radius + SYMBOL_BORDER;
   const out: Candidate[] = [];
   for (const f of facilities) {
@@ -648,7 +656,7 @@ export function facilityCandidates(
     const style = { ...ls.style, color: FACILITY_LABEL_COLORS[f.kind] ?? ls.style.color };
     const label = facilityText(f, stage);
     const size = measure(label, style, false);
-    const anchors = symbols.filter((s) => s.owner === owner).sort((a, b) => b.x - a.x || a.y - b.y);
+    const anchors = [...(byOwner.get(owner) ?? [])].sort((a, b) => b.x - a.x || a.y - b.y);
     const options: Candidate[] = [];
     for (const anchor of anchors) {
       // 画面の位置（ずらしたあと）を基準に、記号の右、左、下、上の順に置く
@@ -683,6 +691,14 @@ export function facilityCandidates(
     const [first, ...rest] = options;
     if (first !== undefined) out.push({ ...first, alternatives: rest });
   }
+  // 候補が多いときは、画面の真ん中に近いものを残し、ほかの種類のラベルの枠を空けておく
+  if (out.length > MAX_FACILITY_CANDIDATES) {
+    const cx = vp.width / 2;
+    const cy = vp.height / 2;
+    const dist = (c: Candidate) =>
+      ((c.box.x0 + c.box.x1) / 2 - cx) ** 2 + ((c.box.y0 + c.box.y1) / 2 - cy) ** 2;
+    return out.sort((a, b) => dist(a) - dist(b)).slice(0, MAX_FACILITY_CANDIDATES);
+  }
   return out;
 }
 
@@ -713,7 +729,12 @@ export function placeLabels(
   obstacles: readonly Obstacle[],
 ): Candidate[] {
   const order = candidates
-    .map((c, i) => ({ c, i, prev: shown.has(c.id) ? 0 : 1 }))
+    // 置き方の違いのどれかが前に出ていれば、前に出ていたものとして先に置く
+    .map((c, i) => ({
+      c,
+      i,
+      prev: shown.has(c.id) || (c.alternatives ?? []).some((a) => shown.has(a.id)) ? 0 : 1,
+    }))
     .sort((a, b) => a.c.priority - b.c.priority || a.prev - b.prev || a.i - b.i)
     .slice(0, MAX_CANDIDATES);
   const placed: Candidate[] = [];

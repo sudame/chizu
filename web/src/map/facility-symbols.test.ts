@@ -122,20 +122,23 @@ describe("出す記号", () => {
   });
 
   test("ずらす量は丸の直径までで、収まらない記号は出さない", () => {
-    // 2×2 の浄水場を 5 マスおきに 20 個並べ、倍率 2 で重ねる
+    // 2×2 の浄水場を 5 マスおきに 5 × 4 個並べ、倍率 1 で重ねる
     const list = facilityLabels(
       0,
-      Array.from({ length: 20 }, (_, i) => [i * 5, 0, i * 5 + 1, 1, 2]).flat(),
+      Array.from({ length: 20 }, (_, i) => {
+        const [x, y] = [(i % 5) * 5, Math.floor(i / 5) * 5];
+        return [x, y, x + 1, y + 1, 2];
+      }).flat(),
       () => false,
     );
     expect(list).toHaveLength(20);
-    const zoom = 2;
-    const placed = layoutSymbols(list, { x: 50, y: 1, zoom }, { width: 400, height: 200 });
+    const zoom = 1;
+    const placed = layoutSymbols(list, { x: 10, y: 8, zoom }, { width: 400, height: 200 });
     const min = 2 * (symbolLook(zoom).radius + SYMBOL_BORDER) + 1;
     expect(placed.length).toBeGreaterThan(0);
     expect(placed.length).toBeLessThan(20);
     for (const s of placed) {
-      const home = { x: (s.x - 50) * zoom + 200, y: (s.y - 1) * zoom + 100 };
+      const home = { x: (s.x - 10) * zoom + 200, y: (s.y - 8) * zoom + 100 };
       expect(Math.hypot(s.sx - home.x, s.sy - home.y)).toBeLessThanOrEqual(min + 1e-6);
     }
     for (let i = 0; i < placed.length; i++) {
@@ -193,7 +196,10 @@ describe("施設の名前と記号", () => {
   ) => {
     const look = symbolLook(camera.zoom);
     const symbols = layoutSymbols(list, camera, vp);
-    const obstacles = symbols.map((s) => ({ ...symbolBox(s, look.radius), owner: s.key }));
+    // 入れ替わりの途中は、濃いほうの記号だけを置けない範囲にする（label-layer.ts と同じ）
+    const obstacles = symbols
+      .filter((s) => s.alpha > 0.5)
+      .map((s) => ({ ...symbolBox(s, look.radius), owner: s.key }));
     const names = placeLabels(
       facilityCandidates(list, camera, vp, stage, measure, symbols),
       new Set(),
@@ -251,7 +257,7 @@ describe("施設の名前と記号", () => {
       }
     }
   });
-  test("入れ替わりの途中の薄い記号にも、名前を重ねない", () => {
+  test("入れ替わりの途中でも、濃いほうの記号に名前を重ねない", () => {
     const list = facilityLabels(
       0,
       [
@@ -266,7 +272,7 @@ describe("施設の名前と記号", () => {
       const { names, symbols, look } = placeNames(list, { x: 5, y: 1, zoom }, stage);
       expect(names, `倍率 ${zoom}`).toHaveLength(1);
       const box = names[0]?.box;
-      for (const s of symbols.filter((s) => s.key !== names[0]?.owner)) {
+      for (const s of symbols.filter((s) => s.key !== names[0]?.owner && s.alpha > 0.5)) {
         const b = symbolBox(s, look.radius);
         const hit = box && box.x0 < b.x1 && b.x0 < box.x1 && box.y0 < b.y1 && b.y0 < box.y1;
         expect(hit, `倍率 ${zoom}、記号 ${s.key}`).toBe(false);
@@ -306,5 +312,122 @@ describe("施設の名前と記号", () => {
     };
     const placed = placeLabels([...facility, road], new Set(), []);
     expect(placed.some((c) => c.id === "road")).toBe(true);
+  });
+  test("倍率 9.9〜13 で、まとまりの名前の置き場所が変わるのは 1 回だけ", () => {
+    const list = facilityLabels(
+      0,
+      [
+        [0, 0, 1, 1, 2],
+        [4, 0, 5, 1, 2],
+        [8, 0, 9, 1, 2],
+      ].flat(),
+      () => false,
+    );
+    let stage = STAGE_STANDARD;
+    let last = "";
+    let changes = 0;
+    for (let z = 9.9; z <= 13; z += 0.1) {
+      stage = nextLabelStage(z, stage);
+      const { names } = placeNames(list, { x: 5, y: 1, zoom: z }, stage);
+      const c = names[0];
+      expect(c, `倍率 ${z}`).toBeDefined();
+      // 名前の置き場所を、基準の記号の位置（ワールド）と、記号からの向きで表す
+      const at = c ? `${c.wx},${c.wy}|${c.id.split("|").at(-3)}` : "";
+      if (last !== "" && at !== last) changes++;
+      last = at;
+    }
+    expect(changes).toBe(1);
+  });
+
+  test("パンしても、出す記号とずらす位置は変わらない", () => {
+    const list = facilityLabels(
+      0,
+      Array.from({ length: 20 }, (_, i) => {
+        const [x, y] = [(i % 5) * 5, Math.floor(i / 5) * 5];
+        return [x, y, x + 1, y + 1, 2];
+      }).flat(),
+      () => false,
+    );
+    const zoom = 1.3;
+    const view = { width: 400, height: 200 };
+    // 地図の位置に対するずれ（画面の座標からカメラ分を引いた値）を、記号ごとに調べる
+    const snapshot = (cx: number) =>
+      layoutSymbols(list, { x: cx, y: 8, zoom }, view)
+        .map((s) => {
+          const homeX = (s.x - cx) * zoom + view.width / 2;
+          const homeY = (s.y - 8) * zoom + view.height / 2;
+          return `${s.key}:${(s.sx - homeX).toFixed(6)},${(s.sy - homeY).toFixed(6)}`;
+        })
+        .sort();
+    const first = snapshot(10);
+    expect(first.length).toBeGreaterThan(0);
+    for (let i = 1; i <= 80; i++) {
+      expect(snapshot(10 + i * 0.25)).toEqual(first);
+    }
+  });
+
+  test("施設のまとまりが 400 あっても、道路の名前を置く", () => {
+    const facilities = Array.from({ length: 400 }, (_, i) => {
+      const [x, y] = [(i % 20) * 12, Math.floor(i / 20) * 12];
+      return [x, y, x + 1, y + 1, 2];
+    }).flat();
+    const list = facilityLabels(0, facilities, () => false);
+    expect(list).toHaveLength(400);
+    const wide = { width: 1600, height: 1600 };
+    const facility = facilityCandidates(
+      list,
+      { x: 120, y: 120, zoom: 8 },
+      wide,
+      STAGE_STANDARD,
+      measure,
+    );
+    expect(facility.length).toBeLessThanOrEqual(100);
+    const road = {
+      id: "road",
+      priority: 5,
+      text: "道",
+      style: { size: 11, weight: 500, spacing: 0, color: "#000", alpha: 1, shield: false },
+      vertical: false,
+      angle: 0,
+      wx: 0,
+      wy: 0,
+      ox: 0,
+      oy: 0,
+      w: 20,
+      h: 11,
+      box: { x0: 5, y0: 5, x1: 25, y1: 16 },
+    };
+    const roads = Array.from({ length: 150 }, (_, i) => ({
+      ...road,
+      id: `road${i}`,
+      box: { x0: 1000 + i, y0: 5, x1: 1001 + i, y1: 6 },
+    }));
+    const placed = placeLabels([...facility, ...roads], new Set(), []);
+    expect(placed.filter((c) => c.id.startsWith("road")).length).toBeGreaterThan(0);
+  });
+
+  test("前に出ていた置き方があれば、そのまとまりを先に置き、同じ置き方を先に試す", () => {
+    const base = {
+      priority: 3,
+      text: "名",
+      style: { size: 12, weight: 600, spacing: 0, color: "#000", alpha: 1, shield: false },
+      vertical: false,
+      angle: 0,
+      wx: 0,
+      wy: 0,
+      ox: 0,
+      oy: 0,
+      w: 10,
+      h: 10,
+    };
+    const rect = (x0: number) => ({ x0, y0: 0, x1: x0 + 10, y1: 10 });
+    // A は右（100）が塞がれていて、左（0）に出ていた。B の主な置き方は A の左と重なる
+    const aLeft = { ...base, id: "A-l", box: rect(0) };
+    const a = { ...base, id: "A-r", box: rect(100), alternatives: [aLeft] };
+    const b = { ...base, id: "B-r", box: rect(5) };
+    const blocked = [{ x0: 100, y0: 0, x1: 110, y1: 10 }];
+    // B が先に並んでいても、前に出ていた A の左が残る
+    const placed = placeLabels([b, a], new Set(["A-l"]), blocked);
+    expect(placed.map((c) => c.id)).toEqual(["A-l"]);
   });
 });

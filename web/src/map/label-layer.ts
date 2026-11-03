@@ -47,6 +47,8 @@ const VERTICAL_ADVANCE = 1.05;
 // 覚えておく画像の数の上限。超えたら全部捨てて作り直す
 const MAX_SPRITES = 2000;
 // 地図の上に重なるパネル。見えているものの下にはラベルを置かない
+// この濃さ（入れ替わりの途中の半分）より薄い記号は、ラベルを置けない範囲に入れない
+const OBSTACLE_ALPHA = 0.5;
 const PANEL_SELECTOR = "[data-map-panel]";
 
 type Sprite = { image: HTMLCanvasElement; w: number; h: number };
@@ -227,13 +229,13 @@ export class LabelLayer {
         this.#symbols,
       ),
     ];
-    // 描いている記号は、入れ替わりの途中の薄いものも含めて、ほかのラベルを置けない範囲にする。
+    // 描いている記号は、ほかのラベルを置けない範囲にする。入れ替わりの途中は、濃いほうの記号だけにする
+    // （名前を置く段が切り替わる倍率 12 で、薄いほうと濃いほうが入れ替わる）。
     // 名前を添える記号は、名前の置き方で余白を外す
     const look = symbolLook(camera.zoom);
-    const symbolObstacles: Obstacle[] = this.#symbols.map((s) => ({
-      ...symbolBox(s, look.radius),
-      owner: s.key,
-    }));
+    const symbolObstacles: Obstacle[] = this.#symbols
+      .filter((s) => s.alpha > OBSTACLE_ALPHA)
+      .map((s) => ({ ...symbolBox(s, look.radius), owner: s.key }));
     const placed = placeLabels(candidates, this.#fader.shown(), [
       ...this.#readObstacles(),
       ...symbolObstacles,
