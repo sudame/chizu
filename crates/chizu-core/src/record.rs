@@ -705,7 +705,7 @@ mod tests {
         assert!(invalid_command(&[7, 1, 0x2d, 0x01])); // 税率 301‰
         assert!(invalid(&[7, 0, 0, 0])); // 区画の種類 0
         assert!(invalid(&[8, 0, 0])); // 速度 0 倍
-        assert!(invalid(&[8, 49, 0])); // 速度 49 倍
+        assert!(invalid(&[8, 0x21, 0x01])); // 速度 289 倍
         let mut signal = vec![5];
         signal.extend_from_slice(&[0; 6]);
         signal.push(2);
@@ -1009,7 +1009,7 @@ mod tests {
             }),
             (zone, 0..=MAX_TAX_PERMILLE)
                 .prop_map(|(zone, permille)| Command::SetTaxRate { zone, permille }),
-            (1_u16..=48).prop_map(|m| Command::SetSimSpeed {
+            (1_u16..=288).prop_map(|m| Command::SetSimSpeed {
                 speed: SimSpeed::new(m).unwrap(),
             }),
             (

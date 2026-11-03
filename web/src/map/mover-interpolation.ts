@@ -6,13 +6,13 @@
 // tick ごとに段になって変わらないようにする。
 //
 // 補間の区間の長さは、速度の値からではなく、tick が届いた時刻の差から測る。
-// Worker が tick を間引いて遅い速度を作るときや、重くて公称の速さで進めないときも、実際の間隔に追いつく。
+// 重くて公称の速さで進めないときも、実際の間隔に追いつく。
 
 import { CHUNK_SIDE } from "../protocol/messages.ts";
 import { layout } from "../protocol/snapshot.ts";
 
 /** 等速（1 倍）で 1 秒に進む tick の数。chizu-core の TICKS_PER_SECOND_AT_NORMAL_SPEED と同じ。 */
-export const TICKS_PER_SECOND = 30;
+export const TICKS_PER_SECOND = 5;
 
 /** これより長い区間になる tick の進みは、補間せずその場に置く（保存データの読み込みなど）。 */
 const MAX_INTERPOLATED_MS = 500;

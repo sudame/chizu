@@ -16,7 +16,7 @@ use crate::id::CitizenId;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::units::Tick;
 
-/// 住民を分ける組の数。等速（30 tick/秒）で、1 人あたり約 2 秒に 1 回の更新になる。
+/// 住民を分ける組の数。ゲーム内では 1 人あたり約 13 分に 1 回の更新になる。
 pub const BUCKET_COUNT: u32 = 64;
 
 /// 組に分けるときの塊の人数。

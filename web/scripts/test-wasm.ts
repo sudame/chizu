@@ -20,8 +20,8 @@ import { chooseLayer, pickSpeed, pickTool, zoomInTo } from "./ui.ts";
 
 const TIMEOUT_MS = 30_000;
 const MIN_THREADS = 2;
-const TICKS_PER_SECOND = 30;
-const FAST_SPEED = 48;
+const TICKS_PER_SECOND = 5;
+const FAST_SPEED = 288;
 // chizu-core の clock.rs と world.rs の値
 const TICKS_PER_DAY = 7_200;
 const GAME_SECONDS_PER_TICK = 12;
@@ -120,10 +120,10 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   );
   const speedLabels = await page.locator("#speeds button[data-speed]").allTextContents();
   check(
-    speedLabels.join(",") === "1 倍,4 倍,16 倍" &&
+    speedLabels.join(",") === "1 倍,6 倍,48 倍" &&
       (await page.locator('#speeds button[data-speed="1"]').getAttribute("aria-pressed")) ===
         "true",
-    `帯の速度は 1、4、16 倍で、いまの速度が押した状態で出る（${speedLabels.join(",")}）`,
+    `帯の速度は 1、6、48 倍で、いまの速度が押した状態で出る（${speedLabels.join(",")}）`,
   );
   const covered = async () =>
     page.evaluate(() => {
@@ -137,7 +137,7 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
       (await page.locator("#city-numbers").isVisible()) &&
       (await page.locator("#demand").isVisible()) &&
       (await page.locator("#overview").isVisible()) &&
-      (await page.locator('#controls button[data-speed="48"]').isVisible()) &&
+      (await page.locator('#controls button[data-speed="288"]').isVisible()) &&
       (await page.locator("#save-open").isVisible()),
     "「⋯」を押すと、建物、電気と水道、需要、人口と幸福度、ほかの速度と保存が出る",
   );
@@ -436,8 +436,8 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   // 補間そのものは Vitest（mover-interpolation.test.ts）で確かめる。ここでは、画面に補間が効いていることだけを見る。
   // tick が変わらない続きの 2 枠のあいだで位置が変わっていれば、tick に頼らず補間で動いている。
   // 枠の回数や間隔には頼らず、見つかるまで待つ。寄りの段は描画が重く、CI では 1 枠のあいだに tick が
-  // 進みきって同じ tick の枠が続かないことがあるので、0.25 倍に落として 1 tick を長くしてから見る
-  await setSpeed(0.25);
+  // 進みきって同じ tick の枠が続かないことがあるので、等速（1 tick が 200ms）で見る
+  await setSpeed(1);
   const interpolated = await page.evaluate(
     (timeoutMs) =>
       new Promise<boolean>((resolve) => {
@@ -469,8 +469,8 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
     await page.locator("#dev-flag").isVisible(),
     "開発用の道具を使うと、再現できないことの印が出る",
   );
-  // 48 倍で着くまで進めたあと、等速に戻しても描かれないことで、送られなくなったのではなく着いて消えたと分かる
-  await setSpeed(48);
+  // 最高速で着くまで進めたあと、等速に戻しても描かれないことで、送られなくなったのではなく着いて消えたと分かる
+  await setSpeed(FAST_SPEED);
   await waitMap("drawnMovers", "0", "eq");
   await setSpeed(1);
   const tickAtNormal = Number(await hud.getAttribute("data-tick"));
@@ -543,23 +543,15 @@ try {
   const normal = await ticksIn(2_000);
   check(
     normal >= TICKS_PER_SECOND && normal <= TICKS_PER_SECOND * 4,
-    `等速で 2 秒待つと時計が 60 tick ほど進む（${normal} tick）`,
+    `等速で 2 秒待つと時計が 10 tick ほど進む（${normal} tick）`,
   );
 
-  await pickSpeed(page, 0.5);
-  await hud.and(page.locator('[data-speed="0.5"]')).waitFor({ timeout: TIMEOUT_MS });
-  const half = await ticksIn(2_000);
+  await pickSpeed(page, 6);
+  await hud.and(page.locator('[data-speed="6"]')).waitFor({ timeout: TIMEOUT_MS });
+  const six = await ticksIn(2_000);
   check(
-    half >= normal * 0.3 && half <= normal * 0.7,
-    `0.5 倍にすると等速の半分ほど進む（${half} tick、等速は ${normal} tick）`,
-  );
-
-  await pickSpeed(page, 0.25);
-  await hud.and(page.locator('[data-speed="0.25"]')).waitFor({ timeout: TIMEOUT_MS });
-  const quarter = await ticksIn(2_000);
-  check(
-    quarter >= normal * 0.15 && quarter <= normal * 0.35,
-    `0.25 倍にすると等速の 4 分の 1 ほど進む（${quarter} tick、等速は ${normal} tick）`,
+    six >= normal * 3 && six <= normal * 9,
+    `6 倍にすると等速の 6 倍ほど進む（${six} tick、等速は ${normal} tick）`,
   );
 
   await pickSpeed(page, FAST_SPEED);
