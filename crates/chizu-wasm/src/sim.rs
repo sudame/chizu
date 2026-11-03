@@ -441,6 +441,20 @@ impl Sim {
         out
     }
 
+    /// いまの tick。画面の知らせが、状態の続いた長さを Worker の時計で数えるために使う。
+    pub fn current_tick(&self) -> f64 {
+        self.world.tick().0 as f64
+    }
+
+    /// 区画の種類（住宅・商業・工業・オフィスの順）ごとに、需要が正なのに空き区画がなければ 1、そうでなければ 0 を並べる。
+    /// 定義は `chizu_core::World::lot_shortage`。電気や水道の余裕とは別の読み取りで、状態は変えない。
+    pub fn lot_shortage(&self) -> Vec<f64> {
+        self.world
+            .lot_shortage()
+            .map(|b| f64::from(u8::from(b)))
+            .to_vec()
+    }
+
     /// 収支の見込みを次の数で返す。税率の上限（‰）、区画の種類ごとの税率（‰）、区画の種類ごとの税収、
     /// 道路の維持費、発電所と浄水場の維持費。区画の種類の順は住宅、商業、工業、オフィス。
     /// 金額はどれも 1 日あたりである。
@@ -817,6 +831,15 @@ mod tests {
             "{s:?}"
         );
         assert_eq!(s[2], 3.0, "{s:?}");
+    }
+
+    /// 何も塗っていない街では、基礎需要があっても 1 にならない。
+    #[test]
+    fn lot_shortage_is_zero_for_zones_never_painted() {
+        let sim = Sim::new(404);
+        let flags = sim.lot_shortage();
+        assert_eq!(flags, vec![0.0; 4]);
+        assert!(sim.city_stats()[3] > 0.0);
     }
 
     /// つながっていない通りの発電所は、孤立した施設として出る。余りは主の網だけで数え、ほかの網に分ける。

@@ -161,6 +161,8 @@ function sendOverview(sim: Simulation, now: number, paused: boolean, force = fal
     overview: all.slice(0, OVERVIEW_LENGTH),
     stalls: all.slice(OVERVIEW_LENGTH),
     isolated: [...sim.isolated_facilities()],
+    lotShortage: [...sim.lot_shortage()],
+    tick: sim.current_tick(),
   });
 }
 
