@@ -24,17 +24,17 @@ const OUTLIER_RATIO = 3;
 const MAX_MEASURED_GAP_MS = 1000;
 /** 向きの 1 周の値。chizu-wasm の向きの値（x 軸から y 軸へ回る角度）と同じ。 */
 const FULL_TURN = 65536;
-/** 1 tick の向きの変わりがこれより大きければ（折り返しなど）、回さずにその場で変える。1 周の 3/8（135 度）。 */
+/** 1 tick の向きの変わりがこれより大きければ（折り返しなど）、回さずにすぐ変える。1 周の 3/8（135 度）。 */
 const MAX_TURN = (FULL_TURN * 3) / 8;
 
 /**
- * 向き `from` から `to` へ、近いほうに `t` の割合だけ回した向き。変わりが MAX_TURN より大きければ、
- * `t` が 1 になるまで `from` のままにする。
+ * 向き `from` から `to` へ、近いほうに `t` の割合だけ回した向き。変わりが MAX_TURN より大きければ
+ * 回さず、すぐに `to` にする。
  */
 export function turnHeading(from: number, to: number, t: number): number {
   const diff = ((((to - from) % FULL_TURN) + FULL_TURN * 1.5) % FULL_TURN) - FULL_TURN / 2;
   if (Math.abs(diff) > MAX_TURN) {
-    return t >= 1 ? to : from;
+    return to;
   }
   const h = Math.round(from + diff * t) % FULL_TURN;
   return h < 0 ? h + FULL_TURN : h;

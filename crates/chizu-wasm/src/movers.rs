@@ -4,8 +4,9 @@
 use chizu_core::network::{DIAGONAL_TILE_MM, TILE_MM};
 use chizu_core::{
     CHUNK_SIDE, ChunkCoord, Dir, LaneMode, LaneOffset, LinkId, Mover as CoreMover, SidewalkPos,
-    TilePos, TileRect, World,
+    TilePos, TileRect, TripId, World,
 };
+use std::collections::BTreeMap;
 
 use crate::car_path;
 use crate::snapshot::{MAX_MOVERS, Mover};
@@ -59,9 +60,18 @@ fn keep_nearest(found: &mut Vec<CoreMover>, view: TileRect, limit: usize) {
     found.truncate(limit);
 }
 
+/// 曲線の上に描いた車ごとの、曲線の始まり（`car_path::Entry`）。描画のためだけに覚える。
+pub type Arcs = BTreeMap<TripId, car_path::Entry>;
+
 /// `view` の移動体を、基準のチャンク（`view.min` のチャンク）の原点からのマスの座標に直して `out` に入れ、
 /// 基準のチャンクを返す。上限を超えたら、`view` の真ん中に近いものを残す。
-pub fn visible_movers(world: &World, view: TileRect, out: &mut Vec<Mover>) -> ChunkCoord {
+/// `arcs` は前の回に曲線の上に描いた車の曲線の始まりで、この回のものに入れ替える。
+pub fn visible_movers(
+    world: &World,
+    view: TileRect,
+    out: &mut Vec<Mover>,
+    arcs: &mut Arcs,
+) -> ChunkCoord {
     let base = view.min.chunk().unwrap_or_default();
     let side = CHUNK_SIDE as i64;
     let origin = |c: i32| i64::from(c) * side * TILE_MM;
@@ -73,9 +83,16 @@ pub fn visible_movers(world: &World, view: TileRect, out: &mut Vec<Mover>) -> Ch
     out.clear();
     let net = world.network();
     let from_mm = |v: f64, o: i64| ((v - o as f64) / TILE_MM as f64) as f32;
+    let before = core::mem::take(arcs);
     out.extend(found.iter().map(|m| {
         // 車は、ノードの前後を曲線でつないだ道筋の上に描く（`car_path`）。
-        if let Some(d) = m.path.and_then(|p| car_path::draw(net, &p, m.shift)) {
+        let drawn = m
+            .path
+            .and_then(|p| car_path::draw(net, &p, m.shift, before.get(&m.id)));
+        if let Some((d, entry)) = drawn {
+            if let Some(e) = entry {
+                arcs.insert(m.id, e);
+            }
             return Mover {
                 x: from_mm(d.x, ox),
                 y: from_mm(d.y, oy),
@@ -205,7 +222,7 @@ mod tests {
         let n = spawn_dev_walks(&mut w, TilePos::new(2, 10), TilePos::new(25, 10), 30);
         assert_eq!(n, 30);
         let mut first = Vec::new();
-        let base = visible_movers(&w, all(), &mut first);
+        let base = visible_movers(&w, all(), &mut first, &mut Arcs::new());
         assert_eq!(base, ChunkCoord::new(-1, -1));
         assert_eq!(first.len(), 30);
         assert!(first.iter().all(|m| m.kind == KIND_WALK));
@@ -222,12 +239,12 @@ mod tests {
             w.step();
         }
         let mut later = Vec::new();
-        visible_movers(&w, all(), &mut later);
+        visible_movers(&w, all(), &mut later, &mut Arcs::new());
         assert_ne!(first, later);
         for _ in 0..2_000 {
             w.step();
         }
-        visible_movers(&w, all(), &mut later);
+        visible_movers(&w, all(), &mut later, &mut Arcs::new());
         assert!(later.is_empty());
     }
 

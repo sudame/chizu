@@ -290,6 +290,25 @@ describe("MoverInterpolator", () => {
   });
 });
 
+describe("MoverInterpolator の折り返し", () => {
+  it("補間の途中で次の tick が来ても、折り返した向きが残らない", () => {
+    const i = new MoverInterpolator();
+    const half = 32768;
+    const headingAt = (now: number, tick: number, heading: number) => {
+      const { frame: f, out } = frame(tick, [{ id: 1, x: tick, y: 0, heading }]);
+      i.apply(f, now, out);
+      return (new Uint32Array(out.buffer)[layout.mover.headingKind] ?? 0) & 0xffff;
+    };
+    headingAt(0, 10, 0);
+    headingAt(TICK_MS, 11, 0);
+    // 折り返した tick の補間の途中で、次の tick が届く
+    expect(headingAt(TICK_MS * 2, 12, half)).toBe(half);
+    expect(headingAt(TICK_MS * 2.3, 12, half)).toBe(half);
+    expect(headingAt(TICK_MS * 2.5, 13, half)).toBe(half);
+    expect(headingAt(TICK_MS * 2.6, 13, half)).toBe(half);
+  });
+});
+
 describe("turnHeading", () => {
   const quarter = 16384;
   it("近いほうへ回す", () => {
@@ -300,8 +319,8 @@ describe("turnHeading", () => {
     expect(turnHeading(100, 200, 1)).toBe(200);
   });
 
-  it("折り返しは回さず、着いたときに変える", () => {
-    expect(turnHeading(0, 2 * quarter, 0.5)).toBe(0);
-    expect(turnHeading(0, 2 * quarter, 1)).toBe(2 * quarter);
+  it("折り返しは回さず、すぐに新しい向きにする", () => {
+    expect(turnHeading(0, 2 * quarter, 0)).toBe(2 * quarter);
+    expect(turnHeading(0, 2 * quarter, 0.5)).toBe(2 * quarter);
   });
 });
