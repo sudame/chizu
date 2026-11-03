@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { TICKS_PER_SECOND } from "./map/mover-interpolation.ts";
-import { BAR_SPEEDS, describeSpeed, EXTRA_SPEEDS, stepBudget, tickRate } from "./speed.ts";
+import {
+  BAR_SPEEDS,
+  describeSpeed,
+  EXTRA_SPEEDS,
+  nearestSpeed,
+  stepBudget,
+  tickRate,
+} from "./speed.ts";
 
 const FRAME_MS = 1000 / 60;
 const TICKS_PER_DAY = 7_200;
@@ -55,6 +62,28 @@ describe("速さの段", () => {
       (s) => TICKS_PER_DAY / tickRate(TICKS_PER_SECOND, s),
     );
     expect(daySeconds).toEqual([24 * 60, 4 * 60, 30, 5]);
+  });
+});
+
+describe("nearestSpeed", () => {
+  it("段にある速さはそのまま返す", () => {
+    for (const s of [...BAR_SPEEDS, ...EXTRA_SPEEDS]) {
+      expect(nearestSpeed(s)).toBe(s);
+    }
+  });
+
+  it("前の帯の 4 倍と 16 倍は、tick/秒の比が近い 6 倍にそろえる", () => {
+    // 4 倍は 20 tick/秒で 6 倍（30）との比が 1.5、16 倍は 80 tick/秒で 6 倍との比が 2.7、48 倍（240）との比が 3
+    expect(nearestSpeed(4)).toBe(6);
+    expect(nearestSpeed(16)).toBe(6);
+  });
+
+  it("あいだの速さは、比の近いほうにそろえる", () => {
+    expect(nearestSpeed(2)).toBe(1);
+    expect(nearestSpeed(3)).toBe(6);
+    expect(nearestSpeed(17)).toBe(48);
+    expect(nearestSpeed(117)).toBe(48);
+    expect(nearestSpeed(118)).toBe(288);
   });
 });
 

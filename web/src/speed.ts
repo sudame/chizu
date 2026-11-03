@@ -8,6 +8,20 @@ export const BAR_SPEEDS = [1, 6, 48] as const;
 /** 詳細の欄に出す速さ。最高速（1 日 5 秒）。chizu-core の SimSpeed::MAX と同じ。 */
 export const EXTRA_SPEEDS = [288] as const;
 
+/**
+ * どの段にも当たらない速さ（前の帯の 4 倍や 16 倍で保存した記録など）を、1 秒あたりの tick 数の比が
+ * いちばん近い段にそろえる。段にあればそのまま返す。
+ */
+export function nearestSpeed(speed: number): number {
+  let best: number = BAR_SPEEDS[0];
+  for (const step of [...BAR_SPEEDS, ...EXTRA_SPEEDS]) {
+    if (Math.abs(Math.log(speed / step)) < Math.abs(Math.log(speed / best))) {
+      best = step;
+    }
+  }
+  return best;
+}
+
 export function describeSpeed(speed: number): string {
   return `速度 ${speed} 倍`;
 }

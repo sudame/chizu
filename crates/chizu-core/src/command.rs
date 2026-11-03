@@ -173,33 +173,6 @@ impl SimSpeed {
     pub fn ticks_per_second(self) -> u32 {
         u32::from(self.0) * TICKS_PER_SECOND_AT_NORMAL_SPEED
     }
-
-    /// この速度で使う移動の計算の細かさ。倍率ではなく 1 秒あたりの tick 数で決める。
-    pub fn fidelity(self) -> Fidelity {
-        match self.ticks_per_second() {
-            t if t <= Fidelity::FINE_MAX_TICKS_PER_SECOND => Fidelity::Fine,
-            t if t <= Fidelity::SEGMENT_MAX_TICKS_PER_SECOND => Fidelity::Segment,
-            _ => Fidelity::Bulk,
-        }
-    }
-}
-
-/// 移動の計算の細かさ（設計書 3.1）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Fidelity {
-    /// 細かい計算。移動体が車線を走る。
-    Fine,
-    /// 区間の計算。リンクの待ち行列で進める。
-    Segment,
-    /// 一括の計算。出発の時点で到着 tick を決める。
-    Bulk,
-}
-
-impl Fidelity {
-    /// 細かい計算で回す 1 秒あたりの tick 数の上限。1 日を 1 分で回す速さである。
-    pub const FINE_MAX_TICKS_PER_SECOND: u32 = 120;
-    /// 区間の計算で回す 1 秒あたりの tick 数の上限。1 日を 20 秒で回す速さである。
-    pub const SEGMENT_MAX_TICKS_PER_SECOND: u32 = 360;
 }
 
 impl Default for SimSpeed {
@@ -424,28 +397,6 @@ mod tests {
         );
         assert_eq!(SimSpeed::new(0), None);
         assert_eq!(SimSpeed::new(289), None);
-    }
-
-    #[test]
-    fn fidelity_switches_by_ticks_per_second() {
-        let at = |m| SimSpeed::new(m).unwrap().fidelity();
-        // 120 tick/秒と 360 tick/秒が境目で、境目ちょうどは細かいほうに入る。
-        assert_eq!(at(1), Fidelity::Fine);
-        assert_eq!(at(24), Fidelity::Fine);
-        assert_eq!(at(25), Fidelity::Segment);
-        assert_eq!(at(72), Fidelity::Segment);
-        assert_eq!(at(73), Fidelity::Bulk);
-        assert_eq!(SimSpeed::MAX.fidelity(), Fidelity::Bulk);
-        // 画面の速さの段（1、6、48、288 倍）は、細かい、細かい、区間、一括に入る。
-        assert_eq!(
-            [1, 6, 48, 288].map(at),
-            [
-                Fidelity::Fine,
-                Fidelity::Fine,
-                Fidelity::Segment,
-                Fidelity::Bulk
-            ]
-        );
     }
 
     #[test]

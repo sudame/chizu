@@ -131,7 +131,7 @@ import {
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 import { setupSaves } from "./save/main-side.ts";
 import { setupScaleBar } from "./scale-bar.ts";
-import { BAR_SPEEDS, describeSpeed } from "./speed.ts";
+import { BAR_SPEEDS, describeSpeed, nearestSpeed } from "./speed.ts";
 
 function element<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
@@ -194,7 +194,22 @@ function setText(el: HTMLElement, text: string): void {
   }
 }
 
+// 読み込んだ記録の速さが段にないとき（前の帯の 4 倍や 16 倍など）、最初の枠で近い段にそろえる。
+// SetSimSpeed のコマンドで変えるので、記録にも残る
+let speedAligned = false;
+function alignSpeed(speed: number): void {
+  if (speedAligned || speed < 1) {
+    return;
+  }
+  speedAligned = true;
+  const next = nearestSpeed(speed);
+  if (next !== speed) {
+    sendCommand({ kind: "SetSimSpeed", speed: next });
+  }
+}
+
 function draw(header: SnapshotHeader): void {
+  alignSpeed(header.speed);
   setText(hudClock, describeClock(header));
   setText(hudMoney, `お金 ${header.money.toLocaleString("ja-JP")}`);
   // 収支が赤字のあいだは、所持金の横に知らせる

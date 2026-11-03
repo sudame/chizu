@@ -111,10 +111,10 @@ describe("MoverInterpolator", () => {
     expect(mid).toBeLessThan(46);
   });
 
-  it("速度が切り替わったら、測り直して追いつく", () => {
+  it("6 倍から 1 倍へ落としたら、測り直して追いつく", () => {
     const i = new MoverInterpolator();
     for (let k = 0; k < 6; k++) {
-      run(i, k * 33.3, 10 + k, [{ id: 1, x: k * 10, y: 0 }]);
+      run(i, k * 33.3, 10 + k, [{ id: 1, x: k * 10, y: 0 }], { speed: 6 });
     }
     let t = 5 * 33.3;
     let x = 50;
