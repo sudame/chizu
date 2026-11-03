@@ -174,7 +174,10 @@ impl Trip {
         }) else {
             return false;
         };
-        buildings.get(lot).and_then(|b| building_spot(net, b)) != Some(to)
+        // 駐車場の建物が取り壊されていれば、もう向かう先の駐車場はないので数えない。
+        buildings
+            .get(lot)
+            .is_some_and(|b| building_spot(net, b) != Some(to))
     }
 
     pub fn speed(&self) -> MmPerTick {

@@ -24,7 +24,7 @@ use super::{
 };
 use crate::building::{Building, Buildings, ParkingCut, SLOT_WIDTH_MM};
 use crate::id::{BuildingId, TripId};
-use crate::network::{Dir, LaneMode, LinkId, Network, TILE_MM};
+use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId, TILE_MM};
 use crate::routing::AstarRouter;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{TilePos, TileRect};
@@ -268,7 +268,8 @@ pub fn lot_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
                 .into_iter()
                 .flat_map(|d| spots_near(road, step, d))
                 .find(|p| {
-                    p.resolve_on(net, LaneMode::Sidewalk).is_some()
+                    p.resolve_on(net, LaneMode::Sidewalk)
+                        .is_some_and(|(l, _)| joined(net, l.segment, b.entrance.segment))
                         && p.resolve_on(net, LaneMode::Car).is_some()
                 })?;
             let (link, off) = p.resolve_on(net, LaneMode::Car)?;
@@ -277,6 +278,29 @@ pub fn lot_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
         })
         .max_by_key(|(k, _)| *k)
         .map_or(Some(door), |(_, p)| Some(p))
+}
+
+/// 区間 `a` と `b` が同じ区間か、端のノードでつながっているか。建物の間口は、隣り合うだけで
+/// つながっていない 2 本の道路にまたがりうるので、出入りの位置は出入口の区間とつながる区間に取る。
+fn joined(net: &Network, a: SegmentId, b: SegmentId) -> bool {
+    a == b
+        || net
+            .segment(a)
+            .zip(net.segment(b))
+            .is_some_and(|(x, y)| [x.a, x.b].iter().any(|n| *n == y.a || *n == y.b))
+}
+
+/// [`lot_spot`] のうち、出入口から歩道で届くもの。届かなければ出入口にする。出入口の区間と
+/// つながる区間に取っても、片側の歩道が途切れているなどで届かないことがあるためである。
+fn reachable_lot_spot(
+    net: &Network,
+    router: &mut AstarRouter,
+    b: &Building,
+) -> Option<SidewalkPos> {
+    let door = building_spot(net, b)?;
+    let at = lot_spot(net, b)?;
+    let ok = at == door || reachable(net, router, LaneMode::Sidewalk, door, at);
+    Some(if ok { at } else { door })
 }
 
 /// 道路のマス `road` の真ん中から、1 歩の向き `step` に `d` mm ずれた位置の表し方。真ん中ちょうどは、
@@ -405,7 +429,8 @@ impl Trips {
     ) -> Option<TripId> {
         let from_b = buildings.get(from)?;
         let door = building_spot(net, from_b)?;
-        let origin = lot_spot(net, from_b)?;
+        router.sync(net);
+        let origin = reachable_lot_spot(net, router, from_b)?;
         let dest = building_spot(net, buildings.get(to)?)?;
         let took = take.filter(|b| self.parking.unpark(*b));
         let id = self.start_drive(net, router, buildings, (door, origin), (to, dest), now);
@@ -435,13 +460,12 @@ impl Trips {
             self.parking_tally.lots_full = self.parking_tally.lots_full.saturating_add(1);
             return None;
         }
-        let (lot, park_at) = candidates
-            .into_iter()
-            .filter_map(|lot| Some((lot, lot_spot(net, buildings.get(lot)?)?)))
-            .find(|(_, at)| {
-                reachable(net, router, LaneMode::Car, origin, *at)
-                    && reachable(net, router, LaneMode::Sidewalk, *at, dest)
-            })?;
+        let (lot, park_at) = candidates.into_iter().find_map(|lot| {
+            let at = reachable_lot_spot(net, router, buildings.get(lot)?)?;
+            (reachable(net, router, LaneMode::Car, origin, at)
+                && reachable(net, router, LaneMode::Sidewalk, at, dest))
+            .then_some((lot, at))
+        })?;
         let id = self.spawn_many(net, router, &[(door, origin)], now)[0]?;
         self.rows[id.slot()]
             .as_mut()
