@@ -31,7 +31,7 @@ pub use citizens::{
 pub use clock::{GameTime, TICKS_PER_DAY};
 pub use command::{Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
 pub use id::{BuildingId, CitizenId, HouseholdId, TripId};
-pub use movement::{Congestion, Mover, Noted, SidewalkPos, Trip, Trips};
+pub use movement::{CarPath, Congestion, Mover, Noted, SidewalkPos, Trip, Trips};
 pub use network::{
     Dir, KindChange, Lane, LaneId, LaneMode, Line, LinkId, Network, Node, NodeControl, Segment,
     SegmentId, SegmentKind, road_change_cost,
@@ -45,4 +45,7 @@ pub use terrain::{TerrainTiles, is_water, terrain};
 pub use tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, TileRect};
 pub use units::{LaneOffset, Mm, MmPerTick, Money, Tick, WorldPos};
 pub use world::people::MigrationOutlook;
-pub use world::{ApplyOutcome, CarSample, CitizenPlaces, DayTraffic, DenyReason, Traffic, World};
+pub use world::{
+    ApplyOutcome, CarSample, CitizenPlaces, CommuteDistances, DayTraffic, DenyReason, Traffic,
+    World,
+};

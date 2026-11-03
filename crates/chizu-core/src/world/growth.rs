@@ -163,6 +163,19 @@ impl World {
         self.growth_report().0
     }
 
+    /// 区画の種類（[`ZoneKind::index`] の順）ごとに、需要が正なのに建てる候補の間口が 1 つもないかを返す。状態は変えない。
+    /// 塗ったことのある（街に区画か建物がある）種類だけを数える。塗っていない種類は、基礎需要があっても偽である。
+    /// 塗った区画が建ち尽くしたとき真になる。電気や水道の余裕とは関係がない。
+    pub fn lot_shortage(&self) -> [bool; 4] {
+        let stats = self.city_stats();
+        let demand = demand(&stats);
+        let mut has_front = [false; 4];
+        for (zone, _) in self.lots.fronts.values() {
+            has_front[zone.index()] = true;
+        }
+        std::array::from_fn(|z| demand[z] > 0 && stats.zoned[z] && !has_front[z])
+    }
+
     /// [`World::growth_blocks`] と [`World::stalled_networks`] を 1 回の走査で求める。
     /// 止まっている間口が 1 つでもあれば、網の一覧は空でない。
     pub fn growth_report(&self) -> ([GrowthBlock; 4], Vec<StalledNetwork>) {
@@ -1415,6 +1428,37 @@ mod tests {
         let half = w.stalled_networks();
         assert_eq!(half.len(), 1, "{half:?}");
         assert!(!half[0].no_power && half[0].no_water, "{half:?}");
+    }
+
+    /// 需要が正なのに空き区画がないとき真になる。塗っていなければ偽で、塗れば偽、建ち尽くせば真、塗り足せば偽に戻る。
+    #[test]
+    fn lot_shortage_is_true_while_demand_has_no_free_lot() {
+        let mut w = served_street();
+        // 通りの両側を塗った街から、いったん塗りを消す。
+        let clear = Command::PaintZone {
+            area: rect((0, 4), (40, 16)),
+            zone: None,
+        };
+        assert_eq!(w.apply(&clear), ApplyOutcome::Applied);
+        let res = ZoneKind::Residential.index();
+        assert!(demand(&w.city_stats())[res] > 0);
+        assert!(!w.lot_shortage()[res], "塗っていないのに真");
+        assert_eq!(w.growth_blocks()[res].fronts, 0);
+        // 状態を変えない。
+        let hash = w.state_hash();
+        let _ = w.lot_shortage();
+        assert_eq!(hash, w.state_hash());
+        // 小さく塗れば偽になる。
+        paint(&mut w, (4, 7), (7, 9), ZoneKind::Residential);
+        assert!(!w.lot_shortage()[res], "空きがあるのに真");
+        // 建ち尽くせば、需要が残るあいだは真に戻る。
+        run(&mut w, 60 * GROWTH_INTERVAL);
+        assert_eq!(w.growth_blocks()[res].fronts, 0, "建ち尽くしていない");
+        assert!(demand(&w.city_stats())[res] > 0, "需要が尽きた");
+        assert!(w.lot_shortage()[res], "建ち尽くしたのに偽");
+        // 塗り足せば偽に戻る。
+        paint(&mut w, (12, 7), (15, 9), ZoneKind::Residential);
+        assert!(!w.lot_shortage()[res], "塗り足したのに真");
     }
 
     /// 主の網の電気だけが足りない街。小さな区画を塗った通りに、浄水場だけを置く。

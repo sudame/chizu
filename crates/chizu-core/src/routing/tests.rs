@@ -250,6 +250,8 @@ fn requests(n: &Network, count: usize) -> Vec<RouteRequest> {
                 from,
                 to,
                 mode: from.mode,
+                // 候補の数より大きい値も混ぜ、余りで選ぶことも確かめる。
+                variant: (i % 11) as u8,
             }
         })
         .collect()
@@ -263,7 +265,9 @@ fn batch_returns_results_in_request_order_and_reuses_them() {
     let got = router.route_batch(&reqs);
     let mut s = Scratch::default();
     for (r, got) in reqs.iter().zip(&got) {
-        let want = astar(router.graph(r.mode), r.from, r.to, &mut s);
+        let n = variants_of(r.mode);
+        let want = astar_variants(router.graph(r.mode), r.from, r.to, &mut s, n)
+            .map(|v| v[usize::from(r.variant) % v.len()].clone());
         assert_eq!(got.as_deref(), want.as_ref());
     }
     assert!(got.iter().any(Option::is_none));
@@ -288,6 +292,7 @@ fn bundling_and_the_cache_limit_do_not_change_the_routes() {
         from: links[(i * 11) % links.len()],
         to: links[i % 3],
         mode: LaneMode::Car,
+        variant: 0,
     }));
     let want = AstarRouter::new(&n)
         .with_bundle_min(usize::MAX)
@@ -307,11 +312,13 @@ fn one_batch_larger_than_the_cache_limit_keeps_only_the_limit() {
     let n = grid(6);
     let reqs = requests(&n, 100);
     let want = AstarRouter::new(&n).route_batch(&reqs);
-    let mut router = AstarRouter::new(&n).with_cache_limit(10);
+    // 大きさは経路のリンクの数で数えるので、上限を超える前に一部だけを覚える。
+    let mut router = AstarRouter::new(&n).with_cache_limit(60);
     assert_eq!(router.route_batch(&reqs), want);
-    assert!(router.cached() <= 10);
+    assert!(router.cached() > 0);
+    assert!(router.cached_size() <= 60);
     assert_eq!(router.route_batch(&reqs), want);
-    assert!(router.cached() <= 10);
+    assert!(router.cached_size() <= 60);
 }
 
 #[test]
@@ -322,6 +329,7 @@ fn bundles_in_the_direction_that_covers_more_requests() {
         from: links[from],
         to: links[to],
         mode: LaneMode::Car,
+        variant: 0,
     };
     // 1 か所から 60 か所へ散らばる依頼と、その 60 か所へほかから 2 件ずつ来る依頼。
     // 着くリンクの組（60 組、3 件ずつ）のほうが少ないが、下限に届くのは出発のリンクの組だけである。
@@ -329,7 +337,8 @@ fn bundles_in_the_direction_that_covers_more_requests() {
     reqs.extend((1..=60).flat_map(|t| [req(60 + t, t), req(120 + t, t)]));
     reqs.sort();
     let router = AstarRouter::new(&n);
-    let jobs = router.plan(&reqs);
+    let keys: Vec<Key> = reqs.iter().map(RouteRequest::key).collect();
+    let jobs = router.plan(&keys);
     let bundled: Vec<(Toward, usize)> = jobs
         .iter()
         .filter_map(|j| match j {
@@ -354,6 +363,7 @@ fn a_large_group_extracts_routes_in_parallel_with_the_same_result() {
             from: links[0],
             to: links[t],
             mode: LaneMode::Car,
+            variant: 0,
         })
         .collect();
     let want = AstarRouter::new(&n)
@@ -378,12 +388,13 @@ fn mixed_modes_do_not_reallocate_the_scratch() {
             from: l,
             to: l,
             mode: l.mode,
+            variant: 0,
         })
         .collect();
     reqs.sort();
     let mut s = Scratches::default();
     for r in &reqs {
-        router.solve(&Job::Single(*r), &mut s);
+        router.solve(&Job::Single(r.key()), &mut s);
     }
     assert_eq!((s.car.allocations(), s.walk.allocations()), (1, 1));
 }
@@ -436,10 +447,20 @@ proptest! {
             let mut s = Scratch::default();
             for (a, b) in &pairs {
                 let (a, b) = ((a % g.vertex_count()) as u32, (b % g.vertex_count()) as u32);
+                let best = dijkstra(&g, a, b);
                 let r = astar(&g, g.link(a), g.link(b), &mut s);
-                prop_assert_eq!(r.as_ref().map(|r| r.cost), dijkstra(&g, a, b));
+                prop_assert_eq!(r.as_ref().map(|r| r.cost), best);
                 if let Some(r) = r {
                     check_route(&g, &r);
+                }
+                // どの候補も、出発から着くリンクまで辺でつながり、たどって足した費用が最短の費用になる。
+                let vs = astar_variants(&g, g.link(a), g.link(b), &mut s, ROUTE_VARIANTS);
+                prop_assert_eq!(vs.is_some(), best.is_some());
+                for v in vs.iter().flatten() {
+                    prop_assert_eq!(v.links.first(), Some(&g.link(a)));
+                    prop_assert_eq!(v.links.last(), Some(&g.link(b)));
+                    check_route(&g, v);
+                    prop_assert_eq!(Some(v.cost), best);
                 }
             }
             let ends: Vec<(LinkId, LinkId)> = pairs
@@ -451,7 +472,7 @@ proptest! {
     }
 }
 
-/// 着くリンクで束ねても出発のリンクで束ねても、A* と同じ経路になることを確かめる。
+/// 着くリンクで束ねても出発のリンクで束ねても、どの候補でも A* と同じ経路になることを確かめる。
 fn check_bundles(g: &Graph, ends: &[(LinkId, LinkId)]) {
     let mut s = Scratch::default();
     let (from, to) = ends[0];
@@ -464,6 +485,32 @@ fn check_bundles(g: &Graph, ends: &[(LinkId, LinkId)]) {
     let fwd = one_to_many(g, from, &goals, Toward::Forward, &mut s);
     for (b, got) in goals.iter().zip(fwd) {
         assert_eq!(got, astar(g, from, *b, &mut s), "{from:?} から {b:?}");
+    }
+    let n = ROUTE_VARIANTS;
+    let mut m = Marks::default();
+    let root = search_many(g, to, &starts, Toward::Backward, &mut s).unwrap();
+    let back: Vec<_> = starts
+        .iter()
+        .map(|a| extract(g, &s, &mut m, root, *a, Toward::Backward, n))
+        .collect();
+    for (a, got) in starts.iter().zip(back) {
+        assert_eq!(
+            got,
+            astar_variants(g, *a, to, &mut s, n),
+            "{a:?} から {to:?}"
+        );
+    }
+    let root = search_many(g, from, &goals, Toward::Forward, &mut s).unwrap();
+    let fwd: Vec<_> = goals
+        .iter()
+        .map(|b| extract(g, &s, &mut m, root, *b, Toward::Forward, n))
+        .collect();
+    for (b, got) in goals.iter().zip(fwd) {
+        assert_eq!(
+            got,
+            astar_variants(g, from, *b, &mut s, n),
+            "{from:?} から {b:?}"
+        );
     }
 }
 
@@ -488,6 +535,112 @@ fn bundles_pick_the_same_route_as_astar_among_ties() {
             check_bundles(&g, &swapped);
         }
     }
+}
+
+#[test]
+fn variants_spread_over_routes_of_the_same_cost_and_keep_to_straight_roads() {
+    // 同じ道路の 6 × 6 区画の格子で、角から向かいの角へ行く。最短経路はすべて同じ費用である。
+    let mut n = Network::new();
+    for i in 0..=6 {
+        road(&mut n, (0, i * 3), (18, i * 3), RoadKind::Small);
+        road(&mut n, (i * 3, 0), (i * 3, 18), RoadKind::Small);
+    }
+    let g = Graph::build(&n, LaneMode::Car);
+    let from = link(&n, (0, 0), (3, 0), LaneMode::Car);
+    let to = link(&n, (18, 15), (18, 18), LaneMode::Car);
+    let routes = astar_variants(&g, from, to, &mut Scratch::default(), ROUTE_VARIANTS).unwrap();
+    let best = dijkstra(&g, g.vertex(from).unwrap(), g.vertex(to).unwrap()).unwrap();
+    for r in &routes {
+        check_route(&g, r);
+        assert_eq!(r.cost, best);
+    }
+    let mut distinct: Vec<&Vec<LinkId>> = routes.iter().map(|r| &r.links).collect();
+    distinct.sort();
+    distinct.dedup();
+    assert!(
+        distinct.len() >= 4,
+        "候補が {} 本にしか分かれない",
+        distinct.len()
+    );
+    // 曲がる回数。区間ごとに 1 歩の向きが変わったら 1 回と数える。
+    let turns = |r: &Route| {
+        let steps: Vec<_> = r
+            .links
+            .iter()
+            .map(|l| {
+                let line = n.segment_line(l.segment).unwrap();
+                match l.dir {
+                    Dir::Forward => line.step,
+                    Dir::Backward => (-line.step.0, -line.step.1),
+                }
+            })
+            .collect();
+        steps.windows(2).filter(|w| w[0] != w[1]).count()
+    };
+    // 直線ごとに順を決めるので、交差点ごとに向きを選ぶより曲がる回数が少ない。東へ 6 区画、北へ 6 区画の
+    // 最短経路を一様に選ぶと、平均で 6 回曲がる。
+    let total: usize = routes.iter().map(turns).sum();
+    assert!(total < 4 * routes.len(), "曲がる回数が多すぎる {total}");
+}
+
+#[test]
+fn batch_picks_the_requested_variant_from_one_search() {
+    let n = grid(6);
+    let links: Vec<LinkId> = n.links().filter(|l| l.mode == LaneMode::Car).collect();
+    let (from, to) = (links[0], links[links.len() - 1]);
+    let reqs: Vec<RouteRequest> = (0..ROUTE_VARIANTS * 2)
+        .map(|variant| RouteRequest {
+            from,
+            to,
+            mode: LaneMode::Car,
+            variant,
+        })
+        .collect();
+    let mut router = AstarRouter::new(&n);
+    let got = router.route_batch(&reqs);
+    // 候補は 1 つの鍵にまとめて覚える。大きさは、鍵の 1 に、共有した経路を 1 回だけ数えたリンクの数を足したもの。
+    assert_eq!(router.cached(), 1);
+    let mut distinct: Vec<&Vec<LinkId>> = got.iter().flatten().map(|r| &r.links).collect();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        router.cached_size(),
+        1 + distinct.iter().map(|l| l.len()).sum::<usize>()
+    );
+    let want = astar_variants(
+        router.graph(LaneMode::Car),
+        from,
+        to,
+        &mut Scratch::default(),
+        ROUTE_VARIANTS,
+    )
+    .unwrap();
+    for (r, got) in reqs.iter().zip(&got) {
+        assert_eq!(
+            **got.as_ref().unwrap(),
+            want[usize::from(r.variant) % want.len()]
+        );
+    }
+    // 同じ経路の候補は 1 つを共有する。
+    let a = got[0].as_ref().unwrap();
+    let shared = got.iter().flatten().filter(|g| Arc::ptr_eq(g, a)).count();
+    let same = got.iter().flatten().filter(|g| ***g == **a).count();
+    assert_eq!(shared, same);
+    // 歩く経路は散らさない。
+    let walk = |variant| RouteRequest {
+        from: LinkId {
+            mode: LaneMode::Sidewalk,
+            ..from
+        },
+        to: LinkId {
+            mode: LaneMode::Sidewalk,
+            ..to
+        },
+        mode: LaneMode::Sidewalk,
+        variant,
+    };
+    let w = router.route_batch(&[walk(0), walk(3)]);
+    assert_eq!(w[0], w[1]);
 }
 
 /// 整合を崩した網から、手段ごとのグラフ、車線のつながり、経路探索のどれを作っても panic せず `Err` になる。
@@ -607,11 +760,13 @@ fn delays_steer_cars_to_the_parallel_road_and_survive_a_rebuild() {
         from: link(&n, (-4, 0), (0, 0), car),
         to: link(&n, (20, 0), (24, 0), car),
         mode: car,
+        variant: 0,
     };
     let walk = RouteRequest {
         from: link(&n, (-4, 0), (0, 0), LaneMode::Sidewalk),
         to: link(&n, (20, 0), (24, 0), LaneMode::Sidewalk),
         mode: LaneMode::Sidewalk,
+        variant: 0,
     };
     let straight = link(&n, (0, 0), (20, 0), car);
     let mut router = AstarRouter::new(&n);
@@ -637,6 +792,38 @@ fn delays_steer_cars_to_the_parallel_road_and_survive_a_rebuild() {
     assert_eq!(router.route_batch(&[req])[0], jammed[0]);
     router.set_delays(&Delays::default());
     assert_eq!(router.route_batch(&[req])[0], free[0]);
+}
+
+/// 覚えている結果の大きさが、残っている結果から数え直した値と同じであることを確かめる。
+fn check_cached_size(router: &AstarRouter) {
+    let want: usize = router.cache.values().map(size_of_entry).sum();
+    assert_eq!(router.cached_size(), want);
+}
+
+#[test]
+fn cached_size_follows_the_cache_through_delays_and_bands() {
+    let n = grid(6);
+    let mut router = AstarRouter::new(&n);
+    router.route_batch(&requests(&n, 300));
+    let walks = router
+        .cache
+        .keys()
+        .filter(|k| k.mode == LaneMode::Sidewalk)
+        .count();
+    assert!(walks > 0 && walks < router.cached());
+    check_cached_size(&router);
+    // 遅れが変わると車の結果だけを捨てるので、大きさも歩く結果のぶんだけになる。
+    let car = n.links().find(|l| l.mode == LaneMode::Car).unwrap();
+    router.set_delays(&Delays::from_sorted([(car, 5_000)]));
+    assert_eq!(router.cached(), walks);
+    check_cached_size(&router);
+    // 数え直した大きさから、また覚え足していける。
+    router.route_batch(&requests(&n, 300));
+    check_cached_size(&router);
+    router.set_band(1);
+    assert_eq!((router.cached(), router.cached_size()), (0, 0));
+    router.route_batch(&requests(&n, 300));
+    check_cached_size(&router);
 }
 
 #[test]

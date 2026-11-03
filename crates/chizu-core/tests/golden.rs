@@ -1467,7 +1467,11 @@ fn compare_golden(name: &str, got: &str) {
 /// 毎 tick、停めてある台数と押さえた台数の和が駐車場の台数を超えず、押さえた台数がその駐車場へ
 /// 向かう主体の数と同じで、駐車場が建っている建物にだけあることを確かめる。
 fn driving_checkpoints(seed: u64, ticks: u64) -> (String, u32, World) {
-    let log = growth();
+    driving_checkpoints_on(&growth(), seed, ticks)
+}
+
+/// [`driving_checkpoints`] と同じく、記録 `log` の街で車を行き来させる。
+fn driving_checkpoints_on(log: &CommandLog, seed: u64, ticks: u64) -> (String, u32, World) {
     let mut world = World::new(seed);
     let mut digest = StateHasher::new();
     let mut out = String::new();
@@ -1483,7 +1487,7 @@ fn driving_checkpoints(seed: u64, ticks: u64) -> (String, u32, World) {
                 spawned += u32::from(world.spawn_drive(a, b).is_some());
             }
         }
-        replay(&mut world, &log, 1);
+        replay(&mut world, log, 1);
         let mut heading = std::collections::BTreeMap::<BuildingId, u32>::new();
         for (_, t) in world.trips().iter() {
             if let Some(b) = t
@@ -1531,6 +1535,111 @@ fn driving_golden() {
     assert!(end.trips().lots().any(|(_, l)| l.parked > 0));
     assert_eq!(driving_checkpoints(SEED, TICKS).0, got);
     compare_golden("driving", &got);
+}
+
+/// 同じ道路の碁盤の目に区画を塗った記録。西の 2 列の区画は住宅、東の 2 列はオフィスと商業にする。
+/// 区画の角から向かいの角へは、費用の同じ経路がたくさんある。
+fn grid_city() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    for i in 0..=4 {
+        for (from, to) in [((0, i * 12), (48, i * 12)), ((i * 12, 0), (i * 12, 48))] {
+            rec(
+                1,
+                Command::BuildRoad {
+                    from: TilePos::new(from.0, from.1),
+                    to: TilePos::new(to.0, to.1),
+                    kind: RoadKind::Small,
+                },
+            );
+        }
+    }
+    for bx in 0..4 {
+        for by in 0..4 {
+            let zone = match (bx, by % 2) {
+                (0 | 1, _) => ZoneKind::Residential,
+                (_, 0) => ZoneKind::Office,
+                _ => ZoneKind::Commercial,
+            };
+            let area = TileRect::from_corners(
+                TilePos::new(bx * 12 + 1, by * 12 + 1),
+                TilePos::new(bx * 12 + 11, by * 12 + 11),
+            );
+            rec(
+                2,
+                Command::PaintZone {
+                    area,
+                    zone: Some(zone),
+                },
+            );
+        }
+    }
+    for c in connect_to_outside(42, 0, 0, 48) {
+        rec(3, c);
+    }
+    for (kind, x) in [(ServiceKind::PowerPlant, 3), (ServiceKind::WaterPump, 7)] {
+        rec(
+            3,
+            Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(x, -1),
+                rotation: 2,
+            },
+        );
+    }
+    log
+}
+
+/// 碁盤の目の街で車を行き来させる。費用の同じ経路をどう散らすかを変えると、ハッシュが変わる。
+#[test]
+fn grid_driving_golden() {
+    const SEED: u64 = 42;
+    const TICKS: u64 = 2_600;
+    let log = grid_city();
+    let mut world = World::new(SEED);
+    let stats = replay(&mut world, &log, 4);
+    assert_eq!(stats.denied, 0);
+    let (got, spawned, end) = driving_checkpoints_on(&log, SEED, TICKS);
+    assert!(spawned > 300, "作れた移動が少ない {spawned}");
+    assert_eq!(driving_checkpoints_on(&log, SEED, TICKS).0, got);
+    compare_golden("grid_driving", &got);
+    // 建物どうしをまとめて車で結ぶと、同じ 2 つのリンクを結ぶ車のうち、別の経路を通る組がある。
+    let mut world = World::new(SEED);
+    replay(&mut world, &log, 1_200);
+    let ids: Vec<BuildingId> = world.buildings().iter().map(|(id, _)| id).collect();
+    assert!(ids.len() > 20, "建物が少ない {}", ids.len());
+    for a in &ids {
+        for b in ids.iter().rev().take(5) {
+            world.spawn_drive(*a, *b);
+        }
+    }
+    // 歩いて車に乗り、車の区切りの経路を探してから走るので、しばらく進めながら車の経路を集める。
+    let mut by_ends = std::collections::BTreeMap::new();
+    for _ in 0..200 {
+        replay(&mut world, &log, 1);
+        for (_, t) in world
+            .trips()
+            .iter()
+            .filter(|(_, t)| t.mode() == LaneMode::Car)
+        {
+            let links = &t.route().links;
+            by_ends
+                .entry((links[0], *links.last().unwrap()))
+                .or_insert_with(std::collections::BTreeSet::new)
+                .insert(links.clone());
+        }
+    }
+    assert!(
+        by_ends.values().any(|r| r.len() > 1),
+        "同じ 2 つのリンクを結ぶ車が、みな同じ経路を通る"
+    );
+    assert!(
+        end.trips().len() < 200,
+        "着かずに残った移動が多い {}",
+        end.trips().len()
+    );
 }
 
 /// 通勤のシナリオで、朝の車が走っている通りを `UPGRADE_TICK` に大きい道路へ上げる tick。

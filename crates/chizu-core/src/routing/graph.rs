@@ -5,6 +5,7 @@ use core::fmt;
 use crate::command::{NodeId, RoadKind};
 use crate::movement::crossing::{self, JAYWALK_DETOUR_MM};
 use crate::network::{Dir, LaneId, LaneMode, Line, LinkId, Network, SegmentId, SegmentKind};
+use crate::rng::{GOLDEN_GAMMA, RngPurpose, mix_words, mix64};
 use crate::tile::TilePos;
 use crate::units::MmPerTick;
 
@@ -137,6 +138,9 @@ pub struct Graph {
     component_len: Vec<u32>,
     /// リンクの終わりのノードのマス。ヒューリスティックに使う。
     end_tile: Vec<TilePos>,
+    /// リンクの通る直線の向きと位置を混ぜた値。同じ直線の上のリンクは、区間や進む向きが違っても同じ値になる。
+    /// 費用の同じ経路から 1 本を選ぶときの順に使う（[`Graph::rank`]）。
+    street: Vec<u64>,
     /// 頂点 `v` から出る辺は `edges[edge_start[v]..edge_start[v + 1]]` で、行き先の番号の順に並ぶ。
     edge_start: Vec<u32>,
     edges: Vec<Edge>,
@@ -222,6 +226,7 @@ impl Graph {
         let links: Vec<LinkId> = net.links().filter(|l| l.mode == mode).collect();
         let mut cost = Vec::with_capacity(links.len());
         let mut end_tile = Vec::with_capacity(links.len());
+        let mut street = Vec::with_capacity(links.len());
         let mut max_speed = MmPerTick(1);
         for l in &links {
             let seg = net
@@ -232,7 +237,9 @@ impl Graph {
                 LaneMode::Sidewalk => WALK_SPEED,
             };
             max_speed = max_speed.max(speed);
-            let length = segment_line(net, l.segment)?
+            let line = segment_line(net, l.segment)?;
+            street.push(street_of(&line));
+            let length = line
                 .checked_length()
                 .and_then(|m| u64::try_from(m.0).ok())
                 .ok_or(GraphError::Overflow)?;
@@ -270,6 +277,7 @@ impl Graph {
             free: cost.clone(),
             cost,
             end_tile,
+            street,
             edge_start,
             edges,
             rev_start,
@@ -293,6 +301,14 @@ impl Graph {
 
     pub(crate) fn link(&self, v: u32) -> LinkId {
         self.links[v as usize]
+    }
+
+    /// 経路の候補 `variant` で、費用の同じ経路から 1 本を選ぶときの頂点 `v` の順。小さいほうを選ぶ。
+    /// 同じ直線の上のリンクは同じ順になるので、まっすぐ進む経路が選ばれやすい。
+    pub(crate) fn rank(&self, variant: u8, v: u32) -> u64 {
+        // 直線の値はすでに混ぜてあるので、候補ごとの値を 1 回混ぜるだけにする。経路を取り出すたびに呼ぶため軽くしておく。
+        let salt = (u64::from(variant) + 1).wrapping_mul(GOLDEN_GAMMA);
+        mix64(self.street[v as usize] ^ salt)
     }
 
     /// リンクの費用を、自由に走れたときの所要時間に `delays` の遅れを足したものにする。
@@ -358,6 +374,26 @@ impl Graph {
         let speed = u64::try_from(self.max_speed.0).expect("速さが負");
         mm.checked_mul(1_000).expect("所要時間があふれた") / speed
     }
+}
+
+/// 直線 `line` の向きと位置を混ぜた値。逆向きに引いた直線と、同じ直線の上にある別の区間も同じ値になる。
+fn street_of(line: &Line) -> u64 {
+    // 向きを x が正（x が 0 なら y が正）にそろえ、向きに直交する座標を位置にする。
+    let (sx, sy) = if line.step.0 < 0 || (line.step.0 == 0 && line.step.1 < 0) {
+        (-line.step.0, -line.step.1)
+    } else {
+        line.step
+    };
+    let p = line.start;
+    let at = match (sx, sy) {
+        (0, _) => p.x,
+        (_, 0) => p.y,
+        (_, 1) => p.y - p.x,
+        _ => p.y + p.x,
+    };
+    // 2 の補数のビットをそのまま使う。
+    let (dir, at) = ((sx + 1) * 3 + (sy + 1), at as u64);
+    mix_words(0, RngPurpose::RouteVariant, &[dir as u64, at])
 }
 
 /// 辺の向きを逆にした CSR。元の頂点を番号の順になめるので、入る辺は元の頂点の順に並ぶ。

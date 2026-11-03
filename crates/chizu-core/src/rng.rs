@@ -33,12 +33,14 @@ pub enum RngPurpose {
     Errand = 8,
     /// 世帯が車を持つか。
     CarOwnership = 9,
+    /// 費用の同じ経路から 1 本を選ぶ順。
+    RouteVariant = 10,
 }
 
-const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+pub(crate) const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// SplitMix64 の出力関数。入力が 1 ビット違えば出力は大きく変わる。
-fn mix64(z: u64) -> u64 {
+pub(crate) fn mix64(z: u64) -> u64 {
     let z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     let z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)

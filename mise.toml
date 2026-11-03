@@ -7,8 +7,13 @@ idiomatic_version_file_enable_tools = ["rust"]
 # sccache は入力の中身で引くので、ブランチごとに中身が違っても古い成果物を使わない。
 # CI は target/ をキャッシュしているので通さない。cargo は空の RUSTC_WRAPPER を、設定がないものとして扱う
 RUSTC_WRAPPER = "{% if get_env(name='CI', default='') == '' %}sccache{% endif %}"
+# test:wasm と lint:web が使う WASM の profile。手元では LTO のない wasm-dev で軽くし、CI では配るものと同じ wasm-release で確かめる。
+# 手元でも配るもので確かめたいときは、CHIZU_WASM_TEST_PROFILE=wasm-release を付けて回す
+CHIZU_WASM_TEST_PROFILE = "{% if get_env(name='CI', default='') == '' %}{{ get_env(name='CHIZU_WASM_TEST_PROFILE', default='wasm-dev') }}{% else %}wasm-release{% endif %}"
 
 [tools]
+# test:rust でテストを回す
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.149"
 biome = "2.6.4"
 jactionlint = "2.4.0"
 node = "26.13.0"
@@ -36,14 +41,15 @@ run = "rumdl check ."
 run = "jactionlint"
 
 [tasks."lint:rust"]
-# cargo は clippy.toml の変更を確実には拾わない。clippy.toml を持つクレートだけ消して毎回検査し直す。
-# clippy.toml を持つクレートを足したら、cargo clean の --package にも足す
+# clippy は読んだ clippy.toml を依存のファイルとして記録するので、clippy.toml を書き換えれば検査し直す。
+# clippy.toml を読んでいないクレートには記録がない。そのクレートか、ルートなど親のディレクトリに clippy.toml を新しく置いたときは、
+# 読むことになるクレートを cargo clean してから回す
 run = [
   "cargo fmt --all --check",
-  "cargo clean --package chizu-core --package chizu-scenario",
   "cargo clippy --workspace --all-targets -- -D warnings",
   "scripts/check-no-float.sh crates/chizu-core/src",
   "scripts/check-no-float.sh crates/chizu-scenario/src",
+  "scripts/check-no-doctest.sh",
 ]
 
 [tasks."lint:wasm"]
@@ -58,8 +64,8 @@ dir = "web"
 run = "pnpm install --frozen-lockfile"
 
 [tasks."lint:web"]
-# tsc は wasm-bindgen が作る型定義を読むので、先に WASM をビルドする
-depends = ["install:web", "build:wasm"]
+# tsc は wasm-bindgen が作る型定義を読むので、先に WASM をビルドする。型定義は profile によらない
+depends = ["install:web", "build:wasm-test"]
 dir = "web"
 run = ["biome check .", "pnpm exec tsc --noEmit"]
 
@@ -71,7 +77,13 @@ description = "mise の環境で cargo を回す。shell に mise の [env] が�
 run = "cargo"
 
 [tasks."test:rust"]
-run = "cargo test --workspace"
+# cargo test はテストのバイナリを 1 本ずつ順に回すので、長いテストを持つバイナリが続くと待ちが積み重なる。
+# nextest はバイナリをまたいでテストを並べて回す。
+# nextest は doctest を回さない。いまは doctest がないので、lint:rust の scripts/check-no-doctest.sh で、足したら気づけるようにしている
+# nextest はテストごとに別のプロセスを立て、それぞれが rayon のスレッドを立てる。既定ではコアの数だけ立ち、仕事を待つあいだも回り続けて CPU を使い切る。
+# 2 本でも並列の経路は通る。スレッドの数で結果が変わらないことは、スレッドの数を指定して立てたプールで確かめるテストがある
+env = { RAYON_NUM_THREADS = "2" }
+run = "cargo nextest run --workspace"
 
 [tasks."test:web"]
 depends = ["install:web"]
@@ -80,7 +92,7 @@ run = "pnpm exec vitest run"
 
 [tasks."test:wasm"]
 description = "ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかと、保存と読み込み、朝の通勤と昼の買い物の描画を確かめる"
-depends = ["build:web"]
+depends = ["build:web-test"]
 dir = "web"
 run = [
   "node scripts/test-wasm.ts",
@@ -126,6 +138,19 @@ run = [
 
 [tasks."build:web"]
 depends = ["install:web", "build:wasm"]
+dir = "web"
+run = "pnpm exec vite build"
+
+[tasks."build:wasm-test"]
+description = "test:wasm と lint:web のために、build:wasm と同じ WASM を CHIZU_WASM_TEST_PROFILE の profile でビルドする"
+run = [
+  "cargo build --profile $CHIZU_WASM_TEST_PROFILE --target wasm32-unknown-unknown --package chizu-wasm -Z build-std=panic_abort,std",
+  "wasm-bindgen --target web --out-dir web/wasm target/wasm32-unknown-unknown/$CHIZU_WASM_TEST_PROFILE/chizu_wasm.wasm",
+]
+
+[tasks."build:web-test"]
+description = "test:wasm のために、build:wasm-test の WASM で build:web と同じビルドをする"
+depends = ["install:web", "build:wasm-test"]
 dir = "web"
 run = "pnpm exec vite build"
 

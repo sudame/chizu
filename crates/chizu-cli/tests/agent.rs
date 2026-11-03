@@ -105,6 +105,7 @@ fn make_feedback(name: &str, unrecorded_ops: u32) -> PathBuf {
     map.insert("unrecordedOps".into(), unrecorded_ops.into());
     std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
     std::fs::remove_file(dir.join("session.lock")).unwrap();
+    std::fs::remove_file(dir.join("replay-cache.bin")).unwrap();
     std::fs::remove_file(dir.join("c.json")).unwrap();
     dir
 }
@@ -279,6 +280,61 @@ fn reports_invalid_commands_without_recording() {
     let rec = std::fs::read(dir.join("commands.rec")).unwrap();
     let log = chizu_core::CommandLog::decode(&rec).unwrap();
     assert!(log.is_empty());
+}
+
+/// 再生の途中のキャッシュが壊れているか、ほかのセッションのものなら、捨てて記録の先頭から作り直す。
+#[test]
+fn discards_broken_or_foreign_caches() {
+    const CACHE: &str = "replay-cache.bin";
+    let replayed = |dir: &Path, tick: &str| {
+        let rec = dir.join("commands.rec");
+        // small_town は種 42 で作る。
+        cli(&[rec.to_str().unwrap(), "42", tick]).trim().to_string()
+    };
+    let dir = small_town("agent-cache-broken");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "advance", d, "400"]);
+    assert!(dir.join(CACHE).exists(), "キャッシュを書いていない");
+
+    // 中ほどの 1 バイトを壊す。
+    let mut bytes = std::fs::read(dir.join(CACHE)).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0x55;
+    std::fs::write(dir.join(CACHE), &bytes).unwrap();
+    let seen = json(&cli(&["agent", "observe", d]));
+    assert_eq!(seen["stateHash"].as_str().unwrap(), replayed(&dir, "400"));
+    assert_ne!(
+        std::fs::read(dir.join(CACHE)).unwrap(),
+        bytes,
+        "壊れたキャッシュを書き直していない"
+    );
+
+    // 同じ種で、最初の道路の違う街のキャッシュを持ってくる。
+    let other = session("agent-cache-foreign");
+    let o = other.to_str().unwrap();
+    cli(&["agent", "new", o, "42"]);
+    let cmds = write(
+        &other.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[30,0],"kind":"Small"},
+            {"type":"PaintZone","area":[[0,1],[24,6]],"zone":"Residential"}]"#,
+    );
+    cli(&["agent", "act", o, &cmds]);
+    cli(&["agent", "advance", o, "400"]);
+    std::fs::copy(dir.join(CACHE), other.join(CACHE)).unwrap();
+    let seen = json(&cli(&["agent", "observe", o]));
+    assert_eq!(seen["stateHash"].as_str().unwrap(), replayed(&other, "400"));
+    assert_ne!(
+        seen["stateHash"],
+        json(&cli(&["agent", "observe", d]))["stateHash"]
+    );
+    // act と advance も、ハッシュの突き合わせを通って書き込める。
+    std::fs::copy(dir.join(CACHE), other.join(CACHE)).unwrap();
+    cli(&["agent", "advance", o, "15"]);
+    let state = json(&std::fs::read_to_string(other.join("state.json")).unwrap());
+    assert_eq!(
+        state["stateHash"].as_str().unwrap(),
+        replayed(&other, "415")
+    );
 }
 
 /// 道路と区画を置いた小さな街。道路は y=0 の x=0〜20 を Medium で引き、区画は x=0〜24、y=1〜6 の住宅である。
@@ -620,6 +676,29 @@ fn observe_shows_power_plants_cut_off_from_the_main_network() {
     assert!(others["networks"].as_u64().unwrap() >= 1, "{power}");
 }
 
+/// 塗っていない種類は、需要が正でも noFreeLot が偽である（塗った区画が建ち尽くしたときだけ真になる）。
+#[test]
+fn observe_no_free_lot_is_false_for_zones_never_painted() {
+    let dir = session("agent-no-free-lot");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let obs = json(&cli(&["agent", "observe", d]));
+    assert!(obs["demand"]["Residential"].as_i64().unwrap() > 0, "{obs}");
+    assert_eq!(obs["growth"]["Residential"]["fronts"], 0, "{obs}");
+    assert_eq!(obs["growth"]["Residential"]["noFreeLot"], false, "{obs}");
+    let setup = write(
+        &dir.join("setup.json"),
+        &serde_json::json!([
+            {"type":"BuildRoad","from":[0,0],"to":[30,0],"kind":"Small"},
+            {"type":"PaintZone","area":[[0,1],[30,6]],"zone":"Residential"},
+        ])
+        .to_string(),
+    );
+    cli(&["agent", "act", d, &setup]);
+    let obs = json(&cli(&["agent", "observe", d]));
+    assert_eq!(obs["growth"]["Residential"]["noFreeLot"], false, "{obs}");
+}
+
 /// 施設のない道路網に建つ分は電気と水道の余裕で止まり、observe の growth と networksWithoutFacility に出る。
 #[test]
 fn observe_shows_why_growth_is_blocked() {
@@ -643,6 +722,7 @@ fn observe_shows_why_growth_is_blocked() {
         for key in ["fronts", "blocked", "noPower", "noWater"] {
             assert!(g[key].is_u64(), "{zone}.{key}: {g}");
         }
+        assert!(g["noFreeLot"].is_boolean(), "{zone}: {g}");
     }
     cli(&["agent", "advance", d, "6000"]);
     let obs = json(&cli(&["agent", "observe", d]));
@@ -1129,4 +1209,94 @@ fn map_marks_a_signal_with_removed_crosswalks_only_from_the_same_junction() {
     );
     cli(&["agent", "act", d, &more]);
     assert_eq!(cell(), "s");
+}
+
+/// 高速道路の端の隣から引いた道路は、端まで延びてつながる。延ばしたことは結果の joined に出る。
+#[test]
+fn act_joins_a_road_started_next_to_the_highway_end() {
+    let dir = session("agent-join-highway");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let seen = json(&cli(&["agent", "observe", d]));
+    let [x, y] = [
+        seen["highway"]["end"][0].as_i64().unwrap(),
+        seen["highway"]["end"][1].as_i64().unwrap(),
+    ];
+    let [ox, oy] = [
+        seen["highway"]["outward"][0].as_i64().unwrap(),
+        seen["highway"]["outward"][1].as_i64().unwrap(),
+    ];
+    let (from, to) = ([x - ox, y - oy], [x - ox * 11, y - oy * 11]);
+    let cmds = write(
+        &dir.join("c.json"),
+        &serde_json::json!([{"type":"BuildRoad","from":from,"to":to,"kind":"Small"}]).to_string(),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "Applied", "{acted}");
+    assert_eq!(r["joined"], serde_json::json!({"from": [x, y], "to": to}));
+    assert!(r.get("warning").is_none(), "{acted}");
+}
+
+/// 道路の隣から引いた道路は交差点でつながり、どれにもつながらない道路には warning が付く。
+#[test]
+fn act_joins_next_to_a_road_and_warns_about_an_isolated_road() {
+    let dir = session("agent-join-road");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[0,20],"kind":"Small"},
+            {"type":"BuildRoad","from":[1,10],"to":[11,10],"kind":"Small"},
+            {"type":"BuildRoad","from":[1,0],"to":[1,20],"kind":"Small"},
+            {"type":"BuildRoad","from":[30,30],"to":[40,30],"kind":"Small"}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let results = acted["results"].as_array().unwrap();
+    assert!(results.iter().all(|r| r["outcome"] == "Applied"), "{acted}");
+    assert_eq!(results[1]["joined"]["from"], serde_json::json!([0, 10]));
+    assert!(results[1].get("warning").is_none(), "{acted}");
+    // 平行に隣り合う道路は、つながらず、延ばしもしない。
+    assert!(results[2].get("joined").is_none(), "{acted}");
+    assert!(results[3]["warning"].is_string(), "{acted}");
+}
+
+/// join:false なら隣にあっても延ばさない。join の書き方が違うときや BuildRoad 以外では Invalid になる。
+#[test]
+fn act_does_not_join_when_join_is_false() {
+    let dir = session("agent-join-off");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[0,20],"kind":"Small"},
+            {"type":"BuildRoad","from":[1,10],"to":[11,10],"kind":"Small","join":false},
+            {"type":"BuildRoad","from":[1,5],"to":[11,5],"kind":"Small","join":true},
+            {"type":"BuildRoad","from":[1,6],"to":[11,6],"kind":"Small","join":1},
+            {"type":"SetSignal","at":[0,5],"on":true,"join":false}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds, "--verbose"]));
+    let r = acted["results"].as_array().unwrap();
+    assert_eq!(r[1]["outcome"], "Applied", "{acted}");
+    assert!(r[1].get("joined").is_none(), "{acted}");
+    assert_eq!(r[1]["command"]["from"], serde_json::json!([1, 10]));
+    assert_eq!(r[2]["joined"]["from"], serde_json::json!([0, 5]), "{acted}");
+    assert_eq!(r[3]["outcome"], "Invalid", "{acted}");
+    assert_eq!(r[4]["outcome"], "Invalid", "{acted}");
+}
+
+/// demandFactors の値を足し合わせると demand になる。
+#[test]
+fn observe_demand_factors_add_up_to_the_demand() {
+    let dir = session("agent-demand-factors");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let obs = json(&cli(&["agent", "observe", d]));
+    for zone in ["Residential", "Commercial", "Industrial", "Office"] {
+        let factors = obs["demandFactors"][zone].as_array().unwrap();
+        assert!(!factors.is_empty(), "{zone}: {obs}");
+        let sum: i64 = factors.iter().map(|f| f["value"].as_i64().unwrap()).sum();
+        assert_eq!(sum, obs["demand"][zone].as_i64().unwrap(), "{zone}: {obs}");
+    }
+    assert_eq!(obs["demandFactors"]["Residential"][0]["factor"], "base");
 }

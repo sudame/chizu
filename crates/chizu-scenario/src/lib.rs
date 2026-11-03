@@ -1,7 +1,7 @@
 //! テストとベンチマークに使う、種から決定論的に作る街。
 
 use chizu_core::citizens::draw_household;
-use chizu_core::routing::RouteRequest;
+use chizu_core::routing::{ROUTE_VARIANTS, RouteRequest};
 use chizu_core::{
     CHUNK_SIDE, ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network, Population,
     RngPurpose, RoadKind, ServiceKind, Tick, TilePos, TileRect, World, ZoneKind, rng,
@@ -227,6 +227,8 @@ pub fn commute_requests(
                 from: links[r.below(len) as usize],
                 to: offices[r.below(office_len) as usize],
                 mode: LaneMode::Car,
+                // 実際の街と同じく、費用の同じ経路の候補を人ごとに散らす。
+                variant: u8::try_from(i % u32::from(ROUTE_VARIANTS)).expect("候補が多すぎる"),
             }
         })
         .collect()

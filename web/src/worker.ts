@@ -120,10 +120,27 @@ function sendBuildings(sim: Simulation): void {
   sentBuildingsVersion = version;
   const buildings = sim.buildings();
   const facilities = sim.facilities();
-  reply({ kind: "buildings", buildings, facilities, stats: [...sim.city_stats()] }, [
-    buildings.buffer,
-    facilities.buffer,
-  ]);
+  const stats = [...sim.city_stats()];
+  sentStats = stats.join(",");
+  reply({ kind: "buildings", buildings, facilities, stats }, [buildings.buffer, facilities.buffer]);
+}
+
+// 需要は税率、幸福度、人口、職のない住民で、建物の表が変わらなくても動く。住民の数だけ数え直すので、間引いて送る。
+// 送るのは前と数が違うときだけで、コマンドのあとはすぐ確かめる。一時停止中は街が進まないので、タイマーからは確かめない
+const STATS_INTERVAL_MS = 500;
+let lastStatsAt = Number.NEGATIVE_INFINITY;
+let sentStats = "";
+function sendCityStats(sim: Simulation, now: number, force = false): void {
+  if (!force && now - lastStatsAt < STATS_INTERVAL_MS) {
+    return;
+  }
+  lastStatsAt = now;
+  const stats = [...sim.city_stats()];
+  const key = stats.join(",");
+  if (key !== sentStats) {
+    sentStats = key;
+    reply({ kind: "cityStats", stats });
+  }
 }
 
 // 収支の見込みは全住民を数えて出すので、毎フレームは求めない。送るのは前と数が違うときだけにする。
@@ -161,6 +178,8 @@ function sendOverview(sim: Simulation, now: number, paused: boolean, force = fal
     overview: all.slice(0, OVERVIEW_LENGTH),
     stalls: all.slice(OVERVIEW_LENGTH),
     isolated: [...sim.isolated_facilities()],
+    lotShortage: [...sim.lot_shortage()],
+    tick: sim.current_tick(),
   });
 }
 
@@ -186,6 +205,9 @@ function run(sim: Simulation): {
     sendRoads(sim);
     sendSignals(sim);
     sendBuildings(sim);
+    if (!paused) {
+      sendCityStats(sim, now);
+    }
     sendFinance(sim, now);
     sendOverview(sim, now, paused);
     sendChunks(sim);
@@ -249,6 +271,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         sendRoads(sim);
         sendSignals(sim);
         sendBuildings(sim);
+        sendCityStats(sim, performance.now(), true);
         sendFinance(sim, performance.now(), true);
         sendOverview(sim, performance.now(), false, true);
         layerSender.send(sim, reply, CHUNKS_PER_FRAME);

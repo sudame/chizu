@@ -15,8 +15,8 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 ## 作業の手順
 
 1. 作業は、マネージャーが用意した worktree の中で行う。すでに worktree の中にいるので、新しく worktree を作らず、本体のディレクトリにも移らない。`git worktree add` と `gwq` は使わない。
-2. 作業の途中は、変えたところに絞って確かめる。`mise run test` と `mise run lint` は WASM の LTO を含む重いビルドを何本も回すので、PR を作る直前に 1 回だけ回し、両方が通ることを確かめる。
-   - Rust：`mise run cargo -- test -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ
+2. 作業の途中は、変えたところに絞って確かめる。`mise run test` と `mise run lint` は重いビルドとテストを何本も回すので、PR を作る直前に 1 回だけ回し、両方が通ることを確かめる。
+   - Rust：`RAYON_NUM_THREADS=2 mise run cargo -- nextest run -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ。`RAYON_NUM_THREADS=2` は test:rust と同じく、rayon のスレッドが待つあいだに CPU を使い切らないようにする
    - 画面：`mise run test:web`、`mise run lint:web`
    - WASM の境目や描画を変えたときだけ：`mise run test:wasm`
 3. コミットメッセージは日本語で書き、末尾に `Co-Authored-By:` の行を付ける。
@@ -37,10 +37,10 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 mise run test          # テストをすべて回す
 mise run lint          # 静的検査をすべて回す
 mise run cargo -- ...  # mise の環境（sccache を含む）で cargo を回す
-mise run test:rust     # cargo test --workspace
+mise run test:rust     # cargo nextest run --workspace。doctest は回さない
 mise run lint:md       # markdown の検査（rumdl）
 mise run lint:actions  # ワークフローの検査（jactionlint）
-mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core と chizu-scenario の浮動小数点の検査
+mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core と chizu-scenario の浮動小数点の検査、doctest がないことの検査
 mise run lint:wasm     # wasm32 のターゲットで chizu-wasm に cargo clippy
 mise run lint:web      # Biome と tsc --noEmit
 mise run test:web      # Vitest
@@ -48,6 +48,8 @@ mise run test:wasm     # ビルドしたページをヘッドレスの Chrome �
 mise run build         # build:wasm と build:web をまとめて回す
 mise run build:wasm    # chizu-wasm をスレッドつきでビルドし、wasm-bindgen で web/wasm につなぎのコードを作る
 mise run build:web     # Vite で web/dist にビルドする
+mise run build:wasm-test  # test:wasm と lint:web が使う WASM。手元では LTO のない wasm-dev、CI では wasm-release でビルドする
+mise run build:web-test   # test:wasm が使う。build:wasm-test の WASM で、build:web と同じく Vite で web/dist にビルドする
 mise run dev           # WASM をビルドしてから Vite の開発サーバーを立てる
 mise run play          # 遊ぶ用の開発サーバーを立てっぱなしにし、origin の main が進んだら立て直す
 mise run test:play     # scripts/play.sh の小さな関数を確かめる
@@ -62,6 +64,9 @@ mise run bench:wasm    # スレッドつきの WASM をヘッドレスの Chrome
 
 `test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。
 
+test:rust は nextest で回すので、doctest は回らない。`cargo test --workspace --doc` は cdylib と bin のクレートを外してビルドするので、依存まで別の成果物になり、ビルドし直しになる。
+そのため、いまは doctest を置かず、lint:rust の `scripts/check-no-doctest.sh` で doctest になるコードのブロックを断る。doctest を足すときは、test:rust に `cargo test --workspace --doc` を足し、この検査を外す。
+
 手元の cargo は、`mise.toml` の `RUSTC_WRAPPER` で sccache を通す。この設定は mise のタスクの中でだけ確実に効くので、cargo は `mise run cargo` から呼ぶ。worktree ごとに `target/` は分かれるが、依存のクレートと build-std の std はキャッシュから取り出す。
 CI では `CI` が立っているので sccache を通さない。キャッシュの当たり具合は `sccache --show-stats` で見られる。
 
@@ -73,6 +78,9 @@ WASM のスレッドに要る rustflags は `.cargo/config.toml` で wasm32 の�
 
 三重バッファの配置は `crates/chizu-wasm/src/snapshot.rs` で決め、`web/src/protocol/snapshot-layout.json` に書き出して画面の側で読む。
 配置や書き方を変えたときは `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` でこの JSON と、画面の側のテストが読む `snapshot-fixture.bin` を書き直し、同じ PR に含める。
+
+街の数字（`city_stats`）の固定の並びの個数と、需要の要因の番号の表は `crates/chizu-wasm/src/sim.rs` で決め、`web/src/protocol/city-stats-layout.json` に書き出して画面の側で読む。
+変えたときは `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` でこの JSON を書き直し、同じ PR に含める。
 
 Rust のツールチェーンは `rust-toolchain.toml` で日付つきの nightly に固定している。
 mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファイルから版を読むので、`mise.toml` の `[tools]` には `rust` を書かない。
@@ -101,7 +109,8 @@ cargo run -p chizu-cli -- feedback/<日時>-<番号>/commands.rec <seed> <tick>
 
 `chizu-cli agent` を使うと、AI が Bash から 1 回ずつコマンドを打って、画面なしで街を作れる。
 セッションはディレクトリで持ち、中身はフィードバックと同じ `state.json` と `commands.rec` である。
-呼び出しのあいだに状態は持たず、毎回、種から作った街に記録を再生して作り直す。
+毎回、種から作った街に記録を再生して作り直す。再生が長くならないよう、セッションには途中の街を `replay-cache.bin` に置き、そこから続きを再生する。
+このキャッシュは chizu-cli だけが使い、chizu-cli を作り直したときや、記録の先頭と合わないときは捨てて先頭から再生する。正しい記録は `state.json` と `commands.rec` のままである。
 
 - 人間のフィードバックは書き換えない。続きを遊ぶときは `agent new <dir> --from <フィードバックのディレクトリ>` で種、tick、記録を写す。写すときに再生したハッシュが元と一致したかを出力に入れる。
 - act と advance が書くのは、`agent new` で作った（`state.json` に `agentSession` がある）ディレクトリだけである。

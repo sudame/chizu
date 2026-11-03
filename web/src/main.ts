@@ -1,4 +1,4 @@
-import { demandBar, parseCityStats, renderCityStats } from "./city-panel.ts";
+import { demandBar, parseCityStats, renderCityStats, setupDemandFactors } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
 import {
@@ -10,10 +10,13 @@ import {
   setupFinance,
 } from "./finance.ts";
 import {
+  type LotShortageSince,
   parseGrowthBlocks,
   parseIsolated,
   parseStalls,
+  persistedLotShortage,
   setupGrowthNotice,
+  trackLotShortage,
 } from "./growth-notice.ts";
 import { setupHudPanel, trackHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
@@ -154,6 +157,7 @@ const toolButtons = [...document.querySelectorAll<HTMLButtonElement>("button[dat
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
 setupSaves(worker, element<HTMLElement>("#controls"));
+setupDemandFactors();
 
 function send(message: MainToWorker): void {
   worker.postMessage(message);
@@ -271,6 +275,8 @@ const trafficLines = new TrafficLines();
 let trafficBuilds = 0;
 // 需要の主題図と凡例に使う、住宅・商業・工業・オフィスの需要（街の数字の値）
 let demand: number[] | null = null;
+// 電気か水道が届いていない建物の数。街の数字だけを送り直されたときの表示に使う
+let unsupplied = 0;
 // 主題図の凡例。レイヤーのボタンの左に浮かべるものと、レイヤーのパネルの中のもの
 const themeLegendElements = [
   element<HTMLElement>("#theme-legend"),
@@ -553,6 +559,8 @@ let manualRotation: number | null = null;
 let probe: { service: ServiceName; x: number; y: number; results: ServiceProbe } | null = null;
 let probeSent = "";
 let money = 0;
+// 空き区画がない状態が続いた長さは、Worker の tick で数える（描画は背景のタブで止まる）
+let lotShortageSince: LotShortageSince = [];
 let roadStart: Tile | null = null;
 let roadIndex: RoadIndex = EMPTY_ROAD_INDEX;
 // 最後に届いた道路の区間（chizu-wasm の road_segments）。種類を変える道具の見積もりに使う
@@ -1108,13 +1116,22 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     renderer?.roads.setBuildings(buildings);
     labels.setBuildings(message.buildings, message.facilities);
     const stats = parseCityStats(message.stats);
-    renderCityStats(stats, unsuppliedCount(message.buildings));
+    unsupplied = unsuppliedCount(message.buildings);
+    renderCityStats(stats, unsupplied);
     demand = [...stats.demand];
     updateDemandTheme();
     // test:wasm が読む
     mapCanvas.dataset.firstBuilding = Array.from(message.buildings.subarray(0, 4)).join(",");
     mapCanvas.dataset.unsupplied = String(unsuppliedCount(message.buildings));
     mapCanvas.dataset.facilities = String(message.facilities.length / FACILITY_STRIDE);
+    return;
+  }
+  if (message.kind === "cityStats") {
+    // 建物の表が変わらないまま動いた需要と内訳
+    const stats = parseCityStats(message.stats);
+    renderCityStats(stats, unsupplied);
+    demand = [...stats.demand];
+    updateDemandTheme();
     return;
   }
   if (message.kind === "finance") {
@@ -1126,10 +1143,12 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "overview") {
     renderOverview(parseOverview(message.overview));
+    lotShortageSince = trackLotShortage(lotShortageSince, message.lotShortage, message.tick);
     growthNotice.render(
       parseGrowthBlocks(message.overview),
       parseStalls(message.stalls),
       parseIsolated(message.isolated),
+      persistedLotShortage(lotShortageSince, message.tick),
     );
     return;
   }

@@ -22,10 +22,21 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
+# 手元の test:wasm と lint:web だけに使う。配る WASM と同じ最適化の段階で、LTO を外して incremental にし、触ったあとのビルドを短くする。
+# CI はこれを使わず、wasm-release で確かめる
+[profile.wasm-dev]
+inherits = "release"
+lto = "off"
+codegen-units = 256
+incremental = true
+
 # ゴールデンのテストは毎 tick 状態ハッシュをとるので、テストも最適化して回す。
 # dev の profile なので、overflow-checks と debug-assertions は有効なままである。
 [profile.dev]
 opt-level = 1
+# デバッグ情報は、パニックやバックトレースに出るファイルと行だけにする。作るデバッグ情報が減るぶん、触ったあとのビルドが短くなる。
+# デバッガで変数を見たいときは、CARGO_PROFILE_DEV_DEBUG=true を付けてビルドする
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
