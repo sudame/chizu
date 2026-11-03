@@ -32,6 +32,10 @@ const TICK = SCENARIO === "errand" ? NOON : TICKS_PER_DAY + INDUSTRIAL_LEAVE_HOM
 const NEED_BOTH = SCENARIO !== "errand";
 const WHEN = SCENARIO === "errand" ? "昼の買い物" : "朝の通勤";
 const SEED = "42";
+// 道筋のある車のうち、道筋に沿って補間されていなければならない割合
+const MIN_ALONG_SHARE = 0.9;
+// 割合を測るあいだ走らせる時間
+const RUN_MS = 10_000;
 
 function findOnPath(name: string): string {
   for (const dir of (process.env.PATH ?? "").split(":")) {
@@ -145,6 +149,8 @@ try {
     NEED_BOTH,
     { timeout: TIMEOUT_MS },
   );
+  // 補間の割合を測るため、しばらく走らせてから止める
+  await page.waitForTimeout(RUN_MS);
   await page.locator("#pause").click();
   await page
     .locator("#hud")
@@ -192,6 +198,15 @@ try {
     check(
       Number(d.moverPaths) > 0,
       `${WHEN}で、網を変えなくても車を描く道筋が画面に届く（${d.moverPaths} 本）`,
+    );
+  }
+  // 道筋のある車の大半は、道筋に沿って補間されている（一度まっすぐ補間した車も道筋に戻る）
+  if (NEED_BOTH) {
+    const routed = Number(d.moversRouted);
+    const along = Number(d.moversAlongPath);
+    check(
+      routed > 0 && along / routed >= MIN_ALONG_SHARE,
+      `${WHEN}で、道筋のある車の ${MIN_ALONG_SHARE * 100}% 以上が、走らせたあいだ道筋に沿って補間される（${along} / ${routed} = ${((along / Math.max(routed, 1)) * 100).toFixed(1)}%）`,
     );
   }
   const pixel = (p: { x: number; y: number }) =>

@@ -33,6 +33,8 @@ const FULL_TURN = 65536;
 const MAX_TURN = (FULL_TURN * 3) / 8;
 /** 道筋の 1 点の数の個数（x、y、始まりからの長さ、向き）。chizu-wasm の car_path::Path::encode と同じ。 */
 const POINT_STRIDE = 4;
+/** まっすぐ補間した移動体を道筋に乗せ直すのは、補間がこの割合まで進んでいるときに限る（位置が跳ばないため）。 */
+const RELATCH_FRACTION = 0.9;
 /** 前の道筋の終わりと次の道筋の始まりがこれより近ければ（マス）、つながっているとみなす。40mm。 */
 const JOIN_TILES = 0.005;
 
@@ -99,6 +101,29 @@ export function pathAt(
   out.y = p(a, 1) + (p(lo, 1) - p(a, 1)) * t;
   out.angle = p(a, 3) + turn * t;
   return out;
+}
+
+/** 道筋の上で、(x, y) にいちばん近い点の始まりからの長さ `s`。その点の位置と向きを `out` に書く。 */
+function nearestOnPath(path: MoverPath, x: number, y: number, out: PathPoint): { s: number } {
+  const n = Math.floor(path.length / POINT_STRIDE);
+  const p = (k: number, i: number) => path[k * POINT_STRIDE + i] ?? 0;
+  let best = Number.POSITIVE_INFINITY;
+  let bestS = 0;
+  for (let k = 0; k + 1 < n; k++) {
+    const ax = p(k, 0);
+    const ay = p(k, 1);
+    const dx = p(k + 1, 0) - ax;
+    const dy = p(k + 1, 1) - ay;
+    const len2 = dx * dx + dy * dy;
+    const u = len2 === 0 ? 0 : Math.min(1, Math.max(0, ((x - ax) * dx + (y - ay) * dy) / len2));
+    const d = Math.hypot(ax + dx * u - x, ay + dy * u - y);
+    if (d < best) {
+      best = d;
+      bestS = p(k, 2) + (p(k + 1, 2) - p(k, 2)) * u;
+    }
+  }
+  pathAt(path, bestS, out);
+  return { s: bestS };
 }
 
 /** 道筋 `a` の終わりと道筋 `b` の始まりが同じ所にあるか。 */
@@ -220,6 +245,10 @@ export class MoverInterpolator {
   #msPerTick = 0;
   #paths: MoverPaths = NO_PATHS;
   readonly #seen: Seen = { x: 0, y: 0, h: 0, path: 0, s: 0 };
+  /** これまでに apply した枠のすべてで、届いている道筋を指していた移動体の延べ数。test:wasm が読む。 */
+  routed = 0;
+  /** そのうち、道筋に沿って補間した移動体の延べ数。 */
+  along = 0;
 
   /** 補間の割合（0 で前の tick の位置、1 で今の tick の位置）。 */
   fraction(now: number, paused: boolean): number {
@@ -302,14 +331,24 @@ export class MoverInterpolator {
     const t = this.fraction(now, frame.paused);
     const words = new Uint32Array(out.buffer, out.byteOffset, out.length);
     const seen = this.#seen;
+    let routed = 0;
+    let along = 0;
     for (let i = 0; i < n; i++) {
       const at = i * stride;
       this.#visible(i, t, seen);
+      if (paths.get(this.#path[i] ?? 0) !== undefined) {
+        routed++;
+        if (seen.path !== 0) {
+          along++;
+        }
+      }
       const word = words[at + layout.mover.headingKind] ?? 0;
       words[at + layout.mover.headingKind] = ((word & 0xffff0000) | seen.h) >>> 0;
       out[at + layout.mover.x] = seen.x - ox;
       out[at + layout.mover.y] = seen.y - oy;
     }
+    this.routed += routed;
+    this.along += along;
   }
 
   /**
@@ -407,6 +446,19 @@ export class MoverInterpolator {
         this.#prevH[i] = seen.h;
         this.#prevPath[i] = seen.path;
         this.#prevS[i] = seen.s;
+        if (seen.path === 0 && t >= RELATCH_FRACTION) {
+          // まっすぐ補間した枠でも、tick の終わりには今の道筋に乗せる。
+          // 乗せないと、道筋のない枠から始まった車は、次も道筋から始まれない
+          const id = this.#path[i] ?? 0;
+          const p = this.#paths.get(id);
+          if (p !== undefined) {
+            // 見えている位置に最も近い道筋の点から始める。tick の終わりの位置から始めると、次の枠で前へ跳ぶ
+            const at = nearestOnPath(p, seen.x, seen.y, this.#point);
+            this.#prevPath[i] = id;
+            this.#prevS[i] = at.s;
+            this.#prevH[i] = angleCode(this.#point.angle);
+          }
+        }
         this.#prevIndex.set(this.#keys[i] ?? 0, i);
       }
       this.#span = span;
