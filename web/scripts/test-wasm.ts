@@ -8,7 +8,7 @@
 // フィードバックを送ると、保存した記録を chizu-cli で再生して同じ状態ハッシュになることも確かめる。
 // Chrome は mise の tools で入れた chrome-headless-shell を PATH から探す。
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { accessSync, constants, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -535,6 +535,20 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   );
 }
 
+const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+/** chizu-cli を裏でビルドし、終わったら解決する。失敗しても解決する。 */
+function buildCli(): Promise<void> {
+  return new Promise((resolve) => {
+    const child = spawn("cargo", ["build", "--quiet", "-p", "chizu-cli"], {
+      cwd: repoRoot,
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+    child.on("error", () => resolve());
+    child.on("exit", () => resolve());
+  });
+}
+let cliBuild: Promise<void> | undefined;
+
 const browser = await chromium.launch({ executablePath: findOnPath("chrome-headless-shell") });
 
 try {
@@ -640,6 +654,9 @@ try {
     await hud.and(page.locator(`[data-speed="${speed}"]`)).waitFor({ timeout: TIMEOUT_MS });
   };
   await setSpeed(1);
+  // 最後の再生に使う chizu-cli を、画面の確かめと並べて今からビルドしておく。CI では 30 秒ほどかかる。
+  // 時計の進み方を測り終えてから始めるので、ビルドの負荷は上の速度の確かめに響かない
+  cliBuild = buildCli();
 
   const map = page.locator("#map");
   const mapState = async () => {
@@ -2036,6 +2053,8 @@ try {
       typeof fb.camera?.zoom === "number",
     "書いた文とカメラの位置が保存される",
   );
+  // 裏のビルドが落ちていても、下の cargo run がビルドし直して理由を出す
+  await cliBuild;
   const replayed = execFileSync(
     "cargo",
     [
@@ -2049,7 +2068,7 @@ try {
       String(fb.tick),
     ],
     {
-      cwd: fileURLToPath(new URL("../..", import.meta.url)),
+      cwd: repoRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "inherit"],
     },
@@ -2072,6 +2091,8 @@ try {
 } finally {
   await browser.close();
   await server?.close();
+  // 途中で落ちたときも、裏のビルドを残して終わらない
+  await cliBuild;
   rmSync(feedbackDir, { recursive: true, force: true });
 }
 
