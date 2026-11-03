@@ -930,10 +930,13 @@ impl Trips {
         // 車は、出発のリンクの車線のうち車の少ない車線に置く。前の車と重なるなら、その後ろの空いた
         // 位置まで下げる。どの車線にも空きがなければ、空くまで待たせる。
         let mut ix = car::LaneIndex::of(&self.rows, None);
-        let zones = if mode == LaneMode::Car {
-            crossing::jay_zones(net, &self.rows)
+        let (zones, entering) = if mode == LaneMode::Car {
+            (
+                crossing::jay_zones(net, &self.rows),
+                car::Entering::of(&self.rows, net, router.connectors()),
+            )
         } else {
-            BTreeMap::new()
+            (BTreeMap::new(), car::Entering::default())
         };
         resolved
             .iter()
@@ -943,7 +946,7 @@ impl Trips {
                 let (route, e, jay) = routes.next().expect("探した経路の数が合わない")?;
                 let id = self.insert(make_trip(net, route, e, *to, now, jay));
                 if mode == LaneMode::Car {
-                    car::place(&mut self.rows, net, &mut ix, id.slot(), &zones);
+                    car::place(&mut self.rows, net, &mut ix, id.slot(), &zones, &entering);
                 }
                 Some(id)
             })

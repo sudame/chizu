@@ -408,8 +408,11 @@ impl Trips {
             let mut routes = plan(router, net, mode, &ends, false).into_iter();
             // 置き直す行はまだ歩いているので、車線の上の車には入らない。
             let mut ix = (mode == LaneMode::Car).then(|| car::LaneIndex::of(&self.rows, None));
-            let zones = if mode == LaneMode::Car && !legs.is_empty() {
-                super::crossing::jay_zones(net, &self.rows)
+            let (zones, entering) = if mode == LaneMode::Car && !legs.is_empty() {
+                (
+                    super::crossing::jay_zones(net, &self.rows),
+                    car::Entering::of(&self.rows, net, router.connectors()),
+                )
             } else {
                 Default::default()
             };
@@ -429,7 +432,7 @@ impl Trips {
                 self.rows[i] = Some(t);
                 // 出発と同じく、空いた車線に置き、前の車と重なるなら下げ、空きがなければ待たせる。
                 if let Some(ix) = ix.as_mut() {
-                    car::place(&mut self.rows, net, ix, i, &zones);
+                    car::place(&mut self.rows, net, ix, i, &zones, &entering);
                 }
                 let t = self.rows[i].as_mut().expect("置いた主体がない");
                 t.blend = Some(lane_shift::Blend {
