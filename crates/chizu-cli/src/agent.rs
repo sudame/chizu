@@ -889,7 +889,7 @@ fn parking(world: &World) -> Value {
     let redirected = world
         .trips()
         .iter()
-        .filter(|(_, t)| t.parks_elsewhere())
+        .filter(|(_, t)| t.parks_elsewhere(world.network(), world.buildings()))
         .count();
     json!({
         "byZone": by_zone(|k| {
