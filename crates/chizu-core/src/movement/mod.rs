@@ -44,7 +44,7 @@ pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
 pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, OWNER_DRIVE_MIN_MM};
 pub use congestion::{Congestion, classify as classify_congestion};
 pub use junction::Rescues;
-pub use parking::{Lot, PARK_RADIUS, ParkingTally, building_spot};
+pub use parking::{Lot, PARK_RADIUS, ParkingTally, building_spot, lot_spot};
 pub use pos::SidewalkPos;
 
 use crate::command::NodeId;
@@ -158,20 +158,26 @@ impl Trip {
         self.lane
     }
 
-    /// 路肩で、車線に出る順番を待っている車か。
+    /// 駐車場の中で、車線に出る順番を待っている車か。
     pub fn waiting_to_depart(&self) -> bool {
         self.mode == LaneMode::Car && self.waiting && !self.rejoining
     }
 
     /// 行き先の建物の駐車場が満車で、近くのほかの建物の駐車場に停めに向かっているか。
-    /// 駐車場の位置と行き先の出入口の位置が違えば、ほかの建物の駐車場である。
-    pub fn parks_elsewhere(&self) -> bool {
-        match self.then {
-            parking::Then::Arrive => false,
-            parking::Then::Drive { park_at, to, .. } => park_at != to,
-            // 車で走っている区切りで、いまの区切りの行き先が駐車場である。
-            parking::Then::Walk { to, .. } => self.dest != to,
-        }
+    /// 押さえた駐車場の建物の出入口が、行き先の出入口と違えば、ほかの建物の駐車場である。
+    pub fn parks_elsewhere(&self, net: &Network, buildings: &crate::building::Buildings) -> bool {
+        let Some((lot, to)) = (match self.then {
+            parking::Then::Arrive => None,
+            parking::Then::Drive { lot, to, .. } | parking::Then::Walk { lot, to } => {
+                Some((lot, to))
+            }
+        }) else {
+            return false;
+        };
+        // 駐車場の建物が取り壊されていれば、もう向かう先の駐車場はないので数えない。
+        buildings
+            .get(lot)
+            .is_some_and(|b| building_spot(net, b) != Some(to))
     }
 
     pub fn speed(&self) -> MmPerTick {

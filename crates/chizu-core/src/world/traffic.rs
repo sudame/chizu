@@ -64,7 +64,7 @@ const SAME_SPOT_MM: i64 = 5;
 
 /// ある tick の、走っている車のワールド座標の位置。止まっている車を見分けるのに使う。
 /// 車線の ID は、道路が分けられると変わるので、位置は車線によらない座標で持つ。
-/// 路肩で車線に出る順番を待っている車は、別に数える。
+/// 駐車場の中で車線に出る順番を待っている車は、別に数える。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CarSample(BTreeMap<TripId, (WorldPos, bool)>);
 
@@ -79,12 +79,12 @@ impl CarSample {
         )
     }
 
-    /// 路肩で、車線に出る順番を待っている車の台数。
+    /// 駐車場の中で、車線に出る順番を待っている車の台数。
     pub fn waiting_at_curb(&self) -> usize {
         self.0.values().filter(|(_, w)| *w).count()
     }
 
-    /// 道路の上で、`earlier` から同じ場所（ずれは数 mm まで）にいる車の台数。建物の前の路肩で待つ車は数えない。
+    /// 道路の上で、`earlier` から同じ場所（ずれは数 mm まで）にいる車の台数。駐車場の中で待つ車は数えない。
     /// 道路の種類を下げて車線を外れ、車線に戻るのを待つ車は、道路の上で止まっているので数える。
     pub fn stopped_on_road_since(&self, earlier: &CarSample) -> usize {
         self.unmoved(earlier).filter(|(_, (_, w))| !*w).count()

@@ -1,5 +1,5 @@
 use super::*;
-use crate::building::{Building, Buildings};
+use crate::building::{Building, Buildings, ParkingCut};
 use crate::command::{RoadKind, ZoneKind};
 use crate::id::BuildingId;
 use crate::network::{Dir, Line};
@@ -108,6 +108,22 @@ impl Street {
         );
     }
 
+    /// `ids` の移動がどれも駐車場の出入りの位置まで歩いて車に乗るまで進める。
+    fn board(&mut self, ids: &[TripId]) {
+        for _ in 0..20 {
+            let car = |id: &TripId| {
+                self.trips
+                    .get(*id)
+                    .is_some_and(|t| t.mode() == LaneMode::Car)
+            };
+            if ids.iter().all(car) {
+                return;
+            }
+            self.step();
+        }
+        panic!("車に乗らない");
+    }
+
     /// 終わるまで進め、その tick ごとの手段の列（同じ手段が続く所は 1 つにまとめる）を返す。
     fn run(&mut self, id: TripId) -> Vec<LaneMode> {
         let mut modes = Vec::new();
@@ -210,9 +226,9 @@ fn cars_sent_to_another_lot_are_told_apart_until_they_park() {
         if a.is_none() && b.is_none() {
             break;
         }
-        assert!(!a.is_some_and(Trip::parks_elsewhere));
+        assert!(!a.is_some_and(|t| t.parks_elsewhere(&s.net, &s.buildings)));
         if let Some(t) = b {
-            seen.push((t.mode(), t.parks_elsewhere()));
+            seen.push((t.mode(), t.parks_elsewhere(&s.net, &s.buildings)));
         }
         s.step();
     }
@@ -250,10 +266,9 @@ fn two_cars_leaving_one_building_in_the_same_tick_do_not_overlap() {
     let (home, shop) = (ids[0], ids[1]);
     let a = s.drive(home, shop).unwrap();
     let b = s.drive(home, shop).unwrap();
-    // 1 tick 目で 2 台とも車に乗り、車間の検査は `step` のたびに走る。
-    s.step();
-    let on_road = |id| s.trips.get(id).is_some_and(|t| t.mode() == LaneMode::Car);
-    assert!(on_road(a) && on_road(b));
+    // 同じ距離を歩いて、2 台とも同じ tick に車に乗る。車間の検査は `step` のたびに走る。
+    s.board(&[a]);
+    assert_eq!(s.trips.get(b).unwrap().mode(), LaneMode::Car);
     let mut ended = Vec::new();
     for _ in 0..300 {
         ended.extend(s.step());
@@ -274,11 +289,11 @@ fn cars_boarding_past_a_junction_leave_room_for_a_car_entering_from_it() {
         step: (1, 0),
         along: LaneOffset(0),
     };
-    // 西から交差点の手前まで来た車がいる。
+    // 西から交差点へ向かう車がいて、4 台が駐車場まで歩くあいだに交差点の手前まで来る。
     let approach = s.trips.spawn_drives(
         &s.net,
         &mut s.router,
-        &[(on_street(8), on_street(59))],
+        &[(on_street(6), on_street(59))],
         Tick::ZERO,
     )[0]
     .unwrap();
@@ -286,7 +301,7 @@ fn cars_boarding_past_a_junction_leave_room_for_a_car_entering_from_it() {
         .iter()
         .map(|to| s.drive(ids[0], *to).unwrap())
         .collect();
-    s.step();
+    s.board(&cars);
     let rows: Vec<&Trip> = cars.iter().map(|id| s.trips.get(*id).unwrap()).collect();
     assert!(rows.iter().all(|t| t.mode() == LaneMode::Car));
     // 3 台は車 2 台ぶんまで下げて入り、4 台めは交差点から入る車の空きを取らずに路肩で待つ。
@@ -340,7 +355,8 @@ fn a_trip_without_a_next_leg_returns_its_space() {
     s.net.bulldoze(west).unwrap();
     s.router.sync(&s.net);
     assert_eq!(s.trips.reroute(&s.net, &mut s.router), []);
-    assert_eq!(s.step(), [id]);
+    let ended = (0..20).flat_map(|_| s.step()).collect::<Vec<_>>();
+    assert_eq!(ended, [id]);
     assert_eq!(lot(&s, shop), (0, 0));
 }
 
@@ -543,4 +559,258 @@ fn walking_instead_of_driving_starts_on_the_building_side() {
     // 建物の側（西向きの歩道のリンクの右）にいる。東へ歩くなら左の側である。
     assert_eq!(walker.link().dir == Dir::Backward, !walker.walk.far);
     assert_eq!(walker.walk.jay, None);
+}
+
+/// 東西の道路の北側の、`front_x` のマスを東の端にして西へ間口 `w` マス、奥へ `h` マス延びる建物。
+fn wide(net: &Network, zone: ZoneKind, front_x: i64, (w, h): (i64, i64), level: u8) -> Building {
+    let front = TilePos::new(front_x, -1);
+    let segment = net.segments_through(TilePos::new(front_x, 0))[0];
+    let east = net.segment_line(segment).unwrap().end().x;
+    Building {
+        zone,
+        area: TileRect::from_corners(front, TilePos::new(front_x - (w - 1), -h)),
+        front,
+        toward_road: (0, 1),
+        entrance: LinkId {
+            segment,
+            dir: Dir::Backward,
+            mode: LaneMode::Sidewalk,
+        },
+        entrance_at: LaneOffset(u32::try_from(east - front_x).unwrap() * 8_000),
+        level,
+        leveled_at: Tick::ZERO,
+        supply: Default::default(),
+    }
+}
+
+/// x が `xs` のマスで、東西の道路に南から道路が交わる。
+fn street_with_junctions(xs: &[i64]) -> Network {
+    let mut net = Network::new();
+    let line = Line::between(TilePos::new(0, 0), TilePos::new(60, 0)).unwrap();
+    net.build_road(&line, RoadKind::Small).unwrap();
+    for x in xs {
+        let side = Line::between(TilePos::new(*x, 0), TilePos::new(*x, 10)).unwrap();
+        net.build_road(&side, RoadKind::Small).unwrap();
+    }
+    net
+}
+
+/// 出入りの位置の、x のワールド座標（mm）。
+fn spot_x(net: &Network, b: &Building) -> i64 {
+    let p = lot_spot(net, b).unwrap();
+    assert!(p.resolve_on(net, LaneMode::Car).is_some());
+    assert!(p.resolve_on(net, LaneMode::Sidewalk).is_some());
+    p.world().x.0
+}
+
+/// マス `x` の真ん中の x のワールド座標（mm）。
+fn mid(x: i64) -> i64 {
+    x * 8_000 + 4_000
+}
+
+#[test]
+fn a_side_lot_opens_at_the_end_far_from_the_nearest_junction() {
+    let net = street_with_junctions(&[10, 50]);
+    // 4×4 の商業の段階 1 は 8 台で、端の 1 列を切り欠く。出入りの位置は、端の列のマスの真ん中である。
+    let near_west = wide(&net, ZoneKind::Commercial, 14, (4, 4), 1);
+    assert!(matches!(
+        near_west.parking_layout().cut,
+        ParkingCut::Side { columns: 1, .. }
+    ));
+    // 西の交差点から 1 マスの西の端（x = 11）より、4 マスの東の端（x = 14）が遠い。
+    assert_eq!(spot_x(&net, &near_west), mid(14));
+    // 東の交差点のそばでは、西の端（x = 46）にする。出入口（x = 49）とは別の所になる。
+    let near_east = wide(&net, ZoneKind::Commercial, 49, (4, 4), 1);
+    assert_eq!(spot_x(&net, &near_east), mid(46));
+    assert_ne!(lot_spot(&net, &near_east), building_spot(&net, &near_east));
+    // 2 つの交差点のうち近いほうまでの距離で比べる。x = 27〜30 なら、西の端は西の交差点から 17 マス、
+    // 東の端は東の交差点から 20 マスで、東の端が遠い。x = 30〜33 なら逆になる。
+    let middle = wide(&net, ZoneKind::Commercial, 30, (4, 4), 1);
+    assert_eq!(spot_x(&net, &middle), mid(30));
+    let middle = wide(&net, ZoneKind::Commercial, 33, (4, 4), 1);
+    assert_eq!(spot_x(&net, &middle), mid(30));
+}
+
+#[test]
+fn a_front_strip_opens_in_the_middle_of_its_slots() {
+    let net = street_with_junctions(&[10]);
+    // 1 マスの商業の段階 1 は 1 台で、帯は枠 1 つ（2.5m）。交差点から遠い東の辺に寄せ、その真ん中から出入りする。
+    let one = wide(&net, ZoneKind::Commercial, 11, (1, 1), 1);
+    assert_eq!(
+        one.parking_layout().cut,
+        ParkingCut::FrontStrip { slots: 1 }
+    );
+    assert_eq!(spot_x(&net, &one), mid(11) + 4_000 - 1_250);
+    // 間口 2 マスの工業の段階 4 は 6 台で、帯は 15m。東の端の辺から 7.5m 内に入った所である。
+    let two = wide(&net, ZoneKind::Industrial, 13, (2, 1), 4);
+    assert_eq!(
+        two.parking_layout().cut,
+        ParkingCut::FrontStrip { slots: 6 }
+    );
+    assert_eq!(spot_x(&net, &two), mid(13) + 4_000 - 7_500);
+}
+
+#[test]
+fn without_a_junction_the_lot_opens_at_the_larger_coordinate() {
+    let net = street_with_junctions(&[]);
+    let b = wide(&net, ZoneKind::Commercial, 30, (4, 4), 1);
+    assert_eq!(spot_x(&net, &b), mid(30));
+    let b = wide(&net, ZoneKind::Commercial, 30, (1, 1), 1);
+    assert_eq!(spot_x(&net, &b), mid(30) + 2_750);
+}
+
+#[test]
+fn a_lot_at_the_dead_end_of_a_road_stays_on_the_road() {
+    // 道路の西の端（x = 0）のマスの建物。交差点から遠い西の側は道路の外になるので、マスの真ん中にする。
+    let net = street_with_junctions(&[3]);
+    let b = wide(&net, ZoneKind::Commercial, 0, (1, 1), 1);
+    assert_eq!(spot_x(&net, &b), mid(0));
+}
+
+#[test]
+fn arriving_cars_turn_into_the_lot_without_stopping_the_lane() {
+    // 家から西へ、店（x = 20）へ向かう車と、その先（x = 5）へ向かう車が続いて走る。
+    let (mut s, ids) = Street::new(&[50, 20, 5]);
+    let (home, shop, far) = (ids[0], ids[1], ids[2]);
+    let first = s.drive(home, shop).unwrap();
+    s.board(&[first]);
+    for _ in 0..3 {
+        s.step();
+    }
+    let second = s.drive(home, far).unwrap();
+    s.board(&[second]);
+    let mut prev = std::collections::BTreeMap::new();
+    let (mut first_min, mut follow_min) = (i32::MAX, i32::MAX);
+    for _ in 0..300 {
+        for id in [first, second] {
+            let Some(t) = s.trips.get(id).filter(|t| car::on_road(t)) else {
+                continue;
+            };
+            let v = t.speed().0;
+            if let Some(before) = prev.insert(id, v) {
+                assert!(
+                    before - v <= CAR_DECEL,
+                    "減速の上限を破った {before} -> {v}"
+                );
+            }
+            if id == first && t.offset() > LaneOffset(16_000) {
+                first_min = first_min.min(v);
+            }
+        }
+        // 先の車が車線にいるあいだの、走り出したあとの後ろの車の速さ。
+        if s.trips.get(first).is_some_and(car::on_road)
+            && let Some(t) = s.trips.get(second).filter(|t| car::on_road(t))
+            && (t.speed().0 > 0 || follow_min != i32::MAX)
+        {
+            follow_min = follow_min.min(t.speed().0);
+        }
+        if s.step().contains(&second) {
+            break;
+        }
+    }
+    // 先の車は、走り出したあとは入る速さより落とさずに駐車場へ入り、後ろの車も止まらない。
+    assert_eq!(lot(&s, shop), (1, 0));
+    assert!(first_min >= car::PARK_ENTRY_SPEED, "{first_min}");
+    assert!(follow_min > 0, "後ろの車が止まった");
+}
+
+#[test]
+fn a_lot_spanning_two_unjoined_roads_opens_onto_the_road_of_its_door() {
+    // 西の道路（x = 0〜20）と東の道路（x = 21〜40）は隣り合うが、つながっていない。
+    let (mut s, _) = Street::with_roads(&[], &[(0, 20), (21, 40)]);
+    // 東の道路の x = 24 に交差点がある。x = 19〜22 の建物の出入口は東の道路の x = 22 にあり、
+    // 交差点から遠い西の端（x = 19）は西の道路に面する。
+    let side = Line::between(TilePos::new(24, 0), TilePos::new(24, 10)).unwrap();
+    s.net.build_road(&side, RoadKind::Small).unwrap();
+    s.router = AstarRouter::new(&s.net);
+    let west = s.net.segments_through(TilePos::new(19, 0))[0];
+    let east = s.net.segments_through(TilePos::new(22, 0))[0];
+    assert_ne!(west, east);
+    let b = wide(&s.net, ZoneKind::Commercial, 22, (4, 4), 1);
+    let (link, _) = lot_spot(&s.net, &b)
+        .unwrap()
+        .resolve_on(&s.net, LaneMode::Sidewalk)
+        .unwrap();
+    assert_eq!(link.segment, east);
+    assert_eq!(spot_x(&s.net, &b), mid(22));
+    // 出入口から出入りの位置まで歩いて、車で出られる。
+    let shop = s.buildings.insert(b);
+    let to = s
+        .buildings
+        .insert(wide(&s.net, ZoneKind::Commercial, 35, (1, 1), 1));
+    let id = s.drive(shop, to).unwrap();
+    s.board(&[id]);
+    assert_eq!(s.run(id), [LaneMode::Car, LaneMode::Sidewalk]);
+}
+
+#[test]
+fn a_lot_just_past_a_node_is_entered_by_slowing_on_the_link_before() {
+    // x = 10 で 2 本に分かれた道路を東から西へ走り、つなぎ目を抜けてすぐの店（x = 9）に入る。
+    // つなぎ目は交差点でないので、出入りの位置は座標の大きい東の辺の側で、最後のリンクの始まりから
+    // 5.25m にある。最高速度から入る速さまで落とすには、手前のリンクから減速が要る。
+    let (mut s, ids) = Street::with_roads(&[50, 9], &[(0, 10), (10, 60)]);
+    let (home, shop) = (ids[0], ids[1]);
+    let id = s.drive(home, shop).unwrap();
+    s.board(&[id]);
+    let last = {
+        let t = s.trips.get(id).unwrap();
+        assert!(t.route.links.len() >= 2, "交差点を抜けない経路");
+        t.route.links.len() - 1
+    };
+    let (mut prev, mut slowed_before, mut speeds) = (None::<(u32, i32)>, false, Vec::new());
+    for _ in 0..300 {
+        let Some(t) = s.trips.get(id).filter(|t| car::on_road(t)) else {
+            if s.trips
+                .get(id)
+                .is_some_and(|t| t.mode() == LaneMode::Sidewalk)
+                && prev.is_some()
+            {
+                break;
+            }
+            s.step();
+            continue;
+        };
+        let v = t.speed().0;
+        if let Some((leg, before)) = prev {
+            assert!(
+                before - v <= CAR_DECEL,
+                "減速の上限を破った {before} -> {v}"
+            );
+            // この tick の速さは、tick の始めにいたリンクの上で決めた。
+            if (leg as usize) < last && v < before {
+                slowed_before = true;
+            }
+        }
+        speeds.push((t.leg, v));
+        prev = Some((t.leg, v));
+        s.step();
+    }
+    assert_eq!(lot(&s, shop), (1, 0), "{speeds:?}");
+    assert!(slowed_before, "手前のリンクで減速しない {speeds:?}");
+    let (_, arrive) = *speeds.last().unwrap();
+    assert!(arrive >= car::PARK_ENTRY_SPEED, "{speeds:?}");
+    // 落としすぎない。出入りの位置は最後のリンクの 5.25m 先なので、つなぎ目を抜けた tick には、
+    // 入る速さより 1 tick の減速ぶん以上速い。
+    let (_, entered) = *speeds
+        .iter()
+        .find(|(leg, _)| *leg as usize == last)
+        .unwrap();
+    assert!(
+        entered > car::PARK_ENTRY_SPEED + CAR_DECEL,
+        "手前で落としすぎた {speeds:?}"
+    );
+}
+
+#[test]
+fn a_car_bound_for_a_removed_building_is_not_counted_as_parking_elsewhere() {
+    let (mut s, ids) = Street::new(&[50, 5]);
+    let (home, shop) = (ids[0], ids[1]);
+    let id = s.drive(home, shop).unwrap();
+    s.board(&[id]);
+    let t = s.trips.get(id).unwrap();
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings));
+    s.buildings.remove(shop);
+    s.trips.forget_lots(&s.buildings);
+    let t = s.trips.get(id).unwrap();
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings));
 }

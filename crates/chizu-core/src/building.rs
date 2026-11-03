@@ -17,7 +17,7 @@ use crate::units::{LaneOffset, Tick};
 
 mod parking;
 
-pub use parking::{ParkingCut, ParkingLayout, SLOTS_PER_TILE};
+pub use parking::{ParkingCut, ParkingLayout, SLOT_WIDTH_MM, SLOTS_PER_TILE};
 
 /// 建物の段階の上限。
 pub const MAX_LEVEL: u8 = 5;

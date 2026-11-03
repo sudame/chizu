@@ -39,6 +39,9 @@ pub const CAR_ACCEL: i32 = 2_500;
 /// 安全速度を求めるときの減速の上限（mm/tick）。
 pub const CAR_DECEL: i32 = 4_500;
 
+/// 駐車場に入る車が、出入りの位置で車線から外れるときの速さ（mm/tick）。時速 7.2km である。
+pub const PARK_ENTRY_SPEED: i32 = 2_000;
+
 /// 前の車の後ろの端から、自分の前の端までに空ける距離に、車の長さを足したもの。
 const SPACING: u32 = CAR_LENGTH + MIN_GAP;
 
@@ -138,9 +141,9 @@ pub(super) fn given_up(t: &Trip) -> bool {
 
 /// 交差点の手前まで来た車線の先頭の車が、交差点の先で入りうる車線（[`lane_choices`]）。
 ///
-/// 路肩の車がこの車線で後ろへ下がって入ると、交差点から入ろうとする車の空きを先に取ってしまう。
+/// 駐車場から出る車がこの車線で後ろへ下がって入ると、交差点から入ろうとする車の空きを先に取ってしまう。
 /// 列が詰まっていると、交差点の先頭の車は空きを待ち続け、その手前の交差点まで列が延びて輪になる。
-/// 先頭の車は車線の車の数で入る車線を選ぶので、路肩の車を置くと選ぶ車線が変わりうる。そのため、
+/// 先頭の車は車線の車の数で入る車線を選ぶので、駐車場から出る車を置くと選ぶ車線が変わりうる。そのため、
 /// 選びうる車線をすべて守る。
 #[derive(Default)]
 pub(super) struct Entering(BTreeSet<LaneId>);
@@ -182,7 +185,7 @@ impl Entering {
 
 /// 行 `i` の車を、いまのリンクの車線に置く。車の少ない車線から順に、いまの位置から後ろへ下げて
 /// 空いた位置を探す。ただし、交差点から車の入ってくる車線（`entering`）では、いまの位置から
-/// 車 2 台ぶんより後ろへは下げない。どの車線にも空きがなければ、出発を待たせて `false` を返す。
+/// 車 2 台ぶんより後ろへは下げない。どの車線にも空きがなければ、車線の外（駐車場の中）で待たせて `false` を返す。
 /// `ix` は行 `i` を除いた車線の上の車で、置いたら行 `i` を足す。
 /// `jay` は車のリンクごとの、区間の途中の衝突区間の真ん中の位置で、車がその区間にかかる位置には置かない。
 pub(super) fn place(
@@ -417,19 +420,37 @@ fn drive(
             v = v.min(s);
         }
     }
-    if t.last_leg() {
-        // 着く位置には、止まった前の車があるものとして近づき、残りが加速の幅に収まったら着く。
-        let left = i64::from(t.dest_offset.0) - i64::from(t.offset.0);
-        let stop = LaneOffset(t.dest_offset.0.saturating_add(SPACING));
-        let approach = safe_speed(t.offset, stop, MmPerTick::ZERO);
-        v = v.min(if left <= i64::from(CAR_ACCEL) {
-            left
-        } else {
-            approach.min(left)
-        });
+    // 着く位置へは、入る速さまで減速の上限で落としながら近づき、届いたら車線から外れる。
+    // 車線の上で止まらないので、後ろの車は止まらずに済む。
+    if let Some(left) = left_to_dest(net, t, seg.kind) {
+        v = v.min(entry_speed(left, i64::from(PARK_ENTRY_SPEED)));
     }
     let v = MmPerTick(i32::try_from(v.max(0)).expect("速さが i32 に収まらない"));
     (v, t.offset.advance(v.distance(1)))
+}
+
+/// 着く位置までの距離。減速が要るほど近いときだけ返す。着く位置が先のリンクにあれば、
+/// あいだのリンクの長さを足す。網が変わって先のリンクがなくなっていれば `None`。
+fn left_to_dest(net: &Network, t: &Trip, kind: crate::network::SegmentKind) -> Option<i64> {
+    let vmax = i64::from(speed_limit(kind).0) + i64::from(CAR_ACCEL);
+    let reach = vmax + braking_distance(vmax);
+    if t.last_leg() {
+        let left = i64::from(t.dest_offset.0) - i64::from(t.offset.0);
+        return (left <= reach).then_some(left);
+    }
+    let mut left = i64::from(t.link_len.0) - i64::from(t.offset.0);
+    let last = t.route.links.len() - 1;
+    for k in t.leg as usize + 1..=last {
+        if left > reach {
+            return None;
+        }
+        left += if k == last {
+            i64::from(t.dest_offset.0)
+        } else {
+            i64::from(super::pos::link_geometry(net, t.route.links[k])?.2.0)
+        };
+    }
+    (left <= reach).then_some(left)
 }
 
 /// 区間の途中の衝突区間の手前で止まる車が、衝突区間とのあいだに空ける距離（mm）。

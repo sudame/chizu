@@ -1,8 +1,13 @@
 //! 建物の駐車場と、建物から建物への「歩く → 車 → 歩く」の移動。
 //!
-//! 移動は 3 つの区切りに分ける。出発の建物の出入口から、その建物の駐車場まで歩く。車で行き先の
-//! 駐車場まで走る。車を停めて、行き先の出入口まで歩く。駐車場と出入口は、どちらも建物の前の道路の
-//! 位置に置く。そのため、自分の建物の駐車場までの歩きは長さ 0 で、1 tick で終わる。
+//! 移動は 3 つの区切りに分ける。出発の建物の出入口から、その建物の駐車場の出入りの位置まで歩く。
+//! 車で行き先の駐車場の出入りの位置まで走る。車を停めて、行き先の出入口まで歩く。出入りの位置
+//! （[`lot_spot`]）と出入口は、どちらも建物の前の道路の上の位置で、同じ間口の中にある。
+//!
+//! 着く車は、出入りの位置へ入る速さ（`car::PARK_ENTRY_SPEED`）まで落として近づき、届いたら車線から
+//! 外れて駐車場に入る。車線の上で止まらないので、後ろの車は減速に付き合うだけで済む。
+//! 出る車は、車線に空きができるまで駐車場の中で待つ（`Trip::waiting`）。待つ車は車線の外にいて、
+//! 流れを止めない。車線に入るときの決まりは `car::place` にある。
 //!
 //! 行き先の駐車場は出発のときに決めて、空きを 1 台ぶん押さえる。満車なら、行き先から
 //! [`PARK_RADIUS`] マスの中で空きのある、いちばん近い建物の駐車場にする。どこも満車なら車では行けない。
@@ -11,16 +16,19 @@
 //! 建物が消えると、その駐車場に停めてあった車も消える。そこへ向かっていた車は、着いたら停めずに消える。
 
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
-use super::{Ends, SidewalkPos, Trip, Trips, candidates, car, lane_shift, make_trip, plan};
-use crate::building::{Building, Buildings};
+use super::{
+    Ends, SidewalkPos, Trip, Trips, candidates, car, junction, lane_shift, make_trip, plan, pos,
+};
+use crate::building::{Building, Buildings, ParkingCut, SLOT_WIDTH_MM};
 use crate::id::{BuildingId, TripId};
-use crate::network::{LaneMode, Network};
+use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId, TILE_MM};
 use crate::routing::AstarRouter;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{TilePos, TileRect};
-use crate::units::Tick;
+use crate::units::{LaneOffset, Tick};
 
 /// 満車のときに、ほかの駐車場を探す範囲（マス）。
 pub const PARK_RADIUS: u64 = 16;
@@ -206,6 +214,143 @@ pub fn building_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
     SidewalkPos::on_any_link(net, b.entrance, b.entrance_at)
 }
 
+/// 建物の駐車場の出入りの位置。着く車はここで車線から外れて駐車場に入り、出る車はここから車線に入る。
+/// 出入口と同じく、歩道の上でもあり、同じ側の車のリンクの上でもある。
+///
+/// 切り欠いた平面の駐車場は、間口のどちらかの端に寄せる。脇の駐車場なら端の列の、道路に面した辺の
+/// 真ん中、前面の帯なら端から並べた枠の真ん中が出入りの位置になる。端は、面した道路の近い交差点から
+/// 遠い側にし、同じならワールド座標の大きい側にする。出入りの位置を、交差点の手前の停止線と、
+/// 交差点を抜けた直後の合流から離すためである。
+/// 平面の駐車場のない建物（斜めの道路に面した建物など）は、建物の中の駐車場に出入口から入る。
+/// 出入りの位置が道路の上に取れなければ（行き止まりの端など）、出入口の位置にする。
+pub fn lot_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
+    let door = building_spot(net, b)?;
+    let half = TILE_MM / 2;
+    // 端の外側の辺から、出入りの位置まで内へ入る距離（mm）。
+    let inward = match b.parking_layout().cut {
+        ParkingCut::None => return Some(door),
+        ParkingCut::FrontStrip { slots } => slots
+            .checked_mul(SLOT_WIDTH_MM)
+            .and_then(|w| i64::try_from(w / 2).ok())
+            .expect("帯の長さがあふれた"),
+        ParkingCut::Side { .. } => half,
+    };
+    let (_, step, _) = pos::link_geometry(net, b.entrance)?;
+    let (tx, ty) = b.toward_road;
+    let along = (-ty, tx);
+    // `front` から間口のもう一方の端のマスまでのマスの数。
+    let span = if tx == 0 {
+        b.area.max.x.abs_diff(b.area.min.x)
+    } else {
+        b.area.max.y.abs_diff(b.area.min.y)
+    };
+    let far = i64::try_from(span).expect("間口が i64 に収まらない");
+    let at = |t: TilePos, (dx, dy): (i64, i64), k: i64| {
+        let c = |v: i64, d: i64| {
+            d.checked_mul(k)
+                .and_then(|o| v.checked_add(o))
+                .expect("マスの座標があふれた")
+        };
+        TilePos::new(c(t.x, dx), c(t.y, dy))
+    };
+    // 間口の両端のマスと、そこから外へ向かう向き。1 マスの間口なら、同じマスの両側になる。
+    let ends = [
+        (b.front, (-along.0, -along.1)),
+        (at(b.front, along, far), along),
+    ];
+    // 出入りの位置の、端のマスの真ん中からのずれ（mm）。帯の真ん中は、マスの真ん中より内に入りうる。
+    let shift = half - inward;
+    ends.into_iter()
+        .filter_map(|(tile, out)| {
+            let road = at(tile, (tx, ty), 1);
+            let sign = out.0 * i64::from(step.0) + out.1 * i64::from(step.1);
+            let p = [sign * shift, 0]
+                .into_iter()
+                .flat_map(|d| spots_near(road, step, d))
+                .find(|p| {
+                    p.resolve_on(net, LaneMode::Sidewalk)
+                        .is_some_and(|(l, _)| joined(net, l.segment, b.entrance.segment))
+                        && p.resolve_on(net, LaneMode::Car).is_some()
+                })?;
+            let (link, off) = p.resolve_on(net, LaneMode::Car)?;
+            let w = p.world();
+            Some(((junction_clearance(net, link, off), w.x, w.y), p))
+        })
+        .max_by_key(|(k, _)| *k)
+        .map_or(Some(door), |(_, p)| Some(p))
+}
+
+/// 区間 `a` と `b` が同じ区間か、端のノードでつながっているか。建物の間口は、隣り合うだけで
+/// つながっていない 2 本の道路にまたがりうるので、出入りの位置は出入口の区間とつながる区間に取る。
+fn joined(net: &Network, a: SegmentId, b: SegmentId) -> bool {
+    a == b
+        || net
+            .segment(a)
+            .zip(net.segment(b))
+            .is_some_and(|(x, y)| [x.a, x.b].iter().any(|n| *n == y.a || *n == y.b))
+}
+
+/// [`lot_spot`] のうち、出入口から歩道で届くもの。届かなければ出入口にする。出入口の区間と
+/// つながる区間に取っても、片側の歩道が途切れているなどで届かないことがあるためである。
+fn reachable_lot_spot(
+    net: &Network,
+    router: &mut AstarRouter,
+    b: &Building,
+) -> Option<SidewalkPos> {
+    let door = building_spot(net, b)?;
+    let at = lot_spot(net, b)?;
+    let ok = at == door || reachable(net, router, LaneMode::Sidewalk, door, at);
+    Some(if ok { at } else { door })
+}
+
+/// 道路のマス `road` の真ん中から、1 歩の向き `step` に `d` mm ずれた位置の表し方。真ん中ちょうどは、
+/// 前の 1 歩の終わりと、次の 1 歩の始まりの 2 つで表せる。区間の端のマスでは片方しか道路の上にないので、
+/// 両方を試す順に返す。
+fn spots_near(road: TilePos, step: (i8, i8), d: i64) -> SmallVec<[SidewalkPos; 2]> {
+    let per = TILE_MM;
+    let back = TilePos::new(
+        road.x
+            .checked_sub(i64::from(step.0))
+            .expect("マスの座標があふれた"),
+        road.y
+            .checked_sub(i64::from(step.1))
+            .expect("マスの座標があふれた"),
+    );
+    let along = |v: i64| LaneOffset(u32::try_from(v).expect("1 歩の中の距離が u32 に収まらない"));
+    let mut out = SmallVec::new();
+    if d <= 0 {
+        out.push(SidewalkPos {
+            tile: back,
+            step,
+            along: along(per + d),
+        });
+    }
+    if d >= 0 {
+        out.push(SidewalkPos {
+            tile: road,
+            step,
+            along: along(d),
+        });
+    }
+    out
+}
+
+/// 車のリンク `link` の、始まりから `at` の位置から、リンクの両端の交差点のうち近いほうまでの距離（mm）。
+/// どちらの端も交差点でなければ `u32::MAX`。
+fn junction_clearance(net: &Network, link: LinkId, at: LaneOffset) -> u32 {
+    let Some((seg, (_, _, len))) = net.segment(link.segment).zip(pos::link_geometry(net, link))
+    else {
+        return u32::MAX;
+    };
+    let (start, end) = match link.dir {
+        Dir::Forward => (seg.a, seg.b),
+        Dir::Backward => (seg.b, seg.a),
+    };
+    let to_start = junction::is_junction(net, start).then_some(at.0);
+    let to_end = junction::is_junction(net, end).then(|| len.0.saturating_sub(at.0));
+    to_start.into_iter().chain(to_end).min().unwrap_or(u32::MAX)
+}
+
 /// 手段 `mode` で `from` から `to` へ行けるか。
 fn reachable(
     net: &Network,
@@ -282,11 +427,13 @@ impl Trips {
         take: Option<BuildingId>,
         now: Tick,
     ) -> Option<TripId> {
-        let origin = building_spot(net, buildings.get(from)?)?;
-        let dest_b = buildings.get(to)?;
-        let dest = building_spot(net, dest_b)?;
+        let from_b = buildings.get(from)?;
+        let door = building_spot(net, from_b)?;
+        router.sync(net);
+        let origin = reachable_lot_spot(net, router, from_b)?;
+        let dest = building_spot(net, buildings.get(to)?)?;
         let took = take.filter(|b| self.parking.unpark(*b));
-        let id = self.start_drive(net, router, buildings, (origin, to, dest), now);
+        let id = self.start_drive(net, router, buildings, (door, origin), (to, dest), now);
         if let (None, Some(b)) = (id, took) {
             self.parking.update(b, |l| {
                 l.parked = l.parked.checked_add(1).expect("停めた台数があふれた");
@@ -295,12 +442,15 @@ impl Trips {
         id
     }
 
+    /// 出入口 `door` から駐車場の出入りの位置 `origin` まで歩き、そこから建物 `to`（出入口 `dest`）へ
+    /// 車で向かう移動を作る。
     fn start_drive(
         &mut self,
         net: &Network,
         router: &mut AstarRouter,
         buildings: &Buildings,
-        (origin, to, dest): (SidewalkPos, BuildingId, SidewalkPos),
+        (door, origin): (SidewalkPos, SidewalkPos),
+        (to, dest): (BuildingId, SidewalkPos),
         now: Tick,
     ) -> Option<TripId> {
         router.sync(net);
@@ -310,14 +460,13 @@ impl Trips {
             self.parking_tally.lots_full = self.parking_tally.lots_full.saturating_add(1);
             return None;
         }
-        let (lot, park_at) = candidates
-            .into_iter()
-            .filter_map(|lot| Some((lot, building_spot(net, buildings.get(lot)?)?)))
-            .find(|(_, at)| {
-                reachable(net, router, LaneMode::Car, origin, *at)
-                    && reachable(net, router, LaneMode::Sidewalk, *at, dest)
-            })?;
-        let id = self.spawn_many(net, router, &[(origin, origin)], now)[0]?;
+        let (lot, park_at) = candidates.into_iter().find_map(|lot| {
+            let at = reachable_lot_spot(net, router, buildings.get(lot)?)?;
+            (reachable(net, router, LaneMode::Car, origin, at)
+                && reachable(net, router, LaneMode::Sidewalk, at, dest))
+            .then_some((lot, at))
+        })?;
+        let id = self.spawn_many(net, router, &[(door, origin)], now)[0]?;
         self.rows[id.slot()]
             .as_mut()
             .expect("作った主体がない")
