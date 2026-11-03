@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use chizu_core::building::demand;
+use chizu_core::building::{DemandFactorKind, demand_factors};
 use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
 use chizu_core::world::economy::{chunk_slots, milestone_population};
@@ -20,6 +20,22 @@ use crate::snapshot::{Header, Mover, TripleBuffer};
 /// [`Sim::overview`] が返す数のうち、固定の並びの個数。そのあとに止まっている道路網の並びが続く。画面の側の `OVERVIEW_LENGTH` と合わせる。
 pub const OVERVIEW_LENGTH: usize = 21;
 
+/// [`Sim::city_stats`] が返す数のうち、固定の並びの個数。そのあとに需要の内訳が続く。
+/// 画面の側は `city-stats-layout.json` から読むので、変えたら `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` で書き直す。
+pub const CITY_STATS_FIXED: usize = 21;
+
+/// 画面の側が読む、街の数字の並びと要因の番号の表。
+pub fn city_stats_layout_json() -> String {
+    let kinds: Vec<String> = DemandFactorKind::ALL
+        .iter()
+        .map(|k| format!("    \"{}\": {}", k.name(), *k as u8))
+        .collect();
+    format!(
+        "{{\n  \"fixedLength\": {CITY_STATS_FIXED},\n  \"zones\": 4,\n  \"factorKinds\": {{\n{}\n  }}\n}}\n",
+        kinds.join(",\n")
+    )
+}
+
 pub struct Sim {
     world: World,
     log: CommandLog,
@@ -34,12 +50,16 @@ pub struct Sim {
     /// 最後に集めた移動体と、その基準のチャンク。
     movers: Vec<Mover>,
     movers_base: ChunkCoord,
+    /// 曲線の上に描いた車の、曲線の始まり。描画のためだけに覚え、状態には入れない。
+    arcs: crate::movers::Arcs,
     /// `movers` を集めたときの（tick、記録の件数、範囲、記録に入らない操作の回数）。どれも変わらなければ集め直さない。
     movers_key: Option<(Tick, usize, Option<TileRect>, u32)>,
     /// 記録に入らない操作（開発用の道具）をした回数。1 回でもあれば、記録を再生しても同じ状態にならない。
     unrecorded_ops: u32,
     /// 建物の表の版の控え。`(記録の件数, 建つ・育つが走った回数, 版)` で、前の 2 つが変わったときだけ計算し直す。
     buildings_version: Cell<Option<(usize, u64, f64)>>,
+    /// 街の数字の電気と水道の分の控え。`(供給の版, 値)` で、版が変わったときだけ計算し直す。
+    utility_cache: Cell<Option<(u64, [f64; 14])>>,
 }
 
 /// 記録したコマンドを適用した結果。
@@ -66,9 +86,11 @@ impl Sim {
             mover_view: None,
             movers: Vec::new(),
             movers_base: ChunkCoord::default(),
+            arcs: crate::movers::Arcs::new(),
             movers_key: None,
             unrecorded_ops: 0,
             buildings_version: Cell::new(None),
+            utility_cache: Cell::new(None),
         }
     }
 
@@ -318,7 +340,8 @@ impl Sim {
         self.movers_key = Some(key);
         match self.mover_view {
             Some(v) => {
-                self.movers_base = crate::movers::visible_movers(&self.world, v, &mut self.movers);
+                self.movers_base =
+                    crate::movers::visible_movers(&self.world, v, &mut self.movers, &mut self.arcs);
             }
             None => {
                 self.movers.clear();
@@ -410,6 +433,7 @@ impl Sim {
     /// 主の網（需要がいちばん大きい網）の電気の供給量、水道の供給量、需要、
     /// 主の網以外で施設か建物のある網の数（電気、水道の順）。
     /// 供給量は道路網につながった施設の合計である。余りは網をまたいで足さず、主の網で見る。
+    /// そのあとに、需要の内訳が続く。区画の種類ごとに、要因の数と、要因ごとの `[要因の番号, 寄与]` を並べる。
     pub fn city_stats(&self) -> Vec<f64> {
         let buildings = self.world.buildings();
         let capacity = buildings.capacity();
@@ -421,12 +445,50 @@ impl Sim {
                 .iter()
                 .sum::<u64>() as f64,
         ];
-        out.extend(demand(&self.world.city_stats()).map(|d| d as f64));
-        let [power, water, power_short, water_short] = crate::layers::utility_totals(&self.world);
-        let need: u64 = buildings.iter().map(|(_, b)| building_demand(b)).sum();
-        out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
-        out.extend(crate::layers::utility_gaps(&self.world).map(|v| v as f64));
-        out.extend(crate::layers::utility_main(&self.world).map(|v| v as f64));
+        let breakdown = demand_factors(&self.world.city_stats());
+        out.extend(breakdown.totals().map(|d| d as f64));
+        out.extend(self.utility_numbers());
+        debug_assert_eq!(out.len(), CITY_STATS_FIXED);
+        // 固定の並びのあとに、需要の内訳を区画の種類（住宅・商業・工業・オフィスの順）ごとに並べる。
+        // 種類ごとに、要因の数、そのあとに要因ごとの `[要因の番号, 寄与]`。番号は `DemandFactorKind` の値である。
+        for zone in 0..4 {
+            let factors = breakdown.zone(zone);
+            out.push(factors.len() as f64);
+            for f in factors {
+                out.extend([f64::from(f.kind as u8), f.value as f64]);
+            }
+        }
+        out
+    }
+
+    /// 街の数字のうち、電気と水道の 14 個。電気の供給量、水道の供給量、需要、足りない網の数（電気、水道）、
+    /// 施設のない網の数と不足量、主の網の値と、ほかの網の数。
+    /// 道路と建物の全体をたどって求めるので、建物の表と道路網の版（[`crate::layers::supply_version`]）が
+    /// 変わらないあいだは前の値を使い回す。
+    fn utility_numbers(&self) -> [f64; 14] {
+        let version = crate::layers::supply_version(self);
+        if let Some((cached, numbers)) = self.utility_cache.get()
+            && cached == version
+        {
+            return numbers;
+        }
+        let (totals, main, gaps) = crate::layers::utility_summary(&self.world);
+        let [power, water, power_short, water_short] = totals;
+        let need: u64 = self
+            .world
+            .buildings()
+            .iter()
+            .map(|(_, b)| building_demand(b))
+            .sum();
+        let mut out = [0.0; 14];
+        let values = [power, water, need, power_short, water_short]
+            .into_iter()
+            .chain(gaps)
+            .chain(main);
+        for (slot, v) in out.iter_mut().zip(values) {
+            *slot = v as f64;
+        }
+        self.utility_cache.set(Some((version, out)));
         out
     }
 
@@ -771,6 +833,15 @@ mod tests {
         );
         assert!(stats[9] > 0.0);
         let stats = sim.city_stats();
+        // 需要の内訳は、種類ごとに足し合わせると需要になる。
+        let mut at = CITY_STATS_FIXED;
+        for zone in 0..4 {
+            let n = stats[at] as usize;
+            let sum: f64 = (0..n).map(|i| stats[at + 2 + 2 * i]).sum();
+            assert_eq!(sum, stats[3 + zone], "{zone}");
+            at += 1 + 2 * n;
+        }
+        assert_eq!(at, stats.len());
         assert_eq!(stats[0], count as f64);
         assert!(stats[1] > 0.0);
         assert_ne!(sim.buildings_version(), version);
@@ -1168,6 +1239,85 @@ mod tests {
         assert_eq!(&after[1..5], &[100.0, 170.0, 100.0, 100.0]);
         // 記録に残る
         assert_eq!(sim.log().len(), 1);
+    }
+
+    /// 税率を変えると、建物の表が変わらなくても、街の数字の需要と内訳が変わる。
+    #[test]
+    fn city_stats_factors_follow_tax_rate_commands() {
+        let mut sim = Sim::new(0);
+        let before = sim.city_stats();
+        // 住宅の内訳の 4 つ目が税で、`[要因の番号, 寄与]` の寄与は 1 つ先にある。
+        let tax_at = CITY_STATS_FIXED + 1 + 2 * 3;
+        assert_eq!(before[tax_at], f64::from(DemandFactorKind::Tax as u8));
+        assert_eq!(before[tax_at + 1], 0.0);
+        sim.submit(Command::SetTaxRate {
+            zone: ZoneKind::Residential,
+            permille: 150,
+        })
+        .unwrap();
+        let after = sim.city_stats();
+        assert_eq!(after[tax_at + 1], -25.0);
+        assert_eq!(after[3], before[3] - 25.0);
+        assert_ne!(before, after);
+    }
+
+    /// 電気と水道の分を使い回しても、毎回求め直した値と同じである(道路や施設を足したあとも)。
+    #[test]
+    fn cached_utility_numbers_match_a_fresh_computation() {
+        let fresh = |sim: &Sim| -> Vec<f64> {
+            let [power, water, power_short, water_short] =
+                crate::layers::utility_totals(sim.world());
+            let need: u64 = sim
+                .world()
+                .buildings()
+                .iter()
+                .map(|(_, b)| building_demand(b))
+                .sum();
+            [power, water, need, power_short, water_short]
+                .into_iter()
+                .chain(crate::layers::utility_gaps(sim.world()))
+                .chain(crate::layers::utility_main(sim.world()))
+                .map(|v| v as f64)
+                .collect()
+        };
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 5), (10, 5))).unwrap();
+        for step in 0..6 {
+            assert_eq!(sim.city_stats()[7..21], fresh(&sim)[..], "{step}");
+            // 2 回目は使い回しで、同じ値になる。
+            assert_eq!(sim.city_stats()[7..21], fresh(&sim)[..], "{step}");
+            let kind = if step % 2 == 0 {
+                ServiceKind::PowerPlant
+            } else {
+                ServiceKind::WaterPump
+            };
+            sim.submit(Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(2 + 4 * step, 9),
+                rotation: 2,
+            })
+            .ok();
+            sim.advance(200);
+        }
+    }
+
+    const STATS_LAYOUT_FILE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../web/src/protocol/city-stats-layout.json"
+    );
+
+    #[test]
+    fn city_stats_layout_file_matches() {
+        let expected = city_stats_layout_json();
+        if std::env::var_os("CHIZU_UPDATE_LAYOUT").is_some() {
+            std::fs::write(STATS_LAYOUT_FILE, &expected).unwrap();
+        }
+        let actual = std::fs::read_to_string(STATS_LAYOUT_FILE).unwrap();
+        assert!(
+            actual == expected,
+            "{STATS_LAYOUT_FILE} が Rust 側の並びと食い違う。\
+             CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm で書き直す"
+        );
     }
 
     fn road(from: (i64, i64), to: (i64, i64)) -> Command {

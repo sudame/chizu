@@ -203,6 +203,32 @@ impl Trip {
         (Mm(x), Mm(y))
     }
 
+    /// 車の描くための道筋（[`CarPath`]）。歩く人なら `None`。
+    fn car_path(&self, net: &Network) -> Option<CarPath> {
+        if self.mode != LaneMode::Car {
+            return None;
+        }
+        let mm = |(x, y): (i64, i64)| (Mm(x), Mm(y));
+        let prev = (self.leg as usize)
+            .checked_sub(1)
+            .map(|k| self.route.links[k])
+            .and_then(|l| {
+                let (_, step, _) = pos::link_geometry(net, l)?;
+                // ノードを越えたときに、越える前のずれを移り変わりの始まりとして控えてある。
+                let shown = self
+                    .blend
+                    .map_or_else(|| lane_shift::target(net, l, step, 0), |b| b.from);
+                Some((l, mm(shown)))
+            });
+        Some(CarPath {
+            link: self.link(),
+            offset: self.offset,
+            len: self.link_len,
+            prev,
+            lane_shift: mm(self.lane_target(net, self.link())),
+        })
+    }
+
     fn last_leg(&self) -> bool {
         self.leg as usize + 1 == self.route.links.len()
     }
@@ -381,6 +407,24 @@ pub struct Mover {
     /// 描くときに `pos` へ足す、車線や歩道に寄せるずれ（mm）。進む向きの左へずれる。
     /// 描画のためだけの値で、状態にも状態ハッシュにも入らない。
     pub shift: (Mm, Mm),
+    /// 車なら、ノードの前後を曲線でつないで描くための道筋。歩く人は `None`。
+    pub path: Option<CarPath>,
+}
+
+/// 車の、いまのリンクの上の位置と、抜けてきたリンク。画面は、リンクの終わりのノードの手前で待つ車を
+/// 停止線の手前に描き、ノードを抜けたばかりの車を曲線の上に描くのに使う。
+/// 描画のためだけの値で、状態にも状態ハッシュにも入らない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CarPath {
+    pub link: LinkId,
+    /// いまのリンクの始まりからの距離と、リンクの長さ。
+    pub offset: LaneOffset,
+    pub len: LaneOffset,
+    /// 抜けてきたリンクと、ノードを越える直前に描いていたずれ。経路の最初のリンクにいるか、
+    /// 抜けてきたリンクが網から消えていれば `None`。
+    pub prev: Option<(LinkId, (Mm, Mm))>,
+    /// いまの車線のずれ。車線を移る前のずれからの移り変わりは含まない。
+    pub lane_shift: (Mm, Mm),
 }
 
 /// リンクと、その始まりからの距離。
@@ -901,6 +945,7 @@ impl Trips {
                     heading: t.step,
                     mode: t.mode,
                     shift: t.shift(net),
+                    path: t.car_path(net),
                 })
             })
             .collect()

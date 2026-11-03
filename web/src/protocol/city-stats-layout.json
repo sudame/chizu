@@ -1,0 +1,15 @@
+{
+  "fixedLength": 21,
+  "zones": 4,
+  "factorKinds": {
+    "base": 0,
+    "vacantJobs": 1,
+    "happiness": 2,
+    "tax": 3,
+    "vacantHomes": 4,
+    "jobless": 5,
+    "shoppers": 6,
+    "workers": 7,
+    "existing": 8
+  }
+}
