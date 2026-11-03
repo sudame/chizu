@@ -142,13 +142,13 @@ function sendBuildings(sim: Simulation): void {
 }
 
 // 停めてある車の台数は毎 tick 変わるが、画面に出す精度ではおよそ 1 秒に 1 回で足りる。送るのは前と数が違うときだけにする。
-// 一時停止中は街が進まないので、最初の 1 回のあとは送らない
+// 一時停止中は街が進まないので、最初の 1 回のあとはタイマーからは送らない。コマンドのあとはすぐ確かめる
 const PARKED_INTERVAL_MS = 1000;
 let lastParkedAt = Number.NEGATIVE_INFINITY;
 let sentParked = "";
-function sendParked(sim: Simulation, now: number, paused: boolean): void {
+function sendParked(sim: Simulation, now: number, paused: boolean, force = false): void {
   const first = lastParkedAt === Number.NEGATIVE_INFINITY;
-  if (!first && (paused || now - lastParkedAt < PARKED_INTERVAL_MS)) {
+  if (!force && !first && (paused || now - lastParkedAt < PARKED_INTERVAL_MS)) {
     return;
   }
   lastParkedAt = now;
@@ -304,6 +304,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         sendRoads(sim);
         sendSignals(sim);
         sendBuildings(sim);
+        sendParked(sim, performance.now(), false, true);
         sendCityStats(sim, performance.now(), true);
         sendFinance(sim, performance.now(), true);
         sendOverview(sim, performance.now(), false, true);

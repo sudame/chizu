@@ -501,7 +501,7 @@ function rebuildParked(vp: Viewport): void {
     return;
   }
   renderer?.roads.setParked(meshes);
-  // test:wasm が読む。parkedMs は頂点を作って送るまでにかかった時間（ミリ秒）
+  // 手元の計測用。parkedMs は頂点を作って送るまでにかかった時間（ミリ秒）
   mapCanvas.dataset.parkedMs = (performance.now() - started).toFixed(2);
   mapCanvas.dataset.parkedBuilds = String(parkedCars.builds);
   mapCanvas.dataset.parkedVertices = String(meshes.cars.vertexCount);

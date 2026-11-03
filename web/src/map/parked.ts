@@ -203,9 +203,37 @@ export class ParkedCache {
     this.#dirty = true;
   }
 
+  /** 台数を差し替える。作った範囲の中の駐車場の台数が変わったときだけ、作り直す印を立てる。 */
   setParked(parked: ReadonlyMap<string, number>): void {
+    const before = this.#parked;
     this.#parked = parked;
-    this.#dirty = true;
+    if (this.#dirty) {
+      return;
+    }
+    const rect = this.#rect;
+    if (rect === null) {
+      this.#dirty = true;
+      return;
+    }
+    const changed = (key: string) => {
+      if ((before.get(key) ?? 0) === (parked.get(key) ?? 0)) {
+        return false;
+      }
+      const lot = this.#lots.get(key);
+      return lot?.strips.some((s) => overlaps(rect, s.x0, s.y0, s.x1, s.y1)) ?? false;
+    };
+    for (const key of before.keys()) {
+      if (changed(key)) {
+        this.#dirty = true;
+        return;
+      }
+    }
+    for (const key of parked.keys()) {
+      if (!before.has(key) && changed(key)) {
+        this.#dirty = true;
+        return;
+      }
+    }
   }
 
   /** 次に要るときに、作り直す（WebGL のコンテキストを作り直したときなど）。 */

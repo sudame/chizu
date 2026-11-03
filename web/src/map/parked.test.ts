@@ -184,6 +184,39 @@ describe("ParkedCache", () => {
     expect(c.builds).toBe(2);
   });
 
+  test("作った範囲の外の台数だけが変わっても、作り直さない", () => {
+    const lots = new Map([
+      [lotKey(10, 20), LOT],
+      [
+        lotKey(200, 200),
+        {
+          ...LOT,
+          strips: [{ x0: 200, y0: 200, x1: 200.6, y1: 201, openX: 1, openY: 0, count: 3 }],
+        },
+      ],
+    ]);
+    const c = new ParkedCache();
+    c.setLots(lots);
+    c.setParked(
+      new Map([
+        [lotKey(10, 20), 4],
+        [lotKey(200, 200), 1],
+      ]),
+    );
+    expect(c.update(16, VIEW)).not.toBeNull();
+    c.setParked(
+      new Map([
+        [lotKey(10, 20), 4],
+        [lotKey(200, 200), 3],
+      ]),
+    );
+    expect(c.update(16, VIEW)).toBeNull();
+    c.setParked(new Map([[lotKey(10, 20), 4]]));
+    expect(c.update(16, VIEW)).toBeNull();
+    c.setParked(new Map([[lotKey(10, 20), 3]]));
+    expect(c.update(16, VIEW)?.cars.vertexCount).toBe(3 * 2 * 6);
+  });
+
   test("細部の段に出入りすると窓と屋根を作り直し、駐車場の形が変わると作り直す", () => {
     const c = fresh();
     expect(c.update(16, VIEW)?.fine.vertexCount).toBe(0);
