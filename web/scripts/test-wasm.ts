@@ -1628,13 +1628,16 @@ try {
       (await page.locator("#layers").getAttribute("data-active")) === "traffic",
     `交通の主題図では、標準の段（倍率 ${hyojunZoom.toFixed(2)}）で空いている道路の中に緑の線を重ねる（中心 ${roadColor.join(", ")}、線の外 ${besideLine.join(", ")}）`,
   );
-  // 線は、交通の値が変わったときだけ作り直し、毎フレームは作らない
+  // 線は、交通の値が変わったときだけ作り直し、毎フレームは作らない。
+  // 等速では交通の版がめったに変わらず、間引きが壊れていても通るので、測るあいだだけ最高速で進める
   const builds = async () => Number(await map.getAttribute("data-traffic-builds"));
+  await setSpeed(FAST_SPEED);
   const buildsBefore = await builds();
   const startedAt = await page.evaluate(() => performance.now());
   await page.waitForTimeout(2_000);
   const buildsAfter = await builds();
   const elapsed = (await page.evaluate(() => performance.now())) - startedAt;
+  await setSpeed(1);
   const perSecond = ((buildsAfter - buildsBefore) * 1000) / elapsed;
   check(
     buildsAfter > 0 && perSecond <= 4,
