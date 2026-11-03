@@ -16,7 +16,7 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 
 1. 作業は、マネージャーが用意した worktree の中で行う。すでに worktree の中にいるので、新しく worktree を作らず、本体のディレクトリにも移らない。`git worktree add` と `gwq` は使わない。
 2. 作業の途中は、変えたところに絞って確かめる。`mise run test` と `mise run lint` は WASM の LTO を含む重いビルドを何本も回すので、PR を作る直前に 1 回だけ回し、両方が通ることを確かめる。
-   - Rust：`mise run cargo -- nextest run -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ
+   - Rust：`RAYON_NUM_THREADS=2 mise run cargo -- nextest run -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ。`RAYON_NUM_THREADS=2` は test:rust と同じく、rayon のスレッドが待つあいだに CPU を使い切らないようにする
    - 画面：`mise run test:web`、`mise run lint:web`
    - WASM の境目や描画を変えたときだけ：`mise run test:wasm`
 3. コミットメッセージは日本語で書き、末尾に `Co-Authored-By:` の行を付ける。
