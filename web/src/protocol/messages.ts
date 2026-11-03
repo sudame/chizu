@@ -1,10 +1,10 @@
 // メインスレッドと Worker のあいだでやりとりするメッセージ。
 
+import { validCityStats } from "./city-stats.ts";
+
 export type RoadKindName = "Small" | "Medium" | "Large";
 /** 施設の種類。 */
 export type ServiceName = "PowerPlant" | "WaterPump";
-/** chizu-wasm の city_stats の固定の並びの個数。そのあとに需要の内訳が続くので、これ以上あればよい。 */
-export const CITY_STATS_LENGTH = 21;
 /** chizu-wasm の finance の数の個数。 */
 export const FINANCE_LENGTH = 12;
 
@@ -232,6 +232,11 @@ export type WorkerToMain =
    * 並びは税率の上限、区画の種類ごとの税率、税収、道路の維持費、発電所と浄水場の維持費。
    */
   | { kind: "finance"; values: number[] }
+  /**
+   * 街の数字だけの送り直し。需要は税率、幸福度、人口、職のない住民で、建物の表が変わらなくても動くため、
+   * Worker が一定の間隔で確かめ、前と数が違うときだけ送る。stats は buildings と同じ並びである。
+   */
+  | { kind: "cityStats"; stats: number[] }
   /** dev-spawn-walks で出せた人数。 */
   | { kind: "dev-spawned"; count: number }
   /** Worker が受け取って使っている倍率。画面の表示はこの値を使う。 */
@@ -305,8 +310,14 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         Array.isArray(v.stats) &&
         v.facilities instanceof Float64Array &&
         v.facilities.length % FACILITY_STRIDE === 0 &&
-        v.stats.length >= CITY_STATS_LENGTH &&
-        v.stats.every((x) => typeof x === "number")
+        v.stats.every((x) => typeof x === "number") &&
+        validCityStats(v.stats)
+      );
+    case "cityStats":
+      return (
+        Array.isArray(v.stats) &&
+        v.stats.every((x) => typeof x === "number") &&
+        validCityStats(v.stats)
       );
     case "overview":
       return (

@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use chizu_core::building::{demand, demand_factors};
+use chizu_core::building::{DemandFactorKind, demand_factors};
 use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
 use chizu_core::world::economy::{chunk_slots, milestone_population};
@@ -19,6 +19,22 @@ use crate::snapshot::{Header, Mover, TripleBuffer};
 
 /// [`Sim::overview`] が返す数のうち、固定の並びの個数。そのあとに止まっている道路網の並びが続く。画面の側の `OVERVIEW_LENGTH` と合わせる。
 pub const OVERVIEW_LENGTH: usize = 21;
+
+/// [`Sim::city_stats`] が返す数のうち、固定の並びの個数。そのあとに需要の内訳が続く。
+/// 画面の側は `city-stats-layout.json` から読むので、変えたら `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` で書き直す。
+pub const CITY_STATS_FIXED: usize = 21;
+
+/// 画面の側が読む、街の数字の並びと要因の番号の表。
+pub fn city_stats_layout_json() -> String {
+    let kinds: Vec<String> = DemandFactorKind::ALL
+        .iter()
+        .map(|k| format!("    \"{}\": {}", k.name(), *k as u8))
+        .collect();
+    format!(
+        "{{\n  \"fixedLength\": {CITY_STATS_FIXED},\n  \"zones\": 4,\n  \"factorKinds\": {{\n{}\n  }}\n}}\n",
+        kinds.join(",\n")
+    )
+}
 
 pub struct Sim {
     world: World,
@@ -422,15 +438,18 @@ impl Sim {
                 .iter()
                 .sum::<u64>() as f64,
         ];
-        out.extend(demand(&self.world.city_stats()).map(|d| d as f64));
+        let breakdown = demand_factors(&self.world.city_stats());
+        out.extend(breakdown.totals().map(|d| d as f64));
         let [power, water, power_short, water_short] = crate::layers::utility_totals(&self.world);
         let need: u64 = buildings.iter().map(|(_, b)| building_demand(b)).sum();
         out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
         out.extend(crate::layers::utility_gaps(&self.world).map(|v| v as f64));
         out.extend(crate::layers::utility_main(&self.world).map(|v| v as f64));
-        // 最初の 21 個のあとに、需要の内訳を区画の種類（住宅・商業・工業・オフィスの順）ごとに並べる。
+        debug_assert_eq!(out.len(), CITY_STATS_FIXED);
+        // 固定の並びのあとに、需要の内訳を区画の種類（住宅・商業・工業・オフィスの順）ごとに並べる。
         // 種類ごとに、要因の数、そのあとに要因ごとの `[要因の番号, 寄与]`。番号は `DemandFactorKind` の値である。
-        for factors in demand_factors(&self.world.city_stats()) {
+        for zone in 0..4 {
+            let factors = breakdown.zone(zone);
             out.push(factors.len() as f64);
             for f in factors {
                 out.extend([f64::from(f.kind as u8), f.value as f64]);
@@ -781,7 +800,7 @@ mod tests {
         assert!(stats[9] > 0.0);
         let stats = sim.city_stats();
         // 需要の内訳は、種類ごとに足し合わせると需要になる。
-        let mut at = 21;
+        let mut at = CITY_STATS_FIXED;
         for zone in 0..4 {
             let n = stats[at] as usize;
             let sum: f64 = (0..n).map(|i| stats[at + 2 + 2 * i]).sum();
@@ -1186,6 +1205,45 @@ mod tests {
         assert_eq!(&after[1..5], &[100.0, 170.0, 100.0, 100.0]);
         // 記録に残る
         assert_eq!(sim.log().len(), 1);
+    }
+
+    /// 税率を変えると、建物の表が変わらなくても、街の数字の需要と内訳が変わる。
+    #[test]
+    fn city_stats_factors_follow_tax_rate_commands() {
+        let mut sim = Sim::new(0);
+        let before = sim.city_stats();
+        // 住宅の内訳の 4 つ目が税で、`[要因の番号, 寄与]` の寄与は 1 つ先にある。
+        let tax_at = CITY_STATS_FIXED + 1 + 2 * 3;
+        assert_eq!(before[tax_at], f64::from(DemandFactorKind::Tax as u8));
+        assert_eq!(before[tax_at + 1], 0.0);
+        sim.submit(Command::SetTaxRate {
+            zone: ZoneKind::Residential,
+            permille: 150,
+        })
+        .unwrap();
+        let after = sim.city_stats();
+        assert_eq!(after[tax_at + 1], -25.0);
+        assert_eq!(after[3], before[3] - 25.0);
+        assert_ne!(before, after);
+    }
+
+    const STATS_LAYOUT_FILE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../web/src/protocol/city-stats-layout.json"
+    );
+
+    #[test]
+    fn city_stats_layout_file_matches() {
+        let expected = city_stats_layout_json();
+        if std::env::var_os("CHIZU_UPDATE_LAYOUT").is_some() {
+            std::fs::write(STATS_LAYOUT_FILE, &expected).unwrap();
+        }
+        let actual = std::fs::read_to_string(STATS_LAYOUT_FILE).unwrap();
+        assert!(
+            actual == expected,
+            "{STATS_LAYOUT_FILE} が Rust 側の並びと食い違う。\
+             CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm で書き直す"
+        );
     }
 
     fn road(from: (i64, i64), to: (i64, i64)) -> Command {

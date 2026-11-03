@@ -311,12 +311,16 @@
       }
       #demand {
         display: flex;
-        gap: 4px;
+        gap: 0;
         align-items: flex-end;
       }
+      /* 棒は 12px だが、押せる当たりは 32px 角ほどにする */
       #demand .slot-button {
         display: block;
-        padding: 0;
+        box-sizing: content-box;
+        min-width: 12px;
+        padding: 4px 10px;
+        margin: -4px 0;
         font: inherit;
         color: inherit;
         cursor: pointer;

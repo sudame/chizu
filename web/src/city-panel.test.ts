@@ -5,6 +5,7 @@ import {
   demandBar,
   demandBars,
   demandFactorLines,
+  factorLabel,
   formatCityNumbers,
   formatUtilities,
   parseCityStats,
@@ -14,6 +15,8 @@ import {
   utilityNotice,
   utilityShortage,
 } from "./city-panel.ts";
+import { CITY_STATS_LENGTH, FACTOR_KIND, validCityStats } from "./protocol/city-stats.ts";
+import { isWorkerToMain } from "./protocol/messages.ts";
 
 describe("街の数字", () => {
   test("city_stats の並びを読む", () => {
@@ -158,7 +161,7 @@ describe("需要の内訳", () => {
 
   test("寄与の大きい順に並べ、正と負が分かる言葉で出す", () => {
     expect(demandFactorLines(stats, 3)).toEqual([
-      { label: "オフィスの職場がすでに多い", value: -200 },
+      { label: "いまのオフィスの職場", value: -200 },
       { label: "働く年齢の住民に職場が要る", value: 140 },
       { label: "税が高く、職場を増やしにくい", value: -9 },
     ]);
@@ -173,9 +176,9 @@ describe("需要の内訳", () => {
   });
 
   test("幸福度と税は、符号で言い方が変わる", () => {
-    const s = parseCityStats([...new Array(21).fill(0), 2, 2, 10, 3, 12, 0, 0, 0, 0, 0, 0, 0]);
+    const s = parseCityStats([...new Array(21).fill(0), 2, 2, 10, 3, 12, 0, 0, 0]);
     expect(demandFactorLines(s, 0).map((l) => l.label)).toEqual(["税が低い", "幸福度が高い"]);
-    const bad = parseCityStats([...new Array(21).fill(0), 2, 2, -10, 3, -12, 0, 0, 0, 0, 0, 0, 0]);
+    const bad = parseCityStats([...new Array(21).fill(0), 2, 2, -10, 3, -12, 0, 0, 0]);
     expect(demandFactorLines(bad, 0).map((l) => l.label)).toEqual(["税が高い", "幸福度が低い"]);
   });
 
@@ -192,5 +195,60 @@ describe("需要の内訳", () => {
     expect(shownZone(view)).toBe(2);
     view = togglePinned(view, 2);
     expect(shownZone(view)).toBeNull();
+  });
+
+  test("固定を外すと、指を置いたままでも隠れる", () => {
+    let view = togglePinned({ pinned: null, hover: null }, 1);
+    view = { ...view, hover: 1 };
+    expect(shownZone(view)).toBe(1);
+    view = togglePinned(view, 1);
+    expect(view).toEqual({ pinned: null, hover: null });
+    expect(shownZone(view)).toBeNull();
+  });
+
+  test("符号に関係のない要因の言い方は、寄与が正でも負でも同じである", () => {
+    for (const zone of [1, 2, 3]) {
+      for (const kind of [FACTOR_KIND.existing, FACTOR_KIND.workers, FACTOR_KIND.shoppers]) {
+        expect(factorLabel(zone, kind, 5)).toBe(factorLabel(zone, kind, -5));
+      }
+    }
+    expect(factorLabel(1, FACTOR_KIND.existing, 3)).toBe("いまの商業の職場");
+  });
+
+  test("要因の番号の表は Rust から書き出した JSON と同じで、言い方がすべての番号にある", () => {
+    expect(Object.values(FACTOR_KIND).sort()).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    for (const kind of Object.values(FACTOR_KIND)) {
+      expect(factorLabel(0, kind, 1)).not.toBe("そのほか");
+    }
+  });
+});
+
+describe("city_stats の並びの形", () => {
+  const fixed = new Array(CITY_STATS_LENGTH).fill(0);
+
+  test("固定の並びのあとに、件数と対がちょうど続けば正しい", () => {
+    expect(validCityStats([...fixed, 0, 0, 0, 0])).toBe(true);
+    expect(validCityStats([...fixed, 1, 0, 5, 0, 0, 2, 3, 1, 4, 5])).toBe(true);
+  });
+
+  test("長さが合わない、件数が整数でない、数でない並びは捨てる", () => {
+    expect(validCityStats(fixed)).toBe(false);
+    expect(validCityStats([...fixed, 0, 0, 0])).toBe(false);
+    expect(validCityStats([...fixed, 0, 0, 0, 0, 0])).toBe(false);
+    expect(validCityStats([...fixed, 1, 0, 5, 0, 0])).toBe(false);
+    expect(validCityStats([...fixed, 0.5, 0, 0, 0])).toBe(false);
+    expect(validCityStats([...fixed, -1, 0, 0, 0])).toBe(false);
+    expect(validCityStats([...fixed, Number.NaN, 0, 0, 0])).toBe(false);
+    expect(validCityStats(fixed.slice(1))).toBe(false);
+  });
+
+  test("Worker から来る cityStats は、形が合うものだけ受け取る", () => {
+    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 0, 0, 0, 0] })).toBe(true);
+    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 2, 0, 5] })).toBe(false);
+    expect(isWorkerToMain({ kind: "cityStats", stats: fixed })).toBe(false);
+  });
+
+  test("形の合わない並びでも、内訳は空になるだけで読める", () => {
+    expect(parseCityStats([...fixed, 2, 0, 5]).demandFactors).toEqual([[], [], [], []]);
   });
 });

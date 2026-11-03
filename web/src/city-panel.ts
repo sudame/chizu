@@ -1,5 +1,12 @@
 // 街の数字の表示。建物の数、世帯と職場の上限、区画の種類ごとの需要（CS2 の RCI のような棒）を出す。
 
+import {
+  CITY_STATS_LENGTH,
+  FACTOR_KIND,
+  validCityStats,
+  ZONE_COUNT,
+} from "./protocol/city-stats.ts";
+
 /** chizu-wasm の city_stats を読んだもの。 */
 export type CityStats = {
   buildings: number;
@@ -35,21 +42,21 @@ export type CityStats = {
 /** 需要への寄与 1 つ。kind は chizu-core の DemandFactorKind の値、value は需要に足される量。 */
 export type DemandFactor = { kind: number; value: number };
 
-/** city_stats の固定の並びの個数。そのあとに需要の内訳が続く。 */
-const FIXED_STATS = 21;
-
-/** 区画の種類ごとに、要因の数と `[kind, value]` の対が続く並びを読む。足りなければ空にする。 */
+/**
+ * 区画の種類ごとに、要因の数と `[kind, value]` の対が続く並びを読む。
+ * 形が合わない並び（内訳のない古い形を含む）は、内訳を空にする。
+ */
 function parseDemandFactors(stats: number[]): DemandFactor[][] {
-  let at = FIXED_STATS;
-  return [0, 1, 2, 3].map(() => {
+  const none = (): DemandFactor[][] => Array.from({ length: ZONE_COUNT }, () => []);
+  if (!validCityStats(stats)) {
+    return none();
+  }
+  let at = CITY_STATS_LENGTH;
+  return none().map(() => {
     const count = stats[at] ?? 0;
     const factors: DemandFactor[] = [];
     for (let i = 0; i < count; i++) {
-      const kind = stats[at + 1 + 2 * i];
-      const value = stats[at + 2 + 2 * i];
-      if (kind !== undefined && value !== undefined) {
-        factors.push({ kind, value });
-      }
+      factors.push({ kind: stats[at + 1 + 2 * i] ?? 0, value: stats[at + 2 + 2 * i] ?? 0 });
     }
     at += 1 + 2 * count;
     return factors;
@@ -206,21 +213,12 @@ export function demandBars(stats: CityStats): BarLayout[] {
 /** 住宅・商業・工業・オフィスの順の、区画の名前。 */
 export const ZONE_NAMES = ["住宅", "商業", "工業", "オフィス"] as const;
 
-/** chizu-core の DemandFactorKind の値。 */
-const KIND = {
-  base: 0,
-  vacantJobs: 1,
-  happiness: 2,
-  tax: 3,
-  vacantHomes: 4,
-  jobless: 5,
-  shoppers: 6,
-  workers: 7,
-  existing: 8,
-} as const;
+/** chizu-core の DemandFactorKind の値。Rust から書き出した city-stats-layout.json の表である。 */
+const KIND = FACTOR_KIND;
 
 /**
- * 要因の言い方。寄与が正のときと負のときで言い方を変える。
+ * 要因の言い方。寄与の符号で意味が変わる要因（幸福度、住宅の税）は言い方を変え、
+ * それ以外は符号に関係のない言い方にする（正のときも負のときも同じ文で読める）。
  * 区画の種類（0 住宅、1 商業、2 工業、3 オフィス）によって、同じ要因でも指すものが違う。
  */
 export function factorLabel(zone: number, kind: number, value: number): string {
@@ -246,7 +244,7 @@ export function factorLabel(zone: number, kind: number, value: number): string {
     case KIND.workers:
       return "働く年齢の住民に職場が要る";
     case KIND.existing:
-      return `${ZONE_NAMES[zone] ?? ""}の職場がすでに多い`;
+      return `いまの${ZONE_NAMES[zone] ?? ""}の職場`;
     default:
       return "そのほか";
   }
@@ -269,9 +267,15 @@ export function shownZone(view: FactorView): number | null {
   return view.hover ?? view.pinned;
 }
 
-/** 同じ区画をもう一度押すと隠れ、別の区画を押すとそちらに替わる。 */
+/**
+ * 別の区画を押すとそちらに固定される。固定されている区画をもう一度押すと、指を置いたままでも隠れる
+ * （指を置いている区画の表示も消す。置き直すと、また出る）。
+ */
 export function togglePinned(view: FactorView, zone: number): FactorView {
-  return { ...view, pinned: view.pinned === zone ? null : zone };
+  if (view.pinned === zone) {
+    return { pinned: null, hover: null };
+  }
+  return { ...view, pinned: zone };
 }
 
 let latestStats: CityStats | null = null;
