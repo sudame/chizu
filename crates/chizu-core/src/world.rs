@@ -638,6 +638,11 @@ impl World {
         self.trips.movers_in(&self.network, min, max)
     }
 
+    /// 歩く人 `id` の、交差点の前後で歩道の角を回って描くための道筋（[`crate::WalkPath`]）。状態は変えない。
+    pub fn walk_path(&self, id: TripId) -> Option<crate::WalkPath> {
+        self.trips.walk_path(&self.network, id)
+    }
+
     /// プレイヤーが置いた公共の施設。置いた順に並ぶ。
     pub fn facilities(&self) -> &[Facility] {
         &self.facilities

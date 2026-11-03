@@ -961,3 +961,30 @@ fn walkers_keep_their_way_when_the_next_junction_changes_while_they_cross() {
         n.set_crosswalk(east, Heading::S, false).unwrap();
     });
 }
+
+#[test]
+fn corner_route_goes_through_the_corners_of_the_arms_it_crosses() {
+    let (n, node) = crossroads();
+    let c = (10, 10);
+    let side = |a, b| link(&n, a, b, LaneMode::Sidewalk);
+    let seg = |a, b| side(a, b).segment;
+    let (w, e, s) = ((9, 10), (11, 10), (10, 11));
+    // 西から東へまっすぐ、南の側を歩く。角は腕の時計回りの側かどうかで表す（南の腕の西の側が時計回り）。
+    // 西の腕の南の角から南の腕の西の角へ回り、南の腕を渡って、南の腕の東の角から東の腕の南の角へ回る。
+    let route = crossing::corner_route(&n, node, (side(w, c), false), (side(c, e), false), None);
+    let want = [
+        (seg(w, c), false),
+        (seg(c, s), true),
+        (seg(c, s), false),
+        (seg(c, e), true),
+    ];
+    assert_eq!(route.as_slice(), want);
+    // 渡る腕は、同じ腕の角が続くところと同じである。
+    let (_, arms) = crossing::depart(&n, node, (side(w, c), false), side(c, e), None, None);
+    let crossed: Vec<_> = route.windows(2).filter(|p| p[0].0 == p[1].0).collect();
+    assert_eq!(crossed.len(), arms.len());
+    // 南へ曲がる人は、どの腕も渡らずに角を回る。
+    let route = crossing::corner_route(&n, node, (side(w, c), false), (side(c, s), false), None);
+    assert_eq!(route.len(), 2);
+    assert_ne!(route[0].0, route[1].0);
+}
