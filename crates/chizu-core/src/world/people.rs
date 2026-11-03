@@ -699,6 +699,51 @@ pub(crate) mod tests {
         assert_eq!(w.trips().lot(lot).parked, parked - 1);
     }
 
+    /// 職場へ車で向かっているあいだに職を失った住民の車も、前の職場に停めたまま残らない。
+    #[test]
+    fn a_car_driven_to_a_lost_job_does_not_stay_there() {
+        use crate::movement::HouseholdCar;
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 1);
+        // 職場へ車で向かっている住民を探す。
+        let driving = |w: &World| {
+            let p = w.population();
+            p.citizen_ids().find_map(|id| {
+                let r = p.citizen(id)?;
+                let trip = r.trip?;
+                let c = w.trips().commuter(trip)?;
+                (c.to == Activity::Work
+                    && w.trips().household_car(r.household) == Some(HouseholdCar::InUse(trip)))
+                .then_some((id, r.household, trip))
+            })
+        };
+        for _ in 0..TICKS_PER_DAY {
+            if driving(&w).is_some() {
+                break;
+            }
+            w.step();
+        }
+        let (id, h, trip) = driving(&w).expect("職場へ車で向かう住民がいない");
+        // `update_jobs` が職を外すときと同じく、職場と予定を外す。
+        w.set_workplace(id, None);
+        w.population.set_schedule(id, ScheduleState::default());
+        for _ in 0..TICKS_PER_DAY {
+            if w.trips().get(trip).is_none() {
+                break;
+            }
+            w.step();
+        }
+        assert!(w.trips().get(trip).is_none(), "移動が終わらない");
+        assert!(
+            !matches!(
+                w.trips().household_car(h),
+                Some(HouseholdCar::Parked { by, .. }) if by == id
+            ),
+            "{:?}",
+            w.trips().household_car(h)
+        );
+    }
+
     #[test]
     fn next_time_of_day_is_strictly_later() {
         let eight = 8 * TICKS_PER_HOUR;

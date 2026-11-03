@@ -108,6 +108,11 @@ impl World {
             self.population.set_trip(c.citizen, None);
             if row.schedule.next == c.to && row.schedule.depart_at.is_none() {
                 arrived.push(c.citizen);
+            } else {
+                // 向かっているあいだに職場が変わるかなくなり、着いても予定どおりの居場所にならない。
+                // 着いた所に停めた車は、本人がもうそこから出ないので、どこにもないものに戻す。
+                let home = self.population.home(row.household).flatten();
+                self.trips.return_car(row.household, c.citizen, home);
             }
         }
         arrived.sort_unstable();
