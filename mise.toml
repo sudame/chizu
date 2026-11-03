@@ -45,6 +45,7 @@ run = [
   "cargo clippy --workspace --all-targets -- -D warnings",
   "scripts/check-no-float.sh crates/chizu-core/src",
   "scripts/check-no-float.sh crates/chizu-scenario/src",
+  "scripts/check-no-doctest.sh",
 ]
 
 [tasks."lint:wasm"]
@@ -73,11 +74,9 @@ run = "cargo"
 
 [tasks."test:rust"]
 # cargo test はテストのバイナリを 1 本ずつ順に回すので、長いテストを持つバイナリが続くと待ちが積み重なる。
-# nextest はバイナリをまたいでテストを並べて回す。nextest は doctest を回さないので、doctest は cargo test で回す
-run = [
-  "cargo nextest run --workspace",
-  "cargo test --workspace --doc",
-]
+# nextest はバイナリをまたいでテストを並べて回す。
+# nextest は doctest を回さない。いまは doctest がないので、lint:rust の scripts/check-no-doctest.sh で、足したら気づけるようにしている
+run = "cargo nextest run --workspace"
 
 [tasks."test:web"]
 depends = ["install:web"]
