@@ -16,6 +16,9 @@
 //!
 //! 角の位置は、横断歩道の縞（`web/src/map/roads.ts` の `zebra`）の真ん中の位置と、歩道の中心線に
 //! 合わせる。区間の途中の車と同じ式で道路の端を求める（`car_path`）。
+//!
+//! 網が変わってから次の `step` で経路を探し直すまでのあいだは、網から位置を求められない人がいる
+//! （`WalkPath::stale`）。その人は、前の回に描いた位置に描き続ける（`movers::visible_movers`）。
 
 use chizu_core::movement::crossing;
 use chizu_core::movement::{WALK_WINDOW_MM, WalkAhead, WalkPath};
@@ -232,12 +235,65 @@ fn stage(
     out
 }
 
-/// 歩く人を描く位置と向き。窓の外にいるなど、写し替えない人は `None` で、中核の位置のまま描く。
-pub fn draw(net: &Network, wp: &WalkPath) -> Option<Drawn> {
+/// 歩く人の描き方。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Walk {
+    /// 中核の位置のまま描く。窓の外にいるなど、写し替えない人である。
+    Core,
+    /// この位置と向きに描く。
+    At(Drawn),
+    /// 網が変わったあと、次の `step` で探し直すまでのあいだで、網から描く位置を求められない。
+    /// 前に描いた位置があればそこに描く。なければ、値があればそこに、なければ中核の位置に描く。
+    Lost(Option<Drawn>),
+}
+
+impl Walk {
+    /// 描く位置。前に描いた位置を知らないときのものである。中核の位置のまま描くなら `None`。
+    pub fn position(self) -> Option<Drawn> {
+        match self {
+            Walk::Core => None,
+            Walk::At(d) => Some(d),
+            Walk::Lost(d) => d,
+        }
+    }
+}
+
+/// 歩く人を描く位置と向き。
+pub fn draw(net: &Network, wp: &WalkPath) -> Walk {
+    if wp.stale {
+        return Walk::Lost(curb(net, wp));
+    }
+    match place(net, wp) {
+        Some(Some(d)) => Walk::At(d),
+        Some(None) => Walk::Core,
+        None => Walk::Lost(curb(net, wp)),
+    }
+}
+
+/// いまのリンクの上の、横断歩道の手前の角より交差点の側へは出ない位置。網が変わって道筋を求められない
+/// ときに、交差点の中心に描かないための代わりの位置である。リンクかノードがなくなっていれば `None`。
+fn curb(net: &Network, wp: &WalkPath) -> Option<Drawn> {
+    let g = geom(net, wp.link)?;
+    let start = center(net, g.from)?;
+    let len = f64::from(wp.len.0);
+    let node = Node::of(net, g.to)?;
+    let step = arm_step(net, g.to, wp.link.segment)?;
+    let stop = node.along((-step.0, -step.1)).min(len / 2.0);
+    let along = f64::from(wp.offset.0).min(len - stop);
+    let lat = mm(wp.lane_shift);
+    Some(Drawn {
+        x: start.0 + g.dir.0 * along + lat.0,
+        y: start.1 + g.dir.1 * along + lat.1,
+        angle: g.dir.1.atan2(g.dir.0),
+    })
+}
+
+/// 描く位置と向き。写し替えない人は `Some(None)`、網から位置を求められなければ `None`。
+fn place(net: &Network, wp: &WalkPath) -> Option<Option<Drawn>> {
     let g = geom(net, wp.link)?;
     let len = f64::from(wp.len.0);
     if len <= 0.0 {
-        return None;
+        return Some(None);
     }
     let o = f64::from(wp.offset.0);
     let start = center(net, g.from)?;
@@ -255,7 +311,7 @@ pub fn draw(net: &Network, wp: &WalkPath) -> Option<Drawn> {
     if from_node && ws >= 1.0 && o < ws {
         let node = Node::of(net, g.from)?;
         let stop = capped(node.along(arm_step(net, g.from, wp.link.segment)?), ws);
-        return Some(on_link(stop + o * (ws - stop) / ws));
+        return Some(Some(on_link(stop + o * (ws - stop) / ws)));
     }
     let ahead = wp
         .ahead
@@ -274,12 +330,14 @@ pub fn draw(net: &Network, wp: &WalkPath) -> Option<Drawn> {
             // 道筋が求められないときも、交差点の中心には描かない。
             let node = Node::of(net, g.to)?;
             let step = arm_step(net, g.to, wp.link.segment)?;
-            return Some(on_link(len - node.along((-step.0, -step.1)).min(len / 2.0)));
+            return Some(Some(on_link(
+                len - node.along((-step.0, -step.1)).min(len / 2.0),
+            )));
         }
-        return None;
+        return Some(None);
     };
     if !crossing && o <= len - we {
-        return None;
+        return Some(None);
     }
     let node = Node::of(net, g.to)?;
     let from = on_link(len - we);
@@ -288,16 +346,17 @@ pub fn draw(net: &Network, wp: &WalkPath) -> Option<Drawn> {
             let from = (from.x, from.y);
             if !crossing {
                 let pieces = stage(&points, &ahead.arms, node.junction, from, None);
-                return along_pieces(&pieces, (o - (len - we)) / we);
+                return along_pieces(&pieces, (o - (len - we)) / we).map(Some);
             }
             // 渡っているあいだ。渡る腕の横断歩道を順に並べた道のりの上の位置から、どの横断歩道のどこかを求める。
+            // 角の並びに渡る腕が見つからなければ、網から位置を求められないものとする。
             let mut x = o - len;
             for (k, &arm) in ahead.arms.iter().enumerate() {
                 let w = f64::from(crossing::width(net, arm));
                 if x < w || k + 1 == ahead.arms.len() {
                     let pieces = stage(&points, &ahead.arms, node.junction, from, Some(k));
                     let f = if w > 0.0 { (x / w).min(1.0) } else { 1.0 };
-                    return along_pieces(&pieces, f);
+                    return along_pieces(&pieces, f).map(Some);
                 }
                 x -= w;
             }
@@ -305,7 +364,7 @@ pub fn draw(net: &Network, wp: &WalkPath) -> Option<Drawn> {
         }
         None => {
             let along = capped(node.along(arm_step(net, g.to, wp.link.segment)?), we);
-            crossing.then(|| on_link(len - along))
+            Some(crossing.then(|| on_link(len - along)))
         }
     }
 }
@@ -383,14 +442,16 @@ mod tests {
         for _ in 0..3_000 {
             w.step();
             for m in w.movers_in(view()) {
-                let Some(walk) = m.walk.as_ref() else {
+                let Some(walk) = w.walk_path(m.id) else {
                     continue;
                 };
                 let core = (
                     m.pos.x.0 as f64 + m.shift.0.0 as f64,
                     m.pos.y.0 as f64 + m.shift.1.0 as f64,
                 );
-                let d = draw(w.network(), walk).map_or(core, |d| (d.x, d.y));
+                let d = draw(w.network(), &walk)
+                    .position()
+                    .map_or(core, |d| (d.x, d.y));
                 out.push((d, core, walk.offset >= walk.len));
             }
         }
@@ -477,8 +538,9 @@ mod tests {
                 from: LaneOffset(0),
                 to: None,
                 ahead: None,
+                stale: false,
             };
-            draw(net, &wp)
+            draw(net, &wp).position()
         };
         // 角の歩道の上から始まり、中核の位置へ向かって窓の中を進む。
         let first = at(0).expect("窓の中");
@@ -551,10 +613,11 @@ mod tests {
                 next_len: LaneOffset(80_000),
                 next_end: LaneOffset(80_000),
             }),
+            stale: false,
         };
-        let at = |offset: u32| draw(net, &path(offset)).expect("窓の中");
+        let at = |offset: u32| draw(net, &path(offset)).position().expect("窓の中");
         // 窓の始まりそのものは、中核の位置のまま描く。
-        let draw_is_core = |offset: u32| draw(net, &path(offset)).is_none();
+        let draw_is_core = |offset: u32| draw(net, &path(offset)) == Walk::Core;
         let stripe = 0.4 * TILE + ZEBRA_LENGTH / 2.0;
         // 南の歩道を東へ歩く人は、直進するために南の腕を渡る。渡る前は、その縞の手前の歩道の角に立つ。
         // 交差点の真ん中ではない。
@@ -647,9 +710,8 @@ mod tests {
             m.pos.x.0 as f64 + m.shift.0.0 as f64,
             m.pos.y.0 as f64 + m.shift.1.0 as f64,
         );
-        m.walk
-            .as_ref()
-            .and_then(|p| draw(w.network(), p))
+        w.walk_path(m.id)
+            .and_then(|p| draw(w.network(), &p).position())
             .map_or(core, |d| (d.x, d.y))
     }
 
@@ -666,7 +728,7 @@ mod tests {
             let near = w
                 .movers_in(rect30())
                 .iter()
-                .any(|m| m.walk.as_ref().is_some_and(|p| p.ahead.is_some()));
+                .any(|m| w.walk_path(m.id).is_some_and(|p| p.ahead.is_some()));
             if near {
                 return w;
             }
@@ -709,7 +771,7 @@ mod tests {
         for _ in 0..400 {
             w.step();
             for m in w.movers_in(rect30()) {
-                let Some(p) = m.walk.as_ref() else { continue };
+                let Some(p) = w.walk_path(m.id) else { continue };
                 let d = drawn_or_core(&w, &m);
                 assert!(dist(d, NODE) > 2_500.0, "交差点の中心に描かれた {d:?}");
                 if let Some(l) = last {
@@ -792,9 +854,12 @@ mod tests {
                     from: LaneOffset(0),
                     to: Some(LaneOffset(door)),
                     ahead: None,
+                    stale: false,
                 };
                 let want = core_at(&w, to, o, lane);
-                let got = draw(w.network(), &wp).map_or(want, |d| (d.x, d.y));
+                let got = draw(w.network(), &wp)
+                    .position()
+                    .map_or(want, |d| (d.x, d.y));
                 if o + 1 >= door {
                     assert!(dist(got, want) < 2.0, "{o}: {got:?} {want:?}");
                 }
@@ -819,9 +884,12 @@ mod tests {
                     from: LaneOffset(door),
                     to: None,
                     ahead: Some(ahead.clone()),
+                    stale: false,
                 };
                 let want = core_at(&w, from, o, lane);
-                let got = draw(w.network(), &wp).map_or(want, |d| (d.x, d.y));
+                let got = draw(w.network(), &wp)
+                    .position()
+                    .map_or(want, |d| (d.x, d.y));
                 if o <= door + 1 {
                     assert!(dist(got, want) < 2.0, "{o}: {got:?} {want:?}");
                 }
@@ -840,7 +908,7 @@ mod tests {
         for _ in 0..2_000 {
             w.step();
             for m in w.movers_in(rect30()) {
-                let Some(p) = m.walk.as_ref().filter(|p| p.link == short) else {
+                let Some(p) = w.walk_path(m.id).filter(|p| p.link == short) else {
                     prev = None;
                     continue;
                 };
@@ -888,5 +956,168 @@ mod tests {
         let short = link_of(&w, (10, 10), (11, 11));
         let after = (link_of(&w, (11, 11), (30, 30)), 40_000);
         check_one_tile(&mut w, before, short, after);
+    }
+
+    // ここから、網を変えたときの確かめ。画面と同じく、前の回に描いたものを引き継いで描く。
+
+    use crate::movers::{Arcs, Before, KIND_WALK, visible_movers};
+    use crate::snapshot::Mover as Drawn2;
+
+    /// 画面の側。`visible_movers` を、前の回の結果を引き継いで呼ぶ。
+    #[derive(Default)]
+    struct Screen {
+        out: Vec<Drawn2>,
+        before: Vec<Drawn2>,
+        base: chizu_core::ChunkCoord,
+        arcs: Arcs,
+    }
+
+    impl Screen {
+        /// 歩く人ごとの描く位置（mm）。範囲 (0, 0) からなので、基準のチャンクの原点はワールドの原点である。
+        fn walkers(&mut self, w: &World) -> Vec<(u32, V)> {
+            core::mem::swap(&mut self.out, &mut self.before);
+            let before = Before {
+                out: &self.before,
+                base: self.base,
+            };
+            self.base = visible_movers(w, rect30(), &mut self.out, &mut self.arcs, before);
+            assert_eq!(self.base, chizu_core::ChunkCoord::new(0, 0));
+            self.out
+                .iter()
+                .filter(|m| m.kind == KIND_WALK)
+                .map(|m| (m.id, (f64::from(m.x) * TILE, f64::from(m.y) * TILE)))
+                .collect()
+        }
+    }
+
+    /// 縞の真ん中の線の上（角も含む）にいるか。
+    fn on_stripe(d: V) -> bool {
+        let stripe = 0.4 * TILE + ZEBRA_LENGTH / 2.0;
+        let (dx, dy) = ((d.0 - NODE.0).abs(), (d.1 - NODE.1).abs());
+        ((dx - stripe).abs() < 2.0 && dy < 2_882.0) || ((dy - stripe).abs() < 2.0 && dx < 2_882.0)
+    }
+
+    /// 縞の上か、縞の端から次の縞の手前の角へ回る歩道の上にいるか。車道には入らない。
+    fn on_corner(d: V) -> bool {
+        let (dx, dy) = ((d.0 - NODE.0).abs(), (d.1 - NODE.1).abs());
+        on_stripe(d) || (dx > 2_800.0 && dy > 2_800.0 && dist(d, NODE) < 5_000.0)
+    }
+
+    /// (10, 10) の交差点の西の腕から東の腕へ渡る人がいる街を作る。`signal` なら交差点に信号を付ける。
+    /// 人が車道を渡り始めたところ（`waiting` なら、渡る前に角で待っているところ）で返す。
+    fn town_with_walker_at_the_crossing(signal: bool, waiting: bool) -> World {
+        let mut w = big_world();
+        road(&mut w, (0, 10), (20, 10));
+        road(&mut w, (10, 0), (10, 20));
+        let west = link_of(&w, (0, 10), (10, 10));
+        let east = link_of(&w, (10, 10), (20, 10));
+        if signal {
+            let node = w.network().segment(west.segment).unwrap().b;
+            let out = w.apply(&Command::SetSignal { node, on: true });
+            assert_eq!(out, chizu_core::ApplyOutcome::Applied);
+        }
+        spawn(&mut w, (west, 16_000), (east, 40_000));
+        let mut held = 0;
+        for _ in 0..2_000 {
+            w.step();
+            let found = w.movers_in(rect30()).iter().any(|m| {
+                w.walk_path(m.id).is_some_and(|p| {
+                    if waiting {
+                        p.offset == p.len && p.ahead.is_some()
+                    } else {
+                        p.offset > p.len
+                    }
+                })
+            });
+            // 待つ人は、何 tick か待ってから返す。
+            held += usize::from(found);
+            if found && (!waiting || held > 5) {
+                return w;
+            }
+        }
+        panic!("人が交差点に着かない");
+    }
+
+    #[test]
+    fn walkers_rerouted_at_the_crossing_stay_on_the_stripes_and_do_not_jump() {
+        // 渡っている人と、信号で角に待っている人。区間を T 字につないで分けると、次の step で経路を探し直す。
+        for (signal, waiting) in [(false, false), (true, true)] {
+            let mut w = town_with_walker_at_the_crossing(signal, waiting);
+            let mut screen = Screen::default();
+            let start = screen.walkers(&w);
+            assert_eq!(start.len(), 1);
+            assert!(on_stripe(start[0].1), "{:?}", start[0].1);
+            road(&mut w, (5, 5), (5, 15));
+            let mut last = start[0].1;
+            let mut at_junction = 0;
+            for tick in 0..120 {
+                w.step();
+                let seen = screen.walkers(&w);
+                let Some(&(id, d)) = seen.first() else { break };
+                let core = w.movers_in(rect30())[0];
+                assert_eq!(core.id.index, id);
+                let p = w.walk_path(core.id);
+                assert!(
+                    dist(d, NODE) > 3_500.0,
+                    "{tick}: 交差点の中心に描かれた {d:?}"
+                );
+                assert!(dist(d, last) < 3_000.0, "{tick}: 飛んだ {last:?} -> {d:?}");
+                if p.is_some_and(|p| p.offset >= p.len) {
+                    assert!(on_corner(d), "{tick}: 縞の上にも角にもいない {d:?}");
+                    at_junction += 1;
+                }
+                last = d;
+            }
+            assert!(at_junction > 0, "探し直したあとに交差点にいない");
+        }
+    }
+
+    #[test]
+    fn until_the_next_step_a_changed_network_does_not_draw_the_walker_in_the_middle() {
+        // T 字につないで、いまのリンクの区間を分ける。渡っている腕を壊す。
+        for tee in [true, false] {
+            let mut w = town_with_walker_at_the_crossing(false, false);
+            let mut screen = Screen::default();
+            let before = screen.walkers(&w)[0].1;
+            if tee {
+                road(&mut w, (5, 5), (5, 15));
+            } else {
+                let area = TileRect {
+                    min: TilePos::new(10, 11),
+                    max: TilePos::new(10, 20),
+                };
+                let out = w.apply(&Command::Bulldoze { area });
+                assert_eq!(out, chizu_core::ApplyOutcome::Applied);
+            }
+            let p = w
+                .walk_path(w.movers_in(rect30())[0].id)
+                .expect("道筋がない");
+            assert!(p.stale, "{tee}");
+            // 止めたままなら、何度描き直しても、前に描いた位置のまま。
+            for _ in 0..3 {
+                let now = screen.walkers(&w)[0].1;
+                assert!(
+                    dist(now, NODE) > 3_500.0,
+                    "{tee}: 交差点の中心に描かれた {now:?}"
+                );
+                assert!(dist(now, before) < 1.0, "{tee}: {before:?} -> {now:?}");
+            }
+            // 前に描いていなくても、いまのリンクが残っていれば、交差点の手前の角に描く。
+            if !tee {
+                let fresh = Screen::default().walkers(&w)[0].1;
+                assert!(
+                    dist(fresh, NODE) > 3_500.0,
+                    "交差点の中心に描かれた {fresh:?}"
+                );
+            }
+            // T 字なら、探し直したあとも続けて描く。渡っている腕を壊したときは、中核が渡り終えたものとして
+            // 次のリンクへ移すので、描く位置もそこへ移る。
+            w.step();
+            let after = screen.walkers(&w)[0].1;
+            assert!(dist(after, NODE) > 3_500.0, "{tee}: {after:?}");
+            if tee {
+                assert!(dist(after, before) < 3_000.0, "{before:?} -> {after:?}");
+            }
+        }
     }
 }

@@ -115,15 +115,26 @@ pub struct Trip {
     departed: Tick,
     /// 車線や歩道が変わった直後の、描くずれの移り変わり。描画のためだけの値で、状態ハッシュには入れない。
     blend: Option<lane_shift::Blend>,
-    /// 歩き出した出入口の、リンクの始まりからの距離。描画のためだけの値で、状態ハッシュにも保存データにも
+    /// 経路の最初のリンクのどこから歩き出したか。描画のためだけの値で、状態ハッシュにも保存データにも
     /// 入れず、比べるときも無視する。
     #[serde(skip)]
     origin: Origin,
 }
 
 /// [`Trip::origin`]。比べると常に等しい。
-#[derive(Clone, Copy, Debug, Default)]
-struct Origin(LaneOffset);
+#[derive(Clone, Copy, Debug)]
+enum Origin {
+    /// 出入口から歩き出した。値は、その出入口の、リンクの始まりからの距離である。
+    Door(LaneOffset),
+    /// リンクの始まりのノードを抜けてきた。探し直す前の経路で、ノードを抜けていまのリンクに入っていた人である。
+    Entered,
+}
+
+impl Default for Origin {
+    fn default() -> Origin {
+        Origin::Door(LaneOffset(0))
+    }
+}
 
 impl PartialEq for Origin {
     fn eq(&self, _: &Origin) -> bool {
@@ -248,21 +259,27 @@ impl Trip {
     }
 
     /// 歩く人の描くための道筋（[`WalkPath`]）。車なら `None`。区間の途中を横切っているあいだと、
-    /// リンクの両端から離れているあいだも `None` で、中核の位置のまま描く。
+    /// リンクの両端から離れているあいだも `None` で、中核の位置のまま描く。ただし、網が変わって探し直すのを
+    /// 待っている人は、どこにいても値を返す（[`WalkPath::stale`]）。
     fn walk_path(&self, net: &Network) -> Option<WalkPath> {
         if self.mode != LaneMode::Sidewalk || self.walk.jay.is_some() {
             return None;
         }
-        let entered = self.leg > 0;
+        let door = match self.origin {
+            Origin::Door(at) if self.leg == 0 => Some(at),
+            _ => None,
+        };
+        let entered = door.is_none();
         let len = self.link_len.0;
+        let stale = self.stale(net);
         let near_start = entered && self.offset.0 < WALK_WINDOW_MM;
         let near_end = !self.last_leg() && self.offset.0.saturating_add(WALK_WINDOW_MM) >= len;
-        if !near_start && !near_end {
+        if !stale && !near_start && !near_end {
             return None;
         }
-        let ahead = near_end.then(|| self.walk_ahead(net)).flatten();
+        let ahead = (near_end && !stale).then(|| self.walk_ahead(net)).flatten();
         // 渡っているあいだは、道筋が求められなくても、画面が交差点の中心に描かないよう値を返す。
-        if !near_start && ahead.is_none() && self.offset.0 <= len {
+        if !stale && !near_start && ahead.is_none() && self.offset.0 <= len {
             return None;
         }
         let (x, y) = self.lane_target(net, self.link());
@@ -272,14 +289,53 @@ impl Trip {
             len: self.link_len,
             lane_shift: (Mm(x), Mm(y)),
             entered,
-            from: if entered {
-                LaneOffset(0)
-            } else {
-                self.origin.0
-            },
+            from: door.unwrap_or(LaneOffset(0)),
             to: self.last_leg().then_some(self.dest_offset),
             ahead,
+            stale,
         })
+    }
+
+    /// 探し直す前の、歩き出した所。最初のリンクの上にいて出入口から歩き出していれば、その出入口の位置
+    /// （`Ok`）、ノードを抜けてきたなら、いまのリンクの始まりのマスと 1 歩の向き（`Err`）。
+    fn walk_start(&self) -> Result<SidewalkPos, (TilePos, (i8, i8))> {
+        match self.origin {
+            Origin::Door(at) if self.leg == 0 => Ok(SidewalkPos::along(self.start, self.step, at)),
+            _ => Err((self.start, self.step)),
+        }
+    }
+
+    /// 探し直して作った移動の、[`Trip::origin`]。前の出入口がいまのリンクの上の、いまの位置より手前に
+    /// 残っていればそれを、前にノードを抜けて入ったリンクと同じ所から始まるリンクにいれば `Entered` を引き継ぐ。
+    /// どちらでもなければ、リンクの始まりから歩き出したものとする。描く位置がいまのリンクの始まりから
+    /// 交差点まで続くので、道筋なしにならない。
+    fn rerouted_origin(
+        &self,
+        net: &Network,
+        before: Result<SidewalkPos, (TilePos, (i8, i8))>,
+    ) -> Origin {
+        match before {
+            Ok(door) => match door.resolve_on(net, self.mode) {
+                Some((link, at)) if link == self.link() && at <= self.offset => Origin::Door(at),
+                _ => Origin::default(),
+            },
+            Err(start) if start == (self.start, self.step) => Origin::Entered,
+            Err(_) => Origin::default(),
+        }
+    }
+
+    /// 網が変わって、いまのリンク、次のリンク、渡っている腕のどれかの区間がなくなったか。
+    /// 次の `step` で探し直すまでのあいだである。
+    fn stale(&self, net: &Network) -> bool {
+        let gone = |s: SegmentId| net.segment(s).is_none();
+        self.route.links[self.leg as usize..]
+            .iter()
+            .take(2)
+            .any(|l| gone(l.segment))
+            || self
+                .across
+                .as_ref()
+                .is_some_and(|(_, arms)| arms.iter().any(|&s| gone(s)))
     }
 
     /// リンクの終わりのノードを抜ける道筋。網が変わって区間やノードがなくなっていれば `None`。
@@ -502,7 +558,7 @@ pub struct Finished {
 }
 
 /// 画面に描く移動体。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Mover {
     pub id: TripId,
     pub pos: WorldPos,
@@ -515,8 +571,6 @@ pub struct Mover {
     pub shift: (Mm, Mm),
     /// 車なら、ノードの前後を曲線でつないで描くための道筋。歩く人は `None`。
     pub path: Option<CarPath>,
-    /// 歩く人なら、交差点の前後で歩道の角を回って描くための道筋。車と、交差点の近くにいない人は `None`。
-    pub walk: Option<Box<WalkPath>>,
 }
 
 /// 歩く人の、ノードの前後で `WalkPath` を求める距離（mm）。リンクの両端からこの距離の中にいる人だけが
@@ -535,15 +589,19 @@ pub struct WalkPath {
     pub len: LaneOffset,
     /// いまの歩道の、中心線からのずれ。歩道に寄せる移り変わりは含まない。
     pub lane_shift: (Mm, Mm),
-    /// 前のリンクからノードを抜けてきたか。経路の最初のリンクなら `false` で、出入口から歩き出している。
+    /// 前のリンクからノードを抜けてきたか。出入口から歩き出して、まだ経路の最初のリンクにいるなら `false`。
+    /// 経路を探し直した人も、前の経路でノードを抜けていまのリンクに入っていたなら `true` である。
     pub entered: bool,
     /// 歩き出した出入口の、リンクの始まりからの距離。ノードを抜けてきたなら 0 である。保存データから
-    /// 読み込んだ直後は分からないので 0 になる。
+    /// 読み込んだ直後と、経路を探し直して前の出入口がいまのリンクの上になくなったときは、0 になる。
     pub from: LaneOffset,
     /// 経路の最後のリンクなら、行き先の出入口の、リンクの始まりからの距離。
     pub to: Option<LaneOffset>,
     /// リンクの終わりのノードを抜ける道筋。終わりの近くにいないか、最後のリンクなら `None`。
     pub ahead: Option<WalkAhead>,
+    /// 網が変わって、いまのリンク、次のリンク、渡っている腕のどれかの区間がなくなり、次の `step` で
+    /// 探し直すのを待っているか。そのあいだは、網から描く位置を求められない。
+    pub stale: bool,
 }
 
 /// 歩く人がノードを抜けるときの道筋。
@@ -1057,7 +1115,10 @@ impl Trips {
                     ),
                 };
                 let old_far = old.walk.far;
+                let start = old.walk_start();
                 let mut t = make_trip(net, route, ends, dest, departed, jay);
+                // 探し直しても、描く位置は前の出入口かノードから続ける（描画のためだけの値）。
+                t.origin = t.rerouted_origin(net, start);
                 (
                     t.speed,
                     t.waiting,
@@ -1119,10 +1180,15 @@ impl Trips {
                     mode: t.mode,
                     shift: t.shift(net),
                     path: t.car_path(net),
-                    walk: t.walk_path(net).map(Box::new),
                 })
             })
             .collect()
+    }
+
+    /// 歩く人 `id` の、交差点の前後で歩道の角を回って描くための道筋。車と、交差点の近くにいない人は `None`。
+    /// 角の並びを求めるので軽くない。画面に描く人だけに呼ぶ。
+    pub fn walk_path(&self, net: &Network, id: TripId) -> Option<WalkPath> {
+        self.get(id)?.walk_path(net)
     }
 }
 
@@ -1158,7 +1224,7 @@ fn make_trip(
         across: None,
         departed: now,
         blend: None,
-        origin: Origin(from),
+        origin: Origin::Door(from),
     };
     t.enter(net, from, None);
     t
