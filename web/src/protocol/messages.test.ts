@@ -48,7 +48,7 @@ describe("isWorkerToMain", () => {
       kind: "buildings",
       buildings: new Float64Array(7),
       facilities: new Float64Array(5),
-      stats: Array.from({ length: 21 }, (_, i) => i),
+      stats: [...Array.from({ length: 21 }, (_, i) => i), 0, 0, 0, 0],
     };
     expect(isWorkerToMain({ ...buildings, facilities: new Float64Array(4) })).toBe(false);
     expect(isWorkerToMain(buildings)).toBe(true);
@@ -59,6 +59,8 @@ describe("isWorkerToMain", () => {
       overview: Array.from({ length: 21 }, (_, i) => i),
       stalls: [40, 12, 3],
       isolated: [10, -59, 1],
+      lotShortage: [0, 1, 0, 0],
+      tick: 3600,
     };
     expect(isWorkerToMain(overview)).toBe(true);
     expect(isWorkerToMain({ ...overview, stalls: [] })).toBe(true);
@@ -67,6 +69,9 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ ...overview, isolated: [] })).toBe(true);
     expect(isWorkerToMain({ ...overview, isolated: [1, 2] })).toBe(false);
     expect(isWorkerToMain({ ...overview, isolated: undefined })).toBe(false);
+    expect(isWorkerToMain({ ...overview, lotShortage: [0, 1] })).toBe(false);
+    expect(isWorkerToMain({ ...overview, lotShortage: undefined })).toBe(false);
+    expect(isWorkerToMain({ ...overview, tick: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, overview: [1, 2] })).toBe(false);
     expect(
       isWorkerToMain({

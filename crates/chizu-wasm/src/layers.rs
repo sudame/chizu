@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use chizu_core::service::{Balance, supply_balance};
+use chizu_core::service::{Balance, SupplyBalance, supply_balance};
 use chizu_core::zone::tiles_of;
 use chizu_core::{
     CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Congestion, SegmentId, SegmentKind, ServiceKind,
@@ -225,7 +225,14 @@ fn road_value(b: Balance) -> u8 {
 /// 電気と水道の、道路網につながった施設の供給量の合計と、需要に足りない網の数。
 /// `[電気の供給量, 水道の供給量, 電気の足りない網, 水道の足りない網]`。
 pub fn utility_totals(world: &World) -> [u64; 4] {
-    let balance = supply_balance(world.network(), world.facilities(), world.buildings());
+    totals_of(&supply_balance(
+        world.network(),
+        world.facilities(),
+        world.buildings(),
+    ))
+}
+
+fn totals_of(balance: &SupplyBalance) -> [u64; 4] {
     let mut out = [0; 4];
     for c in &balance.components {
         for slot in 0..2 {
@@ -240,7 +247,14 @@ pub fn utility_totals(world: &World) -> [u64; 4] {
 /// `[電気の供給量, 水道の供給量, 需要, 電気のほかの網の数, 水道のほかの網の数]`。
 /// どの網にも需要がなければ、主の網はなく、供給量と需要は 0 で、ほかの網は施設のある網すべてである。
 pub fn utility_main(world: &World) -> [u64; 5] {
-    let balance = supply_balance(world.network(), world.facilities(), world.buildings());
+    main_of(&supply_balance(
+        world.network(),
+        world.facilities(),
+        world.buildings(),
+    ))
+}
+
+fn main_of(balance: &SupplyBalance) -> [u64; 5] {
     let mut out = [0; 5];
     let main = balance.main_network(0);
     if let Some(i) = main {
@@ -263,6 +277,17 @@ pub fn utility_main(world: &World) -> [u64; 5] {
 pub fn utility_gaps(world: &World) -> [u64; 4] {
     let balance = supply_balance(world.network(), world.facilities(), world.buildings());
     gaps_of(&balance.components)
+}
+
+/// [`utility_totals`]、[`utility_main`]、[`utility_gaps`] を、供給の釣り合いを 1 回だけ作って求める。
+/// 釣り合いは全道路と全建物をたどるので、3 つ続けて求めるときはこちらを使う。
+pub fn utility_summary(world: &World) -> ([u64; 4], [u64; 5], [u64; 4]) {
+    let balance = supply_balance(world.network(), world.facilities(), world.buildings());
+    (
+        totals_of(&balance),
+        main_of(&balance),
+        gaps_of(&balance.components),
+    )
 }
 
 fn gaps_of(components: &[[Balance; 2]]) -> [u64; 4] {

@@ -155,6 +155,7 @@ dependencies = [
  "chizu-core",
  "serde",
  "serde_json",
+ "xxhash-rust",
 ]
 
 [[package]]

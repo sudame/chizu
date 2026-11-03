@@ -74,6 +74,9 @@ WASM のスレッドに要る rustflags は `.cargo/config.toml` で wasm32 の�
 三重バッファの配置は `crates/chizu-wasm/src/snapshot.rs` で決め、`web/src/protocol/snapshot-layout.json` に書き出して画面の側で読む。
 配置や書き方を変えたときは `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` でこの JSON と、画面の側のテストが読む `snapshot-fixture.bin` を書き直し、同じ PR に含める。
 
+街の数字（`city_stats`）の固定の並びの個数と、需要の要因の番号の表は `crates/chizu-wasm/src/sim.rs` で決め、`web/src/protocol/city-stats-layout.json` に書き出して画面の側で読む。
+変えたときは `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` でこの JSON を書き直し、同じ PR に含める。
+
 Rust のツールチェーンは `rust-toolchain.toml` で日付つきの nightly に固定している。
 mise は `mise.toml` の `idiomatic_version_file_enable_tools` でこのファイルから版を読むので、`mise.toml` の `[tools]` には `rust` を書かない。
 
@@ -101,7 +104,8 @@ cargo run -p chizu-cli -- feedback/<日時>-<番号>/commands.rec <seed> <tick>
 
 `chizu-cli agent` を使うと、AI が Bash から 1 回ずつコマンドを打って、画面なしで街を作れる。
 セッションはディレクトリで持ち、中身はフィードバックと同じ `state.json` と `commands.rec` である。
-呼び出しのあいだに状態は持たず、毎回、種から作った街に記録を再生して作り直す。
+毎回、種から作った街に記録を再生して作り直す。再生が長くならないよう、セッションには途中の街を `replay-cache.bin` に置き、そこから続きを再生する。
+このキャッシュは chizu-cli だけが使い、chizu-cli を作り直したときや、記録の先頭と合わないときは捨てて先頭から再生する。正しい記録は `state.json` と `commands.rec` のままである。
 
 - 人間のフィードバックは書き換えない。続きを遊ぶときは `agent new <dir> --from <フィードバックのディレクトリ>` で種、tick、記録を写す。写すときに再生したハッシュが元と一致したかを出力に入れる。
 - act と advance が書くのは、`agent new` で作った（`state.json` に `agentSession` がある）ディレクトリだけである。

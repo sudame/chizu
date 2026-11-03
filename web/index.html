@@ -311,10 +311,69 @@
       }
       #demand {
         display: flex;
-        gap: 4px;
+        gap: 0;
         align-items: flex-end;
       }
+      /* 棒は 12px だが、押せる当たりは 32px 角ほどにする */
+      #demand .slot-button {
+        display: block;
+        box-sizing: content-box;
+        min-width: 12px;
+        padding: 4px 10px;
+        margin: -4px 0;
+        font: inherit;
+        color: inherit;
+        cursor: pointer;
+        background: none;
+        border: 0;
+        border-radius: var(--r-button);
+      }
+      #demand .slot-button:hover,
+      #demand .slot-button[aria-pressed="true"] {
+        background: var(--hover);
+      }
+      #demand .slot-button:focus-visible {
+        outline: 2px solid var(--accent);
+      }
+      #demand-factors {
+        margin: 0 0 6px;
+        font-size: 12px;
+      }
+      #demand-factors .factors-head {
+        margin: 0 0 2px;
+        font-weight: 600;
+      }
+      #demand-factors .factor {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      #demand-factors .factor > span:first-child {
+        flex: 1;
+      }
+      #demand-factors .factor-bar {
+        height: 6px;
+        border-radius: 3px;
+      }
+      #demand-factors .plus .factor-bar {
+        background: var(--good);
+      }
+      #demand-factors .minus .factor-bar {
+        background: var(--bad);
+      }
+      #demand-factors .factor-value {
+        min-width: 36px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+      #demand-factors .plus .factor-value {
+        color: var(--good);
+      }
+      #demand-factors .minus .factor-value {
+        color: var(--bad);
+      }
       #demand .slot {
+        display: block;
         position: relative;
         width: 12px;
         height: 40px;
@@ -328,6 +387,7 @@
         height: 0;
       }
       #demand .label {
+        display: block;
         font-size: 11px;
         text-align: center;
       }
@@ -1011,12 +1071,13 @@
             <p id="city-utilities">電気 0 / 需要 0・水道 0 / 需要 0</p>
           </div>
           <div id="demand" title="区画の種類ごとの需要">
-            <div><div class="slot"><div class="bar" style="background: #a7c18e"></div></div><div class="label">住</div></div>
-            <div><div class="slot"><div class="bar" style="background: #91a9d4"></div></div><div class="label">商</div></div>
-            <div><div class="slot"><div class="bar" style="background: #c0a462"></div></div><div class="label">工</div></div>
-            <div><div class="slot"><div class="bar" style="background: #84bbc1"></div></div><div class="label">オ</div></div>
+            <button type="button" class="slot-button" aria-pressed="false" aria-controls="demand-factors" aria-label="住宅の需要の内訳"><span class="slot"><span class="bar" style="background: #a7c18e"></span></span><span class="label">住</span></button>
+            <button type="button" class="slot-button" aria-pressed="false" aria-controls="demand-factors" aria-label="商業の需要の内訳"><span class="slot"><span class="bar" style="background: #91a9d4"></span></span><span class="label">商</span></button>
+            <button type="button" class="slot-button" aria-pressed="false" aria-controls="demand-factors" aria-label="工業の需要の内訳"><span class="slot"><span class="bar" style="background: #c0a462"></span></span><span class="label">工</span></button>
+            <button type="button" class="slot-button" aria-pressed="false" aria-controls="demand-factors" aria-label="オフィスの需要の内訳"><span class="slot"><span class="bar" style="background: #84bbc1"></span></span><span class="label">オ</span></button>
           </div>
         </div>
+        <div id="demand-factors" role="status" hidden></div>
         <details id="overview">
           <summary><span id="overview-population">人口 0</span>・<span id="overview-happiness">幸福度 0 / 100</span>・<span id="overview-remaining">次の段階まで</span></summary>
           <p id="overview-next"></p>

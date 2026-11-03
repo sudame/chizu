@@ -1,10 +1,10 @@
 // メインスレッドと Worker のあいだでやりとりするメッセージ。
 
+import { validCityStats } from "./city-stats.ts";
+
 export type RoadKindName = "Small" | "Medium" | "Large";
 /** 施設の種類。 */
 export type ServiceName = "PowerPlant" | "WaterPump";
-/** chizu-wasm の city_stats の数の個数。 */
-export const CITY_STATS_LENGTH = 21;
 /** chizu-wasm の finance の数の個数。 */
 export const FINANCE_LENGTH = 12;
 
@@ -205,15 +205,23 @@ export type WorkerToMain =
   | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
   /**
    * 建物と街の数字。建物の表が変わったときだけ送る。stats は chizu-wasm の city_stats で、
-   * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並ぶ。
+   * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並び、最後に需要の内訳が続く。
    */
   | { kind: "buildings"; buildings: Float64Array; facilities: Float64Array; stats: number[] }
   /**
    * 人口と幸福度とマイルストーン。overview は chizu-wasm の overview で、数の並びは overview.ts にある。
    * stalls は chizu-wasm の growth_stalls で、新築が止まっている道路網ごとに [x, y, 足りない資源] が並ぶ。
    * isolated は chizu-wasm の isolated_facilities で、街の道路網につながっていない施設ごとに [x, y, 種類] が並ぶ。
+   * lotShortage は chizu-wasm の lot_shortage で、住宅・商業・工業・オフィスの順に、需要が正なのに空き区画がなければ 1、そうでなければ 0 の 4 個。tick は overview を作った時点の Worker の tick で、空き区画がない状態の続いた長さを数える。
    */
-  | { kind: "overview"; overview: number[]; stalls: number[]; isolated: number[] }
+  | {
+      kind: "overview";
+      overview: number[];
+      stalls: number[];
+      isolated: number[];
+      lotShortage: number[];
+      tick: number;
+    }
   /**
    * id は画面が振ったコマンドの番号、seq は記録の通し番号。
    * 記録する前に受け付けなかったコマンドには seq がない。
@@ -224,6 +232,11 @@ export type WorkerToMain =
    * 並びは税率の上限、区画の種類ごとの税率、税収、道路の維持費、発電所と浄水場の維持費。
    */
   | { kind: "finance"; values: number[] }
+  /**
+   * 街の数字だけの送り直し。需要は税率、幸福度、人口、職のない住民で、建物の表が変わらなくても動くため、
+   * Worker が一定の間隔で確かめ、前と数が違うときだけ送る。stats は buildings と同じ並びである。
+   */
+  | { kind: "cityStats"; stats: number[] }
   /** dev-spawn-walks で出せた人数。 */
   | { kind: "dev-spawned"; count: number }
   /** Worker が受け取って使っている倍率。画面の表示はこの値を使う。 */
@@ -297,7 +310,14 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         Array.isArray(v.stats) &&
         v.facilities instanceof Float64Array &&
         v.facilities.length % FACILITY_STRIDE === 0 &&
-        v.stats.length === CITY_STATS_LENGTH
+        v.stats.every((x) => typeof x === "number") &&
+        validCityStats(v.stats)
+      );
+    case "cityStats":
+      return (
+        Array.isArray(v.stats) &&
+        v.stats.every((x) => typeof x === "number") &&
+        validCityStats(v.stats)
       );
     case "overview":
       return (
@@ -309,7 +329,11 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.stalls.every((x) => typeof x === "number") &&
         Array.isArray(v.isolated) &&
         v.isolated.length % 3 === 0 &&
-        v.isolated.every((x) => typeof x === "number")
+        v.isolated.every((x) => typeof x === "number") &&
+        Array.isArray(v.lotShortage) &&
+        v.lotShortage.length === 4 &&
+        v.lotShortage.every((x) => typeof x === "number") &&
+        typeof v.tick === "number"
       );
     case "outcome":
       return (
