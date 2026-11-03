@@ -39,8 +39,9 @@ pub fn workers_by_building(
 /// 空きを探す格子の 1 辺のマス数。
 const CELL: i64 = 16;
 
-/// 空きのあるセルがこの数以下なら、輪をたどらずに直接見る。
-const DIRECT_CELLS: usize = 64;
+/// 空きのある職場がこの数以下なら、輪をたどらずに、空きのあるセルを直接見る。
+/// 数えるのは職場の数なので、狭い範囲に空きが何千もあるときは、輪をたどって打ち切る。
+const DIRECT_OPEN: usize = JOB_CANDIDATES * 8;
 
 /// 家から職場までの出入口の直線距離（m）。小数点以下は切り捨てる。
 /// 通勤の手段を決める距離（`movement::commute` の `far_enough`）と同じ式で測る。
@@ -138,8 +139,8 @@ impl OpenJobs {
         if self.open == 0 || k == 0 {
             return near;
         }
-        // 空きのあるセルが少ないときは、輪をたどらず、空きのあるセルだけを直接見る。
-        if self.open <= k || self.live.len() <= DIRECT_CELLS {
+        // 空きのある職場が少ないときは、輪をたどらず、空きのあるセルだけを直接見る。
+        if self.open <= k.max(DIRECT_OPEN) {
             for idx in &self.live {
                 self.scan_cell(*idx, from, k, &mut near);
             }

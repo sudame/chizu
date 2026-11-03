@@ -534,17 +534,31 @@ impl World {
             self.population.set_workplace(id, workplace);
             let schedule = match workplace {
                 Some(w) => {
-                    // 勤め先を乗り換えた住民は、今日まだ来ていない出発の時刻をそのまま残す。
-                    // 引き直すと、時刻が今より前のときに出発が翌日になり、その日の出勤を飛ばしてしまう。
-                    let kept = match before {
-                        Some((Some(_), s)) if s.next == Activity::Work => {
-                            s.depart_at.filter(|t| *t > self.tick)
+                    // 勤め先を乗り換えた住民が、今日まだ来ていない出発の時刻を持っているとき。
+                    // 勤務帯が同じなら、その時刻をそのまま残す。違うなら新しい勤務帯で引き直すが、
+                    // 引き直した時刻が翌日になるなら、元の時刻を残す。そうしないと、その日の出勤を飛ばしてしまう。
+                    let (old, kept) = match before {
+                        Some((Some(old), s)) if s.next == Activity::Work => {
+                            (Some(old), s.depart_at.filter(|t| *t > self.tick))
                         }
-                        _ => None,
+                        _ => (None, None),
+                    };
+                    let today = |t: Tick| t.0 / TICKS_PER_DAY == self.tick.0 / TICKS_PER_DAY;
+                    let depart_at = match (old, kept) {
+                        (Some(old), Some(t)) if self.shift_at(old) == self.shift_at(w) => t,
+                        (Some(_), Some(t)) => {
+                            let redrawn = self.next_leave_home(id, w);
+                            if today(t) && !today(redrawn) {
+                                t
+                            } else {
+                                redrawn
+                            }
+                        }
+                        _ => self.next_leave_home(id, w),
                     };
                     ScheduleState {
                         next: Activity::Work,
-                        depart_at: Some(kept.unwrap_or_else(|| self.next_leave_home(id, w))),
+                        depart_at: Some(depart_at),
                     }
                 }
                 None => ScheduleState::default(),
@@ -1326,15 +1340,13 @@ pub(crate) mod tests {
         assert!(now * 10 < was * 9, "通勤の距離が縮まない：{was} → {now}");
     }
 
-    /// 乗り換えるのは、家で出発を待っている住民だけで、通勤の途中や、職場、店にいる住民は動かさない。
-    /// 乗り換えた住民は、今日まだ来ていない出発の時刻を変えない（引き直すと、その日の出勤を飛ばしうる）。
-    #[test]
-    fn only_waiting_workers_switch_and_keep_their_departure() {
+    /// 住宅の帯 3 つと、`work` の帯 1 つの街を 5 日回し、そのあとで近くに工場の区画を足す。
+    fn city_with_late_factories(work: ZoneKind) -> World {
         let zones = [
             ZoneKind::Residential,
             ZoneKind::Residential,
             ZoneKind::Residential,
-            ZoneKind::Industrial,
+            work,
         ];
         let mut w = city(&zones);
         run_days(&mut w, 5);
@@ -1344,48 +1356,122 @@ pub(crate) mod tests {
             let zone = Some(ZoneKind::Industrial);
             apply(&mut w, Command::PaintZone { area, zone });
         }
-        let snapshot = |w: &World| -> BTreeMap<CitizenId, crate::citizens::CitizenRow> {
-            let p = w.population();
-            p.citizen_ids()
-                .map(|id| (id, p.citizen(id).unwrap()))
-                .collect()
-        };
-        let (mut switched, mut kept, mut busy) = (0, 0, 0);
+        w
+    }
+
+    fn snapshot(w: &World) -> BTreeMap<CitizenId, crate::citizens::CitizenRow> {
+        let p = w.population();
+        p.citizen_ids()
+            .map(|id| (id, p.citizen(id).unwrap()))
+            .collect()
+    }
+
+    /// 職場の更新の tick をまたいで 8 日進め、その前後の住民の行を `f(tick, 前, 後)` に渡す。
+    fn across_job_updates(
+        w: &mut World,
+        mut f: impl FnMut(
+            &World,
+            Tick,
+            &BTreeMap<CitizenId, crate::citizens::CitizenRow>,
+            &BTreeMap<CitizenId, crate::citizens::CitizenRow>,
+        ),
+    ) {
         for _ in 0..8 * TICKS_PER_DAY {
-            let at_update = w.tick().0.is_multiple_of(JOB_INTERVAL);
-            let before = at_update.then(|| snapshot(&w));
+            if !w.tick().0.is_multiple_of(JOB_INTERVAL) {
+                w.step();
+                continue;
+            }
+            let before = snapshot(w);
             let now = w.tick();
             w.step();
-            let Some(before) = before else { continue };
-            let after = snapshot(&w);
-            for (id, was) in &before {
-                let Some(is) = after.get(id) else { continue };
-                let (Some(from), Some(to)) = (was.workplace, is.workplace) else {
-                    continue;
-                };
-                if from == to {
-                    continue;
-                }
-                switched += 1;
-                assert!(was.trip.is_none(), "移動の途中の住民が乗り換えた");
-                assert_eq!(
-                    was.schedule.next,
-                    Activity::Work,
-                    "家で待っていない住民が乗り換えた"
-                );
-                assert!(w.errands.at_shop(*id).is_none(), "店にいる住民が乗り換えた");
-                if let Some(t) = was.schedule.depart_at.filter(|t| *t > now) {
-                    assert_eq!(is.schedule.depart_at, Some(t), "出発の時刻が変わった");
-                    kept += 1;
-                }
-            }
-            busy += before
-                .values()
-                .filter(|r| r.workplace.is_some() && r.schedule.next != Activity::Work)
-                .count();
+            f(w, now, &before, &snapshot(w));
         }
-        assert!(switched > 0, "誰も乗り換えない");
-        assert!(kept > 0, "出発の時刻を残した住民がいない");
-        assert!(busy > 0, "職場や店にいる住民がいない");
+    }
+
+    /// 通勤の途中の住民、職場にいる住民、店にいる住民は、近くに職場ができても乗り換えない。
+    /// 乗り換えるのは、家で出発を待っている住民だけである。
+    #[test]
+    fn only_waiting_workers_switch() {
+        let (mut moving, mut at_work, mut at_shop, mut waiting_switched) = (0, 0, 0, 0);
+        // 店のある街と、ない街の両方を見る。
+        for first in [ZoneKind::Industrial, ZoneKind::Commercial] {
+            let mut w = city_with_late_factories(first);
+            across_job_updates(&mut w, |w, _, before, after| {
+                for (id, was) in before {
+                    let Some(is) = after.get(id) else { continue };
+                    let (Some(from), Some(_)) = (was.workplace, is.workplace) else {
+                        continue;
+                    };
+                    let kind = if was.trip.is_some() {
+                        moving += 1;
+                        "移動の途中"
+                    } else if w.errands.at_shop(*id).is_some() {
+                        at_shop += 1;
+                        "店"
+                    } else if was.schedule.next != Activity::Work {
+                        at_work += 1;
+                        "職場"
+                    } else {
+                        if is.workplace != Some(from) {
+                            waiting_switched += 1;
+                        }
+                        continue;
+                    };
+                    assert_eq!(is.workplace, Some(from), "{kind}にいる住民が乗り換えた");
+                }
+            });
+        }
+        assert!(
+            moving > 0 && at_work > 0 && at_shop > 0,
+            "{moving} {at_work} {at_shop}"
+        );
+        assert!(waiting_switched > 0, "誰も乗り換えない");
+    }
+
+    /// 乗り換えた住民は、その日の出勤を飛ばさない。勤務帯が同じなら出発の時刻を変えず、
+    /// 違うなら新しい勤務帯で引き直す。引き直した時刻が翌日になるなら、元の時刻を残す。
+    #[test]
+    fn switching_workers_still_leave_today() {
+        for (first, same_shift) in [(ZoneKind::Industrial, true), (ZoneKind::Commercial, false)] {
+            let mut w = city_with_late_factories(first);
+            let (mut switched, mut redrawn) = (0, 0);
+            across_job_updates(&mut w, |w, now, before, after| {
+                let day = |t: Tick| t.0 / TICKS_PER_DAY;
+                for (id, was) in before {
+                    let Some(is) = after.get(id) else { continue };
+                    let (Some(from), Some(to)) = (was.workplace, is.workplace) else {
+                        continue;
+                    };
+                    let Some(t) = was
+                        .schedule
+                        .depart_at
+                        .filter(|t| *t > now && day(*t) == day(now))
+                    else {
+                        continue;
+                    };
+                    if from == to || was.trip.is_some() || was.schedule.next != Activity::Work {
+                        continue;
+                    }
+                    switched += 1;
+                    let new = is
+                        .schedule
+                        .depart_at
+                        .expect("乗り換えた住民に出発の時刻がない");
+                    assert!(new > now && day(new) == day(now), "その日の出勤を飛ばした");
+                    let shift = |b: BuildingId| Shift::of(w.buildings().get(b).unwrap().zone);
+                    if shift(from) == shift(to) {
+                        assert_eq!(new, t, "同じ勤務帯なのに出発の時刻が変わった");
+                    } else if new != t {
+                        redrawn += 1;
+                    }
+                }
+            });
+            assert!(switched > 0, "誰も乗り換えない");
+            assert_eq!(
+                redrawn > 0,
+                !same_shift,
+                "{first:?}: 引き直した住民 {redrawn} 人"
+            );
+        }
     }
 }
