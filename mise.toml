@@ -77,6 +77,9 @@ run = "cargo"
 # cargo test はテストのバイナリを 1 本ずつ順に回すので、長いテストを持つバイナリが続くと待ちが積み重なる。
 # nextest はバイナリをまたいでテストを並べて回す。
 # nextest は doctest を回さない。いまは doctest がないので、lint:rust の scripts/check-no-doctest.sh で、足したら気づけるようにしている
+# nextest はテストごとに別のプロセスを立て、それぞれが rayon のスレッドを立てる。既定ではコアの数だけ立ち、仕事を待つあいだも回り続けて CPU を使い切る。
+# 2 本でも並列の経路は通る。スレッドの数で結果が変わらないことは、スレッドの数を指定して立てたプールで確かめるテストがある
+env = { RAYON_NUM_THREADS = "2" }
 run = "cargo nextest run --workspace"
 
 [tasks."test:web"]
