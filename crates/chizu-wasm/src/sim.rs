@@ -3,7 +3,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
-use chizu_core::building::demand;
+use chizu_core::building::{demand, demand_factors};
 use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
 use chizu_core::world::economy::{chunk_slots, milestone_population};
@@ -410,6 +410,7 @@ impl Sim {
     /// 主の網（需要がいちばん大きい網）の電気の供給量、水道の供給量、需要、
     /// 主の網以外で施設か建物のある網の数（電気、水道の順）。
     /// 供給量は道路網につながった施設の合計である。余りは網をまたいで足さず、主の網で見る。
+    /// そのあとに、需要の内訳が続く。区画の種類ごとに、要因の数と、要因ごとの `[要因の番号, 寄与]` を並べる。
     pub fn city_stats(&self) -> Vec<f64> {
         let buildings = self.world.buildings();
         let capacity = buildings.capacity();
@@ -427,6 +428,14 @@ impl Sim {
         out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
         out.extend(crate::layers::utility_gaps(&self.world).map(|v| v as f64));
         out.extend(crate::layers::utility_main(&self.world).map(|v| v as f64));
+        // 最初の 21 個のあとに、需要の内訳を区画の種類（住宅・商業・工業・オフィスの順）ごとに並べる。
+        // 種類ごとに、要因の数、そのあとに要因ごとの `[要因の番号, 寄与]`。番号は `DemandFactorKind` の値である。
+        for factors in demand_factors(&self.world.city_stats()) {
+            out.push(factors.len() as f64);
+            for f in factors {
+                out.extend([f64::from(f.kind as u8), f.value as f64]);
+            }
+        }
         out
     }
 
@@ -771,6 +780,15 @@ mod tests {
         );
         assert!(stats[9] > 0.0);
         let stats = sim.city_stats();
+        // 需要の内訳は、種類ごとに足し合わせると需要になる。
+        let mut at = 21;
+        for zone in 0..4 {
+            let n = stats[at] as usize;
+            let sum: f64 = (0..n).map(|i| stats[at + 2 + 2 * i]).sum();
+            assert_eq!(sum, stats[3 + zone], "{zone}");
+            at += 1 + 2 * n;
+        }
+        assert_eq!(at, stats.len());
         assert_eq!(stats[0], count as f64);
         assert!(stats[1] > 0.0);
         assert_ne!(sim.buildings_version(), version);

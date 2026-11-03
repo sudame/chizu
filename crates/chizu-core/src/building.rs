@@ -355,6 +355,62 @@ impl CityStats {
 ///   いまの職場との差。両方が塗られていれば決まった割合で、片方だけならその区画にすべてを割り当てる。
 ///   商業が塗られていなければ、買い物の職場の分も工業とオフィスに回す。
 pub fn demand(s: &CityStats) -> [i64; 4] {
+    demand_factors(s).map(|factors| factors.iter().map(|f| f.value).sum())
+}
+
+/// 需要を足し引きする要因の種類。値は画面との受け渡しに使うので、並びを変えない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DemandFactorKind {
+    /// 働き手がいないうちからある需要（住宅と工業）。
+    Base = 0,
+    /// 住宅：働き口の空き。
+    VacantJobs = 1,
+    /// 住宅：幸福度。
+    Happiness = 2,
+    /// 税率。住宅では税率そのもの、職場の区画では雇える職場が減る分である。
+    Tax = 3,
+    /// 住宅：空き家（2 倍で引く）。
+    VacantHomes = 4,
+    /// 住宅：職のない住民（1/4 を引く）。
+    Jobless = 5,
+    /// 商業：住民の買い物に要る職場。
+    Shoppers = 6,
+    /// 工業とオフィス：商業で働かない働き手に要る職場。
+    Workers = 7,
+    /// 商業・工業・オフィス：いまある職場（引く）。
+    Existing = 8,
+}
+
+impl DemandFactorKind {
+    /// observe に出す名前。
+    pub fn name(self) -> &'static str {
+        match self {
+            DemandFactorKind::Base => "base",
+            DemandFactorKind::VacantJobs => "vacantJobs",
+            DemandFactorKind::Happiness => "happiness",
+            DemandFactorKind::Tax => "tax",
+            DemandFactorKind::VacantHomes => "vacantHomes",
+            DemandFactorKind::Jobless => "jobless",
+            DemandFactorKind::Shoppers => "shoppers",
+            DemandFactorKind::Workers => "workers",
+            DemandFactorKind::Existing => "existing",
+        }
+    }
+}
+
+/// 需要への寄与 1 つ。`value` が需要の値に足される。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DemandFactor {
+    pub kind: DemandFactorKind,
+    pub value: i64,
+}
+
+/// 区画の種類ごとの、需要の内訳。添え字は [`ZoneKind::index`]。
+/// 並びは種類ごとに決まっていて、値は 0 でも省かない。値の合計が [`demand`] である。
+/// 読み取り用で、状態には入れない。
+pub fn demand_factors(s: &CityStats) -> [Vec<DemandFactor>; 4] {
+    use DemandFactorKind as K;
     let n = |v: u64| i64::try_from(v).expect("街の数があふれた");
     let zoned = |z: ZoneKind| s.zoned[z.index()];
     let jobs: u64 = s.job_slots.iter().sum();
@@ -380,19 +436,41 @@ pub fn demand(s: &CityStats) -> [i64; 4] {
     let industry = other_jobs * share / 1_000;
     let office = other_jobs - industry;
     let w = |z: ZoneKind| n(s.workplaces[z.index()]);
+    let f = |kind, value| DemandFactor { kind, value };
+    // 職場の区画の税の分。必要な職場の数が `raw` から `scaled` に減った差である。
+    let tax = |z: ZoneKind, raw: u64| scaled(raw, z) - n(raw);
+    let base_industrial = BASE_INDUSTRIAL_DEMAND as u64;
     [
-        BASE_RESIDENTIAL_DEMAND
-            + vacant_jobs
-            + happiness_pull(s.happiness)
-            + residential_tax_pull(s.tax_permille[ZoneKind::Residential.index()])
-            - 2 * vacant_homes
-            - jobless_quarter,
-        scaled(shop_jobs, ZoneKind::Commercial) - w(ZoneKind::Commercial),
-        scaled(
-            BASE_INDUSTRIAL_DEMAND as u64 + industry,
-            ZoneKind::Industrial,
-        ) - w(ZoneKind::Industrial),
-        scaled(office, ZoneKind::Office) - w(ZoneKind::Office),
+        vec![
+            f(K::Base, BASE_RESIDENTIAL_DEMAND),
+            f(K::VacantJobs, vacant_jobs),
+            f(K::Happiness, happiness_pull(s.happiness)),
+            f(
+                K::Tax,
+                residential_tax_pull(s.tax_permille[ZoneKind::Residential.index()]),
+            ),
+            f(K::VacantHomes, -2 * vacant_homes),
+            f(K::Jobless, -jobless_quarter),
+        ],
+        vec![
+            f(K::Shoppers, n(shop_jobs)),
+            f(K::Tax, tax(ZoneKind::Commercial, shop_jobs)),
+            f(K::Existing, -w(ZoneKind::Commercial)),
+        ],
+        vec![
+            f(K::Base, BASE_INDUSTRIAL_DEMAND),
+            f(K::Workers, n(industry)),
+            f(
+                K::Tax,
+                tax(ZoneKind::Industrial, base_industrial + industry),
+            ),
+            f(K::Existing, -w(ZoneKind::Industrial)),
+        ],
+        vec![
+            f(K::Workers, n(office)),
+            f(K::Tax, tax(ZoneKind::Office, office)),
+            f(K::Existing, -w(ZoneKind::Office)),
+        ],
     ]
 }
 
@@ -490,6 +568,94 @@ mod tests {
         // 基準以下の税率では、職場の需要は変わらない。
         taxed.tax_permille = [50; 4];
         assert_eq!(demand(&taxed)[1..], base[1..]);
+    }
+
+    fn factor(f: &[DemandFactor], kind: DemandFactorKind) -> i64 {
+        f.iter().find(|f| f.kind == kind).expect("要因がない").value
+    }
+
+    /// どんな街でも、内訳の合計が需要と一致し、種類ごとの並びは変わらない。
+    #[test]
+    fn factors_add_up_to_the_demand() {
+        use DemandFactorKind as K;
+        let kinds = |f: &[DemandFactor]| f.iter().map(|f| f.kind).collect::<Vec<_>>();
+        for zoned in [
+            [true; 4],
+            [true, false, true, false],
+            [true, true, false, true],
+        ] {
+            for tax in [0, 100, 150, 250] {
+                for (workplaces, filled, employed) in [(0, 0, 0), (900, 400, 300), (300, 300, 600)]
+                {
+                    let s = CityStats {
+                        households: 200,
+                        employed,
+                        homes: 350,
+                        workplaces: [0, workplaces, workplaces / 2, workplaces / 3],
+                        job_slots: [0, workplaces, workplaces / 2, workplaces / 3],
+                        tax_permille: [tax; 4],
+                        filled: [0, filled, filled / 2, filled / 3],
+                        ..stats(zoned)
+                    };
+                    let factors = demand_factors(&s);
+                    let sum: [i64; 4] = factors.clone().map(|f| f.iter().map(|f| f.value).sum());
+                    assert_eq!(sum, demand(&s));
+                    assert_eq!(
+                        kinds(&factors[0]),
+                        [
+                            K::Base,
+                            K::VacantJobs,
+                            K::Happiness,
+                            K::Tax,
+                            K::VacantHomes,
+                            K::Jobless
+                        ]
+                    );
+                    assert_eq!(kinds(&factors[1]), [K::Shoppers, K::Tax, K::Existing]);
+                    assert_eq!(
+                        kinds(&factors[2]),
+                        [K::Base, K::Workers, K::Tax, K::Existing]
+                    );
+                    assert_eq!(kinds(&factors[3]), [K::Workers, K::Tax, K::Existing]);
+                }
+            }
+        }
+    }
+
+    /// 要因の向きは、式の足し引きに合う。失業者の有無はオフィスの需要に入らない。
+    #[test]
+    fn factors_point_the_way_the_formula_does() {
+        use DemandFactorKind as K;
+        let office = ZoneKind::Office.index();
+        let res = ZoneKind::Residential.index();
+        let mut s = CityStats {
+            households: 100,
+            homes: 150,
+            employed: 600,
+            tax_permille: [150; 4],
+            workplaces: [0, 0, 0, 200],
+            job_slots: [0, 0, 0, 200],
+            filled: [0, 0, 0, 200],
+            ..stats([true; 4])
+        };
+        let f = demand_factors(&s);
+        // 職場が働き手の分より多ければ、いまの職場が負に効いて需要も負になる。
+        assert_eq!(factor(&f[office], K::Workers), 140);
+        assert_eq!(factor(&f[office], K::Existing), -200);
+        assert!(factor(&f[office], K::Tax) < 0);
+        assert!(demand(&s)[office] < 0);
+        // 空き家は住宅を、空き職場は住宅を押し上げる。税が高ければ住宅は負に効く。
+        assert_eq!(factor(&f[res], K::VacantHomes), -100);
+        assert_eq!(factor(&f[res], K::VacantJobs), 0);
+        assert_eq!(factor(&f[res], K::Jobless), 0);
+        assert_eq!(factor(&f[res], K::Tax), -25);
+        s.job_slots[ZoneKind::Commercial.index()] = 80;
+        s.working_age = 900;
+        let f = demand_factors(&s);
+        assert_eq!(factor(&f[res], K::VacantJobs), 80);
+        assert_eq!(factor(&f[res], K::Jobless), -75);
+        // 職の有無ではなく、働く年齢の住民の数が、オフィスの働き手の寄与を決める。
+        assert_eq!(factor(&f[office], K::Workers), 260);
     }
 
     #[test]

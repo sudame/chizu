@@ -1,4 +1,4 @@
-import { demandBar, parseCityStats, renderCityStats } from "./city-panel.ts";
+import { demandBar, parseCityStats, renderCityStats, setupDemandFactors } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
 import {
@@ -157,6 +157,7 @@ const toolButtons = [...document.querySelectorAll<HTMLButtonElement>("button[dat
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
 setupSaves(worker, element<HTMLElement>("#controls"));
+setupDemandFactors();
 
 function send(message: MainToWorker): void {
   worker.postMessage(message);

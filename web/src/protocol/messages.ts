@@ -3,7 +3,7 @@
 export type RoadKindName = "Small" | "Medium" | "Large";
 /** 施設の種類。 */
 export type ServiceName = "PowerPlant" | "WaterPump";
-/** chizu-wasm の city_stats の数の個数。 */
+/** chizu-wasm の city_stats の固定の並びの個数。そのあとに需要の内訳が続くので、これ以上あればよい。 */
 export const CITY_STATS_LENGTH = 21;
 /** chizu-wasm の finance の数の個数。 */
 export const FINANCE_LENGTH = 12;
@@ -205,7 +205,7 @@ export type WorkerToMain =
   | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
   /**
    * 建物と街の数字。建物の表が変わったときだけ送る。stats は chizu-wasm の city_stats で、
-   * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並ぶ。
+   * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並び、最後に需要の内訳が続く。
    */
   | { kind: "buildings"; buildings: Float64Array; facilities: Float64Array; stats: number[] }
   /**
@@ -305,7 +305,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         Array.isArray(v.stats) &&
         v.facilities instanceof Float64Array &&
         v.facilities.length % FACILITY_STRIDE === 0 &&
-        v.stats.length === CITY_STATS_LENGTH
+        v.stats.length >= CITY_STATS_LENGTH &&
+        v.stats.every((x) => typeof x === "number")
       );
     case "overview":
       return (

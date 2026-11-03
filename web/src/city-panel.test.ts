@@ -4,9 +4,12 @@ import {
   DEMAND_FULL_SCALE,
   demandBar,
   demandBars,
+  demandFactorLines,
   formatCityNumbers,
   formatUtilities,
   parseCityStats,
+  shownZone,
+  togglePinned,
   utilityLowHeadroom,
   utilityNotice,
   utilityShortage,
@@ -35,6 +38,7 @@ describe("街の数字", () => {
       mainDemand: 25,
       powerOthers: 1,
       waterOthers: 0,
+      demandFactors: [[], [], [], []],
     });
     expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 0, 1200, 1, 2]))).toBe(
       "電気 400 / 需要 1,200・水道 0 / 需要 1,200",
@@ -126,5 +130,67 @@ describe("街の数字", () => {
     expect(demandBar(-DEMAND_FULL_SCALE / 4)).toBe(-0.25);
     expect(demandBar(DEMAND_FULL_SCALE * 10)).toBe(1);
     expect(demandBar(-DEMAND_FULL_SCALE * 10)).toBe(-1);
+  });
+});
+
+describe("需要の内訳", () => {
+  // 住宅 2 件、商業 0 件、工業 0 件、オフィス 3 件の内訳。件数のあとに [kind, value] が続く。
+  const tail = [2, 0, 20, 4, -30, 0, 0, 3, 7, 140, 3, -9, 8, -200];
+  const stats = parseCityStats([...new Array(21).fill(0), ...tail]);
+
+  test("city_stats の末尾から区画の種類ごとの内訳を読む", () => {
+    expect(stats.demandFactors).toEqual([
+      [
+        { kind: 0, value: 20 },
+        { kind: 4, value: -30 },
+      ],
+      [],
+      [],
+      [
+        { kind: 7, value: 140 },
+        { kind: 3, value: -9 },
+        { kind: 8, value: -200 },
+      ],
+    ]);
+    // 内訳が付いていない並びでも読める。
+    expect(parseCityStats(new Array(21).fill(0)).demandFactors).toEqual([[], [], [], []]);
+  });
+
+  test("寄与の大きい順に並べ、正と負が分かる言葉で出す", () => {
+    expect(demandFactorLines(stats, 3)).toEqual([
+      { label: "オフィスの職場がすでに多い", value: -200 },
+      { label: "働く年齢の住民に職場が要る", value: 140 },
+      { label: "税が高く、職場を増やしにくい", value: -9 },
+    ]);
+    expect(demandFactorLines(stats, 0).map((l) => l.label)).toEqual(["空き家が多い", "基本の需要"]);
+  });
+
+  test("寄与が 0 の要因は出さず、同じ大きさなら正が先に来る", () => {
+    const s = parseCityStats([...new Array(21).fill(0), 2, 1, 0, 3, 0, 0, 0, 0]);
+    expect(demandFactorLines(s, 0)).toEqual([]);
+    const tie = parseCityStats([...new Array(21).fill(0), 2, 3, -5, 1, 5, 0, 0, 0]);
+    expect(demandFactorLines(tie, 0).map((l) => l.value)).toEqual([5, -5]);
+  });
+
+  test("幸福度と税は、符号で言い方が変わる", () => {
+    const s = parseCityStats([...new Array(21).fill(0), 2, 2, 10, 3, 12, 0, 0, 0, 0, 0, 0, 0]);
+    expect(demandFactorLines(s, 0).map((l) => l.label)).toEqual(["税が低い", "幸福度が高い"]);
+    const bad = parseCityStats([...new Array(21).fill(0), 2, 2, -10, 3, -12, 0, 0, 0, 0, 0, 0, 0]);
+    expect(demandFactorLines(bad, 0).map((l) => l.label)).toEqual(["税が高い", "幸福度が低い"]);
+  });
+
+  test("押すと固定され、もう一度押すと隠れる。指を置いているあいだは固定より優先して出る", () => {
+    let view = { pinned: null as number | null, hover: null as number | null };
+    expect(shownZone(view)).toBeNull();
+    view = togglePinned(view, 3);
+    expect(shownZone(view)).toBe(3);
+    view = { ...view, hover: 1 };
+    expect(shownZone(view)).toBe(1);
+    view = { ...view, hover: null };
+    expect(shownZone(view)).toBe(3);
+    view = togglePinned(view, 2);
+    expect(shownZone(view)).toBe(2);
+    view = togglePinned(view, 2);
+    expect(shownZone(view)).toBeNull();
   });
 });

@@ -28,11 +28,38 @@ export type CityStats = {
   /** 主の網以外で、施設か建物のある道路網の数。 */
   powerOthers: number;
   waterOthers: number;
+  /** 住宅・商業・工業・オフィスの順の、需要の内訳。寄与の合計がその区画の需要である。 */
+  demandFactors: DemandFactor[][];
 };
+
+/** 需要への寄与 1 つ。kind は chizu-core の DemandFactorKind の値、value は需要に足される量。 */
+export type DemandFactor = { kind: number; value: number };
+
+/** city_stats の固定の並びの個数。そのあとに需要の内訳が続く。 */
+const FIXED_STATS = 21;
+
+/** 区画の種類ごとに、要因の数と `[kind, value]` の対が続く並びを読む。足りなければ空にする。 */
+function parseDemandFactors(stats: number[]): DemandFactor[][] {
+  let at = FIXED_STATS;
+  return [0, 1, 2, 3].map(() => {
+    const count = stats[at] ?? 0;
+    const factors: DemandFactor[] = [];
+    for (let i = 0; i < count; i++) {
+      const kind = stats[at + 1 + 2 * i];
+      const value = stats[at + 2 + 2 * i];
+      if (kind !== undefined && value !== undefined) {
+        factors.push({ kind, value });
+      }
+    }
+    at += 1 + 2 * count;
+    return factors;
+  });
+}
 
 export function parseCityStats(stats: number[]): CityStats {
   const at = (i: number) => stats[i] ?? 0;
   return {
+    demandFactors: parseDemandFactors(stats),
     buildings: at(0),
     households: at(1),
     workplaces: at(2),
@@ -176,7 +203,145 @@ export function demandBars(stats: CityStats): BarLayout[] {
   });
 }
 
+/** 住宅・商業・工業・オフィスの順の、区画の名前。 */
+export const ZONE_NAMES = ["住宅", "商業", "工業", "オフィス"] as const;
+
+/** chizu-core の DemandFactorKind の値。 */
+const KIND = {
+  base: 0,
+  vacantJobs: 1,
+  happiness: 2,
+  tax: 3,
+  vacantHomes: 4,
+  jobless: 5,
+  shoppers: 6,
+  workers: 7,
+  existing: 8,
+} as const;
+
+/**
+ * 要因の言い方。寄与が正のときと負のときで言い方を変える。
+ * 区画の種類（0 住宅、1 商業、2 工業、3 オフィス）によって、同じ要因でも指すものが違う。
+ */
+export function factorLabel(zone: number, kind: number, value: number): string {
+  const positive = value > 0;
+  switch (kind) {
+    case KIND.base:
+      return "基本の需要";
+    case KIND.vacantJobs:
+      return "空いている職場が多い";
+    case KIND.happiness:
+      return positive ? "幸福度が高い" : "幸福度が低い";
+    case KIND.tax:
+      if (zone === 0) {
+        return positive ? "税が低い" : "税が高い";
+      }
+      return "税が高く、職場を増やしにくい";
+    case KIND.vacantHomes:
+      return "空き家が多い";
+    case KIND.jobless:
+      return "職のない住民が多い";
+    case KIND.shoppers:
+      return "住民の買い物に職場が要る";
+    case KIND.workers:
+      return "働く年齢の住民に職場が要る";
+    case KIND.existing:
+      return `${ZONE_NAMES[zone] ?? ""}の職場がすでに多い`;
+    default:
+      return "そのほか";
+  }
+}
+
+export type FactorLine = { label: string; value: number };
+
+/** 寄与が 0 の要因を除き、寄与の絶対値の大きい順に並べる。同じ大きさなら正を先にする。 */
+export function demandFactorLines(stats: CityStats, zone: number): FactorLine[] {
+  return (stats.demandFactors[zone] ?? [])
+    .filter((f) => f.value !== 0)
+    .map((f) => ({ label: factorLabel(zone, f.kind, f.value), value: f.value }))
+    .sort((a, b) => Math.abs(b.value) - Math.abs(a.value) || b.value - a.value);
+}
+
+/** 内訳を出す区画。押した区画は固定され、指を置いた区画は置いているあいだだけ出る。 */
+export type FactorView = { pinned: number | null; hover: number | null };
+
+export function shownZone(view: FactorView): number | null {
+  return view.hover ?? view.pinned;
+}
+
+/** 同じ区画をもう一度押すと隠れ、別の区画を押すとそちらに替わる。 */
+export function togglePinned(view: FactorView, zone: number): FactorView {
+  return { ...view, pinned: view.pinned === zone ? null : zone };
+}
+
+let latestStats: CityStats | null = null;
+let factorView: FactorView = { pinned: null, hover: null };
+
+function formatSigned(value: number): string {
+  return value > 0 ? `+${value.toLocaleString("ja-JP")}` : value.toLocaleString("ja-JP");
+}
+
+/** 内訳の欄を、いま出す区画に合わせて作り直す。出す区画がなければ隠す。 */
+function renderFactors(): void {
+  const panel = document.querySelector<HTMLElement>("#demand-factors");
+  if (panel === null) {
+    return;
+  }
+  const zone = shownZone(factorView);
+  document.querySelectorAll<HTMLElement>("#demand .slot-button").forEach((button, i) => {
+    button.setAttribute("aria-pressed", String(factorView.pinned === i));
+  });
+  if (zone === null || latestStats === null) {
+    panel.hidden = true;
+    panel.replaceChildren();
+    return;
+  }
+  const lines = demandFactorLines(latestStats, zone);
+  const total = latestStats.demand[zone] ?? 0;
+  const widest = Math.max(1, ...lines.map((l) => Math.abs(l.value)));
+  panel.hidden = false;
+  panel.dataset.zone = String(zone);
+  const head = document.createElement("div");
+  head.className = "factors-head";
+  head.textContent = `${ZONE_NAMES[zone]}の需要 ${formatSigned(total)}`;
+  panel.replaceChildren(head);
+  for (const line of lines) {
+    const row = document.createElement("div");
+    row.className = `factor ${line.value > 0 ? "plus" : "minus"}`;
+    const label = document.createElement("span");
+    label.textContent = line.label;
+    const bar = document.createElement("span");
+    bar.className = "factor-bar";
+    bar.style.width = `${Math.max(2, Math.round((Math.abs(line.value) / widest) * 40))}px`;
+    const value = document.createElement("span");
+    value.className = "factor-value";
+    value.textContent = formatSigned(line.value);
+    row.append(label, bar, value);
+    panel.append(row);
+  }
+}
+
+/** 需要の棒を押すか指を置くと、その区画の内訳が出るようにする。 */
+export function setupDemandFactors(): void {
+  document.querySelectorAll<HTMLElement>("#demand .slot-button").forEach((button, i) => {
+    button.addEventListener("click", () => {
+      factorView = togglePinned(factorView, i);
+      renderFactors();
+    });
+    button.addEventListener("pointerenter", () => {
+      factorView = { ...factorView, hover: i };
+      renderFactors();
+    });
+    button.addEventListener("pointerleave", () => {
+      factorView = { ...factorView, hover: null };
+      renderFactors();
+    });
+  });
+}
+
 export function renderCityStats(stats: CityStats, unsupplied = 0): void {
+  latestStats = stats;
+  renderFactors();
   const numbers = document.querySelector<HTMLElement>("#city-numbers");
   if (numbers !== null) {
     numbers.textContent = formatCityNumbers(stats);
