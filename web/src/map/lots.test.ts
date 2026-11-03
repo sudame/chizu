@@ -7,6 +7,7 @@ import {
   LOT_FACE_COLOR,
   LOT_LINE_COLOR,
   largestPiece,
+  MIN_BODY,
   parseLots,
   type Rect,
   subtract,
@@ -184,6 +185,32 @@ describe("駐車場のある建物の絵", () => {
         expect(inside).toBe(false);
       }
     }
+  });
+});
+
+describe("1×1 の建物の前面の帯", () => {
+  // 道路は南（y の大きい側）で、帯は西の端から道路の側に 0.625 マスの奥行きで、枠の数ぶんだけ延びる
+  const strip = (slots: number): number[] => {
+    const length = slots * 0.3125;
+    const r = [10, 20.375, 10 + length, 21];
+    return [10, 20, slots, 0, 1, 1, ...r, ...r, 0, -1, slots];
+  };
+
+  test.each([1, 2, 3])("枠が %i 台でも、本体は短い辺が下限以上ある", (slots) => {
+    const m = buildingMeshes(
+      new Float64Array([10, 20, 10, 20, 1, 5, 3]),
+      new Float64Array(),
+      new Float64Array(strip(slots)),
+    );
+    const short = (g: Geometry) => {
+      const w = largestPiece(boxes(g)) as Rect;
+      return Math.min(w.x1 - w.x0, w.y1 - w.y0);
+    };
+    // 標準のまとまりは下限以上、寄りの縁（縮めた本体）も下限以上ある
+    expect(short(m.clusters)).toBeGreaterThanOrEqual(MIN_BODY - 1e-9);
+    expect(short(m.details)).toBeGreaterThanOrEqual(MIN_BODY - 1e-9);
+    // 縁の内側の本体も、壁 1 枚にならない（縁の幅 0.05 を両側から引いても 0.25 マス以上）
+    expect(short(m.bodies)).toBeGreaterThanOrEqual(0.25);
   });
 });
 

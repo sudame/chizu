@@ -248,6 +248,21 @@ mod tests {
                         "{zone:?} 枠が切り欠きの外に出る"
                     );
                 }
+                // 地図に出すマス（lot_tiles）は、切り欠いた長方形にかかるマスと同じである
+                let mut tiles: Vec<(i64, i64)> = chizu_core::movement::lot_tiles(net, b)
+                    .iter()
+                    .map(|t| (t.x, t.y))
+                    .collect();
+                tiles.sort_unstable();
+                let mut covered: Vec<(i64, i64)> = (b.area.min.x..=b.area.max.x)
+                    .flat_map(|x| (b.area.min.y..=b.area.max.y).map(move |y| (x, y)))
+                    .filter(|(x, y)| {
+                        let cell = [*x as f64, *y as f64, *x as f64 + 1.0, *y as f64 + 1.0];
+                        shape.faces.iter().any(|f| overlap(*f, cell))
+                    })
+                    .collect();
+                covered.sort_unstable();
+                assert_eq!(tiles, covered, "{zone:?} {b:?} {shape:?}");
                 // 枠の数は平面の台数に一致する
                 assert_eq!(
                     shape.strips.iter().map(|s| s.count).sum::<u64>(),

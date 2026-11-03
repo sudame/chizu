@@ -134,8 +134,17 @@ export const siteOf = (x0: number, y0: number, x1: number, y1: number): Rect => 
 });
 
 /**
+ * 切り欠きを除いた本体の、短い辺の下限（マス）。1×1 の建物の前面の帯が 2〜3 台になると、帯の奥行き 5m
+ * （0.625 マス）のあとに残る本体が 3m しかなく、さらに縮めると壁 1 枚に見えるので、これを下回るときは縮めない。
+ */
+export const MIN_BODY = 0.3;
+
+const shortSide = (r: Rect) => Math.min(r.x1 - r.x0, r.y1 - r.y0);
+
+/**
  * 建物の本体の形。`site` を `inset` だけ縮めた長方形から、駐車場の切り欠きを除く。
  * `edge` は縁の幅で、縁の内側の本体は、切り欠きの側も縁の幅だけ内へ縮める。
+ * 切り欠きを除いた本体のいちばん広い長方形が `MIN_BODY` を下回るときは、敷地を縮めずに（`inset` を 0 にして）作り直す。
  */
 export function bodyShape(
   site: Rect,
@@ -143,15 +152,23 @@ export function bodyShape(
   edge: number,
   lot: Lot | undefined,
 ): { outer: Rect[]; inner: Rect[] } {
-  const outer = grow(site, -inset);
   const faces = lot?.faces ?? [];
-  return {
-    outer: carve(outer, faces),
-    inner: carve(
-      grow(outer, -edge),
-      faces.map((f) => grow(f, edge)),
-    ),
+  const build = (d: number) => {
+    const outer = grow(site, -d);
+    return {
+      outer: carve(outer, faces),
+      inner: carve(
+        grow(outer, -edge),
+        faces.map((f) => grow(f, edge)),
+      ),
+    };
   };
+  const shape = build(inset);
+  const widest = largestPiece(shape.outer);
+  if (lot !== undefined && widest !== undefined && shortSide(widest) < MIN_BODY && inset > 0) {
+    return build(0);
+  }
+  return shape;
 }
 
 /** 切り欠きを除いた本体のうち、いちばん広い長方形。屋根や屋上の設備はここに置く。 */

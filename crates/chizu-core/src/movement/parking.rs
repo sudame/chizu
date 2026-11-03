@@ -252,6 +252,56 @@ pub fn lot_end(net: &Network, b: &Building) -> LotEnd {
         })
 }
 
+/// 切り欠いた駐車場にかかるマス。1 マスの一部だけを切り欠く前面の帯のマスも含む。切り欠かない建物は空。
+/// 地図に出すためのもので、並びは決まっていない。形は [`lot_end`] と `Building::parking_layout` で決まる。
+pub fn lot_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
+    let (tx, ty) = b.toward_road;
+    let (ax, ay) = (-ty, tx);
+    let w = b.area.max.x.abs_diff(b.area.min.x) + 1;
+    let h = b.area.max.y.abs_diff(b.area.min.y) + 1;
+    let (frontage, depth) = if tx == 0 { (w, h) } else { (h, w) };
+    // 間口に沿って数えるマスの数 `along` と、道路の側からの行の数 `rows` の長方形を、端に寄せて返す
+    let rect = |cols: u64, rows: u64| -> Vec<TilePos> {
+        let far = lot_end(net, b) == LotEnd::Far;
+        let mut out = Vec::new();
+        for k in 0..cols {
+            let kk =
+                i64::try_from(if far { frontage - 1 - k } else { k }).expect("間口が大きすぎる");
+            for j in 0..rows {
+                let j = i64::try_from(j).expect("奥行きが大きすぎる");
+                out.push(TilePos::new(
+                    b.front.x + ax * kk - tx * j,
+                    b.front.y + ay * kk - ty * j,
+                ));
+            }
+        }
+        out
+    };
+    match b.parking_layout().cut {
+        ParkingCut::None => Vec::new(),
+        ParkingCut::FrontStrip { slots } => {
+            rect((slots * SLOT_WIDTH_MM).div_ceil(TILE_MM as u64), 1)
+        }
+        ParkingCut::Side { columns, tiles } => {
+            let last = tiles - (columns - 1) * depth;
+            let mut out = rect(columns - 1, depth);
+            // 最後の列は、道路の側の `last` マスだけを切り欠く。列の位置は `rect` と同じ向きで続ける
+            let far = lot_end(net, b) == LotEnd::Far;
+            let k = columns - 1;
+            let kk =
+                i64::try_from(if far { frontage - 1 - k } else { k }).expect("間口が大きすぎる");
+            for j in 0..last {
+                let j = i64::try_from(j).expect("奥行きが大きすぎる");
+                out.push(TilePos::new(
+                    b.front.x + ax * kk - tx * j,
+                    b.front.y + ay * kk - ty * j,
+                ));
+            }
+            out
+        }
+    }
+}
+
 /// [`lot_spot`] の本体。出入りの位置と、選んだ端を返す。出入口にしたときの端は `None`。
 fn lot_choice(net: &Network, b: &Building) -> Option<(SidewalkPos, Option<LotEnd>)> {
     let door = building_spot(net, b)?;
