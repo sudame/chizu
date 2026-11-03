@@ -11,7 +11,7 @@
 //! 1. の前に、前の tick の状態だけを読んで、交差点ごとに手前で止める車をノードの順に決める。
 //!    信号のある交差点では、tick と前の tick の車と歩く人の様子から決まる信号の段階も読む（[`signal_demand`]）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -129,14 +129,52 @@ impl LaneIndex {
     }
 }
 
-/// 行 `i` の車を、いまのリンクの車線に置く。車の少ない車線から順に、いまの位置から後ろへ下げて
-/// 空いた位置を探す。どの車線にも空きがなければ、出発を待たせて `false` を返す。
-/// `ix` は行 `i` を除いた車線の上の車で、置いたら行 `i` を足す。
 /// 車線に一度も出られないまま `RESCUE` tick を越えて待っている車か。
 pub(super) fn given_up(t: &Trip) -> bool {
     t.mode == LaneMode::Car && t.waiting && t.stalled > junction::RESCUE
 }
 
+/// 交差点の手前まで来た車線の先頭の車が、交差点の先で入る車線。`rows` の車線の上の車から決める。
+///
+/// 路肩の車がこの車線で後ろへ下がって入ると、交差点から入ろうとする車の空きを先に取ってしまう。
+/// 列が詰まっていると、交差点の先頭の車は空きを待ち続け、その手前の交差点まで列が延びて輪になる。
+pub(super) fn entered_from_junctions(
+    rows: &[Option<Trip>],
+    net: &Network,
+    conn: &[Connector],
+) -> BTreeSet<LaneId> {
+    // 車線ごとの先頭の車の行。
+    let mut heads = BTreeMap::<LaneId, (LaneOffset, usize)>::new();
+    for (i, t) in rows.iter().enumerate() {
+        if let Some(t) = t.as_ref().filter(|t| on_road(t)) {
+            let h = heads.entry(t.lane).or_insert((t.offset, i));
+            if t.offset > h.0 {
+                *h = (t.offset, i);
+            }
+        }
+    }
+    let st = LaneState::of(rows);
+    let mut out = BTreeSet::new();
+    for (_, i) in heads.into_values() {
+        let t = rows[i].as_ref().expect("車の主体がない");
+        if t.last_leg() || !near_end(net, t) {
+            continue;
+        }
+        let node = end_node(net, t.link());
+        if !junction::is_junction(net, node) {
+            continue;
+        }
+        let next = t.route.links[t.leg as usize + 1];
+        let after = t.route.links.get(t.leg as usize + 2).copied();
+        out.insert(choose_lane(net, conn, &st, t.lane, node, next, after));
+    }
+    out
+}
+
+/// 行 `i` の車を、いまのリンクの車線に置く。車の少ない車線から順に、いまの位置から後ろへ下げて
+/// 空いた位置を探す。ただし、交差点から車の入ってくる車線（`entering`）では、いまの位置から
+/// 車 2 台ぶんより後ろへは下げない。どの車線にも空きがなければ、出発を待たせて `false` を返す。
+/// `ix` は行 `i` を除いた車線の上の車で、置いたら行 `i` を足す。
 /// `jay` は車のリンクごとの、区間の途中の衝突区間の真ん中の位置で、車がその区間にかかる位置には置かない。
 pub(super) fn place(
     rows: &mut [Option<Trip>],
@@ -144,14 +182,16 @@ pub(super) fn place(
     ix: &mut LaneIndex,
     i: usize,
     jay: &BTreeMap<LinkId, Vec<u32>>,
+    entering: &BTreeSet<LaneId>,
 ) -> bool {
     let t = rows[i].as_mut().expect("置く車がない");
     let lanes: Vec<LaneId> = net.link_lanes(t.link()).collect();
     let zones = jay.get(&t.link()).map_or(&[][..], Vec::as_slice);
-    let found = ix
-        .by_count(&lanes)
-        .into_iter()
-        .find_map(|l| Some((l, room_clear_of(ix, l, t.offset, zones)?)));
+    let nearest = t.offset.0.saturating_sub(2 * SPACING);
+    let found = ix.by_count(&lanes).into_iter().find_map(|l| {
+        let at = room_clear_of(ix, l, t.offset, zones)?;
+        (!entering.contains(&l) || at.0 >= nearest).then_some((l, at))
+    });
     match found {
         Some((lane, at)) => {
             (t.lane, t.offset, t.waiting, t.rejoining, t.stalled) = (lane, at, false, false, 0);
@@ -723,8 +763,9 @@ pub(super) fn step(
     let mut still_waiting = Vec::new();
     if !waiting.is_empty() {
         let mut ix = LaneIndex::of(rows, None);
+        let entering = entered_from_junctions(rows, net, conn);
         for i in waiting {
-            if !place(rows, net, &mut ix, i, &occupied.zones) {
+            if !place(rows, net, &mut ix, i, &occupied.zones, &entering) {
                 still_waiting.push(i);
             }
         }

@@ -496,6 +496,48 @@ fn cars_from_the_same_tile_queue_behind_or_wait() {
     assert!(arrived.contains(&w), "待っていた車が出発しない");
 }
 
+/// 交差点 (10,0) から東へ延びるリンクの (14,0) から、4 台を順に出す。`approach` なら、その前に
+/// 西から交差点の手前まで来た車を 1 台置く。4 台めの車を返す。
+fn fourth_from_the_curb(approach: bool) -> (Cars, TripId) {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0), RoadKind::Small);
+    road(&mut n, (10, 0), (30, 0), RoadKind::Small);
+    road(&mut n, (10, 0), (10, 10), RoadKind::Small);
+    let mut c = Cars::new(n);
+    if approach {
+        c.drive(at(8, 0, (1, 0), 0), at(29, 0, (1, 0), 0));
+    }
+    let a = c.drive(at(14, 0, (1, 0), 0), at(29, 0, (1, 0), 0));
+    c.drive(at(14, 0, (1, 0), 0), at(29, 0, (1, 0), 0));
+    let b = c.drive(at(14, 0, (1, 0), 0), at(29, 0, (1, 0), 0));
+    let spot = c.trips.get(a).unwrap().offset().0;
+    // 入ってくる車がいても、車 2 台ぶんまでは後ろへ下げて入る。
+    assert_eq!(c.trips.get(b).unwrap().offset().0, spot - 2 * SPACING);
+    let z = c.drive(at(14, 0, (1, 0), 0), at(29, 0, (1, 0), 0));
+    (c, z)
+}
+
+const SPACING: u32 = CAR_LENGTH + MIN_GAP;
+
+#[test]
+fn a_car_from_the_curb_does_not_take_the_room_of_a_car_entering_from_the_junction() {
+    // 交差点から入ってくる車がいなければ、4 台めは車 3 台ぶん後ろへ下げた空きに入る。
+    let (c, z) = fourth_from_the_curb(false);
+    let tz = c.trips.get(z).unwrap();
+    assert!(!tz.waiting_to_depart());
+    let spot = c.trips.iter().map(|(_, t)| t.offset().0).max().unwrap();
+    assert_eq!(tz.offset().0, spot - 3 * SPACING);
+    // 入ってくる車がいれば、自分の位置から車 2 台ぶんより後ろへは下がらずに待つ。
+    let (mut c, z) = fourth_from_the_curb(true);
+    assert!(c.trips.get(z).unwrap().waiting_to_depart());
+    // 交差点から入った車が先へ進めば、空いた所に入って着く。
+    let mut arrived = Vec::new();
+    for _ in 0..200 {
+        arrived.extend(c.step());
+    }
+    assert!(arrived.contains(&z), "路肩で待っていた車が出発しない");
+}
+
 #[test]
 fn rerouting_keeps_cars_side_by_side_in_their_lanes() {
     let mut n = Network::new();
