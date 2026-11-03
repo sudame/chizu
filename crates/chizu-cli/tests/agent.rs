@@ -1284,3 +1284,19 @@ fn act_does_not_join_when_join_is_false() {
     assert_eq!(r[3]["outcome"], "Invalid", "{acted}");
     assert_eq!(r[4]["outcome"], "Invalid", "{acted}");
 }
+
+/// demandFactors の値を足し合わせると demand になる。
+#[test]
+fn observe_demand_factors_add_up_to_the_demand() {
+    let dir = session("agent-demand-factors");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let obs = json(&cli(&["agent", "observe", d]));
+    for zone in ["Residential", "Commercial", "Industrial", "Office"] {
+        let factors = obs["demandFactors"][zone].as_array().unwrap();
+        assert!(!factors.is_empty(), "{zone}: {obs}");
+        let sum: i64 = factors.iter().map(|f| f["value"].as_i64().unwrap()).sum();
+        assert_eq!(sum, obs["demand"][zone].as_i64().unwrap(), "{zone}: {obs}");
+    }
+    assert_eq!(obs["demandFactors"]["Residential"][0]["factor"], "base");
+}

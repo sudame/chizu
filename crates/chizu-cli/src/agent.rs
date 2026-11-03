@@ -14,7 +14,9 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use cache::Cache;
-use chizu_core::building::{Building, CityStats, demand, jobs_kept_permille, residential_tax_pull};
+use chizu_core::building::{
+    Building, CityStats, demand, demand_factors, jobs_kept_permille, residential_tax_pull,
+};
 use chizu_core::service::supply_balance;
 use chizu_core::world::economy::Finances;
 use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
@@ -98,6 +100,23 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  vacantHomes 外の世界と道路でつながった住宅の空き戸数、homelessHouseholds と homelessCitizens 家がなく空き家を待つ世帯と住民、
                  blockedHouseholds 来ようとしても空き家が足りず入れない世帯の数。
                  vacantHomes が 0 なのに wantingHouseholds があるときは、住宅が足りないか、外の世界とつながっていない。
+
+observe の demandFactors（demand の内訳）:
+  区画の種類ごとに、demand を足し引きしている要因を [{factor, value}] で並べる。value を足し合わせると demand になる。値が 0 の要因も省かない。
+  Residential  base いつもある需要、vacantJobs 空いている職場（多いほど正）、happiness 幸福度、tax 税率（基準より高いと負）、
+               vacantHomes 空き家（多いほど負）、jobless 職のない住民（多いほど負）。
+  Commercial   shoppers 住民の買い物に要る職場、tax 税で必要な職場が減る分（0 以下）、existing いまの商業の職場の数（負）。
+  Industrial   base いつもある需要、workers 商業で働かない働き手のうち工業に回る分に要る職場、tax 税で減る分（0 以下）、existing いまの工業の職場の数（負）。
+  Office       workers 同じくオフィスに回る分に要る職場、tax 税で減る分（0 以下）、existing いまのオフィスの職場の数（負）。
+  職場の区画の demand は「要る職場 − いまの職場」なので、existing が要る職場（shoppers か workers）を上回ると負になる。失業者の数では決まらない。
+  負のときの案内（種類ごと）:
+  Residential  vacantHomes が大きく負なら、空き家が埋まるのを待つ（住宅を塗り足さない）。jobless が負なら職場を増やす。
+               tax が負なら住宅の税を下げる。happiness が負なら幸福度を上げる。
+  Commercial   shoppers は住民全体の 1/4 で、働く年齢の人の数ではない。existing が上回るなら、住民を増やす（住宅を建てる）か、商業の職場が減るのを待つ。
+               tax が負なら商業の税を下げると、要る職場が増える。
+  Industrial   workers は、働く年齢の住民から商業の分を引いた残りのうち工業へ回る分。existing が上回るなら、住民を増やす。商業を塗ると工業に回る分はさらに減る。
+  Office       workers は同じ残りのうちオフィスへ回る分（工業とオフィスが両方塗られていれば 4 割）。existing が上回るなら、住民を増やす。
+               工業とオフィスの税が負なら、その区画の税を下げる。
 
 observe の税の影響（税率を上げたときの代償）:
   税率は基準の 10% までは影響がなく、それを超えると次の 3 つが効く。
@@ -826,6 +845,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
     let time = GameTime::at(tick);
     let stats = world.city_stats();
     let demand = demand(&stats);
+    let factors = demand_factors(&stats);
     // 中核に欄が足されたらここで止まり、observe に出すかを決められるよう、`..` なしで分解する。
     let CityStats {
         citizens,
@@ -971,6 +991,12 @@ fn observe(world: &World, before: &CarSample) -> Value {
         "traffic": traffic(world, before),
         "migration": migration(world.migration_outlook()),
         "demand": by_zone(|z| demand[z.index()]),
+        "demandFactors": by_zone(|z| {
+            factors.zone(z.index())
+                .iter()
+                .map(|f| json!({"factor": f.kind.name(), "value": f.value}))
+                .collect::<Vec<Value>>()
+        }),
         "zoned": by_zone(|z| zoned[z.index()]),
         "jobs": {
             "workplaces": by_zone(|z| workplaces[z.index()]),
