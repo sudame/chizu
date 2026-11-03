@@ -131,7 +131,7 @@ import {
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 import { setupSaves } from "./save/main-side.ts";
 import { setupScaleBar } from "./scale-bar.ts";
-import { describeSpeed, shownSpeed, splitSpeed } from "./speed.ts";
+import { BAR_SPEEDS, describeSpeed, nearestSpeed } from "./speed.ts";
 
 function element<T extends Element>(selector: string): T {
   const found = document.querySelector<T>(selector);
@@ -179,9 +179,6 @@ const financePanel: FinancePanel = setupFinance(
   sendCommand,
 );
 
-// 1 倍より遅く進めているときの倍率。中核の速度は 1 のままなので、Worker だけが持つ。表示は Worker が返した値を使う
-let workerPace = 1;
-
 const pad = (n: number) => String(n).padStart(2, "0");
 
 function describeClock(header: SnapshotHeader): string {
@@ -197,7 +194,22 @@ function setText(el: HTMLElement, text: string): void {
   }
 }
 
+// 読み込んだ記録の速さが段にないとき（前の帯の 4 倍や 16 倍など）、最初の枠で近い段にそろえる。
+// SetSimSpeed のコマンドで変えるので、記録にも残る
+let speedAligned = false;
+function alignSpeed(speed: number): void {
+  if (speedAligned || speed < 1) {
+    return;
+  }
+  speedAligned = true;
+  const next = nearestSpeed(speed);
+  if (next !== speed) {
+    sendCommand({ kind: "SetSimSpeed", speed: next });
+  }
+}
+
 function draw(header: SnapshotHeader): void {
+  alignSpeed(header.speed);
   setText(hudClock, describeClock(header));
   setText(hudMoney, `お金 ${header.money.toLocaleString("ja-JP")}`);
   // 収支が赤字のあいだは、所持金の横に知らせる
@@ -206,12 +218,10 @@ function draw(header: SnapshotHeader): void {
   setText(hudDeficit, balance);
   hudDeficit.hidden = balance === "";
   hudDeficit.dataset.deficit = String(note !== "");
-  const speed = shownSpeed(header.speed, workerPace);
+  const speed = header.speed;
   setText(hudSpeed, header.paused ? "一時停止中" : describeSpeed(speed));
-  // 帯のボタンに出ていない速度（0.25、0.5、48 倍）のときと、止めているときだけ、速度の文字を出す
-  hudSpeed.hidden =
-    !header.paused &&
-    speedButtons.some((b) => Number(b.dataset.speed) === speed && b.closest("#speeds") !== null);
+  // 帯のボタンに出ていない速度（288 倍）のときと、止めているときだけ、速度の文字を出す
+  hudSpeed.hidden = !header.paused && (BAR_SPEEDS as readonly number[]).includes(speed);
   for (const b of speedButtons) {
     b.setAttribute("aria-pressed", String(!header.paused && Number(b.dataset.speed) === speed));
   }
@@ -1047,19 +1057,13 @@ zoomOutButton.addEventListener("click", () => zoomByButton(1 / ZOOM_BUTTON_FACTO
 
 for (const button of speedButtons) {
   button.addEventListener("click", () => {
-    const { core, pace: next } = splitSpeed(Number(button.dataset.speed));
-    send({ kind: "pace", pace: next });
-    sendCommand({ kind: "SetSimSpeed", speed: core });
+    sendCommand({ kind: "SetSimSpeed", speed: Number(button.dataset.speed) });
   });
 }
 
 worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   const message = event.data;
   if (!isWorkerToMain(message)) {
-    return;
-  }
-  if (message.kind === "pace") {
-    workerPace = message.pace;
     return;
   }
   if (message.kind === "chunks") {

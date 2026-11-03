@@ -13,6 +13,9 @@
 //!   `FORMAT_VERSION` を上げる。古い版の記録は読み替えずに、読めないものとして断る。
 //! - シミュレーションの規則だけを変えたときは版を上げない。古い記録も読めるが、再生した街は
 //!   保存したときと違いうる。保存データには状態ハッシュを添え、読み込んだあとに食い違いを示す。
+//! - `SetSimSpeed` は等速の倍率で持つ。等速を 1 秒 30 tick から 5 tick に変えたときは版を上げなかったので、
+//!   古い記録の倍率は新しい段の同じ倍率として再生する（古い 48 倍は、新しい 48 倍の 240 tick/秒になる）。
+//!   段にない倍率（古い 4 倍や 16 倍）は、読み込んだあとに画面が近い段へそろえる。
 //!
 //! # バイト列の形式
 //!
@@ -705,7 +708,7 @@ mod tests {
         assert!(invalid_command(&[7, 1, 0x2d, 0x01])); // 税率 301‰
         assert!(invalid(&[7, 0, 0, 0])); // 区画の種類 0
         assert!(invalid(&[8, 0, 0])); // 速度 0 倍
-        assert!(invalid(&[8, 49, 0])); // 速度 49 倍
+        assert!(invalid(&[8, 0x21, 0x01])); // 速度 289 倍
         let mut signal = vec![5];
         signal.extend_from_slice(&[0; 6]);
         signal.push(2);
@@ -1009,7 +1012,7 @@ mod tests {
             }),
             (zone, 0..=MAX_TAX_PERMILLE)
                 .prop_map(|(zone, permille)| Command::SetTaxRate { zone, permille }),
-            (1_u16..=48).prop_map(|m| Command::SetSimSpeed {
+            (1_u16..=288).prop_map(|m| Command::SetSimSpeed {
                 speed: SimSpeed::new(m).unwrap(),
             }),
             (

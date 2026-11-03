@@ -15,8 +15,8 @@ pub const GAME_SECONDS_PER_DAY: u32 = 86_400;
 
 const _: () = assert!(TICKS_PER_DAY * GAME_SECONDS_PER_TICK as u64 == GAME_SECONDS_PER_DAY as u64);
 
-/// 等速のときに実時間の 1 秒で進める tick 数。
-pub const TICKS_PER_SECOND_AT_NORMAL_SPEED: u32 = 30;
+/// 等速のときに実時間の 1 秒で進める tick 数。1 日は実時間の 24 分になる。
+pub const TICKS_PER_SECOND_AT_NORMAL_SPEED: u32 = 5;
 
 /// ゲーム内の日と時刻。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

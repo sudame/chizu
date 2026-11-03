@@ -12,7 +12,7 @@ import { preview } from "vite";
 import { openHudDetails, pickSpeed, pickTool } from "./ui.ts";
 
 const TIMEOUT_MS = 30_000;
-const FAST_SPEED = 48;
+const FAST_SPEED = 288;
 // 保存の知らせが消えるまでの時間（main-side.ts の NOTICE_MS）に少し足した長さ
 const NOTICE_FADE_MS = 9_000;
 
