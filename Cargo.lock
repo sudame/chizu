@@ -186,6 +186,7 @@ dependencies = [
  "chizu-core",
  "js-sys",
  "rayon",
+ "smallvec",
  "wasm-bindgen",
  "wasm-bindgen-rayon",
 ]

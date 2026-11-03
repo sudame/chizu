@@ -50,6 +50,8 @@ pub struct Sim {
     /// 最後に集めた移動体と、その基準のチャンク。
     movers: Vec<Mover>,
     movers_base: ChunkCoord,
+    /// その前の回に集めた移動体。集め直すたびに `movers` と入れ替える。
+    movers_before: Vec<Mover>,
     /// 曲線の上に描いた車の、曲線の始まり。描画のためだけに覚え、状態には入れない。
     arcs: crate::movers::Arcs,
     /// `movers` を集めたときの（tick、記録の件数、範囲、記録に入らない操作の回数）。どれも変わらなければ集め直さない。
@@ -86,6 +88,7 @@ impl Sim {
             mover_view: None,
             movers: Vec::new(),
             movers_base: ChunkCoord::default(),
+            movers_before: Vec::new(),
             arcs: crate::movers::Arcs::new(),
             movers_key: None,
             unrecorded_ops: 0,
@@ -340,8 +343,19 @@ impl Sim {
         self.movers_key = Some(key);
         match self.mover_view {
             Some(v) => {
-                self.movers_base =
-                    crate::movers::visible_movers(&self.world, v, &mut self.movers, &mut self.arcs);
+                // 前の回の結果を残しておき、網が変わった直後の歩く人を前に描いた位置に描くのに使う。
+                core::mem::swap(&mut self.movers, &mut self.movers_before);
+                let before = crate::movers::Before {
+                    out: &self.movers_before,
+                    base: self.movers_base,
+                };
+                self.movers_base = crate::movers::visible_movers(
+                    &self.world,
+                    v,
+                    &mut self.movers,
+                    &mut self.arcs,
+                    before,
+                );
             }
             None => {
                 self.movers.clear();

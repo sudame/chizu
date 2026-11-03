@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use crate::car_path;
 use crate::snapshot::{MAX_MOVERS, Mover};
+use crate::walk_path::{self, Walk};
 
 /// 移動体の種類の番号。画面の `web/src/map/movers.ts` と同じ。
 pub const KIND_WALK: u16 = 1;
@@ -63,14 +64,36 @@ fn keep_nearest(found: &mut Vec<CoreMover>, view: TileRect, limit: usize) {
 /// 曲線の上に描いた車ごとの、曲線の始まり（`car_path::Entry`）。描画のためだけに覚える。
 pub type Arcs = BTreeMap<TripId, car_path::Entry>;
 
+/// 前の回に描いた移動体。`out` は前の回の `visible_movers` の結果で、`base` はそのときの基準のチャンクである。
+pub struct Before<'a> {
+    pub out: &'a [Mover],
+    pub base: ChunkCoord,
+}
+
+impl Before<'_> {
+    /// 前の回に描いた移動体の、ID ごとの位置（基準のチャンク `base` の原点からのマスの座標）と向き。
+    fn positions(&self, base: ChunkCoord) -> BTreeMap<(u32, u32), (f32, f32, u16)> {
+        let side = CHUNK_SIDE as i64;
+        let shift = |from: i32, to: i32| ((i64::from(from) - i64::from(to)) * side) as f32;
+        let (dx, dy) = (shift(self.base.cx, base.cx), shift(self.base.cy, base.cy));
+        self.out
+            .iter()
+            .map(|m| ((m.id, m.generation), (m.x + dx, m.y + dy, m.heading)))
+            .collect()
+    }
+}
+
 /// `view` の移動体を、基準のチャンク（`view.min` のチャンク）の原点からのマスの座標に直して `out` に入れ、
 /// 基準のチャンクを返す。上限を超えたら、`view` の真ん中に近いものを残す。
 /// `arcs` は前の回に曲線の上に描いた車の曲線の始まりで、この回のものに入れ替える。
+/// `before` は前の回に描いたもので、網が変わってから次の `step` までのあいだ、道筋を求められない歩く人を
+/// そこに描き続ける。
 pub fn visible_movers(
     world: &World,
     view: TileRect,
     out: &mut Vec<Mover>,
     arcs: &mut Arcs,
+    before: Before<'_>,
 ) -> ChunkCoord {
     let base = view.min.chunk().unwrap_or_default();
     let side = CHUNK_SIDE as i64;
@@ -80,38 +103,67 @@ pub fn visible_movers(
     keep_nearest(&mut found, view, MAX_MOVERS);
     // 基準の原点からの差は画面の広さに収まるので、f64 を経て f32 に直しても桁は足りる。
     let tiles = |v: i64, o: i64| (v.saturating_sub(o) as f64 / TILE_MM as f64) as f32;
-    out.clear();
     let net = world.network();
     let from_mm = |v: f64, o: i64| ((v - o as f64) / TILE_MM as f64) as f32;
-    let before = core::mem::take(arcs);
-    out.extend(found.iter().map(|m| {
-        // 車は、ノードの前後を曲線でつないだ道筋の上に描く（`car_path`）。
-        let drawn = m
-            .path
-            .and_then(|p| car_path::draw(net, &p, m.shift, before.get(&m.id)));
-        if let Some((d, entry)) = drawn {
-            if let Some(e) = entry {
-                arcs.insert(m.id, e);
-            }
-            return Mover {
-                x: from_mm(d.x, ox),
-                y: from_mm(d.y, oy),
-                heading: car_path::angle_code(d.angle),
-                kind: kind_of(m),
-                id: m.id.index,
-                generation: u32::from(m.id.generation),
-            };
-        }
-        // 中心線の上の位置に、車線や歩道に寄せるずれを足して描く。
-        Mover {
-            x: tiles(m.pos.x.0.saturating_add(m.shift.0.0), ox),
-            y: tiles(m.pos.y.0.saturating_add(m.shift.1.0), oy),
-            heading: heading_code(m.heading),
+    let prev_arcs = core::mem::take(arcs);
+    // 前の回の位置は、道筋を求められない人がいたときにだけ引く。
+    let mut prev = None;
+    out.clear();
+    let drawn = out;
+    for m in &found {
+        let mover = |x: f32, y: f32, heading: u16| Mover {
+            x,
+            y,
+            heading,
             kind: kind_of(m),
             id: m.id.index,
             generation: u32::from(m.id.generation),
+        };
+        // 車は、ノードの前後を曲線でつないだ道筋の上に描く（`car_path`）。
+        let car = m
+            .path
+            .and_then(|p| car_path::draw(net, &p, m.shift, prev_arcs.get(&m.id)));
+        if let Some((d, entry)) = car {
+            if let Some(e) = entry {
+                arcs.insert(m.id, e);
+            }
+            drawn.push(mover(
+                from_mm(d.x, ox),
+                from_mm(d.y, oy),
+                car_path::angle_code(d.angle),
+            ));
+            continue;
         }
-    }));
+        // 歩く人は、交差点の前後で歩道の角を回る道筋の上に描く（`walk_path`）。道筋は、間引いたあとに
+        // 残った人の分だけ求める。
+        let walk = match m.mode {
+            LaneMode::Sidewalk => world
+                .walk_path(m.id)
+                .map_or(Walk::Core, |w| walk_path::draw(net, &w)),
+            LaneMode::Car => Walk::Core,
+        };
+        if let Walk::Lost(_) = walk {
+            let prev = prev.get_or_insert_with(|| before.positions(base));
+            if let Some(&(x, y, heading)) = prev.get(&(m.id.index, u32::from(m.id.generation))) {
+                drawn.push(mover(x, y, heading));
+                continue;
+            }
+        }
+        if let Some(d) = walk.position() {
+            drawn.push(mover(
+                from_mm(d.x, ox),
+                from_mm(d.y, oy),
+                car_path::angle_code(d.angle),
+            ));
+            continue;
+        }
+        // 中心線の上の位置に、車線や歩道に寄せるずれを足して描く。
+        drawn.push(mover(
+            tiles(m.pos.x.0.saturating_add(m.shift.0.0), ox),
+            tiles(m.pos.y.0.saturating_add(m.shift.1.0), oy),
+            heading_code(m.heading),
+        ));
+    }
     base
 }
 
@@ -209,6 +261,13 @@ mod tests {
         w
     }
 
+    fn none() -> Before<'static> {
+        Before {
+            out: &[],
+            base: ChunkCoord::default(),
+        }
+    }
+
     fn all() -> TileRect {
         TileRect {
             min: TilePos::new(-64, -64),
@@ -222,7 +281,7 @@ mod tests {
         let n = spawn_dev_walks(&mut w, TilePos::new(2, 10), TilePos::new(25, 10), 30);
         assert_eq!(n, 30);
         let mut first = Vec::new();
-        let base = visible_movers(&w, all(), &mut first, &mut Arcs::new());
+        let base = visible_movers(&w, all(), &mut first, &mut Arcs::new(), none());
         assert_eq!(base, ChunkCoord::new(-1, -1));
         assert_eq!(first.len(), 30);
         assert!(first.iter().all(|m| m.kind == KIND_WALK));
@@ -239,12 +298,12 @@ mod tests {
             w.step();
         }
         let mut later = Vec::new();
-        visible_movers(&w, all(), &mut later, &mut Arcs::new());
+        visible_movers(&w, all(), &mut later, &mut Arcs::new(), none());
         assert_ne!(first, later);
         for _ in 0..2_000 {
             w.step();
         }
-        visible_movers(&w, all(), &mut later, &mut Arcs::new());
+        visible_movers(&w, all(), &mut later, &mut Arcs::new(), none());
         assert!(later.is_empty());
     }
 

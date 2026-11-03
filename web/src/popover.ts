@@ -1,5 +1,5 @@
 // ボタンを押すと開く、浮いたパネル（道具の 2 段目、レイヤーの選択、収支）。
-// 開いているのは同時に 1 つだけで、パネルの外を押すか Esc を押すと閉じる。
+// 開いているのは同時に 1 つだけで、パネルの外を押すか Esc を押すと閉じる（Esc の順は escape.ts）。
 
 export type Popover = {
   open(): void;
@@ -11,6 +11,8 @@ export type Popovers = {
   /** toggle を押すと panel を出し入れするようにつなぐ。 */
   add(toggle: HTMLElement, panel: HTMLElement): Popover;
   closeAll(): void;
+  closeOnEscape(): boolean;
+  anyOpen(): boolean;
 };
 
 export function createPopovers(doc: Document = document): Popovers {
@@ -34,10 +36,9 @@ export function createPopovers(doc: Document = document): Popovers {
     }
   });
 
-  doc.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") {
-      return;
-    }
+  /** 開いているパネルを閉じる。閉じたものがあれば true。Esc の順は escape.ts が決めて呼ぶ。 */
+  const closeOnEscape = (): boolean => {
+    let closed = false;
     for (const e of entries) {
       if (e.popover.isOpen()) {
         // パネルの中にいたときは、押したボタンへ戻す。外にいたときは動かさない
@@ -46,12 +47,16 @@ export function createPopovers(doc: Document = document): Popovers {
         if (inside) {
           e.toggle.focus();
         }
+        closed = true;
       }
     }
-  });
+    return closed;
+  };
 
   return {
     closeAll,
+    closeOnEscape,
+    anyOpen: () => entries.some((e) => e.popover.isOpen()),
     add(toggle, panel) {
       const popover: Popover = {
         open() {
