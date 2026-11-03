@@ -457,6 +457,8 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   // test:wasm が読む
   mapCanvas.dataset.drawnMovers = String(movers);
   mapCanvas.dataset.moverPaths = String(moverPaths.size);
+  mapCanvas.dataset.moversAlongPath = String(renderer?.movers.alongPaths.along ?? 0);
+  mapCanvas.dataset.moversRouted = String(renderer?.movers.alongPaths.routed ?? 0);
   const first = renderer?.movers.first;
   mapCanvas.dataset.firstMover = first ? `${first.x},${first.y}` : "";
   const firstOf = (kind: number) => {

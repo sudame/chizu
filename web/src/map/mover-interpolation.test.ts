@@ -611,6 +611,92 @@ describe("MoverInterpolator の道筋に沿う補間", () => {
     expect(r.get(1)?.y).toBeCloseTo(0.5, 4);
   });
 
+  it("道筋なしの枠のあとに道筋つきの枠が続けば、2 つめの枠からは道筋に沿って動かす", () => {
+    const paths = corner();
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0, y: 0 }], {}, paths);
+    // 道筋 7 の s = 0.5 の所。前が道筋なしなので、この区間はまっすぐ動く
+    run(i, TICK_MS, 11, [{ id: 1, x: 0.5, y: 0, path: 7, frac: 0.25 }], {}, paths);
+    run(i, TICK_MS * 2, 11, [{ id: 1, x: 0.5, y: 0, path: 7, frac: 0.25 }], {}, paths);
+    run(i, TICK_MS * 2, 12, [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }], {}, paths);
+    const r = run(i, TICK_MS * 2.5, 12, [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }], {}, paths);
+    // s は 0.5 から 2 へ。半分は 1.25 で、道筋の角を曲がった所。弦なら (0.75, 0.5)
+    expect(r.get(1)?.x).toBeCloseTo(1, 4);
+    expect(r.get(1)?.y).toBeCloseTo(0.25, 4);
+  });
+
+  it("道筋の知らせが枠より遅れて届いても、次の tick で道筋に戻る", () => {
+    const paths = new MoverPaths();
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0, y: 0, path: 7, frac: 0 }], {}, paths);
+    // 枠は道筋 7 を指すが、道筋はまだ届いていない
+    run(i, TICK_MS, 11, [{ id: 1, x: 0.5, y: 0, path: 7, frac: 0.25 }], {}, paths);
+    const late = run(
+      i,
+      TICK_MS * 1.5,
+      11,
+      [{ id: 1, x: 0.5, y: 0, path: 7, frac: 0.25 }],
+      {},
+      paths,
+    );
+    // 道筋がないので、前の位置 (0, 0) と今の位置 (0.5, 0) のあいだをまっすぐ動く
+    expect(late.get(1)?.x).toBeCloseTo(0.25, 4);
+    paths.receive(
+      pathData(true, [
+        [
+          7,
+          [
+            [0, 0, EAST],
+            [1, 0, EAST],
+            [1, 1, SOUTH],
+          ],
+        ],
+      ]),
+    );
+    run(i, TICK_MS * 2, 12, [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }], {}, paths);
+    const r = run(i, TICK_MS * 2.5, 12, [{ id: 1, x: 1, y: 1, path: 7, frac: 1 }], {}, paths);
+    expect(r.get(1)?.x).toBeCloseTo(1, 4);
+    expect(r.get(1)?.y).toBeCloseTo(0.25, 4);
+  });
+
+  it("道筋どうしがつながらない tick だけまっすぐ動かし、次の tick で道筋に戻る", () => {
+    const paths = new MoverPaths();
+    paths.receive(
+      pathData(true, [
+        [
+          1,
+          [
+            [0, 0, EAST],
+            [1, 0, EAST],
+          ],
+        ],
+        [
+          2,
+          [
+            [5, 5, SOUTH],
+            [5, 7, SOUTH],
+          ],
+        ],
+      ]),
+    );
+    const i = new MoverInterpolator();
+    run(i, 0, 10, [{ id: 1, x: 0, y: 0, path: 1, frac: 0 }], {}, paths);
+    run(i, TICK_MS, 11, [{ id: 1, x: 5, y: 5, path: 2, frac: 0 }], {}, paths);
+    const straight = run(
+      i,
+      TICK_MS * 1.5,
+      11,
+      [{ id: 1, x: 5, y: 5, path: 2, frac: 0 }],
+      {},
+      paths,
+    );
+    expect(straight.get(1)?.x).toBeCloseTo(2.5, 4);
+    run(i, TICK_MS * 2, 12, [{ id: 1, x: 5, y: 6, path: 2, frac: 0.5 }], {}, paths);
+    const r = run(i, TICK_MS * 2.5, 12, [{ id: 1, x: 5, y: 6, path: 2, frac: 0.5 }], {}, paths);
+    expect(r.get(1)?.x).toBeCloseTo(5, 4);
+    expect(r.get(1)?.y).toBeCloseTo(5.5, 4);
+  });
+
   it("補間の途中で次の tick が来ても、道筋の上の見えている所から続けて動かす", () => {
     const paths = corner();
     const i = new MoverInterpolator();

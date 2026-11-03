@@ -174,6 +174,10 @@ export class MoverLayer {
   readonly #copy = new Uint32Array(layout.maxMovers * layout.moverWords);
   readonly #floats = new Float32Array(this.#copy.buffer);
   readonly #interpolator = new MoverInterpolator();
+  /** 描いたすべての枠で、道筋に沿って補間した移動体と、届いている道筋を指す移動体の延べ数。test:wasm が読む。 */
+  get alongPaths(): { along: number; routed: number } {
+    return { along: this.#interpolator.along, routed: this.#interpolator.routed };
+  }
   /** 最後に描いた枠の、最初の移動体のワールド座標（マス）。test:wasm が位置の変化を見るのに使う。 */
   first: { x: number; y: number } | null = null;
   /** 最後に描いた枠の、種類ごとの最初の移動体のワールド座標（マス）。test:wasm が画素を見るのに使う。 */
