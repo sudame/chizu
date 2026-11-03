@@ -200,6 +200,11 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
       close: () => page.keyboard.press("Escape"),
     },
     { open: () => layerToggle.click(), close: () => page.keyboard.press("Escape") },
+    // 通知センターの一覧は、開いているあいだ帯や隅の部品と重ならない
+    {
+      open: () => page.locator("#notice-bell").click(),
+      close: () => page.keyboard.press("Escape"),
+    },
     // 建物の情報は、詳細や収支を開いたときも含めて、ほかの欄と重ならない
     { open: () => showInspector(true), close: () => showInspector(false) },
     {
@@ -234,6 +239,17 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
           notice.textContent = "確かめ用の知らせ";
           notice.hidden = false;
         }
+        // 通知センターの一覧は、知らせが 3 つ並んだ大きさで見る
+        const noticeList = document.querySelector<HTMLElement>("#notice-list");
+        if (noticeList !== null && noticeList.children.length === 0) {
+          for (let i = 0; i < 3; i++) {
+            const li = document.createElement("li");
+            li.className = "notice-item";
+            li.innerHTML =
+              "<strong>電気の余裕がなく、新築が止まっている区画がある（住宅 4・商業 2 間口）</strong><div>発電所を置くか、発電所のある道路網につなぐ</div><div class='notice-actions'><button type='button' class='chip'>止まっている区画へ移る（押すたびに次の道路網）</button><button type='button' class='chip'>閉じる</button></div>";
+            noticeList.append(li);
+          }
+        }
         const box = (sel: string) => {
           const el = document.querySelector(sel);
           const r = el?.getBoundingClientRect();
@@ -247,7 +263,7 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
         };
         const covered = [
           ...document.querySelectorAll<HTMLElement>(
-            "#hudbar button, #toolbar button, #map-controls button, #feedback-open, .tool-menu button, #layer-panel button",
+            "#hudbar button, #toolbar button, #map-controls button, #notice-bell, #feedback-open, .tool-menu button, #layer-panel button",
           ),
         ]
           .filter((b) => {
@@ -270,6 +286,8 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
           "#layer-panel",
           "#theme-legend",
           "#notices",
+          "#notice-panel",
+          "#notice-bell",
           "#feedback-open",
           "#toolstack",
           "#map-controls",
@@ -1185,19 +1203,34 @@ try {
     (await unsupplied()) > 0 && anyYellow(markBefore),
     `電気の届かない建物に黄色の印が出る（${await unsupplied()} 棟、${markBefore.map((c) => c.join(",")).join(" ")}）`,
   );
-  const shortage = page.locator("#city-shortage");
+  // 警告の知らせは通知センターにまとまる。鐘の数の印に数え、押すと一覧が開く
+  const bell = page.locator("#notice-bell");
+  const noticePanel = page.locator("#notice-panel");
+  const noticeItem = (id: string) => page.locator(`#notice-list li[data-notice="${id}"]`);
+  const openNotices = async () => {
+    if (!(await noticePanel.isVisible())) {
+      await bell.click();
+    }
+  };
+  const closeNotices = async () => {
+    if (await noticePanel.isVisible()) {
+      await page.keyboard.press("Escape");
+    }
+  };
+  const shortage = noticeItem("utility");
   check(
-    (await shortage.isVisible()) &&
+    (await shortage.count()) === 1 &&
       /足りない|つながっていない/.test((await shortage.textContent()) ?? ""),
-    `届いていない建物の数と理由が欄に出る（${await shortage.textContent()}）`,
+    `届いていない建物の数と理由が一覧に出る（${await shortage.textContent()}）`,
   );
   // 施設のない網に塗った区画が建たない理由は、500 ミリ秒ごとの overview で届く
-  const growth = page.locator("#growth-notice");
+  const growth = noticeItem("stall");
   await page
     .waitForFunction(
       () =>
         /余裕がなく.*新築が止まっている/.test(
-          document.querySelector<HTMLElement>("#growth-notice")?.textContent ?? "",
+          document.querySelector<HTMLElement>('#notice-list [data-notice="stall"]')?.textContent ??
+            "",
         ),
       undefined,
       {
@@ -1206,16 +1239,34 @@ try {
     )
     .catch(() => undefined);
   check(
-    (await growth.isVisible()) &&
+    (await growth.count()) === 1 &&
       /余裕がなく.*新築が止まっている/.test((await growth.textContent()) ?? ""),
-    `施設のない網の区画が建たない理由が出る（${await growth.textContent()}）`,
+    `施設のない網の区画が建たない理由が一覧に出る（${await growth.textContent()}）`,
+  );
+  const bellCount = Number(await bell.getAttribute("data-count"));
+  check(
+    bellCount >= 2 &&
+      (await page.locator("#notice-count").textContent()) ===
+        String(Math.min(bellCount, 9)) + (bellCount > 9 ? "+" : ""),
+    `鐘の数の印が知らせの数を示す（${bellCount} 件）`,
+  );
+  check(
+    Number(await page.locator("#notice-toast").getAttribute("data-count")) >= 1,
+    "新しい知らせは、小さな札で知らせる",
+  );
+  check(
+    (await page.locator("#notice-panel").isHidden()) &&
+      /知らせ/.test((await bell.getAttribute("aria-label")) ?? ""),
+    "一覧は閉じたままで、画面の上に枠は出ない",
   );
   // 区画が画面の外にあっても、知らせを押せばそこが映る。キーボードで押す
-  const stallButton = growth.locator("button");
+  await openNotices();
+  const stallButton = growth.getByRole("button", { name: /へ移る/ });
   check(
     (await stallButton.count()) === 1 && (await stallButton.isVisible()),
     "知らせに、止まっている区画へ移るボタンが出る",
   );
+  await closeNotices();
   const homeCamera = await mapState();
   await panCameraBy(400, 300);
   const awayCamera = await mapState();
@@ -1223,8 +1274,10 @@ try {
     Math.abs(awayCamera.x - 32) > 200 && Math.abs(awayCamera.y - 32) > 100,
     `区画から遠く離れた（カメラ ${awayCamera.x.toFixed(1)}, ${awayCamera.y.toFixed(1)}）`,
   );
+  await openNotices();
   await stallButton.focus();
   await page.keyboard.press("Enter");
+  await closeNotices();
   await page.waitForFunction(
     () => {
       const d = document.querySelector<HTMLElement>("#map")?.dataset;
@@ -1245,6 +1298,17 @@ try {
     Math.abs(restored.x - homeCamera.x) < 0.2 && Math.abs(restored.y - homeCamera.y) < 0.2,
     `カメラを元の位置へ戻した（${restored.x.toFixed(2)}, ${restored.y.toFixed(2)}）`,
   );
+  // 閉じた知らせは、状態が変わるまで一覧にも数の印にも戻らない
+  await openNotices();
+  const countBeforeClose = Number(await bell.getAttribute("data-count"));
+  await shortage.getByRole("button", { name: "閉じる" }).click();
+  await page.waitForTimeout(1500);
+  check(
+    (await shortage.count()) === 0 &&
+      Number(await bell.getAttribute("data-count")) === countBeforeClose - 1,
+    `閉じた知らせは一覧から消え、数の印も 1 つ減って戻らない（${countBeforeClose} 件から）`,
+  );
+  await closeNotices();
   check((await page.locator("#legend-body li").count()) >= 10, "凡例に区画・建物・印・施設が並ぶ");
   // 電気のデータレイヤーに切り替えると、建物が届いているかどうかの色で塗られる
   const layerPixel = () =>
@@ -1323,9 +1387,7 @@ try {
   await page
     .waitForFunction(
       () => {
-        const el = document.querySelector<HTMLElement>("#growth-notice");
-        // 隠れるときは文を書き換えないので、隠れていれば消えたことにする
-        return el?.hidden === true || !/余裕がなく/.test(el?.textContent ?? "");
+        return document.querySelector('#notice-list [data-notice="stall"]') === null;
       },
       undefined,
       {
@@ -1334,8 +1396,8 @@ try {
     )
     .catch(() => undefined);
   check(
-    !(await growth.isVisible()) || !/余裕がなく/.test((await growth.textContent()) ?? ""),
-    `施設を置いて余裕が戻ると、建たない理由の知らせが消える（${await growth.textContent()}）`,
+    (await growth.count()) === 0,
+    `施設を置いて余裕が戻ると、建たない理由の知らせが一覧から消える（${await growth.count()} 件）`,
   );
   // 道路を消して入口を失った浄水場は、孤立した施設として知らせが出る。押すとそこへ移る。
   // 区画が止まっているかは街の育ち方しだいなので、時計を止めてから確かめる
@@ -1368,22 +1430,25 @@ try {
     .waitForFunction(
       () =>
         document
-          .querySelector<HTMLElement>("#growth-notice")
+          .querySelector<HTMLElement>('#notice-list [data-notice="cut"]')
           ?.textContent?.includes("つながっていない"),
       undefined,
       { timeout: TIMEOUT_MS },
     )
     .catch(() => undefined);
+  const cutNotice = noticeItem("cut");
   check(
-    (await growth.isVisible()) &&
+    (await cutNotice.count()) === 1 &&
       /施設はあるが、街の道路網につながっていない（浄水場 1）/.test(
-        (await growth.textContent()) ?? "",
+        (await cutNotice.textContent()) ?? "",
       ),
-    `つながっていない浄水場の知らせが出る（${await growth.textContent()}）`,
+    `つながっていない浄水場の知らせが一覧に出る（${await cutNotice.textContent()}）`,
   );
-  // 止まっている区画があれば、行き先に先に入る。押すたびに次へ移るので、孤立した施設に着くまで押す
+  // 孤立した施設の知らせには、その施設へ移るボタンがある
   const beforeCutOff = await mapState();
-  await stallButton.focus();
+  await openNotices();
+  const cutButton = cutNotice.getByRole("button", { name: /へ移る/ });
+  await cutButton.focus();
   let atCutOff = beforeCutOff;
   for (let i = 0; i < 8; i++) {
     await page.keyboard.press("Enter");
@@ -1393,6 +1458,7 @@ try {
       break;
     }
   }
+  await closeNotices();
   check(
     Math.abs(atCutOff.x - 53.5) < 8 && Math.abs(atCutOff.y - 13.5) < 8,
     `知らせを押すと、つながっていない浄水場へカメラが動く（カメラ ${atCutOff.x.toFixed(1)}, ${atCutOff.y.toFixed(1)}）`,

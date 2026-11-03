@@ -1,4 +1,10 @@
-import { demandBar, parseCityStats, renderCityStats, setupDemandFactors } from "./city-panel.ts";
+import {
+  demandBar,
+  parseCityStats,
+  renderCityStats,
+  setupDemandFactors,
+  utilityNotices,
+} from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
 import { setupFeedback } from "./feedback.ts";
 import {
@@ -10,12 +16,12 @@ import {
   setupFinance,
 } from "./finance.ts";
 import {
+  growthNotices,
   type LotShortageSince,
   parseGrowthBlocks,
   parseIsolated,
   parseStalls,
   persistedLotShortage,
-  setupGrowthNotice,
   trackLotShortage,
 } from "./growth-notice.ts";
 import { setupHudPanel, trackHeight } from "./hud-panel.ts";
@@ -112,6 +118,7 @@ import {
   upgradeRoadCommand,
 } from "./map/tools.ts";
 import { TrafficLines } from "./map/traffic.ts";
+import { setupNoticeCenter } from "./notice-center.ts";
 import { parseOverview, renderOverview } from "./overview.ts";
 import { createPopovers } from "./popover.ts";
 import {
@@ -246,12 +253,6 @@ const WHEEL_LINE_PIXELS = 16;
 // 開始地点の買ってあるチャンク（-1〜1）の真ん中から見始める
 const camera = new Camera(CHUNK_SIDE / 2, CHUNK_SIDE / 2, 4);
 const store = new ChunkStore();
-// 建たない理由の知らせを押すと、止まっている区画のマスの真ん中へカメラを動かす。拡大率は変えない
-const growthNotice = setupGrowthNotice((x, y) => {
-  camera.x = x + 0.5;
-  camera.y = y + 0.5;
-});
-
 // WebGL2 を使えなくても、時計と操作は動かす
 let mapError: string | null = null;
 function createRenderer(): MapRenderer | null {
@@ -307,6 +308,19 @@ for (const toggle of document.querySelectorAll<HTMLButtonElement>("button[data-m
 }
 popovers.add(element<HTMLElement>("#layers-open"), element<HTMLElement>("#layer-panel"));
 popovers.add(element<HTMLElement>("#finance-toggle"), element<HTMLElement>("#finance"));
+// 警告の知らせは通知センターにまとめる。「移る」を押すと、止まっている区画のマスの真ん中へカメラを動かす。拡大率は変えない
+const noticePopover = popovers.add(
+  element<HTMLElement>("#notice-bell"),
+  element<HTMLElement>("#notice-panel"),
+);
+const noticeCenter = setupNoticeCenter(
+  (x, y) => {
+    camera.x = x + 0.5;
+    camera.y = y + 0.5;
+  },
+  () => noticePopover.open(),
+  () => noticePopover.isOpen(),
+);
 const toolGroups = [...document.querySelectorAll<HTMLButtonElement>("button[data-menu]")].map(
   (toggle) => ({ toggle, menu: element<HTMLElement>(`#menu-${toggle.dataset.menu}`) }),
 );
@@ -328,6 +342,11 @@ const layerPanel = element<HTMLElement>("#layer-panel");
 new MutationObserver(() => {
   document.body.toggleAttribute("data-layers-open", !layerPanel.hidden);
 }).observe(layerPanel, { attributes: true, attributeFilter: ["hidden"] });
+// 通知センターの一覧を開いているあいだも、狭い画面で隅の部品と知らせが重なるので、CSS で隠す
+const noticePanel = element<HTMLElement>("#notice-panel");
+new MutationObserver(() => {
+  document.body.toggleAttribute("data-notices-open", !noticePanel.hidden);
+}).observe(noticePanel, { attributes: true, attributeFilter: ["hidden"] });
 const zoomInButton = element<HTMLButtonElement>("#zoom-in");
 const zoomOutButton = element<HTMLButtonElement>("#zoom-out");
 /** 主題図を画面と Worker に伝える。 */
@@ -1122,6 +1141,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     const stats = parseCityStats(message.stats);
     unsupplied = unsuppliedCount(message.buildings);
     renderCityStats(stats, unsupplied);
+    noticeCenter.set("utility", utilityNotices(stats, unsupplied));
     demand = [...stats.demand];
     updateDemandTheme();
     // test:wasm が読む
@@ -1134,6 +1154,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     // 建物の表が変わらないまま動いた需要と内訳
     const stats = parseCityStats(message.stats);
     renderCityStats(stats, unsupplied);
+    noticeCenter.set("utility", utilityNotices(stats, unsupplied));
     demand = [...stats.demand];
     updateDemandTheme();
     return;
@@ -1148,11 +1169,14 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "overview") {
     renderOverview(parseOverview(message.overview));
     lotShortageSince = trackLotShortage(lotShortageSince, message.lotShortage, message.tick);
-    growthNotice.render(
-      parseGrowthBlocks(message.overview),
-      parseStalls(message.stalls),
-      parseIsolated(message.isolated),
-      persistedLotShortage(lotShortageSince, message.tick),
+    noticeCenter.set(
+      "growth",
+      growthNotices(
+        parseGrowthBlocks(message.overview),
+        parseStalls(message.stalls),
+        parseIsolated(message.isolated),
+        persistedLotShortage(lotShortageSince, message.tick),
+      ),
     );
     return;
   }
