@@ -312,11 +312,13 @@ fn one_batch_larger_than_the_cache_limit_keeps_only_the_limit() {
     let n = grid(6);
     let reqs = requests(&n, 100);
     let want = AstarRouter::new(&n).route_batch(&reqs);
-    let mut router = AstarRouter::new(&n).with_cache_limit(10);
+    // 大きさは経路のリンクの数で数えるので、上限を超える前に一部だけを覚える。
+    let mut router = AstarRouter::new(&n).with_cache_limit(60);
     assert_eq!(router.route_batch(&reqs), want);
-    assert!(router.cached() <= 10);
+    assert!(router.cached() > 0);
+    assert!(router.cached_size() <= 60);
     assert_eq!(router.route_batch(&reqs), want);
-    assert!(router.cached() <= 10);
+    assert!(router.cached_size() <= 60);
 }
 
 #[test]
@@ -445,10 +447,20 @@ proptest! {
             let mut s = Scratch::default();
             for (a, b) in &pairs {
                 let (a, b) = ((a % g.vertex_count()) as u32, (b % g.vertex_count()) as u32);
+                let best = dijkstra(&g, a, b);
                 let r = astar(&g, g.link(a), g.link(b), &mut s);
-                prop_assert_eq!(r.as_ref().map(|r| r.cost), dijkstra(&g, a, b));
+                prop_assert_eq!(r.as_ref().map(|r| r.cost), best);
                 if let Some(r) = r {
                     check_route(&g, &r);
+                }
+                // どの候補も、出発から着くリンクまで辺でつながり、たどって足した費用が最短の費用になる。
+                let vs = astar_variants(&g, g.link(a), g.link(b), &mut s, ROUTE_VARIANTS);
+                prop_assert_eq!(vs.is_some(), best.is_some());
+                for v in vs.iter().flatten() {
+                    prop_assert_eq!(v.links.first(), Some(&g.link(a)));
+                    prop_assert_eq!(v.links.last(), Some(&g.link(b)));
+                    check_route(&g, v);
+                    prop_assert_eq!(Some(v.cost), best);
                 }
             }
             let ends: Vec<(LinkId, LinkId)> = pairs
@@ -586,8 +598,15 @@ fn batch_picks_the_requested_variant_from_one_search() {
         .collect();
     let mut router = AstarRouter::new(&n);
     let got = router.route_batch(&reqs);
-    // 候補は 1 つの鍵にまとめて覚える。
+    // 候補は 1 つの鍵にまとめて覚える。大きさは、鍵の 1 に、共有した経路を 1 回だけ数えたリンクの数を足したもの。
     assert_eq!(router.cached(), 1);
+    let mut distinct: Vec<&Vec<LinkId>> = got.iter().flatten().map(|r| &r.links).collect();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(
+        router.cached_size(),
+        1 + distinct.iter().map(|l| l.len()).sum::<usize>()
+    );
     let want = astar_variants(
         router.graph(LaneMode::Car),
         from,

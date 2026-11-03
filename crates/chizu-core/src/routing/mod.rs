@@ -43,8 +43,13 @@ pub const DEFAULT_BUNDLE_MIN: usize = 4;
 #[cfg(feature = "parallel")]
 const PARALLEL_EXTRACT_MIN: usize = 256;
 
-/// 覚えておく結果の数の既定の上限。超えそうになったら、新しい結果を入れる前に全部捨てる。
-pub const DEFAULT_CACHE_LIMIT: usize = 1 << 18;
+/// 覚えておく結果の大きさの既定の上限。経路のリンクの数の和で数え、鍵ごとに 1 を足す。共有した経路は 1 回だけ数える。
+/// 超えそうになったら、新しい結果を入れる前に全部捨てる。鍵の数で数えないのは、車の鍵が最大で
+/// [`ROUTE_VARIANTS`] 本の経路を持ち、鍵あたりの大きさが鍵によって大きく違うためである。
+pub const DEFAULT_CACHE_LIMIT: usize = 1 << 22;
+
+/// 経路があるかを覚える数の上限。超えそうになったら、先に全部捨てる。
+const REACH_LIMIT: usize = 1 << 18;
 
 /// 車の経路の、費用の同じ経路から選ぶ候補の数。
 pub const ROUTE_VARIANTS: u8 = 8;
@@ -88,6 +93,18 @@ struct Key {
 
 /// 1 つの鍵の、候補の順に並べた経路。同じ経路は 1 つを共有する。
 type Variants = Arc<[Arc<Route>]>;
+
+/// 覚えた 1 つの結果の大きさ。鍵ごとの 1 に、持っている経路のリンクの数を足す。共有した経路は 1 回だけ数える。
+fn size_of_entry(v: &Option<Variants>) -> usize {
+    let routes = v.as_deref().unwrap_or_default();
+    let links: usize = routes
+        .iter()
+        .enumerate()
+        .filter(|(i, r)| !routes[..*i].iter().any(|o| Arc::ptr_eq(o, r)))
+        .map(|(_, r)| r.links.len())
+        .sum();
+    1 + links
+}
 
 /// 候補の順に並べた経路から [`Variants`] を作る。
 fn share(routes: Vec<Route>) -> Variants {
@@ -140,6 +157,8 @@ pub struct AstarRouter {
     bundle_min: usize,
     cache_limit: usize,
     cache: BTreeMap<Key, Option<Variants>>,
+    /// `cache` の大きさ（[`DEFAULT_CACHE_LIMIT`] と同じ数え方）。
+    cache_size: usize,
     /// 車のグラフの費用に足している遅れ。グラフを作り直しても引き継ぐ。
     delays: Delays,
     /// 2 点のあいだに経路があるか。費用によらないので、遅れが変わっても捨てず、網を作り直すまで覚える。
@@ -179,6 +198,7 @@ impl AstarRouter {
             bundle_min: DEFAULT_BUNDLE_MIN,
             cache_limit: DEFAULT_CACHE_LIMIT,
             cache: BTreeMap::new(),
+            cache_size: 0,
             delays: Delays::default(),
             reach: BTreeMap::new(),
         })
@@ -210,7 +230,7 @@ impl AstarRouter {
         self
     }
 
-    /// 覚えておく結果の数の上限を変える。
+    /// 覚えておく結果の大きさの上限を変える。数え方は [`DEFAULT_CACHE_LIMIT`] と同じである。
     pub fn with_cache_limit(mut self, n: usize) -> AstarRouter {
         self.cache_limit = n;
         self
@@ -240,6 +260,7 @@ impl AstarRouter {
         self.delays.clone_from(delays);
         self.car.set_delays(delays);
         self.cache.retain(|r, _| r.mode != LaneMode::Car);
+        self.cache_size = self.cache.values().map(size_of_entry).sum();
     }
 
     /// 手段 `mode` で、リンク `from` の終わりからリンク `to` へ必ず経路があると言えるか。
@@ -255,7 +276,7 @@ impl AstarRouter {
 
     /// `key` の 2 点のあいだに経路があるかを覚える。上限を超えそうなら、先に全部捨てる。
     pub fn remember_reach(&mut self, key: ReachKey, found: bool) {
-        if self.reach.len() >= self.cache_limit {
+        if self.reach.len() >= REACH_LIMIT {
             self.reach.clear();
         }
         self.reach.insert(key, found);
@@ -269,6 +290,11 @@ impl AstarRouter {
     /// 覚えている結果の数。
     pub fn cached(&self) -> usize {
         self.cache.len()
+    }
+
+    /// 覚えている結果の大きさ。数え方は [`DEFAULT_CACHE_LIMIT`] と同じである。
+    pub fn cached_size(&self) -> usize {
+        self.cache_size
     }
 
     /// 依頼を解く単位に分ける。手段ごとに、着くリンクと出発のリンクのどちらで束ねるかを決め、
@@ -407,6 +433,7 @@ impl Router for AstarRouter {
         if band != self.band {
             self.band = band;
             self.cache.clear();
+            self.cache_size = 0;
         }
     }
 
@@ -440,12 +467,20 @@ impl Router for AstarRouter {
                 Some(v[usize::from(r.variant) % v.len()].clone())
             })
             .collect();
-        if self.cache.len() + fresh.len() > self.cache_limit {
+        let fresh_size: usize = fresh.values().map(size_of_entry).sum();
+        if self.cache_size + fresh_size > self.cache_limit {
             self.cache.clear();
+            self.cache_size = 0;
         }
-        // 1 回の一括だけで上限を超えるときは、鍵の順で上限までを覚え、残りは捨てる。
-        let room = self.cache_limit.saturating_sub(self.cache.len());
-        self.cache.extend(fresh.into_iter().take(room));
+        // 1 回の一括だけで上限を超えるときは、鍵の順で上限に収まるところまでを覚え、残りは捨てる。
+        for (k, v) in fresh {
+            let n = size_of_entry(&v);
+            if self.cache_size + n > self.cache_limit {
+                break;
+            }
+            self.cache_size += n;
+            self.cache.insert(k, v);
+        }
         out
     }
 }

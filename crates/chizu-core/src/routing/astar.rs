@@ -1,8 +1,9 @@
 //! 最短経路の探索。1 対 1 の A* と、根を共有する依頼をまとめて解く 1 対多のダイクストラ。
 //!
-//! 費用の同じ最短経路がいくつあっても、どの解き方でも同じ経路を返す。1 回の探索から、候補（variant）ごとに
-//! 1 本ずつ取り出す。候補 `k` の経路は、出発のリンクから進むたびに、最短経路を続けられる辺のうち
-//! [`Graph::rank`] のいちばん小さいものを選んだものである。順は候補と行き先の直線だけで決まるので、
+//! 費用の同じ最短経路がいくつあっても、どの解き方でも同じ経路を返す。候補の数が 1 なら、最短経路のうち、
+//! 出発のリンクから順に頂点の番号を比べていちばん小さいものを返す。候補が 2 つ以上なら、1 回の探索から
+//! 候補（variant）ごとに 1 本ずつ取り出す。候補 `k` の経路は、出発のリンクから進むたびに、最短経路を続けられる
+//! 辺のうち [`Graph::rank`] のいちばん小さいものを選んだものである。どちらの選び方も頂点と候補だけで決まるので、
 //! どの依頼を束ねたかや、覚えた結果があったかで経路が変わらない。
 
 use core::cmp::Reverse;
@@ -230,23 +231,27 @@ fn walk_all(
     variants: u8,
     tight: impl Fn(u32, &Edge) -> bool,
 ) -> Option<Vec<Route>> {
-    let (first, branched) = walk(g, src, dst, cost, 0, 0, &tight);
+    if variants == 1 {
+        return Some(vec![walk(g, src, dst, cost, None, 0, &tight).0]);
+    }
+    let (first, branched) = walk(g, src, dst, cost, Some(0), 0, &tight);
     let len = first.links.len();
     let mut out = vec![first];
     if branched {
-        out.extend((1..variants).map(|k| walk(g, src, dst, cost, k, len, &tight).0));
+        out.extend((1..variants).map(|k| walk(g, src, dst, cost, Some(k), len, &tight).0));
     }
     Some(out)
 }
 
 /// `src` から、最短経路を続けられる辺のうち、候補 `variant` での行き先の順がいちばん小さいものを選んで進む。
-/// 順が同じなら、行き先の番号の小さいものを選ぶ。最短経路が途中で分かれたかも返す。`capacity` は経路のリンクの数の見込みである。
+/// 順が同じなら、行き先の番号の小さいものを選ぶ。`variant` が `None` なら、散らさずに行き先の番号の小さいものを選ぶ。
+/// 最短経路が途中で分かれたかも返す。`capacity` は経路のリンクの数の見込みである。
 fn walk(
     g: &Graph,
     src: u32,
     dst: u32,
     cost: u64,
-    variant: u8,
+    variant: Option<u8>,
     capacity: usize,
     tight: &impl Fn(u32, &Edge) -> bool,
 ) -> (Route, bool) {
@@ -255,6 +260,17 @@ fn walk(
     let mut u = src;
     let mut branched = false;
     while u != dst {
+        let Some(variant) = variant else {
+            // 辺は行き先の番号の順に並ぶので、最初に見つかった辺の行き先がいちばん小さい。
+            u = g
+                .edges(u)
+                .iter()
+                .find(|e| tight(u, e))
+                .expect("最短経路が続かない")
+                .to;
+            links.push(g.link(u));
+            continue;
+        };
         let mut next: Option<(u32, Option<u64>)> = None;
         for e in g.edges(u).iter().filter(|e| tight(u, e)) {
             next = Some(match next {
@@ -279,7 +295,7 @@ fn walk(
 
 /// `from` から `to` への費用の最も小さい経路。つながっていないか、どちらかのリンクがグラフにないときは `None`。
 ///
-/// 費用の同じ経路があれば、候補 0 の経路を返す。
+/// 費用の同じ経路があれば、頂点の番号を順に比べていちばん小さいものを返す。
 ///
 /// 待ち行列は（推定の総費用、残りの推定、頂点の番号）の小さい順に取り出す。
 pub fn astar(g: &Graph, from: LinkId, to: LinkId, s: &mut Scratch) -> Option<Route> {
@@ -360,7 +376,7 @@ pub(crate) fn extract(
     }
 }
 
-/// 根 `root` を共有する依頼をまとめて解き、`others` の順に結果を返す。費用の同じ経路があれば、候補 0 の経路を返す。
+/// 根 `root` を共有する依頼をまとめて解き、`others` の順に結果を返す。費用の同じ経路があれば、頂点の番号を順に比べていちばん小さいものを返す。
 ///
 /// `Forward` なら `root` は出発のリンクで `others` は着くリンク、`Backward` なら `root` は着くリンクで
 /// `others` は出発のリンクである。`others` がすべて閉じたところで止める。
