@@ -16,7 +16,7 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 
 1. 作業は、マネージャーが用意した worktree の中で行う。すでに worktree の中にいるので、新しく worktree を作らず、本体のディレクトリにも移らない。`git worktree add` と `gwq` は使わない。
 2. 作業の途中は、変えたところに絞って確かめる。`mise run test` と `mise run lint` は WASM の LTO を含む重いビルドを何本も回すので、PR を作る直前に 1 回だけ回し、両方が通ることを確かめる。
-   - Rust：`mise run cargo -- test -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ
+   - Rust：`mise run cargo -- nextest run -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ
    - 画面：`mise run test:web`、`mise run lint:web`
    - WASM の境目や描画を変えたときだけ：`mise run test:wasm`
 3. コミットメッセージは日本語で書き、末尾に `Co-Authored-By:` の行を付ける。
@@ -37,10 +37,10 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 mise run test          # テストをすべて回す
 mise run lint          # 静的検査をすべて回す
 mise run cargo -- ...  # mise の環境（sccache を含む）で cargo を回す
-mise run test:rust     # cargo test --workspace
+mise run test:rust     # cargo nextest run --workspace。doctest は回さない
 mise run lint:md       # markdown の検査（rumdl）
 mise run lint:actions  # ワークフローの検査（jactionlint）
-mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core と chizu-scenario の浮動小数点の検査
+mise run lint:rust     # cargo fmt --check、cargo clippy、chizu-core と chizu-scenario の浮動小数点の検査、doctest がないことの検査
 mise run lint:wasm     # wasm32 のターゲットで chizu-wasm に cargo clippy
 mise run lint:web      # Biome と tsc --noEmit
 mise run test:web      # Vitest
@@ -61,6 +61,9 @@ mise run bench:wasm    # スレッドつきの WASM をヘッドレスの Chrome
 1 つの置き場所で動かせるのは 1 つだけで、2 つ動かすときは `CHIZU_PLAY_DIR` とポートを変える。
 
 `test` と `lint` は、`test:*` と `lint:*` のタスクを束ねたものである。CI はそれぞれを別のジョブで呼ぶ。
+
+test:rust は nextest で回すので、doctest は回らない。`cargo test --workspace --doc` は cdylib と bin のクレートを外してビルドするので、依存まで別の成果物になり、ビルドし直しになる。
+そのため、いまは doctest を置かず、lint:rust の `scripts/check-no-doctest.sh` で doctest になるコードのブロックを断る。doctest を足すときは、test:rust に `cargo test --workspace --doc` を足し、この検査を外す。
 
 手元の cargo は、`mise.toml` の `RUSTC_WRAPPER` で sccache を通す。この設定は mise のタスクの中でだけ確実に効くので、cargo は `mise run cargo` から呼ぶ。worktree ごとに `target/` は分かれるが、依存のクレートと build-std の std はキャッシュから取り出す。
 CI では `CI` が立っているので sccache を通さない。キャッシュの当たり具合は `sccache --show-stats` で見られる。

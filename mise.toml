@@ -9,6 +9,8 @@ idiomatic_version_file_enable_tools = ["rust"]
 RUSTC_WRAPPER = "{% if get_env(name='CI', default='') == '' %}sccache{% endif %}"
 
 [tools]
+# test:rust でテストを回す
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.149"
 biome = "2.6.4"
 jactionlint = "2.4.0"
 node = "26.13.0"
@@ -43,6 +45,7 @@ run = [
   "cargo clippy --workspace --all-targets -- -D warnings",
   "scripts/check-no-float.sh crates/chizu-core/src",
   "scripts/check-no-float.sh crates/chizu-scenario/src",
+  "scripts/check-no-doctest.sh",
 ]
 
 [tasks."lint:wasm"]
@@ -70,7 +73,10 @@ description = "mise の環境で cargo を回す。shell に mise の [env] が�
 run = "cargo"
 
 [tasks."test:rust"]
-run = "cargo test --workspace"
+# cargo test はテストのバイナリを 1 本ずつ順に回すので、長いテストを持つバイナリが続くと待ちが積み重なる。
+# nextest はバイナリをまたいでテストを並べて回す。
+# nextest は doctest を回さない。いまは doctest がないので、lint:rust の scripts/check-no-doctest.sh で、足したら気づけるようにしている
+run = "cargo nextest run --workspace"
 
 [tasks."test:web"]
 depends = ["install:web"]
