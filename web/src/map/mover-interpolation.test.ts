@@ -101,38 +101,39 @@ describe("MoverInterpolator", () => {
 
   it("速度の値ではなく、tick が届いた時刻の差から区間を測る", () => {
     const i = new MoverInterpolator();
-    // header.speed は 1 のまま、Worker が間引いて 133ms ごとに tick が届く（#102 の 0.25 倍）
+    // header.speed は 6 倍（公称 33ms）だが、重くて 133ms ごとにしか tick が届かない
     for (let k = 0; k < 6; k++) {
-      run(i, k * 133, 10 + k, [{ id: 1, x: k * 10, y: 0 }]);
+      run(i, k * 133, 10 + k, [{ id: 1, x: k * 10, y: 0 }], { speed: 6 });
     }
-    const mid = run(i, 5 * 133 + 133 / 2, 15, [{ id: 1, x: 50, y: 0 }]).get(1)?.x ?? 0;
+    const mid =
+      run(i, 5 * 133 + 133 / 2, 15, [{ id: 1, x: 50, y: 0 }], { speed: 6 }).get(1)?.x ?? 0;
     expect(mid).toBeGreaterThan(44);
     expect(mid).toBeLessThan(46);
   });
 
-  it("速度が切り替わったら、測り直して追いつく", () => {
+  it("6 倍から 1 倍へ落としたら、測り直して追いつく", () => {
     const i = new MoverInterpolator();
     for (let k = 0; k < 6; k++) {
-      run(i, k * 33.3, 10 + k, [{ id: 1, x: k * 10, y: 0 }]);
+      run(i, k * 33.3, 10 + k, [{ id: 1, x: k * 10, y: 0 }], { speed: 6 });
     }
     let t = 5 * 33.3;
     let x = 50;
     for (let k = 6; k < 14; k++) {
-      t += 133;
+      t += 200;
       x += 10;
       run(i, t, 10 + k, [{ id: 1, x, y: 0 }]);
     }
-    const mid = run(i, t + 66.5, 23, [{ id: 1, x, y: 0 }]).get(1)?.x ?? 0;
+    const mid = run(i, t + 100, 23, [{ id: 1, x, y: 0 }]).get(1)?.x ?? 0;
     expect(mid).toBeGreaterThan(x - 6);
     expect(mid).toBeLessThan(x - 4);
   });
 
   // 1 フレーム 16.7ms の画面で、tick が interval ごとに届くとき、位置が止まらず跳ばずに進むか
   describe.each([
-    ["0.25 倍（133ms ごと）", 133],
-    ["0.5 倍（67ms ごと）", 67],
-    ["1 倍（33ms ごと）", 33.3],
-    ["間隔の揺れる 1 倍", 33.3],
+    ["1 倍（200ms ごと）", 200],
+    ["間隔の揺れる 1 倍", 200],
+    ["6 倍（33ms ごと）", 33.3],
+    ["間隔の揺れる 6 倍", 33.3],
   ])("%s", (name, interval) => {
     it("位置が止まらず、跳ばずに進む", () => {
       const frameMs = 1000 / 60;

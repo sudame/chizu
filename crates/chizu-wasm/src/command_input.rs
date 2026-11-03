@@ -48,7 +48,12 @@ impl fmt::Display for InputError {
             InputError::NotObject => write!(f, "コマンドがオブジェクトでない"),
             InputError::MissingKind => write!(f, "コマンドに文字列の kind がない"),
             InputError::UnknownKind(kind) => write!(f, "知らないコマンド {kind}"),
-            InputError::BadSpeed => write!(f, "速度は 1 から 48 までの整数で指定する"),
+            InputError::BadSpeed => write!(
+                f,
+                "速度は {} から {} までの整数で指定する",
+                SimSpeed::NORMAL.multiplier(),
+                SimSpeed::MAX.multiplier()
+            ),
             InputError::BadInteger(name) => write!(f, "{name} が範囲の中の整数でない"),
             InputError::BadRoadKind => write!(f, "road は Small、Medium、Large のどれかで指定する"),
             InputError::BadService => write!(f, "service は PowerPlant か WaterPump で指定する"),
@@ -309,7 +314,7 @@ mod tests {
     #[test]
     fn accepts_set_sim_speed() {
         assert_eq!(
-            speed(Field::Number(48.0)),
+            speed(Field::Number(288.0)),
             Ok(Command::SetSimSpeed {
                 speed: SimSpeed::MAX
             })
@@ -350,7 +355,7 @@ mod tests {
             Field::Text("4".into()),
             Field::Other,
             Field::Number(0.0),
-            Field::Number(49.0),
+            Field::Number(289.0),
             Field::Number(4.5),
             Field::Number(-1.0),
             Field::Number(f64::NAN),

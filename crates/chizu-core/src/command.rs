@@ -10,6 +10,7 @@
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
+use crate::clock::TICKS_PER_SECOND_AT_NORMAL_SPEED;
 use crate::network::{Line, MAX_ROAD_TILES};
 use crate::tile::{ChunkCoord, TilePos, TileRect, WORLD_LIMIT};
 use crate::zone::{MAX_ZONE_SIDE, rect_size};
@@ -155,9 +156,9 @@ pub struct SimSpeed(u16);
 impl SimSpeed {
     pub const NORMAL: SimSpeed = SimSpeed(1);
     /// 最高速。1 日を 5 秒で回す。
-    pub const MAX: SimSpeed = SimSpeed(48);
+    pub const MAX: SimSpeed = SimSpeed(288);
 
-    /// 等速の `multiplier` 倍。`1..=48` の外なら `None`。
+    /// 等速の `multiplier` 倍。`1..=288` の外なら `None`。
     pub fn new(multiplier: u16) -> Option<SimSpeed> {
         (SimSpeed::NORMAL.0..=SimSpeed::MAX.0)
             .contains(&multiplier)
@@ -166,6 +167,11 @@ impl SimSpeed {
 
     pub fn multiplier(self) -> u16 {
         self.0
+    }
+
+    /// 実時間の 1 秒で進める tick 数。
+    pub fn ticks_per_second(self) -> u32 {
+        u32::from(self.0) * TICKS_PER_SECOND_AT_NORMAL_SPEED
     }
 }
 
@@ -374,6 +380,23 @@ mod tests {
             | ZoneKind::Office => 4,
         };
         assert_eq!(ZoneKind::ALL.len(), count(ZoneKind::Office));
+    }
+
+    #[test]
+    fn sim_speed_spans_one_day_in_24_minutes_to_5_seconds() {
+        use crate::clock::TICKS_PER_DAY;
+        assert_eq!(SimSpeed::NORMAL.ticks_per_second(), 5);
+        assert_eq!(
+            TICKS_PER_DAY / u64::from(SimSpeed::NORMAL.ticks_per_second()),
+            24 * 60
+        );
+        assert_eq!(SimSpeed::MAX.ticks_per_second(), 1_440);
+        assert_eq!(
+            TICKS_PER_DAY / u64::from(SimSpeed::MAX.ticks_per_second()),
+            5
+        );
+        assert_eq!(SimSpeed::new(0), None);
+        assert_eq!(SimSpeed::new(289), None);
     }
 
     #[test]

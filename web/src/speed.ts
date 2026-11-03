@@ -1,37 +1,39 @@
 /**
- * 1 倍より遅い速度は、中核の速度を 1 のままにして、Worker が tick を進める頻度だけを落として作る。
- * 記録に残るのは整数の速度だけなので、状態ハッシュと保存の形式は変わらない。
+ * 速さの段は、等速の何倍かで持つ。1 倍は 1 秒に TICKS_PER_SECOND tick で、1 日（7,200 tick）を 24 分で回す。
+ * 帯に出す段と、詳細の欄に出す段を合わせて、1 日 24 分（1 倍）から 5 秒（288 倍）までを分ける。
  */
 
-export interface SplitSpeed {
-  /** 中核に渡す速度（SetSimSpeed）。 */
-  core: number;
-  /** Worker が tick を進める頻度にかける倍率。1 以下。 */
-  pace: number;
-}
+/** 帯に出す速さ。眺める（1 日 24 分）、ふつうに遊ぶ（4 分）、早送り（30 秒）。 */
+export const BAR_SPEEDS = [1, 6, 48] as const;
+/** 詳細の欄に出す速さ。最高速（1 日 5 秒）。chizu-core の SimSpeed::MAX と同じ。 */
+export const EXTRA_SPEEDS = [288] as const;
 
-/** 画面で選んだ倍率を、中核の速度と Worker の倍率に分ける。 */
-export function splitSpeed(speed: number): SplitSpeed {
-  return speed < 1 ? { core: 1, pace: speed } : { core: speed, pace: 1 };
-}
-
-/** 画面に出す倍率。遅くしているあいだは中核の速度が 1 なので、Worker の倍率のほうを出す。 */
-export function shownSpeed(core: number, pace: number): number {
-  return pace < 1 ? pace : core;
+/**
+ * どの段にも当たらない速さ（前の帯の 4 倍や 16 倍で保存した記録など）を、1 秒あたりの tick 数の比が
+ * いちばん近い段にそろえる。段にあればそのまま返す。
+ */
+export function nearestSpeed(speed: number): number {
+  let best: number = BAR_SPEEDS[0];
+  for (const step of [...BAR_SPEEDS, ...EXTRA_SPEEDS]) {
+    if (Math.abs(Math.log(speed / step)) < Math.abs(Math.log(speed / best))) {
+      best = step;
+    }
+  }
+  return best;
 }
 
 export function describeSpeed(speed: number): string {
   return `速度 ${speed} 倍`;
 }
 
-/** 1 秒に進める tick 数。中核の速度と、1 倍より遅くする倍率の積。 */
-export function tickRate(perSecond: number, coreSpeed: number, pace: number): number {
-  return perSecond * coreSpeed * pace;
+/** 1 秒に進める tick 数。 */
+export function tickRate(perSecond: number, speed: number): number {
+  return perSecond * speed;
 }
 
 /**
  * 1 フレームぶんの tick 数を決める。budget は端数の持ち越しで、1 に満たないフレームは 0 tick になる。
- * 60 フレーム毎秒で、1 倍は 2 フレームに 1 tick、0.5 倍は 4 フレームに 1 tick、0.25 倍は 8 フレームに 1 tick 進む。
+ * 60 フレーム毎秒で、1 倍は 12 フレームに 1 tick 進む。
  */
 export function stepBudget(
   budget: number,
