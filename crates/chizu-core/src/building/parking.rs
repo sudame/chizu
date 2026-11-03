@@ -307,29 +307,38 @@ mod tests {
 
     #[test]
     fn the_layout_holds_together_for_every_lot() {
+        // 区画に建つのは 1 辺 4 マスまでだが、式が大きさによらず崩れないことを 6 マスまで確かめる。
         for zone in ZoneKind::ALL {
-            for w in 1..=4 {
-                for h in 1..=4 {
-                    for level in 1..=crate::building::MAX_LEVEL {
-                        let b = building(zone, (w, h), level);
-                        let l = b.parking_layout();
-                        assert_eq!(b.parking_spaces(), l.total());
-                        assert_eq!(l.total(), l.needed);
-                        assert!(l.total() > 0, "{zone:?} {w}×{h} の段階 {level}");
-                        match l.cut {
-                            ParkingCut::None => assert_eq!(l.surface, 0),
-                            FrontStrip { slots } => {
-                                assert!(b.tile_count() <= 2);
-                                assert_eq!(slots, l.surface);
-                            }
-                            Side { columns, tiles } => {
-                                assert!(b.tile_count() >= 3);
-                                assert!(tiles * 3 <= b.tile_count());
-                                assert!(l.surface <= tiles * SLOTS_PER_TILE);
-                                assert!(l.surface > (tiles - 1) * SLOTS_PER_TILE);
-                                assert!(columns <= w as u64);
-                                assert!(tiles <= columns * h as u64);
-                                assert!(tiles > (columns - 1) * h as u64);
+            for w in 1..=6_i64 {
+                for h in 1..=6_i64 {
+                    for road in [(0, -1), (0, 1), (1, 0), (-1, 0)] {
+                        for level in 1..=crate::building::MAX_LEVEL {
+                            let mut b = building(zone, (w, h), level);
+                            b.toward_road = road;
+                            let at = format!("{zone:?} {w}×{h} {road:?} の段階 {level}");
+                            let (w, h) = (w.unsigned_abs(), h.unsigned_abs());
+                            let (frontage, depth) = if road.0 == 0 { (w, h) } else { (h, w) };
+                            let l = b.parking_layout();
+                            assert_eq!(b.parking_spaces(), l.total(), "{at}");
+                            assert_eq!(l.total(), l.needed, "{at}");
+                            assert!(l.total() > 0, "{at}");
+                            match l.cut {
+                                ParkingCut::None => panic!("縦か横の道路なのに切り欠かない：{at}"),
+                                FrontStrip { slots } => {
+                                    assert!(b.tile_count() <= 2, "{at}");
+                                    assert_eq!(slots, l.surface, "{at}");
+                                    assert!(slots <= frontage * SLOTS_PER_TILE, "{at}");
+                                }
+                                Side { columns, tiles } => {
+                                    assert!(b.tile_count() >= 3, "{at}");
+                                    assert!(tiles * 3 <= b.tile_count(), "{at}");
+                                    assert!(l.surface <= tiles * SLOTS_PER_TILE, "{at}");
+                                    assert!(l.surface > (tiles - 1) * SLOTS_PER_TILE, "{at}");
+                                    // 列は間口に沿って並び、1 列は奥行きぶんのマスを持つ。
+                                    assert!(columns <= frontage, "{at}");
+                                    assert!(tiles <= columns * depth, "{at}");
+                                    assert!(tiles > (columns - 1) * depth, "{at}");
+                                }
                             }
                         }
                     }

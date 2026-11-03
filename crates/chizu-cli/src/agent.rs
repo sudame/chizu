@@ -24,7 +24,8 @@ use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
     CommuteDistances, DayTraffic, DenyReason, GameTime, Heading, Line, MigrationOutlook,
-    NodeControl, ServiceKind, TilePos, TileRect, Traffic, World, ZoneKind, replay,
+    NodeControl, ParkingTally, Rescues, ServiceKind, TilePos, TileRect, Traffic, World, ZoneKind,
+    replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -102,9 +103,15 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  fullLots 満車の駐車場の数。
                  台数は建物の種類、大きさ、段階から決まる。住宅の段階 1〜2 は世帯の数、段階 3〜5 は世帯の数の 0.7 倍、
                  商業と工業は職場の数、オフィスは職場の数の 0.5 倍（端数は切り上げ）。
-                 redirectedCars 行き先の建物の駐車場が満車で、16 マスの中のほかの建物の駐車場へ回されている、いま移動中の車。
-                 行き先の近くがどこも満車なら、車では行かずに歩く。fullLots や redirectedCars が多いのは、駐車場が足りない
-                 ということである。
+                 redirectedCars いま移動中の車のうち、16 マスの中のほかの建物の駐車場へ停めに向かっている車。行き先の建物の
+                 駐車場が満車のときのほか、そこへ車か歩きで届かないときも、近くのほかの駐車場に回る。
+                 次の 3 つは始まりからの積み上げで、日ごとの数は 2 つの observe の差で求める。
+                 drives 車で走り始めた移動の数、parkedElsewhere そのうちほかの建物の駐車場に回った数（redirectedCars と同じ決まり）、
+                 lotsFull 行き先の近くの駐車場がどこも満車で、車で向かうのをやめた数（やめた移動は、歩けるなら歩く）。
+                 fullLots、redirectedCars、lotsFull が多いのは、駐車場が足りないということである。
+  traffic.rescues 詰まりをほどく救済の、始まりからの積み上げ。teleported 止まったままの車を行き先に着いたことにした数、
+                 walkedInstead 車線に出られないまま待ち続けた車を、歩く移動に切り替えた数、
+                 passedStuck 交差点の中で止まった車を無視して入った数。
   commute        通勤の距離の分布。職のある住民の、家から職場までの出入口の直線距離（道のりではない）で数える。
                  commuters 数えた住民、medianMeters 中央値（m）、under500m 500m 未満、from500mTo1km 500m 以上 1km 未満、
                  from1km 1km 以上の人数。職のない住民は数えない。住民は職のない間、家から近い空きのある職場を選ぶので、
@@ -772,8 +779,18 @@ fn traffic(world: &World, before: &CarSample) -> Value {
             None => {}
         }
     }
+    let Rescues {
+        passed_stuck,
+        teleported,
+        walked_instead,
+    } = world.trips().rescues();
     json!({
         "cars": cars(world, before),
+        "rescues": {
+            "teleported": teleported,
+            "walkedInstead": walked_instead,
+            "passedStuck": passed_stuck,
+        },
         "walkers": {"atCrosswalks": crosswalks, "midblock": midblock},
         "trips": {
             "inProgress": world.trips().len(),
@@ -861,6 +878,12 @@ fn parking(world: &World) -> Value {
         z.reserved += u64::from(lot.reserved);
         z.full += u64::from(layout.total() > 0 && used >= layout.total());
     }
+    // 中核に欄が足されたらここで止まり、observe に出すかを決められるよう、`..` なしで分解する。
+    let tally @ ParkingTally {
+        drives: _,
+        parked_elsewhere: _,
+        lots_full: _,
+    } = world.trips().parking_tally();
     let redirected = world
         .trips()
         .iter()
@@ -880,6 +903,9 @@ fn parking(world: &World) -> Value {
             })
         }),
         "redirectedCars": redirected,
+        "drives": tally.drives,
+        "parkedElsewhere": tally.parked_elsewhere,
+        "lotsFull": tally.lots_full,
     })
 }
 

@@ -43,7 +43,8 @@ use rayon::prelude::*;
 pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
 pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, OWNER_DRIVE_MIN_MM};
 pub use congestion::{Congestion, classify as classify_congestion};
-pub use parking::{Lot, PARK_RADIUS, building_spot};
+pub use junction::Rescues;
+pub use parking::{Lot, PARK_RADIUS, ParkingTally, building_spot};
 pub use pos::SidewalkPos;
 
 use crate::command::NodeId;
@@ -550,6 +551,8 @@ pub struct Trips {
     commuters: commute::Commuters,
     /// 交差点の詰まりをほどく救済が働いた回数。状態ハッシュには入れない。
     rescues: junction::Rescues,
+    /// 車で向かおうとした移動の、駐車場の決まり方の数。状態ハッシュには入れない。
+    parking_tally: parking::ParkingTally,
     /// 直前の `step` と `reroute` で消えた移動の結果。状態ハッシュには入れない。
     finished: BTreeMap<TripId, Finished>,
     /// 直前の `step` の信号を決めた様子。画面に灯火を出すために控える。状態ハッシュには入れない。
@@ -845,8 +848,7 @@ impl Trips {
     }
 
     /// 交差点の詰まりをほどく救済が働いた回数。
-    #[cfg(test)]
-    pub(crate) fn rescues(&self) -> junction::Rescues {
+    pub fn rescues(&self) -> Rescues {
         self.rescues
     }
 
