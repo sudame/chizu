@@ -836,7 +836,15 @@ fn residential_lots_take_only_their_own_residents() {
         let (net, router) = (&s.net, &mut s.router);
         let id = s
             .trips
-            .spawn_drive_taking(net, router, &s.buildings, (work, house), None, home, Tick::ZERO)
+            .spawn_drive_taking(
+                net,
+                router,
+                &s.buildings,
+                (work, house),
+                None,
+                home,
+                Tick::ZERO,
+            )
             .unwrap();
         s.trips.get(id).unwrap().parking_lot().unwrap()
     };
@@ -885,7 +893,10 @@ fn a_household_shares_one_car() {
         matches!(t.then, Then::Drive { .. })
     };
     // 同じ世帯の 2 人が同時に出ると、先の 1 人だけが車に乗り、もう 1 人は歩く。
-    let out = start(&mut s, &[request(0, (home, work)), request(1, (home, work))]);
+    let out = start(
+        &mut s,
+        &[request(0, (home, work)), request(1, (home, work))],
+    );
     assert!(drives(&s, out[0]));
     assert!(!drives(&s, out[1]), "2 台目の車に乗った");
     assert_eq!(s.trips.parking_tally().no_car, 1);

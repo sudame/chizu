@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use chizu_core::movement::signal;
 
 use chizu_core::{
-    Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, Heading, HouseholdCar, LaneMode,
-    LaneOffset, Money, RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind,
+    Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, Heading, HouseholdCar,
+    LaneMode, LaneOffset, Money, RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind,
     SidewalkPos, SimSpeed, StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind,
     replay, rng,
 };

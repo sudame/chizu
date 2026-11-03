@@ -92,10 +92,7 @@ impl Commuters {
         if *car != HouseholdCar::InUse(trip) {
             return false;
         }
-        *car = HouseholdCar::Parked {
-            lot,
-            by: c.citizen,
-        };
+        *car = HouseholdCar::Parked { lot, by: c.citizen };
         true
     }
 
