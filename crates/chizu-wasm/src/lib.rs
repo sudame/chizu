@@ -310,8 +310,8 @@ impl Simulation {
         self.0.publish();
     }
 
-    /// 前に呼んでから新しく求めた、車を描く道筋。先頭は前の道筋を忘れたか（忘れたら 1）と道筋の数で、
-    /// 道筋ごとに、番号、点の数、点ごとの x、y（マス）、始まりからの長さ（マス）、向き（ラジアン）が続く。
+    /// 前に呼んでから新しく求めた、車を描く道筋と、忘れた道筋の番号。並びは `car_path::Paths::take` の
+    /// とおりである。
     pub fn take_mover_paths(&mut self) -> Vec<f64> {
         self.0.take_mover_paths()
     }

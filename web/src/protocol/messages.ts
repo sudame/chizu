@@ -202,9 +202,10 @@ export type WorkerToMain =
   /** 道路網の形。網が変わったときだけ、全体を送り直す。配列は移譲して送る。 */
   | { kind: "roads"; revision: number; segments: Float64Array; nodes: Float64Array }
   /**
-   * 車を描く道筋（chizu-wasm の take_mover_paths）。新しく求めた道筋だけを、枠より先に送る。
-   * 先頭は前の道筋を忘れるか（1 なら忘れる）と道筋の数で、道筋ごとに、番号、点の数、点ごとの x、y（マス）、
-   * 始まりからの長さ（マス）、向き（ラジアン）が続く。配列は移譲して送る。
+   * 車を描く道筋（chizu-wasm の take_mover_paths）。新しく求めた道筋と、忘れた道筋の番号だけを、枠より先に送る。
+   * 先頭は前の道筋をすべて忘れるか（1 なら忘れる）、忘れる道筋の数とその番号、新しい道筋の数で、新しい道筋
+   * ごとに、番号、点の数、点ごとの x、y（マス）、始まりからの長さ（マス）、向き（ラジアン）が続く。
+   * 配列は移譲して送る。
    */
   | { kind: "mover-paths"; data: Float64Array }
   /**
@@ -304,7 +305,7 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.nodes.length % NODE_STRIDE === 0
       );
     case "mover-paths":
-      return v.data instanceof Float64Array && v.data.length >= 2;
+      return v.data instanceof Float64Array && v.data.length >= 3;
     case "signals":
       return v.lights instanceof Float64Array && v.lights.length % SIGNAL_STRIDE === 0;
     case "buildings":

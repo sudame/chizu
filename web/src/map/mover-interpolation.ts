@@ -114,15 +114,19 @@ export class MoverPaths {
   readonly #paths = new Map<number, MoverPath>();
 
   /**
-   * chizu-wasm の take_mover_paths の並びを受け取る。先頭は前の道筋を忘れるか（1 なら忘れる）と道筋の数で、
-   * 道筋ごとに、番号、点の数、点の並びが続く。
+   * chizu-wasm の take_mover_paths の並びを受け取る。先頭は前の道筋をすべて忘れるか（1 なら忘れる）、
+   * 忘れる道筋の数とその番号、新しい道筋の数で、新しい道筋ごとに、番号、点の数、点の並びが続く。
    */
   receive(data: Float64Array): void {
     if (data[0] === 1) {
       this.#paths.clear();
     }
-    const count = data[1] ?? 0;
-    let at = 2;
+    const dropped = data[1] ?? 0;
+    for (let k = 0; k < dropped; k++) {
+      this.#paths.delete(data[2 + k] ?? 0);
+    }
+    const count = data[2 + dropped] ?? 0;
+    let at = 3 + dropped;
     for (let k = 0; k < count && at + 2 <= data.length; k++) {
       const id = data[at] ?? 0;
       const n = data[at + 1] ?? 0;

@@ -327,50 +327,101 @@ fn a_car_moving_lanes_off_its_path_is_drawn_where_the_core_has_it() {
     assert!((settling.drawn.y - (NODE - 1_920.0)).abs() < 1e-6);
 }
 
-#[test]
-fn paths_are_found_once_per_network_and_never_reused() {
-    let mut w = World::new_with_money(1, chizu_core::Money(1_000_000_000));
-    for (from, to) in [((0, 10), (20, 10)), ((10, 0), (10, 20))] {
-        let c = Command::BuildRoad {
-            from: TilePos::new(from.0, from.1),
-            to: TilePos::new(to.0, to.1),
-            kind: M,
-        };
-        assert_eq!(w.apply(&c), chizu_core::ApplyOutcome::Applied);
-    }
-    let mut paths = Paths::new();
-    let route = |w: &World, paths: &mut Paths| {
-        let net = w.network();
-        paths.sync(net);
-        let east = link_toward(net, (0, 10), (10, 10));
-        let north = link_toward(net, (10, 10), (10, 0));
-        let p = path(north, 3_000, Some((east, ZERO)));
-        draw(net, paths, &p, ZERO, None, None)
-            .unwrap()
-            .route
-            .unwrap()
-    };
-    let a = route(&w, &mut paths);
-    let sent = paths.take();
-    assert_eq!(sent[0], 1.0, "初めて送るときは、前の道筋を忘れさせる");
-    assert_eq!(sent[1], 1.0);
-    assert_eq!(sent[2], f64::from(a.id));
-    // 同じ網なら、同じ車線の組は同じ道筋で、送り直さない。
-    assert_eq!(route(&w, &mut paths).id, a.id);
-    assert_eq!(paths.take(), [0.0, 0.0]);
-    // 網を変えたら、前の道筋は使わず、新しい番号の道筋を求め直す。
+/// 東から (10, 10) に入り、北へ曲がる車の道筋。
+fn turn_north(w: &World, paths: &mut Paths, tick: u64) -> Route {
+    let net = w.network();
+    paths.sync(net, tick);
+    let east = link_toward(net, (0, 10), (10, 10));
+    let north = link_toward(net, (10, 10), (10, 0));
+    let p = path(north, 3_000, Some((east, ZERO)));
+    draw(net, paths, &p, ZERO, None, None)
+        .unwrap()
+        .route
+        .unwrap()
+}
+
+fn build(w: &mut World, from: (i64, i64), to: (i64, i64)) {
     let c = Command::BuildRoad {
-        from: TilePos::new(14, 5),
-        to: TilePos::new(14, 15),
+        from: TilePos::new(from.0, from.1),
+        to: TilePos::new(to.0, to.1),
         kind: M,
     };
     assert_eq!(w.apply(&c), chizu_core::ApplyOutcome::Applied);
-    let b = route(&w, &mut paths);
+}
+
+#[test]
+fn paths_are_found_once_and_only_the_changed_ones_are_found_again() {
+    let mut w = World::new_with_money(1, chizu_core::Money(1_000_000_000));
+    build(&mut w, (0, 10), (20, 10));
+    build(&mut w, (10, 0), (10, 10));
+    let mut paths = Paths::new();
+    let a = turn_north(&w, &mut paths, 0);
+    let sent = paths.take();
+    assert_eq!(sent[0], 1.0, "初めて送るときは、前の道筋を忘れさせる");
+    assert_eq!(sent[1], 0.0);
+    assert_eq!(sent[2], 1.0);
+    assert_eq!(sent[3], f64::from(a.id));
+    // 同じ網なら、同じ車線の組は同じ道筋で、送り直さない。
+    assert_eq!(turn_north(&w, &mut paths, 1).id, a.id);
+    assert_eq!(paths.take(), [0.0, 0.0, 0.0]);
+    // 離れた所に道路を引いても、この交差点の道筋は同じ番号のまま使う。
+    build(&mut w, (14, 14), (14, 18));
+    assert_eq!(turn_north(&w, &mut paths, 2).id, a.id);
+    assert_eq!(paths.take(), [0.0, 0.0, 0.0]);
+    // 交差点に腕を足したら、前の道筋は忘れ、新しい番号の道筋を求め直す。画面にも前の道筋を忘れさせる。
+    build(&mut w, (10, 10), (10, 20));
+    let b = turn_north(&w, &mut paths, 3);
     assert!(b.id > a.id);
     assert!(paths.get(a.id).is_none());
     let sent = paths.take();
-    assert_eq!(sent[0], 1.0);
-    assert_eq!(sent[2], f64::from(b.id));
+    assert_eq!(sent[0], 0.0);
+    assert_eq!(sent[1], 1.0);
+    assert_eq!(sent[2], f64::from(a.id));
+    assert_eq!(sent[3], 1.0);
+    assert_eq!(sent[4], f64::from(b.id));
+}
+
+#[test]
+fn paths_drawn_in_the_same_pass_stay_past_the_limit() {
+    let w = crossroads();
+    let net = w.network();
+    let links: Vec<LinkId> = net.links().filter(|l| l.mode == LaneMode::Car).collect();
+    assert!(links.len() > 4);
+    let mut paths = Paths::with_limit(2);
+    let pass = |paths: &mut Paths, tick: u64, links: &[LinkId]| -> Vec<u32> {
+        paths.sync(net, tick);
+        links
+            .iter()
+            .map(|&l| {
+                draw(net, paths, &path(l, 20_000, None), ZERO, None, None)
+                    .unwrap()
+                    .route
+                    .unwrap()
+                    .id
+            })
+            .collect()
+    };
+    // 上限を超えても、同じ回に描いた車の道筋は、回のあいだすべて引ける。
+    let first = pass(&mut paths, 0, &links);
+    assert!(first.iter().all(|&id| paths.get(id).is_some()));
+    assert_eq!(paths.take()[2], links.len() as f64);
+    // 次の回でも、前の tick に描いた道筋は忘れず、同じ番号を使う。
+    let again = pass(&mut paths, 1, &links[..1]);
+    assert_eq!(again, first[..1]);
+    assert!(first.iter().all(|&id| paths.get(id).is_some()));
+    // その次の回で、前の 2 つの tick に描かなかった道筋を忘れ、画面にも忘れさせる。
+    let last = pass(&mut paths, 2, &links[..1]);
+    assert_eq!(last, first[..1]);
+    assert!(first[1..].iter().all(|&id| paths.get(id).is_none()));
+    let sent = paths.take();
+    assert_eq!(sent[1], (links.len() - 1) as f64);
+    let forgot: Vec<u32> = sent[2..links.len() + 1].iter().map(|&v| v as u32).collect();
+    let mut expected = first[1..].to_vec();
+    expected.sort_unstable();
+    assert_eq!(forgot, expected);
+    // 忘れた鍵の道筋は、新しい番号で求め直す。
+    let back = pass(&mut paths, 3, &links[1..2]);
+    assert!(back[0] > *first.iter().max().unwrap());
 }
 
 /// リンク `link` の、端から数えて `index` 番目の車線のずれ。中核の `lane_shift::target` と同じ式である。
@@ -607,7 +658,7 @@ fn every_move(w: &World, node: (i64, i64)) -> Report {
         .flat_map(|&s| links(s))
         .collect();
     let mut paths = Paths::new();
-    paths.sync(net);
+    paths.sync(net, 0);
     let mut report = Report::default();
     for &inn in all.iter().filter(|l| geom(net, **l).unwrap().to == n) {
         for &out in all.iter().filter(|l| geom(net, **l).unwrap().from == n) {
@@ -844,7 +895,7 @@ fn a_car_crossing_a_one_tile_link_in_one_tick_follows_both_turns() {
     let a = Carriageway::of(net, net.node_at(TilePos::new(10, 10)).unwrap()).unwrap();
     let b = Carriageway::of(net, net.node_at(TilePos::new(11, 10)).unwrap()).unwrap();
     let mut paths = Paths::new();
-    paths.sync(net);
+    paths.sync(net, 0);
     let mut chained = 0;
     for (i, j, k) in [(0, 0, 0), (1, 0, 1), (0, 1, 0), (1, 1, 1)] {
         let legs = [

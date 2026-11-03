@@ -89,7 +89,7 @@ pub struct Memory {
     entries: car_path::FastMap<(u32, u16), (u64, car_path::Entry)>,
     /// 前の回に描いた tick。
     drawn_tick: Option<u64>,
-    /// 網の版ごとに求めた道筋。
+    /// 求めた道筋。
     pub paths: car_path::Paths,
 }
 
@@ -162,7 +162,7 @@ fn draw_movers(
     let net = scene.net;
     let tick = scene.tick;
     let from_mm = |v: f64, o: i64| ((v - o as f64) / TILE_MM as f64) as f32;
-    memory.paths.sync(net);
+    memory.paths.sync(net, tick);
     // 覚え書きは、前の回か、この回と同じ tick に描いたものだけを使う。見えなくなった車の分は、
     // 溜まったら捨てる。
     let valid = |m: &Memo| m.tick == tick || Some(m.tick) == memory.drawn_tick;

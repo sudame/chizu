@@ -344,9 +344,16 @@ describe("turnHeading", () => {
   });
 });
 
-/** 道筋の並び（chizu-wasm の take_mover_paths の形）。点は [x, y, 向き] で、長さは点のあいだの距離を足す。 */
-function pathData(reset: boolean, paths: [number, [number, number, number][]][]): Float64Array {
-  const out = [reset ? 1 : 0, paths.length];
+/**
+ * 道筋の並び（chizu-wasm の take_mover_paths の形）。点は [x, y, 向き] で、長さは点のあいだの距離を足す。
+ * `dropped` は忘れさせる道筋の番号である。
+ */
+function pathData(
+  reset: boolean,
+  paths: [number, [number, number, number][]][],
+  dropped: number[] = [],
+): Float64Array {
+  const out = [reset ? 1 : 0, dropped.length, ...dropped, paths.length];
   for (const [id, points] of paths) {
     out.push(id, points.length);
     let s = 0;
@@ -394,7 +401,7 @@ describe("pathAt", () => {
 });
 
 describe("MoverPaths", () => {
-  it("届いた道筋を足し、忘れる印があれば前の道筋を忘れる", () => {
+  it("届いた道筋を足し、忘れさせる番号の道筋を忘れ、忘れる印があれば前の道筋をすべて忘れる", () => {
     const paths = new MoverPaths();
     paths.receive(
       pathData(true, [
@@ -419,6 +426,9 @@ describe("MoverPaths", () => {
       ]),
     );
     expect(paths.size).toBe(2);
+    paths.receive(pathData(false, [], [1]));
+    expect(paths.get(1)).toBeUndefined();
+    expect(paths.get(2)?.length).toBe(8);
     paths.receive(
       pathData(true, [
         [

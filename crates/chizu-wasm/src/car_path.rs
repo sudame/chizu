@@ -20,9 +20,9 @@
 //!
 //! 2 本だけがつながるノードで向きが変わる角も、同じ道筋でつなぐ。
 //!
-//! 道筋は、網の版ごとに、入ってきた車線と、いまのリンクの車線の組ごとに 1 回だけ求めて
-//! [`Paths`] に覚える。画面には、道筋の形を網が変わったときだけ送り、車ごとには道筋の番号と、道筋の
-//! 上で進んだ割合を送る。画面は、tick と tick のあいだを道筋の上で補間する。1 つの道筋の終わりは、
+//! 道筋は、入ってきた車線と、いまのリンクの車線の組ごとに 1 回だけ求めて [`Paths`] に覚える。網が
+//! 変わったら、形が変わるリンクの道筋だけを求め直す。画面には、道筋の形を新しく求めたときだけ送り、
+//! 車ごとには道筋の番号と、道筋の上で進んだ割合を送る。画面は、tick と tick のあいだを道筋の上で補間する。1 つの道筋の終わりは、
 //! 次のリンクの道筋の始まりと同じ所なので、画面は 2 つの道筋をつないで補間できる。
 //!
 //! 経路を探し直すと、中核は抜けてきたリンクを忘れる。曲線の途中の車が飛ばないよう、
@@ -359,9 +359,9 @@ struct Carriageway {
 }
 
 impl Carriageway {
-    fn of(net: &Network, n: NodeId) -> Option<Carriageway> {
+    /// ノード `n` の車道の四角の半分の大きさと、腕ごとの向き（長さ 1）と車道の半分の幅。
+    fn arms(net: &Network, n: NodeId) -> Option<(f64, Vec<(V, f64)>)> {
         let node = net.node(n)?;
-        let center = center(net, n)?;
         let mut square: f64 = 0.0;
         let mut arms = Vec::with_capacity(node.segments.len());
         for &s in &node.segments {
@@ -387,6 +387,12 @@ impl Carriageway {
                 },
             ));
         }
+        Some((square, arms))
+    }
+
+    fn of(net: &Network, n: NodeId) -> Option<Carriageway> {
+        let center = center(net, n)?;
+        let (square, arms) = Carriageway::arms(net, n)?;
         let exit = |e: f64, d: f64| {
             if d.abs() < 1e-9 {
                 f64::INFINITY
@@ -946,25 +952,66 @@ impl core::hash::Hasher for FastHasher {
 /// [`FastHasher`] で引く表。
 pub type FastMap<K, T> = HashMap<K, T, core::hash::BuildHasherDefault<FastHasher>>;
 
-/// 覚えておく道筋の数の上限。超えたら、すべて忘れて求め直す。
+/// 覚えておく道筋の数の目安。回の始まりに、これを超えていたら、いまの tick と前の tick に描かなかった
+/// 道筋を忘れる。回の途中では忘れないので、同じ回に描いた車の道筋の番号は、その回のあいだ引ける。
 const PATHS_LIMIT: usize = 20_000;
 /// 選んだ曲線の形を覚えておく数の上限。超えたら忘れて選び直す。
 const SHAPES_LIMIT: usize = 65_536;
 
-/// 道筋の覚え書き。網の版ごとに、鍵ごとの道筋を 1 回だけ求めて覚える。道筋の番号は網の版が変わっても
-/// 使い回さないので、画面は前の網の道筋を新しい網の道筋と取り違えない。描画のためだけに覚え、状態には
-/// 入れない。
+/// 覚えた道筋と、それを最後に描いた代（[`Paths::era`]）。
+struct Stored {
+    path: Path,
+    used: u64,
+}
+
+/// リンクの道筋の形を決める、網の側のもの。リンクの向きと長さ、寸法、始まりのノードの中心と車道の形、
+/// 両端のノードである。同じなら、そのリンクの道筋は網の版が変わっても同じ形になる。
+fn link_sig(net: &Network, link: LinkId) -> Option<Vec<u64>> {
+    let g = geom(net, link)?;
+    let len = link_len(net, link);
+    let lay = Layout::of(net, link, &g, len);
+    let start = center(net, g.from)?;
+    let mut sig: Vec<u64> = [
+        g.dir.0, g.dir.1, len, lay.turn, lay.settle, lay.stop, start.0, start.1,
+    ]
+    .iter()
+    .map(|v| v.to_bits())
+    .collect();
+    for n in [g.from, g.to] {
+        sig.extend([u64::from(n.index), u64::from(n.generation)]);
+    }
+    if let Some((square, arms)) = Carriageway::arms(net, g.from) {
+        sig.push(square.to_bits());
+        for (d, h) in arms {
+            sig.extend([d.0.to_bits(), d.1.to_bits(), h.to_bits()]);
+        }
+    }
+    Some(sig)
+}
+
+/// 道筋の覚え書き。鍵ごとの道筋を 1 回だけ求めて覚える。網の版が変わったら、形の決め手（[`link_sig`]）が
+/// 変わったリンクの道筋だけを忘れ、残りは同じ番号のまま使う。番号は使い回さないので、画面は忘れた道筋を
+/// 新しい道筋と取り違えない。描画のためだけに覚え、状態には入れない。
 pub struct Paths {
     version: Option<u64>,
-    /// いまの網の版で最初に振った番号。番号 `first + k` の道筋は `paths[k]` にある。
-    first: u32,
-    paths: Vec<Path>,
+    /// 次に振る番号。
+    next: u32,
+    /// まだ画面へ送っていない番号の始まり。これより前の番号は送ってある。
+    unsent: u32,
+    paths: FastMap<u32, Stored>,
     ids: BTreeMap<Key, Option<u32>>,
     raw: FastMap<Raw, Option<RawHit>>,
-    /// まだ画面へ送っていない道筋の、`paths` の中での始まり。
-    unsent: usize,
-    /// 前に送ってから、覚えた道筋を忘れたか。
+    /// 覚えた道筋と `raw` が使うリンクの、使い始めたときの形の決め手。網のリンクの数より増えないので、
+    /// 形が変わったリンクの分のほかは捨てない。
+    links: FastMap<LinkBits, (LinkId, Vec<u64>)>,
+    /// 送ったあとに忘れた番号。次に送るときに画面にも忘れさせる。
+    dropped: Vec<u32>,
+    /// 前に送ってから、画面の道筋をすべて忘れさせるか。初めて送るときだけ立つ。
     reset: bool,
+    /// 描いた tick が変わるたびに 1 上がる代。
+    era: u64,
+    tick: Option<u64>,
+    limit: usize,
     /// 交差点の車道と、入る車線、出ていく車線の、ノードの中心からの位置と向きごとに選んだ曲線の形。
     /// 同じ形の交差点は多いので、網が変わっても選び直さずに済ませる。反復はしない。
     shapes: FastMap<Vec<u64>, Option<Shape>>,
@@ -978,45 +1025,115 @@ impl Default for Paths {
 
 impl Paths {
     pub fn new() -> Paths {
+        Paths::with_limit(PATHS_LIMIT)
+    }
+
+    fn with_limit(limit: usize) -> Paths {
         Paths {
             version: None,
-            first: 1,
-            paths: Vec::new(),
+            next: 1,
+            unsent: 1,
+            paths: FastMap::default(),
             ids: BTreeMap::new(),
             raw: FastMap::default(),
-            unsent: 0,
+            links: FastMap::default(),
+            dropped: Vec::new(),
             reset: true,
+            era: 0,
+            tick: None,
+            limit,
             shapes: FastMap::default(),
         }
     }
 
-    fn forget(&mut self) {
-        self.first = self.next_id();
-        self.paths.clear();
-        self.ids.clear();
-        self.raw.clear();
-        self.unsent = 0;
-        self.reset = true;
-    }
-
-    fn next_id(&self) -> u32 {
-        u32::try_from(self.paths.len())
-            .ok()
-            .and_then(|n| self.first.checked_add(n))
-            .expect("道筋の番号が尽きた")
-    }
-
-    /// 網の版が変わっていれば、覚えた道筋を忘れる。
-    pub fn sync(&mut self, net: &Network) {
+    /// 描く回の始まりに呼ぶ。`tick` はこの回に描く tick である。網の版が変わっていれば、形の決め手が
+    /// 変わったリンクの道筋を忘れる。覚えた数が多すぎれば、いまの tick と前の tick に描かなかった
+    /// 道筋を忘れる。
+    pub fn sync(&mut self, net: &Network, tick: u64) {
+        let next_tick = self.tick != Some(tick);
+        if next_tick {
+            self.tick = Some(tick);
+            self.era += 1;
+        }
         if self.version != Some(net.version()) {
             self.version = Some(net.version());
-            self.forget();
+            self.invalidate(net);
+        }
+        // 忘れるのは tick が変わったときだけにして、同じ tick に描き直す回では表を舐めない。
+        if next_tick && (self.paths.len() > self.limit || self.ids.len() > 2 * self.limit) {
+            self.evict();
+        }
+    }
+
+    /// 形の決め手が変わったリンクの道筋と、そのリンクを使う `raw` を忘れる。求められなかった鍵も忘れる。
+    fn invalidate(&mut self, net: &Network) {
+        let mut changed: FastMap<LinkBits, ()> = FastMap::default();
+        self.links.retain(|&bits, (link, sig)| {
+            let same = link_sig(net, *link).is_some_and(|now| now == *sig);
+            if !same {
+                changed.insert(bits, ());
+            }
+            same
+        });
+        let paths = &mut self.paths;
+        let dropped = &mut self.dropped;
+        let unsent = self.unsent;
+        self.ids.retain(|key, id| {
+            let keep = id.is_some() && !changed.contains_key(&link_bits(key.link));
+            if !keep && let Some(id) = *id {
+                paths.remove(&id);
+                if id < unsent {
+                    dropped.push(id);
+                }
+            }
+            keep
+        });
+        self.raw.retain(|raw, hit| {
+            let unchanged = !changed.contains_key(&raw.link)
+                && raw.prev.is_none_or(|(p, _)| !changed.contains_key(&p));
+            unchanged && matches!(hit, Some(Some((id, _))) if paths.contains_key(id))
+        });
+    }
+
+    /// いまの代と前の代に描かなかった道筋を忘れる。
+    fn evict(&mut self) {
+        let era = self.era;
+        let unsent = self.unsent;
+        let dropped = &mut self.dropped;
+        self.paths.retain(|&id, s| {
+            let keep = s.used + 1 >= era;
+            if !keep && id < unsent {
+                dropped.push(id);
+            }
+            keep
+        });
+        let paths = &self.paths;
+        self.ids
+            .retain(|_, id| id.is_some_and(|id| paths.contains_key(&id)));
+        self.raw
+            .retain(|_, hit| matches!(hit, Some(Some((id, _))) if paths.contains_key(id)));
+    }
+
+    /// リンク `link` の形の決め手を、まだ覚えていなければ覚える。
+    fn watch(&mut self, net: &Network, link: LinkId) {
+        let bits = link_bits(link);
+        if !self.links.contains_key(&bits)
+            && let Some(sig) = link_sig(net, link)
+        {
+            self.links.insert(bits, (link, sig));
+        }
+    }
+
+    /// 番号 `id` の道筋を、いまの代に描いたとする。
+    fn touch(&mut self, id: u32) {
+        if let Some(s) = self.paths.get_mut(&id) {
+            s.used = self.era;
         }
     }
 
     /// 番号 `id` の道筋。
     pub fn get(&self, id: u32) -> Option<&Path> {
-        self.paths.get(id.checked_sub(self.first)? as usize)
+        self.paths.get(&id).map(|s| &s.path)
     }
 
     /// 鍵 `key` の道筋の番号。まだなければ求めて覚える。求められなければ `None`。
@@ -1024,12 +1141,17 @@ impl Paths {
         if let Some(&id) = self.ids.get(key) {
             return id;
         }
-        if self.ids.len() >= PATHS_LIMIT {
-            self.forget();
-        }
+        self.watch(net, key.link);
         let id = self.build(net, key, entry).map(|path| {
-            let id = self.next_id();
-            self.paths.push(path);
+            let id = self.next;
+            self.next = id.checked_add(1).expect("道筋の番号が尽きた");
+            self.paths.insert(
+                id,
+                Stored {
+                    path,
+                    used: self.era,
+                },
+            );
             id
         });
         self.ids.insert(*key, id);
@@ -1102,18 +1224,26 @@ impl Paths {
         shape
     }
 
-    /// まだ画面へ送っていない道筋を、送る形に並べて返す。先頭は、前に送ってから覚えた道筋を忘れたか
-    /// （忘れたら 1）と、道筋の数である。道筋ごとに、番号、点の数、点ごとの x、y（マス）、始まりからの
-    /// 長さ（マス）、向き（ラジアン）が続く。
+    /// まだ画面へ送っていない道筋を、送る形に並べて返す。先頭は、画面の道筋をすべて忘れさせるか
+    /// （忘れさせるなら 1）、忘れさせる道筋の数とその番号、新しい道筋の数である。新しい道筋ごとに、
+    /// 番号、点の数、点ごとの x、y（マス）、始まりからの長さ（マス）、向き（ラジアン）が続く。
     pub fn take(&mut self) -> Vec<f64> {
-        let fresh = &self.paths[self.unsent..];
-        let mut out = vec![f64::from(u8::from(self.reset)), fresh.len() as f64];
-        for (k, path) in fresh.iter().enumerate() {
-            let id = self.first as usize + self.unsent + k;
-            out.extend([id as f64, path.points.len() as f64]);
-            path.encode(&mut out);
+        let mut dropped = core::mem::take(&mut self.dropped);
+        dropped.sort_unstable();
+        let mut out = vec![f64::from(u8::from(self.reset)), dropped.len() as f64];
+        out.extend(dropped.iter().map(|&id| f64::from(id)));
+        let count_at = out.len();
+        out.push(0.0);
+        let mut count = 0_u32;
+        for id in self.unsent..self.next {
+            if let Some(s) = self.paths.get(&id) {
+                out.extend([f64::from(id), s.path.points.len() as f64]);
+                s.path.encode(&mut out);
+                count += 1;
+            }
         }
-        self.unsent = self.paths.len();
+        out[count_at] = f64::from(count);
+        self.unsent = self.next;
         self.reset = false;
         out
     }
@@ -1203,6 +1333,13 @@ pub fn draw(
                     .and_then(|(prev, shown)| entry_from(net, prev, shown, start, &g))
                     .filter(|_| lay.turn > 0.0);
                 let cacheable = from_prev.is_some() == e.is_some();
+                if cacheable {
+                    // 網が変わったときに、どちらかのリンクの形が変わったら忘れられるようにする。
+                    paths.watch(net, path.link);
+                    if let Some((prev, _)) = path.prev {
+                        paths.watch(net, prev);
+                    }
+                }
                 paths.raw.insert(raw, cacheable.then_some(hit));
                 hit
             }
@@ -1291,6 +1428,8 @@ fn on_path(
         .filter(|b| b.link != path.link)
         .and_then(|b| passed(net, paths, b, path))
         .unwrap_or(0);
+    paths.touch(id);
+    paths.touch(via);
     Some(Placed {
         drawn: Drawn { x, y, angle },
         entry: None,
