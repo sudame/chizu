@@ -1330,10 +1330,11 @@ try {
   // 施設を置いて余裕が戻ると、建たない理由の知らせは消える。空き区画がない知らせは、別の理由なので残ってよい
   await page
     .waitForFunction(
-      () =>
-        !/余裕がなく/.test(
-          document.querySelector<HTMLElement>("#growth-notice")?.textContent ?? "",
-        ),
+      () => {
+        const el = document.querySelector<HTMLElement>("#growth-notice");
+        // 隠れるときは文を書き換えないので、隠れていれば消えたことにする
+        return el?.hidden === true || !/余裕がなく/.test(el?.textContent ?? "");
+      },
       undefined,
       {
         timeout: TIMEOUT_MS,
@@ -1341,7 +1342,7 @@ try {
     )
     .catch(() => undefined);
   check(
-    !/余裕がなく/.test((await growth.textContent()) ?? ""),
+    !(await growth.isVisible()) || !/余裕がなく/.test((await growth.textContent()) ?? ""),
     `施設を置いて余裕が戻ると、建たない理由の知らせが消える（${await growth.textContent()}）`,
   );
   // 道路を消して入口を失った浄水場は、孤立した施設として知らせが出る。押すとそこへ移る。

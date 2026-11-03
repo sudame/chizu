@@ -162,6 +162,7 @@ function sendOverview(sim: Simulation, now: number, paused: boolean, force = fal
     stalls: all.slice(OVERVIEW_LENGTH),
     isolated: [...sim.isolated_facilities()],
     lotShortage: [...sim.lot_shortage()],
+    tick: sim.current_tick(),
   });
 }
 

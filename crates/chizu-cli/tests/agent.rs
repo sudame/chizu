@@ -676,16 +676,16 @@ fn observe_shows_power_plants_cut_off_from_the_main_network() {
     assert!(others["networks"].as_u64().unwrap() >= 1, "{power}");
 }
 
-/// 需要が正なのに塗った区画がなければ noFreeLot が真で、塗れば偽になる。
+/// 塗っていない種類は、需要が正でも noFreeLot が偽である（塗った区画が建ち尽くしたときだけ真になる）。
 #[test]
-fn observe_shows_when_demand_has_no_free_lot() {
+fn observe_no_free_lot_is_false_for_zones_never_painted() {
     let dir = session("agent-no-free-lot");
     let d = dir.to_str().unwrap();
     cli(&["agent", "new", d, "42"]);
     let obs = json(&cli(&["agent", "observe", d]));
     assert!(obs["demand"]["Residential"].as_i64().unwrap() > 0, "{obs}");
     assert_eq!(obs["growth"]["Residential"]["fronts"], 0, "{obs}");
-    assert_eq!(obs["growth"]["Residential"]["noFreeLot"], true, "{obs}");
+    assert_eq!(obs["growth"]["Residential"]["noFreeLot"], false, "{obs}");
     let setup = write(
         &dir.join("setup.json"),
         &serde_json::json!([

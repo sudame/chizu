@@ -212,7 +212,7 @@ export type WorkerToMain =
    * 人口と幸福度とマイルストーン。overview は chizu-wasm の overview で、数の並びは overview.ts にある。
    * stalls は chizu-wasm の growth_stalls で、新築が止まっている道路網ごとに [x, y, 足りない資源] が並ぶ。
    * isolated は chizu-wasm の isolated_facilities で、街の道路網につながっていない施設ごとに [x, y, 種類] が並ぶ。
-   * lotShortage は chizu-wasm の lot_shortage で、住宅・商業・工業・オフィスの順に、需要が正なのに空き区画がなければ 1、そうでなければ 0 の 4 個。
+   * lotShortage は chizu-wasm の lot_shortage で、住宅・商業・工業・オフィスの順に、需要が正なのに空き区画がなければ 1、そうでなければ 0 の 4 個。tick は overview を作った時点の Worker の tick で、空き区画がない状態の続いた長さを数える。
    */
   | {
       kind: "overview";
@@ -220,6 +220,7 @@ export type WorkerToMain =
       stalls: number[];
       isolated: number[];
       lotShortage: number[];
+      tick: number;
     }
   /**
    * id は画面が振ったコマンドの番号、seq は記録の通し番号。
@@ -319,7 +320,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.isolated.every((x) => typeof x === "number") &&
         Array.isArray(v.lotShortage) &&
         v.lotShortage.length === 4 &&
-        v.lotShortage.every((x) => typeof x === "number")
+        v.lotShortage.every((x) => typeof x === "number") &&
+        typeof v.tick === "number"
       );
     case "outcome":
       return (

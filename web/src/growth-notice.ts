@@ -233,8 +233,8 @@ export function setupGrowthNotice(jump: (x: number, y: number) => void): {
       // 区画の知らせが出ていないときの止まっている網には移らない
       const stalled = growthNotice(blocks) === null ? [] : next;
       targets = [...stalled, ...isolated];
-      if (view === null) {
-        // 知らせが消えたら、次は最初の網から数え直す
+      if (targets.length === 0) {
+        // 移る先がなくなったら、次は最初の網から数え直す
         last = null;
       }
       if (root === null || head === null || action === null || button === null) {

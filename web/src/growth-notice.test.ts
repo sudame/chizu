@@ -185,6 +185,13 @@ describe("空き区画がない知らせ", () => {
     expect(persistedLotShortage(since, LOT_SHORTAGE_TICKS + 10)).toEqual([]);
   });
 
+  test("読み込み直後の tick が大きくても、最初の overview では出さない", () => {
+    const T = 5 * LOT_SHORTAGE_TICKS;
+    const since = trackLotShortage([], [0, 1, 0, 0], T);
+    expect(persistedLotShortage(since, T)).toEqual([]);
+    expect(persistedLotShortage(since, T + LOT_SHORTAGE_TICKS)).toEqual([COMMERCIAL]);
+  });
+
   test("tick が戻ったら数え直す", () => {
     const since = trackLotShortage([5000, null, null, null], [1, 0, 0, 0], 100);
     expect(since[0]).toBe(100);

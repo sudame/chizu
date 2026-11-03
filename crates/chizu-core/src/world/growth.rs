@@ -164,14 +164,16 @@ impl World {
     }
 
     /// 区画の種類（[`ZoneKind::index`] の順）ごとに、需要が正なのに建てる候補の間口が 1 つもないかを返す。状態は変えない。
-    /// 塗った区画が建ち尽くしたか、そもそも塗っていないとき真になる。電気や水道の余裕とは関係がない。
+    /// 塗ったことのある（街に区画か建物がある）種類だけを数える。塗っていない種類は、基礎需要があっても偽である。
+    /// 塗った区画が建ち尽くしたとき真になる。電気や水道の余裕とは関係がない。
     pub fn lot_shortage(&self) -> [bool; 4] {
-        let demand = demand(&self.city_stats());
+        let stats = self.city_stats();
+        let demand = demand(&stats);
         let mut has_front = [false; 4];
         for (zone, _) in self.lots.fronts.values() {
             has_front[zone.index()] = true;
         }
-        std::array::from_fn(|z| demand[z] > 0 && !has_front[z])
+        std::array::from_fn(|z| demand[z] > 0 && stats.zoned[z] && !has_front[z])
     }
 
     /// [`World::growth_blocks`] と [`World::stalled_networks`] を 1 回の走査で求める。
@@ -1428,7 +1430,7 @@ mod tests {
         assert!(!half[0].no_power && half[0].no_water, "{half:?}");
     }
 
-    /// 需要が正なのに空き区画がないとき真になる。塗っていなければ真で、塗れば偽になり、建ち尽くせば真に戻り、塗り足せば偽に戻る。
+    /// 需要が正なのに空き区画がないとき真になる。塗っていなければ偽で、塗れば偽、建ち尽くせば真、塗り足せば偽に戻る。
     #[test]
     fn lot_shortage_is_true_while_demand_has_no_free_lot() {
         let mut w = served_street();
@@ -1440,7 +1442,7 @@ mod tests {
         assert_eq!(w.apply(&clear), ApplyOutcome::Applied);
         let res = ZoneKind::Residential.index();
         assert!(demand(&w.city_stats())[res] > 0);
-        assert!(w.lot_shortage()[res], "塗っていないのに偽");
+        assert!(!w.lot_shortage()[res], "塗っていないのに真");
         assert_eq!(w.growth_blocks()[res].fronts, 0);
         // 状態を変えない。
         let hash = w.state_hash();

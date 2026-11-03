@@ -218,7 +218,6 @@ function draw(header: SnapshotHeader): void {
   hud.dataset.deficit = String(note !== "");
   // test:wasm が読む
   hud.dataset.tick = String(header.tick);
-  shownTick = header.tick;
   hud.dataset.speed = String(speed);
   hud.dataset.paused = String(header.paused);
   hud.dataset.day = String(header.day);
@@ -557,8 +556,7 @@ let manualRotation: number | null = null;
 let probe: { service: ServiceName; x: number; y: number; results: ServiceProbe } | null = null;
 let probeSent = "";
 let money = 0;
-// 画面に出している tick。空き区画がない状態が続いた長さを数える
-let shownTick = 0;
+// 空き区画がない状態が続いた長さは、Worker の tick で数える（描画は背景のタブで止まる）
 let lotShortageSince: LotShortageSince = [];
 let roadStart: Tile | null = null;
 let roadIndex: RoadIndex = EMPTY_ROAD_INDEX;
@@ -1133,12 +1131,12 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "overview") {
     renderOverview(parseOverview(message.overview));
-    lotShortageSince = trackLotShortage(lotShortageSince, message.lotShortage, shownTick);
+    lotShortageSince = trackLotShortage(lotShortageSince, message.lotShortage, message.tick);
     growthNotice.render(
       parseGrowthBlocks(message.overview),
       parseStalls(message.stalls),
       parseIsolated(message.isolated),
-      persistedLotShortage(lotShortageSince, shownTick),
+      persistedLotShortage(lotShortageSince, message.tick),
     );
     return;
   }
