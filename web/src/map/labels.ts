@@ -4,6 +4,14 @@
 
 import { BUILDING_STRIDE, FACILITY_STRIDE, SEGMENT_STRIDE } from "../protocol/messages.ts";
 import {
+  activeSymbols,
+  facilityOwner,
+  layoutSymbols,
+  type PlacedSymbol,
+  SYMBOL_BORDER,
+  symbolLook,
+} from "./facility-symbols.ts";
+import {
   chunkOf,
   districtName,
   type FacilityGroup,
@@ -12,6 +20,7 @@ import {
   roadName,
   type Seed,
 } from "./names.ts";
+import { FACILITY_STYLES } from "./palette.ts";
 
 /** 画面のピクセルの長方形。x0 ≤ x1、y0 ≤ y1。 */
 export type Rect = { x0: number; y0: number; x1: number; y1: number };
@@ -69,10 +78,9 @@ const GRAY = "#5f6368";
 const GRAY_NEAR = "#70757a";
 const LARGE_ROAD = "#6b5310";
 /** 施設の名前の色。施設の種類（ServiceKind の値）ごと。 */
-export const FACILITY_LABEL_COLORS: Readonly<Record<number, string>> = {
-  1: "#a8500a",
-  2: "#0b6f78",
-};
+export const FACILITY_LABEL_COLORS: Readonly<Record<number, string>> = Object.fromEntries(
+  Object.entries(FACILITY_STYLES).map(([kind, style]) => [kind, style.name]),
+);
 
 const text = (
   size: number,
@@ -144,6 +152,10 @@ export type Candidate = {
   h: number;
   /** 画面の上で占める範囲。回したときは、回した画像を囲む長方形。 */
   box: Rect;
+  /** 施設の名前のとき、名前を添える記号の識別子。その記号とは、余白をとらずに重なりを調べる。 */
+  owner?: string;
+  /** 同じものの別の置き方。この候補が置けないときに、先頭から順に試す。 */
+  alternatives?: readonly Candidate[];
 };
 
 // ---- 道路 ----
@@ -497,7 +509,13 @@ export const FACILITY_GROUP_GAP = 2;
 /** 施設の名前は、まとまりの中心（記号の位置）の右のこの距離（CSS ピクセル）に置く。 */
 export const FACILITY_LABEL_OFFSET = 15;
 
-/** 施設のまとまり。座標は左上のマスと、記号を置く中心のワールド座標。 */
+/** マスの単位のワールド座標の点。 */
+export type Point = { x: number; y: number };
+
+/**
+ * 施設のまとまり。座標は左上のマスと、まとまりの記号を置くワールド座標（中心にいちばん近い施設の敷地の中心）。
+ * `members` は施設 1 つずつの中心で、寄りの段ではここに記号を 1 つずつ置く。
+ */
 export type FacilityLabel = {
   kind: number;
   x: number;
@@ -506,6 +524,7 @@ export type FacilityLabel = {
   name: string;
   centerX: number;
   centerY: number;
+  members: Point[];
 };
 
 type Box = { x0: number; y0: number; x1: number; y1: number; kind: number };
@@ -550,13 +569,15 @@ export function facilityLabels(
       }
     }
   }
-  const groups = new Map<number, Box & { count: number }>();
+  const groups = new Map<number, Box & { count: number; members: Point[] }>();
   boxes.forEach((b, i) => {
     const r = find(i);
     const g = groups.get(r);
+    const center = { x: (b.x0 + b.x1 + 1) / 2, y: (b.y0 + b.y1 + 1) / 2 };
     if (g === undefined) {
-      groups.set(r, { ...b, count: 1 });
+      groups.set(r, { ...b, count: 1, members: [center] });
     } else {
+      g.members.push(center);
       g.x0 = Math.min(g.x0, b.x0);
       g.y0 = Math.min(g.y0, b.y0);
       g.x1 = Math.max(g.x1, b.x1);
@@ -573,51 +594,110 @@ export function facilityLabels(
     y: g.y0,
     count: g.count,
     name: names[i] ?? "",
-    centerX: (g.x0 + g.x1 + 1) / 2,
-    centerY: (g.y0 + g.y1 + 1) / 2,
+    ...centerOn(nearestTo((g.x0 + g.x1 + 1) / 2, (g.y0 + g.y1 + 1) / 2, g.members)),
+    members: g.members,
   }));
 }
+
+/** 点 (x, y) にいちばん近い点。同じ距離なら上、左の順に選ぶ。 */
+function nearestTo(x: number, y: number, points: readonly Point[]): Point {
+  let best = points[0] as Point;
+  let bestD = Number.POSITIVE_INFINITY;
+  for (const p of points) {
+    const d = (p.x - x) ** 2 + (p.y - y) ** 2;
+    if (d < bestD || (d === bestD && (p.y < best.y || (p.y === best.y && p.x < best.x)))) {
+      best = p;
+      bestD = d;
+    }
+  }
+  return best;
+}
+const centerOn = (p: Point) => ({ centerX: p.x, centerY: p.y });
 
 /** 施設のラベルの文字。標準の段では、2 棟以上のまとまりに棟の数を添える。 */
 export function facilityText(f: FacilityLabel, stage: number): string {
   return stage === STAGE_STANDARD && f.count > 1 ? `${f.name}（${f.count} 棟）` : f.name;
 }
 
-/** 施設の名前の候補。画面に収まるものだけを出す。 */
+/** 1 つのまとまりの名前について試す候補の数の上限。 */
+const MAX_FACILITY_ALTERNATIVES = 12;
+/** 施設の名前の候補の数の上限。1 画面で調べる候補（MAX_CANDIDATES）の半分までにして、残りをほかの種類に残す。 */
+const MAX_FACILITY_CANDIDATES = 100;
+// 記号の下と上に置くときの、丸の縁から名前までの隙間（CSS ピクセル）。並んだ隣の記号の影と、
+// 名前の余白（LABEL_MARGIN の 4px）に当たらない広さにする
+const BELOW_GAP = 6;
+
+/**
+ * 施設の名前の候補。画面に収まるものだけを出す。1 つのまとまりを 1 つの候補と数え、置き方の違いは
+ * `alternatives` に、記号の右、左、下、上の順で持つ。寄りの段は記号が 1 つずつ並ぶので、
+ * いちばん右の記号から順に試す。`placed` は layoutSymbols の結果で、渡さなければ求める。
+ */
 export function facilityCandidates(
   facilities: readonly FacilityLabel[],
   camera: CameraView,
   vp: Viewport,
   stage: number,
   measure: Measure,
+  placed: readonly PlacedSymbol[] = layoutSymbols(facilities, camera, vp),
 ): Candidate[] {
   const ls = labelStyle("facility", stage);
   if (ls === null) return [];
+  // まとまりごとの記号を、1 度だけ引ける形にする
+  const byOwner = new Map<string, PlacedSymbol[]>();
+  for (const sym of activeSymbols(placed, stage >= STAGE_NEAR)) {
+    const list = byOwner.get(sym.owner);
+    if (list === undefined) byOwner.set(sym.owner, [sym]);
+    else list.push(sym);
+  }
+  const reach = symbolLook(camera.zoom).radius + SYMBOL_BORDER;
   const out: Candidate[] = [];
   for (const f of facilities) {
+    const owner = facilityOwner(f);
     const style = { ...ls.style, color: FACILITY_LABEL_COLORS[f.kind] ?? ls.style.color };
     const label = facilityText(f, stage);
-    const s = toScreen(camera, vp, f.centerX, f.centerY);
     const size = measure(label, style, false);
-    const ox = FACILITY_LABEL_OFFSET;
-    const oy = -size.h / 2;
-    const box = { x0: s.x + ox, y0: s.y + oy, x1: s.x + ox + size.w, y1: s.y + oy + size.h };
-    if (!inside(box, vp)) continue;
-    out.push({
-      id: `facility|${f.kind}|${f.x},${f.y}|${label}|${styleKey(style)}`,
-      priority: ls.priority,
-      text: label,
-      style,
-      vertical: false,
-      angle: 0,
-      wx: f.centerX,
-      wy: f.centerY,
-      ox,
-      oy,
-      w: size.w,
-      h: size.h,
-      box,
-    });
+    const anchors = [...(byOwner.get(owner) ?? [])].sort((a, b) => b.x - a.x || a.y - b.y);
+    const options: Candidate[] = [];
+    for (const anchor of anchors) {
+      // 画面の位置（ずらしたあと）を基準に、記号の右、左、下、上の順に置く
+      const sides: [string, number, number][] = [
+        ["r", anchor.sx + FACILITY_LABEL_OFFSET, anchor.sy - size.h / 2],
+        ["l", anchor.sx - FACILITY_LABEL_OFFSET - size.w, anchor.sy - size.h / 2],
+        ["b", anchor.sx - size.w / 2, anchor.sy + reach + BELOW_GAP],
+        ["t", anchor.sx - size.w / 2, anchor.sy - reach - BELOW_GAP - size.h],
+      ];
+      for (const [side, x0, y0] of sides) {
+        const box = { x0, y0, x1: x0 + size.w, y1: y0 + size.h };
+        if (!inside(box, vp) || options.length >= MAX_FACILITY_ALTERNATIVES) continue;
+        const home = toScreen(camera, vp, anchor.x, anchor.y);
+        options.push({
+          id: `facility|${anchor.key}|${side}|${label}|${styleKey(style)}`,
+          priority: ls.priority,
+          text: label,
+          style,
+          vertical: false,
+          angle: 0,
+          wx: anchor.x,
+          wy: anchor.y,
+          ox: x0 - home.x,
+          oy: y0 - home.y,
+          w: size.w,
+          h: size.h,
+          box,
+          owner: anchor.key,
+        });
+      }
+    }
+    const [first, ...rest] = options;
+    if (first !== undefined) out.push({ ...first, alternatives: rest });
+  }
+  // 候補が多いときは、画面の真ん中に近いものを残し、ほかの種類のラベルの枠を空けておく
+  if (out.length > MAX_FACILITY_CANDIDATES) {
+    const cx = vp.width / 2;
+    const cy = vp.height / 2;
+    const dist = (c: Candidate) =>
+      ((c.box.x0 + c.box.x1) / 2 - cx) ** 2 + ((c.box.y0 + c.box.y1) / 2 - cy) ** 2;
+    return out.sort((a, b) => dist(a) - dist(b)).slice(0, MAX_FACILITY_CANDIDATES);
   }
   return out;
 }
@@ -628,6 +708,9 @@ export function facilityCandidates(
 export function styleKey(s: TextStyle): string {
   return `${s.size}/${s.weight}/${s.spacing}/${s.color}/${s.alpha}/${s.shield ? 1 : 0}`;
 }
+
+/** 置けない範囲。パネルと施設の記号である。記号は、名前を持つまとまりの識別子を `owner` に持つ。 */
+export type Obstacle = Rect & { owner?: string };
 
 /** 1 画面で調べる候補の数の上限。 */
 export const MAX_CANDIDATES = 200;
@@ -643,22 +726,40 @@ const overlaps = (a: Rect, b: Rect) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1
 export function placeLabels(
   candidates: readonly Candidate[],
   shown: ReadonlySet<string>,
-  obstacles: readonly Rect[],
+  obstacles: readonly Obstacle[],
 ): Candidate[] {
   const order = candidates
-    .map((c, i) => ({ c, i, prev: shown.has(c.id) ? 0 : 1 }))
+    // 置き方の違いのどれかが前に出ていれば、前に出ていたものとして先に置く
+    .map((c, i) => ({
+      c,
+      i,
+      prev: shown.has(c.id) || (c.alternatives ?? []).some((a) => shown.has(a.id)) ? 0 : 1,
+    }))
     .sort((a, b) => a.c.priority - b.c.priority || a.prev - b.prev || a.i - b.i)
     .slice(0, MAX_CANDIDATES);
   const placed: Candidate[] = [];
   const taken: Rect[] = [];
-  for (const { c } of order) {
-    const m = LABEL_MARGIN;
+  const m = LABEL_MARGIN;
+  const fits = (c: Candidate) => {
     const padded = { x0: c.box.x0 - m, y0: c.box.y0 - m, x1: c.box.x1 + m, y1: c.box.y1 + m };
-    if (obstacles.some((o) => overlaps(padded, o)) || taken.some((t) => overlaps(padded, t))) {
-      continue;
-    }
-    placed.push(c);
-    taken.push(c.box);
+    // 名前を添える記号は、名前を記号の右 15px に置くと余白に入るので、余白をとらずに調べる
+    const blocked = obstacles.some((o) =>
+      overlaps(o.owner !== undefined && o.owner === c.owner ? c.box : padded, o),
+    );
+    return !blocked && !taken.some((t) => overlaps(padded, t));
+  };
+  for (const { c } of order) {
+    // 前に出ていた置き方があれば先に試し、なければ並びの順に試す
+    const tries = [c, ...(c.alternatives ?? [])].map((t, i) => ({
+      t,
+      i,
+      prev: shown.has(t.id) ? 0 : 1,
+    }));
+    tries.sort((a, b) => a.prev - b.prev || a.i - b.i);
+    const chosen = tries.find(({ t }) => fits(t))?.t;
+    if (chosen === undefined) continue;
+    placed.push(chosen);
+    taken.push(chosen.box);
   }
   return placed;
 }

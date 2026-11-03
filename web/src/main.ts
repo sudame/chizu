@@ -54,7 +54,7 @@ import {
   type Color,
   type CrosswalkArm,
   crosswalkArms,
-  FACILITY_COLOR,
+  facilityCircleColor,
   footprintOutline,
   Geometry,
   MIN_PX,
@@ -666,8 +666,8 @@ function updatePreview(): void {
     const choice = serviceChoice(tool.service, cursor);
     const { min, max } = serviceFootprint(cursor, choice.rotation, info.width, info.depth);
     geometry = new Geometry(min);
-    const base = FACILITY_COLOR[tool.service === "PowerPlant" ? 1 : 2] ?? PREVIEW_OK_COLOR;
-    const color: Color = choice.placeable ? [base[0], base[1], base[2], 0.6] : PREVIEW_BAD_COLOR;
+    const base = facilityCircleColor(tool.service === "PowerPlant" ? 1 : 2);
+    const color: Color = choice.placeable ? [base[0], base[1], base[2], 0.7] : PREVIEW_BAD_COLOR;
     geometry.rect(min, max, color);
     const cost = `費用 ${info.cost.toLocaleString("ja-JP")}・R で回す`;
     infoText = choice.placeable ? cost : `置けない：${choice.reason}・${cost}`;
