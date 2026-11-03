@@ -120,7 +120,8 @@ function sendSignals(sim: Simulation): void {
   reply({ kind: "signals", lights }, [lights.buffer]);
 }
 
-// 建物と街の数字は、建物の表か道路網が変わったときだけ全体を送り直す。足りない網の数は網のつながりで変わる
+// 建物と街の数字は、建物の表か道路網が変わったときだけ全体を送り直す。足りない網の数は網のつながりで、
+// 駐車場の寄る端は道路網で変わる
 let sentBuildingsVersion = -1;
 function sendBuildings(sim: Simulation): void {
   const version = sim.supply_version();
@@ -130,9 +131,14 @@ function sendBuildings(sim: Simulation): void {
   sentBuildingsVersion = version;
   const buildings = sim.buildings();
   const facilities = sim.facilities();
+  const lots = sim.lots();
   const stats = [...sim.city_stats()];
   sentStats = stats.join(",");
-  reply({ kind: "buildings", buildings, facilities, stats }, [buildings.buffer, facilities.buffer]);
+  reply({ kind: "buildings", buildings, facilities, lots, stats }, [
+    buildings.buffer,
+    facilities.buffer,
+    lots.buffer,
+  ]);
 }
 
 // 需要は税率、幸福度、人口、職のない住民で、建物の表が変わらなくても動く。住民の数だけ数え直すので、間引いて送る。

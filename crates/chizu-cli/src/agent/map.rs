@@ -4,6 +4,7 @@
 //! 書き込みはせず、中核の公開の読み出し口だけを使う。
 
 use chizu_core::chunk::Layer;
+use chizu_core::movement::lot_tiles;
 use chizu_core::network::{NodeControl, SegmentKind};
 use chizu_core::tile::local_index;
 use chizu_core::{
@@ -27,6 +28,7 @@ pub const LEGEND: &str = "\
   Z Y      信号のない交差点。Z は高速道路でないどの腕にも横断歩道があり、Y は横断歩道を外した腕がある
            （--layer traffic では混み具合の文字を先に出す）
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
+  p        建物の駐車場に切り欠いたマス（建物より先に出す。前面の帯のように 1 マスの一部だけの切り欠きも p にする）
   * ^ %    電気か水が届いていない建物（* 電気だけ、^ 水だけ、% 両方。R C I O の代わりに出す）
   R C I O  建物（住宅、商業、工業、オフィスの区画に建っている。電気も水も届いている）
   r c i o  建物のない区画（同じ並び）
@@ -82,6 +84,8 @@ struct Cell {
     /// 道路の最大の種類。0 は道路なし。
     road: u8,
     building: [u32; 4],
+    /// 駐車場に切り欠いたマスの数（1 マスの一部だけの帯も 1 と数える）。
+    lot: u32,
     /// 電気が届いていない建物のマスの数。
     unpowered: u32,
     /// 水が届いていない建物のマスの数。
@@ -120,7 +124,7 @@ fn facility_letter(k: ServiceKind) -> char {
 }
 
 impl Cell {
-    /// 載せる文字。公共施設、信号、横断歩道のある交差点（この 2 つは交通の層では道路のあと）、道路、建物、区画、水辺、買っていない土地、空きマスの順に選び、
+    /// 載せる文字。公共施設、信号、横断歩道のある交差点（この 2 つは交通の層では道路のあと）、道路、駐車場、建物、区画、水辺、買っていない土地、空きマスの順に選び、
     /// 同じ種類の中では数の多いものを選ぶ（道路は種類の大きいもの）。
     fn glyph(&self) -> char {
         if let Some(i) = argmax(&self.facility) {
@@ -141,6 +145,10 @@ impl Cell {
                     .congestion
                     .map_or(char::from(b'0' + k), congestion_glyph);
             }
+        }
+        // 駐車場に切り欠いたマスは、建物より先に出す。セルの中で建物のマスより少なければ、建物を出す。
+        if self.lot > 0 && self.lot >= self.building.iter().sum::<u32>() {
+            return 'p';
         }
         if let Some(i) = argmax(&self.building) {
             // 電気か水が届いていない建物は、区画の種類より先にそれを出す。
@@ -316,6 +324,13 @@ pub fn render(
             cell.unpowered += u32::from(!b.supply.power);
             cell.dry += u32::from(!b.supply.water);
         });
+    }
+    for (_, b) in world.buildings().iter() {
+        for t in lot_tiles(world.network(), b) {
+            if let Some(cell) = grid.cell_mut(t) {
+                cell.lot += 1;
+            }
+        }
     }
     for f in world.facilities() {
         grid.each_tile_in(f.area, |cell, _| cell.facility[f.kind.index()] += 1);
@@ -516,6 +531,47 @@ mod tests {
         .unwrap();
         assert!(text.contains("X 詰まっている"), "{text}");
         assert!(!text.contains("H 1 2 3"), "{text}");
+    }
+
+    /// 駐車場に切り欠いたマスは p、残りの建物のマスは区画の文字になる。凡例にも p がある。
+    #[test]
+    fn parking_lots_are_drawn_before_buildings() {
+        let world = jammed_city();
+        let net = world.network();
+        let mut lots = 0;
+        let mut bodies = 0;
+        for (_, b) in world.buildings().iter().take(60) {
+            let cut = lot_tiles(net, b);
+            let rect = b.area;
+            let text = render(&world, rect, 1, MapLayer::Terrain).unwrap();
+            let rows: Vec<&str> = text
+                .lines()
+                .rev()
+                .take(rect.max.y.abs_diff(rect.min.y) as usize + 1)
+                .collect();
+            for (r, row) in rows.iter().rev().enumerate() {
+                let glyphs: Vec<char> = row.chars().skip_while(|c| *c != ' ').skip(1).collect();
+                for (c, g) in glyphs.iter().enumerate() {
+                    let t = TilePos::new(rect.min.x + c as i64, rect.min.y + r as i64);
+                    if cut.contains(&t) {
+                        assert_eq!(*g, 'p', "{t:?} は駐車場");
+                        lots += 1;
+                    } else {
+                        assert_ne!(*g, 'p', "{t:?} は駐車場でない");
+                        bodies += 1;
+                    }
+                }
+            }
+        }
+        assert!(lots > 0 && bodies > 0, "{lots} {bodies}");
+        let text = render(
+            &world,
+            TileRect::from_corners(TilePos::new(0, 0), TilePos::new(1, 1)),
+            1,
+            MapLayer::Terrain,
+        )
+        .unwrap();
+        assert!(text.contains("  p "), "{text}");
     }
 
     #[test]

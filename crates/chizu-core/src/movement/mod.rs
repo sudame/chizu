@@ -44,7 +44,9 @@ pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
 pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, OWNER_DRIVE_MIN_MM};
 pub use congestion::{Congestion, classify as classify_congestion};
 pub use junction::Rescues;
-pub use parking::{Lot, PARK_RADIUS, ParkingTally, building_spot, lot_spot};
+pub use parking::{
+    Lot, LotEnd, PARK_RADIUS, ParkingTally, building_spot, lot_end, lot_spot, lot_tiles,
+};
 pub use pos::SidewalkPos;
 
 use crate::command::NodeId;

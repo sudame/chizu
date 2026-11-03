@@ -61,6 +61,30 @@ export type Outcome = "Applied" | "Denied" | "Rejected" | "NotImplemented";
 export const SEGMENT_STRIDE = 5;
 /** 建物 1 つの数の個数。chizu-wasm の buildings と同じ。 */
 export const BUILDING_STRIDE = 7;
+
+/** 駐車場の形の 1 件の見出しの数（建物の min の x と y、平面の台数、建物の中の台数、長方形の数、枠の並びの数）。 */
+export const LOT_HEADER = 6;
+/** 駐車場の長方形 1 つの数の個数（x0、y0、x1、y1）。 */
+export const LOT_FACE_STRIDE = 4;
+/** 駐車場の枠の並び 1 本の数の個数（x0、y0、x1、y1、車の入る側の向きの x と y、枠の数）。 */
+export const LOT_STRIP_STRIDE = 7;
+
+/** 駐車場の形の並びが、見出しの数のとおりに過不足なく読めるか。 */
+export function lotsWellFormed(data: Float64Array): boolean {
+  let i = 0;
+  while (i < data.length) {
+    if (i + LOT_HEADER > data.length) {
+      return false;
+    }
+    const faces = data[i + 4] ?? -1;
+    const strips = data[i + 5] ?? -1;
+    if (!Number.isInteger(faces) || !Number.isInteger(strips) || faces < 0 || strips < 0) {
+      return false;
+    }
+    i += LOT_HEADER + faces * LOT_FACE_STRIDE + strips * LOT_STRIP_STRIDE;
+  }
+  return i === data.length;
+}
 /** 建物の供給の値のうち、電気が届いていることを表す値。水道は 2 を足す。 */
 export const SUPPLY_POWER = 1;
 export const SUPPLY_WATER = 2;
@@ -209,10 +233,18 @@ export type WorkerToMain =
    */
   | { kind: "mover-paths"; data: Float64Array }
   /**
-   * 建物と街の数字。建物の表が変わったときだけ送る。stats は chizu-wasm の city_stats で、
+   * 建物と街の数字。建物の表か道路網が変わったときだけ送る。stats は chizu-wasm の city_stats で、
    * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並び、最後に需要の内訳が続く。
+   * lots は chizu-wasm の lots で、敷地を切り欠いた駐車場の形が、切り欠く建物の分だけ並ぶ（並びは map/lots.ts にある）。
+   * どちらの端に寄せるかが道路網で変わるので、道路網が変わったときにも送り直す。
    */
-  | { kind: "buildings"; buildings: Float64Array; facilities: Float64Array; stats: number[] }
+  | {
+      kind: "buildings";
+      buildings: Float64Array;
+      facilities: Float64Array;
+      lots: Float64Array;
+      stats: number[];
+    }
   /**
    * 人口と幸福度とマイルストーン。overview は chizu-wasm の overview で、数の並びは overview.ts にある。
    * stalls は chizu-wasm の growth_stalls で、新築が止まっている道路網ごとに [x, y, 足りない資源] が並ぶ。
@@ -315,6 +347,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         Array.isArray(v.stats) &&
         v.facilities instanceof Float64Array &&
         v.facilities.length % FACILITY_STRIDE === 0 &&
+        v.lots instanceof Float64Array &&
+        lotsWellFormed(v.lots) &&
         v.stats.every((x) => typeof x === "number") &&
         validCityStats(v.stats)
       );
