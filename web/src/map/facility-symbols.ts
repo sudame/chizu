@@ -91,40 +91,78 @@ export function facilitySymbols(groups: readonly SymbolGroup[], zoom: number): F
   return out;
 }
 
+/** 画面の外でも、この幅（CSS ピクセル）の余白の中の記号は、ずらす計算に入れる。 */
+const LAYOUT_MARGIN = 120;
+
 /**
- * 記号の画面の位置を求める。まとまりの記号と 1 棟の記号は、ほかの記号と丸が重なるとき、
- * あとの記号を重ならない所までずらす（施設 1 つずつの記号は敷地の中心に置いたままにする）。
+ * 記号の画面の位置を求める。画面の中（少し余白を足した範囲）の記号だけを扱う。
+ * まとまりの記号と 1 棟の記号は、ほかの記号と丸が重なるとき、丸の直径を上限にずらす。
+ * それでも重なるときは、あとの記号を出さない（引きでは間引く）。施設 1 つずつの記号は、敷地の中心に置いたままにする。
  */
 export function layoutSymbols(
   groups: readonly SymbolGroup[],
   camera: { x: number; y: number; zoom: number },
   viewport: { width: number; height: number },
 ): PlacedSymbol[] {
-  const placed: PlacedSymbol[] = facilitySymbols(groups, camera.zoom).map((s) => ({
-    ...s,
-    sx: (s.x - camera.x) * camera.zoom + viewport.width / 2,
-    sy: (s.y - camera.y) * camera.zoom + viewport.height / 2,
-  }));
+  const m = LAYOUT_MARGIN;
+  const placed: PlacedSymbol[] = [];
+  for (const s of facilitySymbols(groups, camera.zoom)) {
+    const sx = (s.x - camera.x) * camera.zoom + viewport.width / 2;
+    const sy = (s.y - camera.y) * camera.zoom + viewport.height / 2;
+    if (sx >= -m && sy >= -m && sx <= viewport.width + m && sy <= viewport.height + m) {
+      placed.push({ ...s, sx, sy });
+    }
+  }
+  const min = 2 * (symbolLook(camera.zoom).radius + SYMBOL_BORDER) + 1;
+  // 並べた記号を、格子（1 辺 min）に入れて、近くの記号とだけ比べる
+  const cells = new Map<string, PlacedSymbol[]>();
+  const cell = (v: number) => Math.floor(v / min);
+  const add = (s: PlacedSymbol) => {
+    const k = `${cell(s.sx)},${cell(s.sy)}`;
+    const list = cells.get(k);
+    if (list === undefined) cells.set(k, [s]);
+    else list.push(s);
+  };
+  const near = (s: PlacedSymbol) => {
+    const out: PlacedSymbol[] = [];
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        out.push(...(cells.get(`${cell(s.sx) + dx},${cell(s.sy) + dy}`) ?? []));
+      }
+    }
+    return out;
+  };
+  const hidden = new Set<PlacedSymbol>();
   const movable = placed
     .filter((s) => s.phase !== "member")
     .sort((a, b) => a.sy - b.sy || a.sx - b.sx || (a.key < b.key ? -1 : 1));
-  const min = 2 * (symbolLook(camera.zoom).radius + SYMBOL_BORDER) + 1;
-  for (let pass = 0; pass < 3; pass++) {
-    for (let i = 0; i < movable.length; i++) {
-      for (let j = 0; j < i; j++) {
-        const a = movable[j] as PlacedSymbol;
-        const b = movable[i] as PlacedSymbol;
-        const dx = b.sx - a.sx;
-        const dy = b.sy - a.sy;
+  for (const s of movable) {
+    const [ox, oy] = [s.sx, s.sy];
+    const overlapping = () =>
+      near(s).filter((a) => Math.hypot(s.sx - a.sx, s.sy - a.sy) < min - 1e-6);
+    for (let pass = 0; pass < 4; pass++) {
+      const hits = overlapping();
+      if (hits.length === 0) break;
+      for (const a of hits) {
+        const dx = s.sx - a.sx;
+        const dy = s.sy - a.sy;
         const d = Math.hypot(dx, dy);
-        if (d >= min) continue;
         const [ux, uy] = d === 0 ? [1, 0] : [dx / d, dy / d];
-        b.sx = a.sx + ux * min;
-        b.sy = a.sy + uy * min;
+        s.sx = a.sx + ux * min;
+        s.sy = a.sy + uy * min;
+        // もとの位置から、丸の直径より離さない
+        const away = Math.hypot(s.sx - ox, s.sy - oy);
+        if (away > min) {
+          s.sx = ox + ((s.sx - ox) / away) * min;
+          s.sy = oy + ((s.sy - oy) / away) * min;
+        }
       }
     }
+    const clear = overlapping().length === 0;
+    if (clear) add(s);
+    else hidden.add(s);
   }
-  return placed;
+  return placed.filter((s) => !hidden.has(s));
 }
 
 /** 名前を置く段（寄りか）で、いま出している記号。標準まではまとまりの記号、寄りは 1 つずつの記号である。 */

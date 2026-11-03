@@ -347,11 +347,13 @@ describe("地区と施設の名前", () => {
     const near = facilityCandidates(groups, { x: 5, y: 1, zoom: 16 }, vp, STAGE_NEAR, measure)[0];
     expect(std?.wx).toBe(groups[0]?.centerX);
     expect(near?.wx).toBe(9);
-    expect(near?.group).toBe(std?.group);
     expect(near?.ox).toBe(15);
     // 置き方の違う候補は、右、左、下、上の順に並ぶ
     const all = facilityCandidates(groups, { x: 5, y: 1, zoom: 8 }, vp, STAGE_STANDARD, measure);
-    expect(all.map((c) => c.id.split("|")[3])).toEqual(["r", "l", "b", "t"]);
+    // 1 つのまとまりは 1 つの候補で、置き方の違いは alternatives に持つ
+    expect(all).toHaveLength(1);
+    const options = [all[0], ...(all[0]?.alternatives ?? [])];
+    expect(options.map((c) => c?.id.split("|").at(-3))).toEqual(["r", "l", "b", "t"]);
     // いちばん右の記号の右が画面の外にあるときは、収まる置き方を出す
     const narrow = { width: 300, height: 300 };
     const fallback = facilityCandidates(
@@ -362,7 +364,8 @@ describe("地区と施設の名前", () => {
       measure,
     );
     expect(fallback.length).toBeGreaterThan(0);
-    expect(fallback.every((c) => c.box.x1 <= narrow.width && c.box.x0 >= 0)).toBe(true);
+    const boxes = fallback.flatMap((c) => [c, ...(c.alternatives ?? [])]).map((c) => c.box);
+    expect(boxes.every((b) => b.x1 <= narrow.width && b.x0 >= 0)).toBe(true);
   });
 });
 

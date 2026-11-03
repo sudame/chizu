@@ -7,6 +7,7 @@ import {
   activeSymbols,
   facilityOwner,
   layoutSymbols,
+  type PlacedSymbol,
   SYMBOL_BORDER,
   symbolLook,
 } from "./facility-symbols.ts";
@@ -153,8 +154,8 @@ export type Candidate = {
   box: Rect;
   /** 施設の名前のとき、名前を添える記号の識別子。その記号とは、余白をとらずに重なりを調べる。 */
   owner?: string;
-  /** 同じ値の候補は、1 つだけ置く。置き方の違う候補を、優先の高い順に並べるのに使う。 */
-  group?: string;
+  /** 同じものの別の置き方。この候補が置けないときに、先頭から順に試す。 */
+  alternatives?: readonly Candidate[];
 };
 
 // ---- 道路 ----
@@ -620,12 +621,14 @@ export function facilityText(f: FacilityLabel, stage: number): string {
 
 /** 1 つのまとまりの名前について試す候補の数の上限。 */
 const MAX_FACILITY_ALTERNATIVES = 12;
-// 記号の下と上に置くときの、丸の縁から名前までの隙間（CSS ピクセル）
-const BELOW_GAP = 3;
+// 記号の下と上に置くときの、丸の縁から名前までの隙間（CSS ピクセル）。並んだ隣の記号の影と、
+// 名前の余白（LABEL_MARGIN の 4px）に当たらない広さにする
+const BELOW_GAP = 6;
 
 /**
- * 施設の名前の候補。画面に収まるものだけを出す。名前は、記号の右、左、下、上の順で試す（同じ `group` の候補は
- * 1 つだけ置く）。寄りの段は記号が 1 つずつ並ぶので、いちばん右の記号から順に試す。
+ * 施設の名前の候補。画面に収まるものだけを出す。1 つのまとまりを 1 つの候補と数え、置き方の違いは
+ * `alternatives` に、記号の右、左、下、上の順で持つ。寄りの段は記号が 1 つずつ並ぶので、
+ * いちばん右の記号から順に試す。`placed` は layoutSymbols の結果で、渡さなければ求める。
  */
 export function facilityCandidates(
   facilities: readonly FacilityLabel[],
@@ -633,11 +636,11 @@ export function facilityCandidates(
   vp: Viewport,
   stage: number,
   measure: Measure,
+  placed: readonly PlacedSymbol[] = layoutSymbols(facilities, camera, vp),
 ): Candidate[] {
   const ls = labelStyle("facility", stage);
   if (ls === null) return [];
-  const near = stage >= STAGE_NEAR;
-  const symbols = activeSymbols(layoutSymbols(facilities, camera, vp), near);
+  const symbols = activeSymbols(placed, stage >= STAGE_NEAR);
   const reach = symbolLook(camera.zoom).radius + SYMBOL_BORDER;
   const out: Candidate[] = [];
   for (const f of facilities) {
@@ -646,7 +649,7 @@ export function facilityCandidates(
     const label = facilityText(f, stage);
     const size = measure(label, style, false);
     const anchors = symbols.filter((s) => s.owner === owner).sort((a, b) => b.x - a.x || a.y - b.y);
-    let count = 0;
+    const options: Candidate[] = [];
     for (const anchor of anchors) {
       // 画面の位置（ずらしたあと）を基準に、記号の右、左、下、上の順に置く
       const sides: [string, number, number][] = [
@@ -657,10 +660,9 @@ export function facilityCandidates(
       ];
       for (const [side, x0, y0] of sides) {
         const box = { x0, y0, x1: x0 + size.w, y1: y0 + size.h };
-        if (!inside(box, vp) || count >= MAX_FACILITY_ALTERNATIVES) continue;
-        count++;
+        if (!inside(box, vp) || options.length >= MAX_FACILITY_ALTERNATIVES) continue;
         const home = toScreen(camera, vp, anchor.x, anchor.y);
-        out.push({
+        options.push({
           id: `facility|${anchor.key}|${side}|${label}|${styleKey(style)}`,
           priority: ls.priority,
           text: label,
@@ -675,10 +677,11 @@ export function facilityCandidates(
           h: size.h,
           box,
           owner: anchor.key,
-          group: owner,
         });
       }
     }
+    const [first, ...rest] = options;
+    if (first !== undefined) out.push({ ...first, alternatives: rest });
   }
   return out;
 }
@@ -715,21 +718,27 @@ export function placeLabels(
     .slice(0, MAX_CANDIDATES);
   const placed: Candidate[] = [];
   const taken: Rect[] = [];
-  const doneGroups = new Set<string>();
-  for (const { c } of order) {
-    if (c.group !== undefined && doneGroups.has(c.group)) continue;
-    const m = LABEL_MARGIN;
+  const m = LABEL_MARGIN;
+  const fits = (c: Candidate) => {
     const padded = { x0: c.box.x0 - m, y0: c.box.y0 - m, x1: c.box.x1 + m, y1: c.box.y1 + m };
-    // 自分のまとまりの記号は、名前を記号の右 15px に置くと余白に入るので、余白をとらずに調べる
+    // 名前を添える記号は、名前を記号の右 15px に置くと余白に入るので、余白をとらずに調べる
     const blocked = obstacles.some((o) =>
       overlaps(o.owner !== undefined && o.owner === c.owner ? c.box : padded, o),
     );
-    if (blocked || taken.some((t) => overlaps(padded, t))) {
-      continue;
-    }
-    placed.push(c);
-    taken.push(c.box);
-    if (c.group !== undefined) doneGroups.add(c.group);
+    return !blocked && !taken.some((t) => overlaps(padded, t));
+  };
+  for (const { c } of order) {
+    // 前に出ていた置き方があれば先に試し、なければ並びの順に試す
+    const tries = [c, ...(c.alternatives ?? [])].map((t, i) => ({
+      t,
+      i,
+      prev: shown.has(t.id) ? 0 : 1,
+    }));
+    tries.sort((a, b) => a.prev - b.prev || a.i - b.i);
+    const chosen = tries.find(({ t }) => fits(t))?.t;
+    if (chosen === undefined) continue;
+    placed.push(chosen);
+    taken.push(chosen.box);
   }
   return placed;
 }

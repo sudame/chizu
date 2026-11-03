@@ -4,7 +4,6 @@
 
 import { TILE_WATER } from "../protocol/messages.ts";
 import {
-  activeSymbols,
   drawSymbol,
   layoutSymbols,
   type PlacedSymbol,
@@ -29,7 +28,6 @@ import {
   type RoadRun,
   roadCandidates,
   roadRuns,
-  STAGE_NEAR,
   STAGE_STANDARD,
   styleKey,
   type TextStyle,
@@ -215,18 +213,27 @@ export class LabelLayer {
       const s = this.#sprite(text, style, vertical);
       return { w: s.w, h: s.h };
     };
+    // 記号の位置は 1 回だけ求め、名前の候補と置けない範囲と描画で使う
+    this.#symbols = layoutSymbols(this.#facilityLabels, camera, viewport);
     const candidates: Candidate[] = [
       ...roadCandidates(this.#runs, camera, viewport, this.#stage, measure),
       ...districtCandidates(this.#districts, camera, viewport, this.#stage, measure),
-      ...facilityCandidates(this.#facilityLabels, camera, viewport, this.#stage, measure),
+      ...facilityCandidates(
+        this.#facilityLabels,
+        camera,
+        viewport,
+        this.#stage,
+        measure,
+        this.#symbols,
+      ),
     ];
-    // 施設の記号の上にも、ほかのラベルを置かない
-    this.#symbols = layoutSymbols(this.#facilityLabels, camera, viewport);
+    // 描いている記号は、入れ替わりの途中の薄いものも含めて、ほかのラベルを置けない範囲にする。
+    // 名前を添える記号は、名前の置き方で余白を外す
     const look = symbolLook(camera.zoom);
-    // 名前の段が出している記号だけを、置けない範囲にする。名前を添える記号は、名前の置き方で外す
-    const symbolObstacles: Obstacle[] = activeSymbols(this.#symbols, this.#stage >= STAGE_NEAR).map(
-      (s) => ({ ...symbolBox(s, look.radius), owner: s.key }),
-    );
+    const symbolObstacles: Obstacle[] = this.#symbols.map((s) => ({
+      ...symbolBox(s, look.radius),
+      owner: s.key,
+    }));
     const placed = placeLabels(candidates, this.#fader.shown(), [
       ...this.#readObstacles(),
       ...symbolObstacles,
