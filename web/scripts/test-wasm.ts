@@ -57,6 +57,16 @@ function findOnPath(name: string): string {
   throw new Error(`${name} が PATH にない。mise install で入れる`);
 }
 
+/** ページが 2 枠描くまで待つ。1 枠目の前に並べ直しと ResizeObserver の知らせが済み、2 枠目でそれが描かれる。 */
+function afterFrames(page: Page): Promise<void> {
+  return page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+}
+
 const failures: string[] = [];
 function check(ok: boolean, label: string): void {
   console.log(`${ok ? "ok" : "NG"}: ${label}`);
@@ -253,7 +263,8 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
     await open();
     for (const width of [1280, 1000, 900, 860, 780, 640, 500, 390, 360]) {
       await page.setViewportSize({ width, height: 800 });
-      await page.waitForTimeout(300);
+      // 帯と欄の並びは CSS だけで決まる。ResizeObserver の知らせも含めて、2 枠描くまで待てば並び終わっている
+      await afterFrames(page);
       const layout = await page.evaluate(() => {
         const notice = document.querySelector<HTMLElement>("#save-notice");
         if (notice !== null) {
@@ -622,6 +633,13 @@ try {
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   const resumed = await ticksIn(500);
   check(resumed > 0, `再開すると時計がまた進む（${resumed} tick）`);
+  // 以降は、時間を進めて待つところでだけ速くする。288 倍のままだと Worker が CPU を使い続けて CI の画面の操作が遅れ、
+  // 最後に chizu-cli で再生する tick も増える
+  const setSpeed = async (speed: number) => {
+    await pickSpeed(page, speed);
+    await hud.and(page.locator(`[data-speed="${speed}"]`)).waitFor({ timeout: TIMEOUT_MS });
+  };
+  await setSpeed(1);
 
   const map = page.locator("#map");
   const mapState = async () => {
@@ -665,6 +683,26 @@ try {
       },
       { x, y },
     );
+  // 画面の点の色をまとめて読む。点ごとに読むとページとの往復が点の数だけ要り、CI では 1 往復が重い
+  const pixels = (points: { x: number; y: number }[]) =>
+    map.evaluate((el, at) => {
+      const canvas = el as HTMLCanvasElement;
+      const gl = canvas.getContext("webgl2");
+      const dpr = window.devicePixelRatio;
+      return at.map((p) => {
+        const out = new Uint8Array(4);
+        gl?.readPixels(
+          Math.floor(p.x * dpr),
+          canvas.height - 1 - Math.floor(p.y * dpr),
+          1,
+          1,
+          gl.RGBA,
+          gl.UNSIGNED_BYTE,
+          out,
+        );
+        return [...out];
+      });
+    }, points);
   // 画素の色（0〜255）が、色の表の値（`#rrggbb`）に近いか。キャンバスのアルファが 1 を切ると、
   // ページの背景と混ざって白く飛ぶので、アルファが 255 のままであることも確かめる
   const near = (c: number[], code: string, tolerance = 6) =>
@@ -772,11 +810,7 @@ try {
   const minorRoadHex = mixHex(GROUND_HEX, "#ffffff", stageWeights(zoom).minorRoad);
   const isRoad = (c: number[]) => near(c, minorRoadHex, 3);
   const isGround = (c: number[]) => near(c, GROUND_HEX, 4);
-  const colorAt = async (x: number, y: number) => {
-    const p = tileCenter(x, y);
-    return pixel(p.x, p.y);
-  };
-  for (const [x, y, road, label] of [
+  const roadTiles = [
     [32, 32, true, "道路の途中のマスの中心"],
     [12, 32, true, "始点のマスの中心"],
     [52, 32, true, "終点のマスの中心"],
@@ -784,8 +818,10 @@ try {
     [32, 33, false, "1 つ下のマスの中心"],
     [10, 32, false, "始点の 2 つ左のマスの中心"],
     [54, 32, false, "終点の 2 つ右のマスの中心"],
-  ] as const) {
-    const c = await colorAt(x, y);
+  ] as const;
+  const roadTileColors = await pixels(roadTiles.map(([x, y]) => tileCenter(x, y)));
+  for (const [i, [x, y, road, label]] of roadTiles.entries()) {
+    const c = roadTileColors[i] ?? [];
     check(
       road ? isRoad(c) : isGround(c),
       `${label} (${x}, ${y}) が${road ? "道路" : "地面"}の色で描かれる（${c.join(", ")}）`,
@@ -970,14 +1006,15 @@ try {
   // 買った土地の地面の色（#f4f2ec）の点を数える。買っていない土地は #e6e3db と斜線の #d9d5ca で塗る。
   // 買う道具のカーソルが載っていれば、買える土地の仮の表示（青の 10%）が重なって #dee5ec になる
   const ownedPixels = async () => {
-    let n = 0;
+    const points: { x: number; y: number }[] = [];
     for (let i = -3; i <= 3; i++) {
       for (let j = -3; j <= 3; j++) {
-        const c = await pixel(east.x + i * 0.1 * 64 * view.zoom, east.y + j * 0.1 * 64 * view.zoom);
-        n += near(c, GROUND_HEX, 2) || near(c, GROUND_ON_HINT_HEX, 2) ? 1 : 0;
+        points.push({ x: east.x + i * 0.1 * 64 * view.zoom, y: east.y + j * 0.1 * 64 * view.zoom });
       }
     }
-    return n;
+    return (await pixels(points)).filter(
+      (c) => near(c, GROUND_HEX, 2) || near(c, GROUND_ON_HINT_HEX, 2),
+    ).length;
   };
   const eastBefore = await ownedPixels();
   const tickBeforeBuy = await tick();
@@ -1134,11 +1171,13 @@ try {
   await page.mouse.move(r1.x, r1.y, { steps: 4 });
   await page.mouse.up();
   const cityNumbers = page.locator("#city-numbers");
+  await setSpeed(FAST_SPEED);
   await page.waitForFunction(
     () => Number(document.querySelector<HTMLElement>("#city-numbers")?.dataset.buildings ?? 0) > 0,
     undefined,
     { timeout: TIMEOUT_MS },
   );
+  await setSpeed(1);
   const firstBuilding = ((await map.getAttribute("data-first-building")) ?? "")
     .split(",")
     .map(Number);
@@ -1742,12 +1781,9 @@ try {
     y: cy + (wy - fine.y) * fine.zoom,
   });
   const ridgeAt = at(bx1 + 0.65, by1 + 0.65);
-  const ridgeArea: number[][] = [];
-  for (const dx of [-1, 0, 1]) {
-    for (const dy of [-1, 0, 1]) {
-      ridgeArea.push(await pixel(ridgeAt.x + dx, ridgeAt.y + dy));
-    }
-  }
+  const ridgeArea = await pixels(
+    [-1, 0, 1].flatMap((dx) => [-1, 0, 1].map((dy) => ({ x: ridgeAt.x + dx, y: ridgeAt.y + dy }))),
+  );
   const besideRidge = at(bx1 + 0.62, by1 + 0.76);
   const roofSide = await pixel(besideRidge.x, besideRidge.y);
   check(
