@@ -760,7 +760,11 @@ fn a_lot_just_past_a_node_is_entered_by_slowing_on_the_link_before() {
     let (mut prev, mut slowed_before, mut speeds) = (None::<(u32, i32)>, false, Vec::new());
     for _ in 0..300 {
         let Some(t) = s.trips.get(id).filter(|t| car::on_road(t)) else {
-            if s.trips.get(id).is_some_and(|t| t.mode() == LaneMode::Sidewalk) && prev.is_some() {
+            if s.trips
+                .get(id)
+                .is_some_and(|t| t.mode() == LaneMode::Sidewalk)
+                && prev.is_some()
+            {
                 break;
             }
             s.step();
@@ -768,7 +772,10 @@ fn a_lot_just_past_a_node_is_entered_by_slowing_on_the_link_before() {
         };
         let v = t.speed().0;
         if let Some((leg, before)) = prev {
-            assert!(before - v <= CAR_DECEL, "減速の上限を破った {before} -> {v}");
+            assert!(
+                before - v <= CAR_DECEL,
+                "減速の上限を破った {before} -> {v}"
+            );
             // この tick の速さは、tick の始めにいたリンクの上で決めた。
             if (leg as usize) < last && v < before {
                 slowed_before = true;
@@ -782,6 +789,16 @@ fn a_lot_just_past_a_node_is_entered_by_slowing_on_the_link_before() {
     assert!(slowed_before, "手前のリンクで減速しない {speeds:?}");
     let (_, arrive) = *speeds.last().unwrap();
     assert!(arrive >= car::PARK_ENTRY_SPEED, "{speeds:?}");
+    // 落としすぎない。出入りの位置は最後のリンクの 5.25m 先なので、つなぎ目を抜けた tick には、
+    // 入る速さより 1 tick の減速ぶん以上速い。
+    let (_, entered) = *speeds
+        .iter()
+        .find(|(leg, _)| *leg as usize == last)
+        .unwrap();
+    assert!(
+        entered > car::PARK_ENTRY_SPEED + CAR_DECEL,
+        "手前で落としすぎた {speeds:?}"
+    );
 }
 
 #[test]
