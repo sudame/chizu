@@ -224,11 +224,41 @@ pub fn building_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
 /// 平面の駐車場のない建物（斜めの道路に面した建物など）は、建物の中の駐車場に出入口から入る。
 /// 出入りの位置が道路の上に取れなければ（行き止まりの端など）、出入口の位置にする。
 pub fn lot_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
+    lot_choice(net, b).map(|(p, _)| p)
+}
+
+/// 切り欠いた駐車場が寄る、間口の端。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LotEnd {
+    /// `Building::front` のある端。
+    Front,
+    /// 間口を `front` から進んだ先の、もう一方の端。
+    Far,
+}
+
+/// 切り欠いた駐車場が寄る端。[`lot_spot`] が選ぶ端と同じである。出入りの位置が道路の上に取れず、
+/// 出入口にしたときは、同じ決まりの最後の「座標の大きい側」を返す。描画が切り欠きの位置を決めるのに使う。
+pub fn lot_end(net: &Network, b: &Building) -> LotEnd {
+    lot_choice(net, b)
+        .and_then(|(_, end)| end)
+        .unwrap_or_else(|| {
+            let (tx, ty) = b.toward_road;
+            // 間口に沿う向き `(-ty, tx)` が、ワールド座標の大きい側へ向かうほうの端
+            if tx - ty > 0 {
+                LotEnd::Far
+            } else {
+                LotEnd::Front
+            }
+        })
+}
+
+/// [`lot_spot`] の本体。出入りの位置と、選んだ端を返す。出入口にしたときの端は `None`。
+fn lot_choice(net: &Network, b: &Building) -> Option<(SidewalkPos, Option<LotEnd>)> {
     let door = building_spot(net, b)?;
     let half = TILE_MM / 2;
     // 端の外側の辺から、出入りの位置まで内へ入る距離（mm）。
     let inward = match b.parking_layout().cut {
-        ParkingCut::None => return Some(door),
+        ParkingCut::None => return Some((door, None)),
         ParkingCut::FrontStrip { slots } => slots
             .checked_mul(SLOT_WIDTH_MM)
             .and_then(|w| i64::try_from(w / 2).ok())
@@ -255,13 +285,13 @@ pub fn lot_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
     };
     // 間口の両端のマスと、そこから外へ向かう向き。1 マスの間口なら、同じマスの両側になる。
     let ends = [
-        (b.front, (-along.0, -along.1)),
-        (at(b.front, along, far), along),
+        (LotEnd::Front, b.front, (-along.0, -along.1)),
+        (LotEnd::Far, at(b.front, along, far), along),
     ];
     // 出入りの位置の、端のマスの真ん中からのずれ（mm）。帯の真ん中は、マスの真ん中より内に入りうる。
     let shift = half - inward;
     ends.into_iter()
-        .filter_map(|(tile, out)| {
+        .filter_map(|(end, tile, out)| {
             let road = at(tile, (tx, ty), 1);
             let sign = out.0 * i64::from(step.0) + out.1 * i64::from(step.1);
             let p = [sign * shift, 0]
@@ -274,10 +304,10 @@ pub fn lot_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
                 })?;
             let (link, off) = p.resolve_on(net, LaneMode::Car)?;
             let w = p.world();
-            Some(((junction_clearance(net, link, off), w.x, w.y), p))
+            Some(((junction_clearance(net, link, off), w.x, w.y), p, end))
         })
-        .max_by_key(|(k, _)| *k)
-        .map_or(Some(door), |(_, p)| Some(p))
+        .max_by_key(|(k, _, _)| *k)
+        .map_or(Some((door, None)), |(_, p, end)| Some((p, Some(end))))
 }
 
 /// 区間 `a` と `b` が同じ区間か、端のノードでつながっているか。建物の間口は、隣り合うだけで

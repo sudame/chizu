@@ -4,6 +4,7 @@ pub mod car_path;
 pub mod command_input;
 pub mod inspect;
 pub mod layers;
+pub mod lots;
 pub mod movers;
 pub mod save;
 pub mod sim;
@@ -148,6 +149,11 @@ impl Simulation {
     /// 建物ごとに `[min の x, min の y, max の x, max の y, 区画の種類, 段階, 供給]`。
     pub fn buildings(&self) -> Vec<f64> {
         self.0.buildings()
+    }
+
+    /// 切り欠いた駐車場の形。並びは `lots::encode` にある。版は建物の表と道路網の版（`supply_version`）で見分ける。
+    pub fn lots(&self) -> Vec<f64> {
+        self.0.lots()
     }
 
     /// 施設を間口のマス (x, y) に置けるかを、向き 0〜3 の順に返す。置けるなら null、置けないなら理由の文。

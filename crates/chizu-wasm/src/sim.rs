@@ -415,6 +415,15 @@ impl Sim {
         out
     }
 
+    /// 切り欠いた駐車場の形を、切り欠く建物の分だけ返す。並びは [`crate::lots::encode`] にある。
+    /// 間口のどちらの端に寄せるかは道路網で変わるので、版は建物の表と道路網の両方で決まる。
+    pub fn lots(&self) -> Vec<f64> {
+        crate::lots::encode(
+            self.world.network(),
+            self.world.buildings().iter().map(|(_, b)| b.clone()),
+        )
+    }
+
     /// 施設を `at` に置けるかを、向き 0〜3 のそれぞれについて中核の判定で調べる。状態は変えない。
     pub fn service_probe(&self, kind: ServiceKind, at: TilePos) -> [Result<(), DenyReason>; 4] {
         [0, 1, 2, 3].map(|r| self.world.check_service(kind, at, r).map(|_| ()))
