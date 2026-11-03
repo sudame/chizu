@@ -10,6 +10,7 @@ import init, {
 } from "../wasm/chizu_wasm.js";
 import { ChunkSync } from "./map/chunk-sync.ts";
 import { LayerSender, TrafficSender } from "./map/layer-sync.ts";
+import { hasMoverPaths } from "./map/mover-interpolation.ts";
 import type {
   ChunkData,
   CommandMessage,
@@ -101,7 +102,7 @@ function sendRoads(sim: Simulation): void {
 // 車を描く道筋は、新しく求めたものだけを送る。枠が指す道筋を画面が先に受け取れるよう、枠を書く前に送る
 function sendMoverPaths(sim: Simulation): void {
   const data = sim.take_mover_paths();
-  if (data[0] === 0 && data[1] === 0) {
+  if (!hasMoverPaths(data)) {
     return;
   }
   reply({ kind: "mover-paths", data }, [data.buffer]);

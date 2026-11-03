@@ -3,6 +3,7 @@ import { CHUNK_SIDE } from "../protocol/messages.ts";
 import { layout } from "../protocol/snapshot.ts";
 import {
   angleCode,
+  hasMoverPaths,
   type MoverFrame,
   MoverInterpolator,
   MoverPaths,
@@ -622,5 +623,24 @@ describe("MoverInterpolator の道筋に沿う補間", () => {
     expect(r.get(1)?.x).toBeCloseTo(1, 4);
     expect(r.get(1)?.y).toBeGreaterThan(0);
     expect(r.get(1)?.y).toBeLessThan(1);
+  });
+});
+
+describe("hasMoverPaths", () => {
+  it("忘れる番号がなくても、新しい道筋があれば送る", () => {
+    // [すべて忘れるか, 忘れる数, 新しい数, 番号, 点の数, 点…]
+    expect(hasMoverPaths(new Float64Array([0, 0, 1, 7, 0]))).toBe(true);
+  });
+
+  it("忘れる道筋があれば、新しい道筋がなくても送る", () => {
+    expect(hasMoverPaths(new Float64Array([0, 2, 3, 4, 0]))).toBe(true);
+  });
+
+  it("すべて忘れるときは送る", () => {
+    expect(hasMoverPaths(new Float64Array([1, 0, 0]))).toBe(true);
+  });
+
+  it("忘れるものも新しい道筋もないときは送らない", () => {
+    expect(hasMoverPaths(new Float64Array([0, 0, 0]))).toBe(false);
   });
 });

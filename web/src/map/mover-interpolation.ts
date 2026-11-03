@@ -109,6 +109,18 @@ function joins(a: MoverPath, b: MoverPath): boolean {
   return Math.hypot(dx, dy) < JOIN_TILES;
 }
 
+/**
+ * take_mover_paths の並びに、画面へ送る中身があるか。忘れる道筋か新しい道筋が 1 つでもあれば送る。
+ * 新しい道筋の数は、忘れる番号の並びのあと（`2 + 忘れる数`）にある。
+ */
+export function hasMoverPaths(data: Float64Array): boolean {
+  if (data[0] === 1) {
+    return true;
+  }
+  const dropped = data[1] ?? 0;
+  return dropped > 0 || (data[2 + dropped] ?? 0) > 0;
+}
+
 /** Worker から届いた、車を描く道筋。番号は網が変わっても使い回さない。 */
 export class MoverPaths {
   readonly #paths = new Map<number, MoverPath>();
