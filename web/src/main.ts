@@ -37,8 +37,9 @@ import {
   type Viewport,
 } from "./map/camera.ts";
 import { ChunkStore } from "./map/chunk-sync.ts";
-import { DetailCache } from "./map/detail.ts";
+import { DetailCache, roofBody } from "./map/detail.ts";
 import { LabelLayer } from "./map/label-layer.ts";
+import { lotKey, parseLots } from "./map/lots.ts";
 import { MoverPaths } from "./map/mover-interpolation.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
 import {
@@ -1186,6 +1187,11 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     updateDemandTheme();
     // test:wasm が読む
     mapCanvas.dataset.firstBuilding = Array.from(message.buildings.subarray(0, 4)).join(",");
+    // 最初の建物の屋根を置く本体の長方形（駐車場に切り欠いた所を除く）
+    const [fx0 = 0, fy0 = 0, fx1 = 0, fy1 = 0] = message.buildings.subarray(0, 4);
+    const roof = roofBody(fx0, fy0, fx1, fy1, parseLots(message.lots).get(lotKey(fx0, fy0)));
+    mapCanvas.dataset.firstRoof =
+      roof === undefined ? "" : [roof.minX, roof.minY, roof.maxX, roof.maxY].join(",");
     mapCanvas.dataset.unsupplied = String(unsuppliedCount(message.buildings));
     mapCanvas.dataset.facilities = String(message.facilities.length / FACILITY_STRIDE);
     return;

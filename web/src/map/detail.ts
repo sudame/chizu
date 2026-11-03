@@ -95,6 +95,22 @@ export function equipmentCenters(
   return out;
 }
 
+/** 屋根を置く本体の長方形。駐車場に切り欠いた所があれば、それを除いたいちばん広い長方形である。 */
+export function roofBody(
+  tx0: number,
+  ty0: number,
+  tx1: number,
+  ty1: number,
+  lot: Lot | undefined,
+): TileRect | undefined {
+  const piece = largestPiece(
+    bodyShape(siteOf(tx0, ty0, tx1, ty1), BUILDING_INSET, BUILDING_EDGE, lot).inner,
+  );
+  return piece === undefined
+    ? undefined
+    : { minX: piece.x0, minY: piece.y0, maxX: piece.x1, maxY: piece.y1 };
+}
+
 /**
  * 建物の屋根の形。住宅は屋根の棟と隅棟（寄棟の屋根）、商業とオフィスは屋上の設備、工業は屋根の筋にする。
  * `rect` にかかる建物だけを描く。
@@ -105,7 +121,6 @@ export function roofGeometry(
   lots: ReadonlyMap<string, Lot> = new Map(),
 ): Geometry {
   const geometry = new Geometry({ x: Math.floor(rect.minX), y: Math.floor(rect.minY) });
-  const e = BUILDING_EDGE;
   for (let i = 0; i + BUILDING_STRIDE <= buildings.length; i += BUILDING_STRIDE) {
     // 見えない建物も含めて全部を回るので、配列を切り出さずに読む
     const tx0 = buildings[i] ?? 0;
@@ -114,13 +129,11 @@ export function roofGeometry(
     const ty1 = buildings[i + 3] ?? 0;
     const zone = buildings[i + 4] ?? 0;
     // 本体（縁の内側）の長方形。駐車場に切り欠いた所があれば、それを除いたいちばん広い長方形に置く
-    const body = largestPiece(
-      bodyShape(siteOf(tx0, ty0, tx1, ty1), BUILDING_INSET, e, lots.get(lotKey(tx0, ty0))).inner,
-    );
+    const body = roofBody(tx0, ty0, tx1, ty1, lots.get(lotKey(tx0, ty0)));
     if (body === undefined) {
       continue;
     }
-    const { x0, y0, x1, y1 } = body;
+    const [x0, y0, x1, y1] = [body.minX, body.minY, body.maxX, body.maxY];
     if (!overlaps(rect, x0, y0, x1, y1)) {
       continue;
     }

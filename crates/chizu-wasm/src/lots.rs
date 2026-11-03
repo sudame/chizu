@@ -132,10 +132,10 @@ pub fn lot_shape(net: &Network, b: &Building) -> Option<LotShape> {
 ///
 /// `[建物の min の x, min の y, 平面の台数, 建物の中の台数, 長方形の数, 枠の並びの数,`
 /// `長方形ごとに x0, y0, x1, y1, 枠の並びごとに x0, y0, x1, y1, 向きの x, 向きの y, 枠の数]`。
-pub fn encode(net: &Network, buildings: impl Iterator<Item = Building>) -> Vec<f64> {
+pub fn encode<'a>(net: &Network, buildings: impl Iterator<Item = &'a Building>) -> Vec<f64> {
     let mut out = Vec::new();
     for b in buildings {
-        let Some(shape) = lot_shape(net, &b) else {
+        let Some(shape) = lot_shape(net, b) else {
             continue;
         };
         let layout = b.parking_layout();
@@ -377,7 +377,7 @@ mod tests {
         );
         let world = sim.world();
         let net = world.network();
-        let data = encode(net, world.buildings().iter().map(|(_, b)| b.clone()));
+        let data = encode(net, world.buildings().iter().map(|(_, b)| b));
         let mut i = 0;
         let mut records = 0;
         while i < data.len() {
@@ -404,7 +404,7 @@ mod tests {
         toward: (i64, i64),
         level: u8,
     ) -> Building {
-        let mut b = template.clone();
+        let mut b = *template;
         b.zone = zone;
         b.level = level;
         b.toward_road = toward;

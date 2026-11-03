@@ -1764,10 +1764,12 @@ try {
     (await map.getAttribute("data-detail-builds")) === null,
     "細部の段より引いているあいだは、細部の頂点を作らない",
   );
-  // 本体の右下の角（マスの縁から 0.2 マス）から 45 度に隅棟が延びる。角から 0.15 マス先の、隅棟の上と脇を比べる。
-  // 左上のマスには電気と水道の印が重なることがあるので、右下のマスに寄って見る
-  const [, , bx1 = bx, by1 = by] = firstBuilding;
-  const corner = tilePoint(bx1, by1);
+  // 屋根を置く本体（駐車場に切り欠いた所を除いたいちばん広い長方形）の右下の角から 45 度に隅棟が延びる。
+  // 角から 0.15 マス先の、隅棟の上と脇を比べる。左上のマスには電気と水道の印が重なることがあるので、右下の角に寄って見る
+  const [, , rx1 = bx, ry1 = by] = ((await map.getAttribute("data-first-roof")) ?? "")
+    .split(",")
+    .map(Number);
+  const corner = tilePoint(Math.floor(rx1 - 0.01), Math.floor(ry1 - 0.01));
   await page.mouse.move(corner.x, corner.y);
   for (let i = 0; i < 20; i++) {
     await page.mouse.wheel(0, -400);
@@ -1783,11 +1785,11 @@ try {
     x: cx + (wx - fine.x) * fine.zoom,
     y: cy + (wy - fine.y) * fine.zoom,
   });
-  const ridgeAt = at(bx1 + 0.65, by1 + 0.65);
+  const ridgeAt = at(rx1 - 0.15, ry1 - 0.15);
   const ridgeArea = await pixels(
     [-1, 0, 1].flatMap((dx) => [-1, 0, 1].map((dy) => ({ x: ridgeAt.x + dx, y: ridgeAt.y + dy }))),
   );
-  const besideRidge = at(bx1 + 0.62, by1 + 0.76);
+  const besideRidge = at(rx1 - 0.18, ry1 - 0.04);
   const roofSide = await pixel(besideRidge.x, besideRidge.y);
   check(
     Number(await map.getAttribute("data-detail-roofs")) > 0 &&
