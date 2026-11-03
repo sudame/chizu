@@ -5,6 +5,7 @@
 
 import { BUILDING_STRIDE, SEGMENT_STRIDE, SIGNAL_STRIDE } from "../protocol/messages.ts";
 import { carriagewayHalfWidth, HIGHWAY_CODE, hasSidewalks, SIDEWALK_WIDTH } from "./lanes.ts";
+import { bodyShape, type Lot, largestPiece, lotKey, parseLots, siteOf } from "./lots.ts";
 import { type Color, hex } from "./palette.ts";
 import {
   asphaltHalfWidth,
@@ -98,7 +99,11 @@ export function equipmentCenters(
  * 建物の屋根の形。住宅は屋根の棟と隅棟（寄棟の屋根）、商業とオフィスは屋上の設備、工業は屋根の筋にする。
  * `rect` にかかる建物だけを描く。
  */
-export function roofGeometry(buildings: Float64Array, rect: TileRect): Geometry {
+export function roofGeometry(
+  buildings: Float64Array,
+  rect: TileRect,
+  lots: ReadonlyMap<string, Lot> = new Map(),
+): Geometry {
   const geometry = new Geometry({ x: Math.floor(rect.minX), y: Math.floor(rect.minY) });
   const e = BUILDING_EDGE;
   for (let i = 0; i + BUILDING_STRIDE <= buildings.length; i += BUILDING_STRIDE) {
@@ -108,11 +113,14 @@ export function roofGeometry(buildings: Float64Array, rect: TileRect): Geometry 
     const tx1 = buildings[i + 2] ?? 0;
     const ty1 = buildings[i + 3] ?? 0;
     const zone = buildings[i + 4] ?? 0;
-    // 本体（縁の内側）の長方形
-    const x0 = tx0 + BUILDING_INSET + e;
-    const y0 = ty0 + BUILDING_INSET + e;
-    const x1 = tx1 + 1 - BUILDING_INSET - e;
-    const y1 = ty1 + 1 - BUILDING_INSET - e;
+    // 本体（縁の内側）の長方形。駐車場に切り欠いた所があれば、それを除いたいちばん広い長方形に置く
+    const body = largestPiece(
+      bodyShape(siteOf(tx0, ty0, tx1, ty1), BUILDING_INSET, e, lots.get(lotKey(tx0, ty0))).inner,
+    );
+    if (body === undefined) {
+      continue;
+    }
+    const { x0, y0, x1, y1 } = body;
     if (!overlaps(rect, x0, y0, x1, y1)) {
       continue;
     }
@@ -392,6 +400,7 @@ export type DetailMeshes = { roofs?: Geometry; streets?: Geometry; lamps?: Geome
  */
 export class DetailCache {
   #buildings: Float64Array = new Float64Array();
+  #lots: Map<string, Lot> = new Map();
   #segments: Float64Array = new Float64Array();
   #nodes: Float64Array = new Float64Array();
   #lights: Float64Array = new Float64Array();
@@ -403,8 +412,9 @@ export class DetailCache {
   /** 頂点を作った回数。test:wasm が、引いたときに作っていないかを見るのに使う。 */
   builds = 0;
 
-  setBuildings(buildings: Float64Array): void {
+  setBuildings(buildings: Float64Array, lots: Float64Array = new Float64Array()): void {
     this.#buildings = buildings;
+    this.#lots = parseLots(lots);
     this.#dirty.roofs = true;
   }
 
@@ -458,7 +468,7 @@ export class DetailCache {
     const rect = this.#rect;
     const out: DetailMeshes = {};
     if (all || this.#dirty.roofs) {
-      out.roofs = roofGeometry(this.#buildings, rect);
+      out.roofs = roofGeometry(this.#buildings, rect, this.#lots);
     }
     if (all || this.#dirty.streets) {
       this.#net ??= roadNet(this.#segments, this.#nodes);

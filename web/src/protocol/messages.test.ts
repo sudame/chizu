@@ -48,12 +48,20 @@ describe("isWorkerToMain", () => {
       kind: "buildings",
       buildings: new Float64Array(7),
       facilities: new Float64Array(5),
+      lots: new Float64Array(0),
       stats: [...Array.from({ length: 21 }, (_, i) => i), 0, 0, 0, 0],
     };
     expect(isWorkerToMain({ ...buildings, facilities: new Float64Array(4) })).toBe(false);
     expect(isWorkerToMain(buildings)).toBe(true);
     expect(isWorkerToMain({ ...buildings, buildings: new Float64Array(5) })).toBe(false);
     expect(isWorkerToMain({ ...buildings, stats: [1, 2] })).toBe(false);
+    // 駐車場の形は、見出しの長方形と枠の並びの数のとおりに続く
+    const lot = [10, 12, 3, 0, 1, 1, 10, 12, 11, 13, 10, 12, 11, 13, 1, 0, 3];
+    expect(isWorkerToMain({ ...buildings, lots: new Float64Array(lot) })).toBe(true);
+    expect(isWorkerToMain({ ...buildings, lots: new Float64Array([...lot, ...lot]) })).toBe(true);
+    expect(isWorkerToMain({ ...buildings, lots: new Float64Array(lot.slice(0, -1)) })).toBe(false);
+    expect(isWorkerToMain({ ...buildings, lots: new Float64Array([...lot, 1]) })).toBe(false);
+    expect(isWorkerToMain({ ...buildings, lots: undefined })).toBe(false);
     const overview = {
       kind: "overview",
       overview: Array.from({ length: 21 }, (_, i) => i),

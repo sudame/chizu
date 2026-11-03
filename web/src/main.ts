@@ -1174,8 +1174,8 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   if (message.kind === "buildings") {
-    buildings = buildingMeshes(message.buildings, message.facilities);
-    detail.setBuildings(message.buildings);
+    buildings = buildingMeshes(message.buildings, message.facilities, message.lots);
+    detail.setBuildings(message.buildings, message.lots);
     renderer?.roads.setBuildings(buildings);
     labels.setBuildings(message.buildings, message.facilities);
     const stats = parseCityStats(message.stats);

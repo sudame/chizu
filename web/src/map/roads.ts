@@ -19,6 +19,7 @@ import {
   roadHalfWidth,
   SIDEWALK_WIDTH,
 } from "./lanes.ts";
+import { addLot, bodyShape, lotKey, parseLots, siteOf } from "./lots.ts";
 import { type Color, facilityStyle, GROUND_COLOR, hex } from "./palette.ts";
 import { stageWeights } from "./stages.ts";
 
@@ -594,8 +595,15 @@ export const CLUSTER_INSET = 0.06;
  * - `facilities`：施設の敷地の縁と面。どの段でも描く（丸い記号は label-layer.ts が描く）
  * - `bodies`：寄りの段の、1 軒ずつの建物の本体
  * - `marks`：電気か水道が届いていない印
+ * - `lots`、`lotEdges`、`lotLines`：敷地を切り欠いた駐車場の面、縁、枠の白線（lots.ts）。建物の本体は切り欠いた所を除く
  */
 export type BuildingMeshes = {
+  /** 駐車場の面（標準の段から）。 */
+  lots: Geometry;
+  /** 駐車場の縁（寄りの段から）。 */
+  lotEdges: Geometry;
+  /** 駐車場の枠の白線（寄りの段で、車と人と同じ倍率で溶け込む）。 */
+  lotLines: Geometry;
   clusters: Geometry;
   details: Geometry;
   facilities: Geometry;
@@ -607,12 +615,20 @@ export type BuildingMeshes = {
  * Worker から届いた建物と施設を頂点に直す。寄りの段では、建物は隣と見分けられるよう少し内側に縮め、
  * 影と縁を付ける。標準の段では、隙間を細くした縁なしの面にする。引きの段の街区の面は、チャンクのシェーダーで塗る。
  */
-export function buildingMeshes(buildings: Float64Array, facilities: Float64Array): BuildingMeshes {
+export function buildingMeshes(
+  buildings: Float64Array,
+  facilities: Float64Array,
+  lotData: Float64Array = new Float64Array(),
+): BuildingMeshes {
+  const lots = parseLots(lotData);
   const origin = {
     x: buildings[0] ?? facilities[0] ?? 0,
     y: buildings[1] ?? facilities[1] ?? 0,
   };
   const meshes: BuildingMeshes = {
+    lots: new Geometry(origin),
+    lotEdges: new Geometry(origin),
+    lotLines: new Geometry(origin),
     clusters: new Geometry(origin),
     details: new Geometry(origin),
     facilities: new Geometry(origin),
@@ -631,30 +647,38 @@ export function buildingMeshes(buildings: Float64Array, facilities: Float64Array
       edge: facilitySiteEdgeColor(kind),
     });
   }
+  // 建物の本体は、駐車場に切り欠いた所を除いた長方形に分ける。縁と本体は、切り欠きの側も縁の幅だけ内に縮める
   const buildingBoxes: Box[] = [];
+  const bodyBoxes: Box[] = [];
   const marks: [number, number, number][] = [];
+  const e = BUILDING_EDGE;
   for (let i = 0; i + BUILDING_STRIDE <= buildings.length; i += BUILDING_STRIDE) {
     const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, zone = 0, , supply = 0] = buildings.subarray(
       i,
       i + BUILDING_STRIDE,
     );
-    const [i0, i1] = [BUILDING_INSET, 1 - BUILDING_INSET];
-    buildingBoxes.push({
-      x0: x0 + i0,
-      y0: y0 + i0,
-      x1: x1 + i1,
-      y1: y1 + i1,
-      color: buildingColor(zone),
-      edge: buildingEdgeColor(zone),
-    });
-    const c = CLUSTER_INSET;
-    meshes.clusters.box(x0 + c, y0 + c, x1 + 1 - c, y1 + 1 - c, buildingColor(zone));
+    const site = siteOf(x0, y0, x1, y1);
+    const lot = lots.get(lotKey(x0, y0));
+    if (lot !== undefined) {
+      addLot(meshes, site, lot);
+    }
+    const color = buildingColor(zone);
+    const edge = buildingEdgeColor(zone);
+    const shape = bodyShape(site, BUILDING_INSET, e, lot);
+    for (const r of shape.outer) {
+      buildingBoxes.push({ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, color, edge });
+    }
+    for (const r of shape.inner) {
+      bodyBoxes.push({ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, color, edge });
+    }
+    for (const r of bodyShape(site, CLUSTER_INSET, 0, lot).outer) {
+      meshes.clusters.box(r.x0, r.y0, r.x1, r.y1, color);
+    }
     marks.push([x0, y0, supply]);
   }
   for (const { x0, y0, x1, y1 } of [...facilityBoxes, ...buildingBoxes]) {
     meshes.details.box(x0, y0, x1, y1, SHADOW_COLOR, BUILDING_SHADOW_PX);
   }
-  const e = BUILDING_EDGE;
   // 敷地は、縁の 4 本と面を重ならないように置く。標準に入るあいだ薄く描いても、縁が面に透けない
   for (const { x0, y0, x1, y1, color, edge } of facilityBoxes) {
     meshes.facilities.box(x0, y0, x1, y0 + e, edge);
@@ -664,9 +688,11 @@ export function buildingMeshes(buildings: Float64Array, facilities: Float64Array
     meshes.facilities.box(x0 + e, y0 + e, x1 - e, y1 - e, color);
   }
   // 寄りの段に移るあいだは、本体を濃く描いたまま縁を濃くしていくので、縁と本体を分ける
-  for (const { x0, y0, x1, y1, color, edge } of buildingBoxes) {
+  for (const { x0, y0, x1, y1, edge } of buildingBoxes) {
     meshes.details.box(x0, y0, x1, y1, edge);
-    meshes.bodies.box(x0 + e, y0 + e, x1 - e, y1 - e, color);
+  }
+  for (const { x0, y0, x1, y1, color } of bodyBoxes) {
+    meshes.bodies.box(x0, y0, x1, y1, color);
   }
   for (const [x, y, supply] of marks) {
     if ((supply & SUPPLY_POWER) === 0) {
@@ -1229,10 +1255,13 @@ export function roadMeshes(segments: Float64Array, nodes: Float64Array): RoadMes
 type Mesh = { buffer: WebGLBuffer; vao: WebGLVertexArrayObject; count: number; origin: Tile };
 
 const MESH_NAMES = [
+  "lots",
   "clusters",
   "details",
   "facilities",
   "bodies",
+  "lotEdges",
+  "lotLines",
   "roofs",
   "marks",
   "minor",
@@ -1260,11 +1289,16 @@ export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
   // 歩道と植え込みでマスいっぱいを覆うので、上に重ねて濃くしていけば線が見えなくなる
   const lines = w.detail < 1 ? 1 : 0;
   const order: [MeshName, number][] = [
+    // 駐車場の面は、建物の影が上に重なるよう、建物より下に描く。引きでは描かない
+    ["lots", w.marks],
     ["clusters", w.clusters],
     ["details", w.detail],
     ["facilities", 1],
     // 寄りに移るあいだは、本体を濃いまま描き、縁と影と隙間だけを濃くしていく
     ["bodies", w.detail > 0 ? 1 : 0],
+    // 駐車場の縁は寄りの描き方に合わせ、枠の白線は車と人と同じ倍率で溶け込む（枠が細かすぎる倍率では描かない）
+    ["lotEdges", w.detail],
+    ["lotLines", w.movers],
     // 細部の段では、寄りの描き方に描き足す（detail.ts）
     ["roofs", w.fine],
     ["marks", w.marks],
@@ -1353,6 +1387,9 @@ export class RoadLayer {
   }
 
   setBuildings(meshes: BuildingMeshes): void {
+    this.#upload("lots", meshes.lots);
+    this.#upload("lotEdges", meshes.lotEdges);
+    this.#upload("lotLines", meshes.lotLines);
     this.#upload("clusters", meshes.clusters);
     this.#upload("details", meshes.details);
     this.#upload("facilities", meshes.facilities);
