@@ -143,7 +143,8 @@ observe の removedCrosswalks:
       既存の道路に重ねると Denied（Overlap）になる。種類を変えるときは UpgradeRoad を使う。
       始点か終点が道路のないマスで、引く向きの 1 歩外に道路（高速道路は内側の端だけ）があれば、そのマスまで 1 マス
       延ばして交差点でつなぐ（延ばした 1 マスも費用がかかる）。延ばしたときは結果の joined に実際の from と to が出る。
-      平行に隣り合う道路や、1 マス離れた道路にはつながない。どの道路にもつながらなければ結果に warning が出る。
+      平行に隣り合う道路や、1 マス離れた道路にはつながない。所持金が延ばしたぶんに足りないときも延ばさない。
+      "join":false を足すと延ばさない（道路の 1 マス手前で止める行き止まりを引くときに使う。省くと true）。どの道路にもつながらなければ結果に warning が出る。
   {"type":"UpgradeRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
       直線と同じ 1 歩を通る既存の道路の区間を、区間ごと kind に変える（上げるのにも下げるのにも使う）。
       直線の形は BuildRoad と同じ決まりで、直線が区間の一部しか通らなくても、ノードからノードまでの区間全体が変わる。
@@ -490,7 +491,12 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
         .map(|(i, value)| {
             let kind = value.get("type").cloned().unwrap_or(Value::Null);
             let invalid = |message: String| json!({"index": i, "type": kind, "outcome": "Invalid", "message": message});
-            let value = match command_json::resolve_node_at(value, |t| world.network().node_at(t)) {
+            // join は CLI だけが読む欄で、記録には入らない。
+            let (value, join) = match take_join(value) {
+                Ok(v) => v,
+                Err(e) => return invalid(e),
+            };
+            let value = match command_json::resolve_node_at(&value, |t| world.network().node_at(t)) {
                 Ok(v) => v,
                 Err(e) => return invalid(e),
             };
@@ -502,7 +508,11 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
             let mut joined = None;
             let mut isolated = false;
             if let Command::BuildRoad { from, to, kind } = command {
-                let (f, t) = world.joined_road(from, to);
+                let (f, t) = if join {
+                    world.joined_road(from, to, kind)
+                } else {
+                    (from, to)
+                };
                 if (f, t) != (from, to) {
                     joined = Some(json!({"from": [f.x, f.y], "to": [t.x, t.y]}));
                     command = Command::BuildRoad { from: f, to: t, kind };
@@ -542,6 +552,20 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
             out
         })
         .collect()
+}
+
+/// BuildRoad の `"join"`（延ばさない指定）を取り除いて返す。省くと true である。BuildRoad 以外には書けない。
+fn take_join(value: &Value) -> Result<(Value, bool), String> {
+    let mut out = value.clone();
+    let Some(join) = out.as_object_mut().and_then(|o| o.remove("join")) else {
+        return Ok((out, true));
+    };
+    if value.get("type").and_then(Value::as_str) != Some("BuildRoad") {
+        return Err("join は BuildRoad にだけ書ける".into());
+    }
+    join.as_bool()
+        .map(|b| (out, b))
+        .ok_or_else(|| "join は true か false で書く".into())
 }
 
 /// 引いた道路がどの道路ともつながらなかったときの知らせ。

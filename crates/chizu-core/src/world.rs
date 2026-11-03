@@ -456,8 +456,8 @@ impl World {
     /// 始点か終点が道路のないマスで、引く向きの 1 歩外のマスに、つなげられる道路（高速道路の内側の端、
     /// ほかの道路の端や途中）があれば、そのマスまで 1 マス延ばす。延ばした先で交差点ができる。
     /// 向きが違う（横や平行に隣り合う）道路には延ばさない。延ばした道路が引けないとき
-    /// （土地を買っていない、重なる、角で交わるなど）は延ばさない。
-    pub fn joined_road(&self, from: TilePos, to: TilePos) -> (TilePos, TilePos) {
+    /// （土地を買っていない、重なる、角で交わる、所持金が足りないなど）は延ばさない。
+    pub fn joined_road(&self, from: TilePos, to: TilePos, kind: RoadKind) -> (TilePos, TilePos) {
         if Line::between(from, to).is_err() {
             return (from, to);
         }
@@ -476,6 +476,7 @@ impl World {
             let (f, t) = (if s { before } else { from }, if e { after } else { to });
             if let Ok(longer) = Line::between(f, t)
                 && self.network.check_road(&longer).is_ok()
+                && road_cost(kind, &longer) <= self.money
             {
                 return (f, t);
             }
@@ -1025,7 +1026,11 @@ mod tests {
             let mut w = World::new(seed);
             let (inner, inward) = highway_inner(&w);
             let (from, to) = (at(inner, inward, 1), at(inner, inward, 11));
-            assert_eq!(w.joined_road(from, to), (inner, to), "種 {seed}");
+            assert_eq!(
+                w.joined_road(from, to, RoadKind::Small),
+                (inner, to),
+                "種 {seed}"
+            );
             let before = w.money();
             assert_eq!(
                 w.apply(&Command::BuildRoad {
@@ -1055,12 +1060,18 @@ mod tests {
             ApplyOutcome::Applied
         );
         let (from, to) = (TilePos::new(1, 10), TilePos::new(11, 10));
-        assert_eq!(w.joined_road(from, to), (TilePos::new(0, 10), to));
+        assert_eq!(
+            w.joined_road(from, to, RoadKind::Small),
+            (TilePos::new(0, 10), to)
+        );
         // 向こう側へ引くときは、終点の 1 歩先の道路につながる。
         let (from, to) = (TilePos::new(-10, 5), TilePos::new(-1, 5));
-        assert_eq!(w.joined_road(from, to), (from, TilePos::new(0, 5)));
+        assert_eq!(
+            w.joined_road(from, to, RoadKind::Small),
+            (from, TilePos::new(0, 5))
+        );
         let (from, to) = (TilePos::new(1, 10), TilePos::new(11, 10));
-        let (f, t) = w.joined_road(from, to);
+        let (f, t) = w.joined_road(from, to, RoadKind::Small);
         assert_eq!(
             w.apply(&Command::BuildRoad {
                 from: f,
@@ -1082,16 +1093,84 @@ mod tests {
         );
         // 平行に隣を引く。
         let (from, to) = (TilePos::new(1, 0), TilePos::new(1, 20));
-        assert_eq!(w.joined_road(from, to), (from, to));
+        assert_eq!(w.joined_road(from, to, RoadKind::Small), (from, to));
         // 1 マス離れていれば延ばさない。
         let (from, to) = (TilePos::new(2, 10), TilePos::new(12, 10));
-        assert_eq!(w.joined_road(from, to), (from, to));
+        assert_eq!(w.joined_road(from, to, RoadKind::Small), (from, to));
         // 道路に離れる向きでも、始点がすでに道路の上なら延ばさない。
         let (from, to) = (TilePos::new(0, 10), TilePos::new(10, 10));
-        assert_eq!(w.joined_road(from, to), (from, to));
+        assert_eq!(w.joined_road(from, to, RoadKind::Small), (from, to));
         // 斜めの角だけで接していても、引く向きの先が道路でなければ延ばさない。
         let (from, to) = (TilePos::new(1, 30), TilePos::new(11, 30));
-        assert_eq!(w.joined_road(from, to), (from, to));
+        assert_eq!(w.joined_road(from, to, RoadKind::Small), (from, to));
+    }
+
+    #[test]
+    fn joins_each_end_on_its_own_and_prefers_both_then_the_start() {
+        let t = TilePos::new;
+        let small = RoadKind::Small;
+        // 左にだけ道路がある：始点だけ延びる。
+        let mut w = World::new(0);
+        road(&mut w, (0, 0), (0, 20), small);
+        assert_eq!(
+            w.joined_road(t(1, 10), t(11, 10), small),
+            (t(0, 10), t(11, 10))
+        );
+        // 右にだけ道路がある：終点だけ延びる。
+        let mut w = World::new(0);
+        road(&mut w, (12, 0), (12, 20), small);
+        assert_eq!(
+            w.joined_road(t(1, 10), t(11, 10), small),
+            (t(1, 10), t(12, 10))
+        );
+        // 両側にある：両方延びる。
+        road(&mut w, (0, 0), (0, 20), small);
+        assert_eq!(
+            w.joined_road(t(1, 10), t(11, 10), small),
+            (t(0, 10), t(12, 10))
+        );
+        // 所持金が両方延ばすぶんに足りないと、始点だけを先に試す。
+        w.money = Money(2_750);
+        assert_eq!(
+            w.joined_road(t(1, 10), t(11, 10), small),
+            (t(0, 10), t(11, 10))
+        );
+    }
+
+    #[test]
+    fn does_not_join_when_the_extra_tile_costs_more_than_the_money() {
+        let mut w = World::new(0);
+        road(&mut w, (0, 0), (0, 20), RoadKind::Small);
+        let (from, to) = (TilePos::new(1, 10), TilePos::new(11, 10));
+        // 延ばさなければ 2,500 で引ける。延ばすと 2,750 かかる。
+        w.money = Money(2_500);
+        assert_eq!(w.joined_road(from, to, RoadKind::Small), (from, to));
+        assert_eq!(
+            w.apply(&Command::BuildRoad {
+                from,
+                to,
+                kind: RoadKind::Small
+            }),
+            ApplyOutcome::Applied
+        );
+        let mut w = World::new(0);
+        road(&mut w, (0, 0), (0, 20), RoadKind::Small);
+        w.money = Money(2_750);
+        assert_eq!(
+            w.joined_road(from, to, RoadKind::Small),
+            (TilePos::new(0, 10), to)
+        );
+    }
+
+    #[test]
+    fn does_not_join_when_the_longer_line_crosses_a_corner() {
+        let t = TilePos::new;
+        let mut w = World::new(0);
+        road(&mut w, (-5, 0), (0, 0), RoadKind::Small);
+        // (0,1) と (1,0) を結ぶ斜めの道路。延ばした (0,0) → (1,1) の角と交わる。
+        road(&mut w, (0, 1), (1, 0), RoadKind::Small);
+        let (from, to) = (t(1, 1), t(6, 6));
+        assert_eq!(w.joined_road(from, to, RoadKind::Small), (from, to));
     }
 
     #[test]

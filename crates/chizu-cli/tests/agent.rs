@@ -1260,3 +1260,27 @@ fn act_joins_next_to_a_road_and_warns_about_an_isolated_road() {
     assert!(results[2].get("joined").is_none(), "{acted}");
     assert!(results[3]["warning"].is_string(), "{acted}");
 }
+
+/// join:false なら隣にあっても延ばさない。join の書き方が違うときや BuildRoad 以外では Invalid になる。
+#[test]
+fn act_does_not_join_when_join_is_false() {
+    let dir = session("agent-join-off");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[0,20],"kind":"Small"},
+            {"type":"BuildRoad","from":[1,10],"to":[11,10],"kind":"Small","join":false},
+            {"type":"BuildRoad","from":[1,5],"to":[11,5],"kind":"Small","join":true},
+            {"type":"BuildRoad","from":[1,6],"to":[11,6],"kind":"Small","join":1},
+            {"type":"SetSignal","at":[0,5],"on":true,"join":false}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds, "--verbose"]));
+    let r = acted["results"].as_array().unwrap();
+    assert_eq!(r[1]["outcome"], "Applied", "{acted}");
+    assert!(r[1].get("joined").is_none(), "{acted}");
+    assert_eq!(r[1]["command"]["from"], serde_json::json!([1, 10]));
+    assert_eq!(r[2]["joined"]["from"], serde_json::json!([0, 5]), "{acted}");
+    assert_eq!(r[3]["outcome"], "Invalid", "{acted}");
+    assert_eq!(r[4]["outcome"], "Invalid", "{acted}");
+}
