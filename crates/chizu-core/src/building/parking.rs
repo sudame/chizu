@@ -22,7 +22,7 @@ const STRIP_MAX_TILES: u64 = 2;
 /// 敷地を切り欠いて作る、平面の駐車場の形。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParkingCut {
-    /// 切り欠かない。斜めの道路に面した建物はこれになる。
+    /// 切り欠かない。斜めの道路に面した建物はこれになり、台数はすべて建物の中に持つ。
     None,
     /// 道路に面した辺に沿った、奥行き 5m の帯。マスが 1〜2 の建物に使う。枠を道路に直角に
     /// `slots` 個並べ、帯の長さは枠の数だけにする。
@@ -47,7 +47,8 @@ pub struct ParkingLayout {
 }
 
 impl ParkingLayout {
-    /// 停められる台数。戸建ては建物の中に駐車場を持たないので、要る台数より少ないことがある。
+    /// 停められる台数。戸建ては建物の中に駐車場を持たず、平面に入りきらない分は切り捨てるので、
+    /// 要る台数より少なくなりうる（いまの大きさの上限では、戸建ての要る台数はいつも平面に収まる）。
     pub fn total(&self) -> u64 {
         self.surface + self.indoor
     }
@@ -63,7 +64,8 @@ impl Building {
         let h = self.area.max.y.abs_diff(self.area.min.y) + 1;
         // 道路が南北の側にあれば、間口は東西の幅で、奥行きは南北の長さである。
         let (frontage, depth) = if dx == 0 { (w, h) } else { (h, w) };
-        let (surface, cut) = if dx != 0 && dy != 0 {
+        let diagonal = dx != 0 && dy != 0;
+        let (surface, cut) = if diagonal {
             (0, ParkingCut::None)
         } else if tiles <= STRIP_MAX_TILES {
             let slots = needed.min(frontage * SLOTS_PER_TILE);
@@ -82,8 +84,9 @@ impl Building {
         } else {
             (surface, cut)
         };
-        // 戸建ては建物の中に駐車場を持たず、平面に入りきらない分は切り捨てる。
-        let detached = self.zone == ZoneKind::Residential && self.level <= 2;
+        // 戸建ては建物の中に駐車場を持たず、平面に入りきらない分は切り捨てる。ただし斜めの道路に面した
+        // 戸建ては切り欠けないので、建物の中の車庫に持つ。
+        let detached = self.zone == ZoneKind::Residential && self.level <= 2 && !diagonal;
         let indoor = if detached { 0 } else { needed - surface };
         ParkingLayout {
             needed,
@@ -269,15 +272,21 @@ mod tests {
         let l = shop.parking_layout();
         assert_eq!((l.needed, l.surface, l.indoor), (6, 0, 6));
         assert_eq!(l.cut, ParkingCut::None);
-        // 戸建ては建物の中に持たないので、斜めの道路に面すると駐車場がない。
-        let mut house = building(Residential, (1, 1), 2);
-        house.toward_road = (-1, 1);
-        let l = house.parking_layout();
-        assert_eq!((l.needed, l.total(), l.cut), (1, 0, ParkingCut::None));
+        // 戸建ても、斜めの道路に面すると建物の中の車庫に持つ。台数はほかの戸建てと同じ 1 世帯 1 台。
+        for level in [1, 2] {
+            let mut house = building(Residential, (2, 2), level);
+            house.toward_road = (-1, 1);
+            let l = house.parking_layout();
+            let households = house.households();
+            assert_eq!(
+                (l.needed, l.surface, l.indoor, l.cut),
+                (households, 0, households, ParkingCut::None)
+            );
+        }
     }
 
     #[test]
-    fn low_level_houses_have_no_indoor_parking() {
+    fn low_level_houses_have_no_indoor_parking_unless_on_a_diagonal_road() {
         for size in [(1, 1), (1, 2), (2, 1), (2, 2), (3, 4), (4, 4)] {
             for level in [1, 2] {
                 let l = building(Residential, size, level).parking_layout();
@@ -305,7 +314,7 @@ mod tests {
                         let b = building(zone, (w, h), level);
                         let l = b.parking_layout();
                         assert_eq!(b.parking_spaces(), l.total());
-                        assert!(l.total() <= l.needed);
+                        assert_eq!(l.total(), l.needed);
                         assert!(l.total() > 0, "{zone:?} {w}×{h} の段階 {level}");
                         match l.cut {
                             ParkingCut::None => assert_eq!(l.surface, 0),

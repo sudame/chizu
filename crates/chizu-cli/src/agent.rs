@@ -99,7 +99,7 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
   parking        建物の駐車場。byZone 区画の種類ごとに、spaces 停められる台数の合計（surface 敷地を切り欠いた平面の駐車場、
                  indoor 建物の中の駐車場の内訳）、parked 停めてある台数、reserved 向かっている車のために押さえた台数、
                  occupiedPermille 停めてある台数と押さえた台数の和の、台数に対する千分率（台数 0 なら null）、
-                 fullLots 満車の駐車場の数、withoutParking 駐車場のない建物の数（斜めの道路に面した戸建て）。
+                 fullLots 満車の駐車場の数。
                  台数は建物の種類、大きさ、段階から決まる。住宅の段階 1〜2 は世帯の数、段階 3〜5 は世帯の数の 0.7 倍、
                  商業と工業は職場の数、オフィスは職場の数の 0.5 倍（端数は切り上げ）。
                  redirectedCars 行き先の建物の駐車場が満車で、16 マスの中のほかの建物の駐車場へ回されている、いま移動中の車。
@@ -847,7 +847,6 @@ fn parking(world: &World) -> Value {
         parked: u64,
         reserved: u64,
         full: u64,
-        without: u64,
     }
     let mut zones: [Zone; 4] = Default::default();
     for (id, b) in world.buildings().iter() {
@@ -861,7 +860,6 @@ fn parking(world: &World) -> Value {
         z.parked += u64::from(lot.parked);
         z.reserved += u64::from(lot.reserved);
         z.full += u64::from(layout.total() > 0 && used >= layout.total());
-        z.without += u64::from(layout.total() == 0);
     }
     let redirected = world
         .trips()
@@ -879,7 +877,6 @@ fn parking(world: &World) -> Value {
                 "reserved": z.reserved,
                 "occupiedPermille": (z.spaces > 0).then(|| (z.parked + z.reserved) * 1000 / z.spaces),
                 "fullLots": z.full,
-                "withoutParking": z.without,
             })
         }),
         "redirectedCars": redirected,
