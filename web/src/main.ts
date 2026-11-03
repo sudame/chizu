@@ -1,5 +1,6 @@
 import { demandBar, parseCityStats, renderCityStats, setupDemandFactors } from "./city-panel.ts";
 import { DEV_WALK_TOOL, setupDevWalks } from "./dev-walks.ts";
+import { handlesEscape, nextEscapeStep } from "./escape.ts";
 import { setupFeedback } from "./feedback.ts";
 import {
   balanceNote,
@@ -845,6 +846,28 @@ function clickTile(at: Tile): void {
   }
 }
 
+/** Esc 1 回ぶん。順は escape.ts が決める */
+function escapeOnce(): void {
+  const step = nextEscapeStep({
+    drawing: roadStart !== null || pointer?.mode === "area" || devWalks.pending(),
+    popoverOpen: popovers.anyOpen(),
+    toolSelected: mapCanvas.dataset.tool !== "none",
+    inspectorOpen: inspected !== null,
+  });
+  if (step === "cancel-drawing") {
+    cancelTool();
+  } else if (step === "close-popover") {
+    popovers.closeOnEscape();
+  } else if (step === "select-view") {
+    const view = toolButtons.find((b) => b.dataset.tool === "none");
+    if (view !== undefined) {
+      selectTool({ kind: "none" }, view);
+    }
+  } else if (step === "close-inspector") {
+    closeInspector();
+  }
+}
+
 mapCanvas.addEventListener("contextmenu", (event) => event.preventDefault());
 window.addEventListener("keydown", (event) => {
   // 文字を打っているあいだは、道具のキーとして扱わない
@@ -857,8 +880,13 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.key === "Escape") {
-    closeInspector();
-    cancelTool();
+    // 保存やフィードバックのダイアログは、ブラウザが Esc で閉じる。裏の道具は戻さない
+    const dialogOpen =
+      document.querySelector("dialog[open]") !== null ||
+      (target instanceof Element && target.closest("dialog") !== null);
+    if (handlesEscape({ repeat: event.repeat, dialogOpen })) {
+      escapeOnce();
+    }
   } else if ((event.key === "r" || event.key === "R") && tool.kind === "service") {
     const current = cursor !== null ? serviceChoice(tool.service, cursor).rotation : 0;
     manualRotation = (current + 1) % 4;

@@ -1616,9 +1616,18 @@ fn grid_driving_golden() {
         }
     }
     // 歩いて車に乗り、車の区切りの経路を探してから走るので、しばらく進めながら車の経路を集める。
+    // 一度に出た車で、交差点の先の車線が詰まる。路肩の車を置く決まりを変えると、ハッシュが変わる。
     let mut by_ends = std::collections::BTreeMap::new();
+    let mut digest = StateHasher::new();
+    let mut burst = String::new();
     for _ in 0..200 {
         replay(&mut world, &log, 1);
+        let h = world.state_hash();
+        digest.write(&h);
+        let t = world.tick().0;
+        if t.is_multiple_of(50) {
+            burst.push_str(&format!("{t} {h:016x} {:016x}\n", digest.finish()));
+        }
         for (_, t) in world
             .trips()
             .iter()
@@ -1635,6 +1644,7 @@ fn grid_driving_golden() {
         by_ends.values().any(|r| r.len() > 1),
         "同じ 2 つのリンクを結ぶ車が、みな同じ経路を通る"
     );
+    compare_golden("grid_driving_burst", &burst);
     assert!(
         end.trips().len() < 200,
         "着かずに残った移動が多い {}",

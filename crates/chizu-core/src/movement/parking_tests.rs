@@ -239,6 +239,47 @@ fn two_cars_leaving_one_building_in_the_same_tick_do_not_overlap() {
 }
 
 #[test]
+fn cars_boarding_past_a_junction_leave_room_for_a_car_entering_from_it() {
+    // 交差点 (10,0) から東へ延びる道路の (14,0) の建物から、4 台が同じ tick に車に乗る。
+    let (mut s, ids) = Street::with_roads(&[14, 50, 52, 54, 56], &[(0, 10), (10, 60)]);
+    let north = Line::between(TilePos::new(10, 0), TilePos::new(10, 10)).unwrap();
+    s.net.build_road(&north, RoadKind::Small).unwrap();
+    s.router = AstarRouter::new(&s.net);
+    let on_street = |x| SidewalkPos {
+        tile: TilePos::new(x, 0),
+        step: (1, 0),
+        along: LaneOffset(0),
+    };
+    // 西から交差点の手前まで来た車がいる。
+    let approach = s.trips.spawn_drives(
+        &s.net,
+        &mut s.router,
+        &[(on_street(8), on_street(59))],
+        Tick::ZERO,
+    )[0]
+    .unwrap();
+    let cars: Vec<TripId> = ids[1..]
+        .iter()
+        .map(|to| s.drive(ids[0], *to).unwrap())
+        .collect();
+    s.step();
+    let rows: Vec<&Trip> = cars.iter().map(|id| s.trips.get(*id).unwrap()).collect();
+    assert!(rows.iter().all(|t| t.mode() == LaneMode::Car));
+    // 3 台は車 2 台ぶんまで下げて入り、4 台めは交差点から入る車の空きを取らずに路肩で待つ。
+    let waiting: Vec<bool> = rows.iter().map(|t| t.waiting_to_depart()).collect();
+    assert_eq!(waiting, [false, false, false, true]);
+    let mut ended = Vec::new();
+    for _ in 0..400 {
+        ended.extend(s.step());
+    }
+    assert!(ended.contains(&approach));
+    assert!(
+        cars.iter().all(|id| s.trips.get(*id).is_none()),
+        "着かない車がある"
+    );
+}
+
+#[test]
 fn an_unusable_nearest_lot_falls_back_to_the_next_one() {
     // 西の道路は東の道路とつながっていない。
     let (mut s, ids) = Street::with_roads(&[55, 40, 27, 54], &[(0, 28), (32, 60)]);
