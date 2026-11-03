@@ -34,7 +34,14 @@ const KIND_LARGE = 3;
 const KIND_HIGHWAY = 4;
 
 /** ラベルの種類。道路は区間の種類ごとに分ける。 */
-export type LabelKind = "highway" | "district" | "facility" | "large" | "medium" | "small";
+export type LabelKind =
+  | "highway"
+  | "district"
+  | "facility"
+  | "parking"
+  | "large"
+  | "medium"
+  | "small";
 
 // ラベルの段。倍率がこの値以上になると次の段に移る。引き、標準、寄り、地区の名前を消す段の順である。
 // 地区の名前は、溶け込みの表の「地区の名前が消える 32〜40」の終わりの 40 で消す
@@ -68,8 +75,10 @@ export type TextStyle = {
   color: string;
   /** 不透明度。 */
   alpha: number;
-  /** 高速道路の緑の盾に白い字で置くか。 */
+  /** 色つきの角丸の盾に白い字で置くか。 */
   shield: boolean;
+  /** 盾の色。なければ高速道路の緑。 */
+  badge?: string;
 };
 
 export type LabelStyle = { priority: number; style: TextStyle };
@@ -77,6 +86,8 @@ export type LabelStyle = { priority: number; style: TextStyle };
 const GRAY = "#5f6368";
 const GRAY_NEAR = "#70757a";
 const LARGE_ROAD = "#6b5310";
+/** 建物の中の駐車場の台数の盾の色（docs/map-style.md の「建物の中の駐車場の台数」）。 */
+export const PARKING_BADGE = "#1a73e8";
 /** 施設の名前の色。施設の種類（ServiceKind の値）ごと。 */
 export const FACILITY_LABEL_COLORS: Readonly<Record<number, string>> = Object.fromEntries(
   Object.entries(FACILITY_STYLES).map(([kind, style]) => [kind, style.name]),
@@ -93,7 +104,7 @@ const text = (
 
 /**
  * 段ごとの、ラベルの種類の優先と見た目。出さない段は null。優先は小さいほど先に置く。
- * 高速 > 地区（引き） > 施設 > 地区（標準） > 大 > 中 > 小 > 地区（寄り）の順である。
+ * 高速 > 地区（引き） > 施設 > 地区（標準） > 大 > 中 > 小 > 地区（寄り） > 建物の中の駐車場の順である。
  */
 export function labelStyle(kind: LabelKind, stage: number): LabelStyle | null {
   const near = stage >= STAGE_NEAR;
@@ -108,6 +119,10 @@ export function labelStyle(kind: LabelKind, stage: number): LabelStyle | null {
       return null;
     case "facility":
       return stage === STAGE_FAR ? null : { priority: 3, style: text(12, 600, GRAY) };
+    case "parking":
+      return near
+        ? { priority: 9, style: { ...text(11, 600, "#ffffff", 0, 1, true), badge: PARKING_BADGE } }
+        : null;
     case "large":
       return { priority: 5, style: text(roadSize, 500, LARGE_ROAD) };
     case "medium":
@@ -702,11 +717,83 @@ export function facilityCandidates(
   return out;
 }
 
+// ---- 建物の中の駐車場 ----
+
+/** 建物の中に車を停めてある建物。座標は建物の敷地の中心（マス）。 */
+export type ParkingLabel = { key: string; x: number; y: number; count: number };
+
+/**
+ * 建物の中の駐車場に停めてある台数（chizu-wasm の parked を parseIndoorParked で直したもの）を、
+ * 建物の表（chizu-wasm の buildings）の位置に結ぶ。
+ */
+export function parkingLabels(
+  buildings: ArrayLike<number>,
+  indoor: ReadonlyMap<string, number>,
+): ParkingLabel[] {
+  const out: ParkingLabel[] = [];
+  if (indoor.size === 0) return out;
+  for (let i = 0; i + BUILDING_STRIDE <= buildings.length; i += BUILDING_STRIDE) {
+    const x0 = buildings[i] ?? 0;
+    const y0 = buildings[i + 1] ?? 0;
+    const key = `${x0},${y0}`;
+    const count = indoor.get(key);
+    if (count === undefined || count <= 0) continue;
+    const x1 = buildings[i + 2] ?? 0;
+    const y1 = buildings[i + 3] ?? 0;
+    out.push({ key, x: (x0 + x1 + 1) / 2, y: (y0 + y1 + 1) / 2, count });
+  }
+  return out;
+}
+
+/** 建物の中の台数の候補。「P 12」のように、青い盾に白い字で建物の中心へ置く。画面に収まるものだけを出す。 */
+export function parkingCandidates(
+  labels: readonly ParkingLabel[],
+  camera: CameraView,
+  vp: Viewport,
+  stage: number,
+  measure: Measure,
+): Candidate[] {
+  const ls = labelStyle("parking", stage);
+  if (ls === null) return [];
+  const out: Candidate[] = [];
+  for (const p of labels) {
+    const s = toScreen(camera, vp, p.x, p.y);
+    // 画面の外のものは、字の大きさを測らずに外す
+    if (s.x < 0 || s.y < 0 || s.x > vp.width || s.y > vp.height) continue;
+    const text = `P ${p.count}`;
+    const size = measure(text, ls.style, false);
+    const box = {
+      x0: s.x - size.w / 2,
+      y0: s.y - size.h / 2,
+      x1: s.x + size.w / 2,
+      y1: s.y + size.h / 2,
+    };
+    if (!inside(box, vp)) continue;
+    // 台数が変わっても同じラベルとして、出し入れせずに字だけ入れ替える
+    out.push({
+      id: `parking|${p.key}|${styleKey(ls.style)}`,
+      priority: ls.priority,
+      text,
+      style: ls.style,
+      vertical: false,
+      angle: 0,
+      wx: p.x,
+      wy: p.y,
+      ox: -size.w / 2,
+      oy: -size.h / 2,
+      w: size.w,
+      h: size.h,
+      box,
+    });
+  }
+  return out;
+}
+
 // ---- 置き方 ----
 
 /** 見た目を、画像を覚えておく鍵にする。 */
 export function styleKey(s: TextStyle): string {
-  return `${s.size}/${s.weight}/${s.spacing}/${s.color}/${s.alpha}/${s.shield ? 1 : 0}`;
+  return `${s.size}/${s.weight}/${s.spacing}/${s.color}/${s.alpha}/${s.shield ? 1 : 0}/${s.badge ?? ""}`;
 }
 
 /** 置けない範囲。パネルと施設の記号である。記号は、名前を持つまとまりの識別子を `owner` に持つ。 */

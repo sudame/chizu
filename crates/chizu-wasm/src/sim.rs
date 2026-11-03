@@ -424,7 +424,7 @@ impl Sim {
         )
     }
 
-    /// 停めてある車の台数を、平面の駐車場のある建物の分だけ返す。並びは [`crate::lots::encode_parked`] にある。
+    /// 停めてある車の台数を、駐車場のある建物の分だけ返す。並びは [`crate::lots::encode_parked`] にある。
     /// 台数は毎 tick 変わるので、画面へは三重バッファの外で、およそ 1 秒に 1 回送る。
     pub fn parked(&self) -> Vec<f64> {
         crate::lots::encode_parked(&self.world)

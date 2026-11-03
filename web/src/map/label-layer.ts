@@ -24,6 +24,9 @@ import {
   type LabelSize,
   nextLabelStage,
   type Obstacle,
+  type ParkingLabel,
+  parkingCandidates,
+  parkingLabels,
   placeLabels,
   type RoadRun,
   roadCandidates,
@@ -79,6 +82,9 @@ export class LabelLayer {
   #runs: RoadRun[] = [];
   #districts: DistrictLabel[] = [];
   #facilityLabels: FacilityLabel[] = [];
+  #indoor: ReadonlyMap<string, number> = new Map();
+  #parking: ParkingLabel[] = [];
+  #parkingDirty = false;
   #symbols: PlacedSymbol[] = [];
   #roadsDirty = false;
   #placesDirty = false;
@@ -151,6 +157,19 @@ export class LabelLayer {
     this.#buildings = buildings;
     this.#facilities = facilities;
     this.#placesDirty = true;
+    this.#parkingDirty = true;
+  }
+
+  /** 建物の中の駐車場に停めてある台数（parseIndoorParked）。変わったときだけ置き直す。 */
+  setIndoorParked(indoor: ReadonlyMap<string, number>): void {
+    const before = this.#indoor;
+    this.#indoor = indoor;
+    if (
+      before.size !== indoor.size ||
+      [...indoor].some(([key, count]) => before.get(key) !== count)
+    ) {
+      this.#parkingDirty = true;
+    }
   }
 
   /** チャンクのマスが届いたときに、水があるかを覚える。変わったときだけ地区の名前を作り直す。 */
@@ -187,6 +206,11 @@ export class LabelLayer {
         (f) => this.#known(f.x, f.y),
       );
       this.#placesDirty = false;
+      changed = true;
+    }
+    if (this.#parkingDirty) {
+      this.#parking = parkingLabels(this.#buildings, this.#indoor);
+      this.#parkingDirty = false;
       changed = true;
     }
     const key = `${camera.x},${camera.y},${camera.zoom},${viewport.width},${viewport.height},${dpr}`;
@@ -228,6 +252,7 @@ export class LabelLayer {
         measure,
         this.#symbols,
       ),
+      ...parkingCandidates(this.#parking, camera, viewport, this.#stage, measure),
     ];
     // 描いている記号は、ほかのラベルを置けない範囲にする。入れ替わりの途中は、濃いほうの記号だけにする
     // （名前を置く段が切り替わる倍率 12 で、薄いほうと濃いほうが入れ替わる）。
@@ -434,7 +459,7 @@ export class LabelLayer {
     ctx.beginPath();
     ctx.roundRect(1, 1, innerW + b * 2, innerH + b * 2, SHIELD_RADIUS + b);
     ctx.fill();
-    ctx.fillStyle = SHIELD_COLOR;
+    ctx.fillStyle = style.badge ?? SHIELD_COLOR;
     ctx.beginPath();
     ctx.roundRect(1 + b, 1 + b, innerW, innerH, SHIELD_RADIUS);
     ctx.fill();

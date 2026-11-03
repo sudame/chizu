@@ -159,10 +159,11 @@ pub fn encode<'a>(net: &Network, buildings: impl Iterator<Item = &'a Building>) 
     out
 }
 
-/// 停めてある台数。平面の駐車場のある建物のうち、1 台以上停めてある建物だけを、次の並びで続ける。
+/// 停めてある台数。駐車場のある建物のうち、1 台以上停めてある建物だけを、次の並びで続ける。
 ///
-/// `[建物の min の x, min の y, 停めてある台数]`。建物の番号の順に並べる。
+/// `[建物の min の x, min の y, 停めてある台数, そのうち建物の中に停めてある台数]`。建物の番号の順に並べる。
 /// 建物は `encode` と同じ鍵（min の x と y）で引く。台数は平面と建物の中の合計で、
+/// 平面の枠を先に埋めるものとして、平面の台数を超えた分を建物の中の台数にする。
 /// どの枠に置くかは画面が決める。状態は変えない。
 pub fn encode_parked(world: &World) -> Vec<f64> {
     let mut out = Vec::new();
@@ -173,13 +174,16 @@ pub fn encode_parked(world: &World) -> Vec<f64> {
         let Some(b) = world.buildings().get(id) else {
             continue;
         };
-        if b.parking_layout().surface == 0 {
+        let layout = b.parking_layout();
+        if layout.surface + layout.indoor == 0 {
             continue;
         }
+        let parked = u64::from(lot.parked);
         out.extend([
             b.area.min.x as f64,
             b.area.min.y as f64,
-            f64::from(lot.parked),
+            parked as f64,
+            parked.saturating_sub(layout.surface).min(layout.indoor) as f64,
         ]);
     }
     out
@@ -569,18 +573,29 @@ mod tests {
         replay(&mut world, &log, 100_000);
         let data = encode_parked(&world);
         assert!(!data.is_empty(), "停めてある車が1台もない");
-        assert_eq!(data.len() % 3, 0);
+        assert_eq!(data.len() % 4, 0);
         let mut total = 0.0;
-        for rec in data.chunks(3) {
+        let mut indoor_parked = 0.0;
+        for rec in data.chunks(4) {
             let (id, b) = world
                 .buildings()
                 .iter()
                 .find(|(_, b)| b.area.min.x as f64 == rec[0] && b.area.min.y as f64 == rec[1])
                 .expect("鍵の建物がない");
-            assert!(b.parking_layout().surface > 0);
-            assert_eq!(rec[2], f64::from(world.trips().lot(id).parked));
+            let layout = b.parking_layout();
+            assert!(layout.surface + layout.indoor > 0);
+            let parked = u64::from(world.trips().lot(id).parked);
+            assert_eq!(rec[2], parked as f64);
+            // 建物の中の台数は、平面の枠を埋めたあとの分で、建物の中の駐車場の台数を超えない
+            assert_eq!(
+                rec[3],
+                parked.saturating_sub(layout.surface).min(layout.indoor) as f64
+            );
+            assert!(rec[3] <= layout.indoor as f64);
             total += rec[2];
+            indoor_parked += rec[3];
         }
         assert!(total >= 1.0);
+        assert!(indoor_parked >= 1.0, "建物の中に停めた車が1台もない");
     }
 }

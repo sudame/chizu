@@ -55,7 +55,7 @@ import {
   PREVIEW_OK_EDGE_COLOR,
   PREVIEW_ROAD_FILL_ALPHA,
 } from "./map/palette.ts";
-import { ParkedCache, parseParked } from "./map/parked.ts";
+import { ParkedCache, parseIndoorParked, parseParked } from "./map/parked.ts";
 import { MapRenderer } from "./map/renderer.ts";
 import {
   type BuildingMeshes,
@@ -1227,6 +1227,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "parked") {
     parkedCars.setParked(parseParked(message.data));
+    labels.setIndoorParked(parseIndoorParked(message.data));
     return;
   }
   if (message.kind === "cityStats") {

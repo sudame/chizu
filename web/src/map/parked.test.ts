@@ -7,6 +7,7 @@ import {
   ParkedCache,
   parkedColorIndex,
   parkedGeometry,
+  parseIndoorParked,
   parseParked,
   slotsOf,
 } from "./parked.ts";
@@ -48,10 +49,16 @@ function boxes(g: ReturnType<typeof parkedGeometry>["cars"]) {
 
 describe("停めてある台数", () => {
   test("建物の左上のマスで引ける表に直す", () => {
-    const m = parseParked(new Float64Array([10, 20, 3, 30, 40, 1]));
+    const m = parseParked(new Float64Array([10, 20, 3, 0, 30, 40, 1, 0]));
     expect(m.get("10,20")).toBe(3);
     expect(m.get("30,40")).toBe(1);
-    expect(parseParked(new Float64Array([1, 2])).size).toBe(0);
+    expect(parseParked(new Float64Array([1, 2, 3])).size).toBe(0);
+  });
+
+  test("建物の中の台数は、1 台以上ある建物だけを引ける", () => {
+    const m = parseIndoorParked(new Float64Array([10, 20, 9, 4, 30, 40, 1, 0]));
+    expect(m.get("10,20")).toBe(4);
+    expect(m.has("30,40")).toBe(false);
   });
 });
 
