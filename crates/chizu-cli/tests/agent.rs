@@ -603,6 +603,7 @@ fn observe_points_at_the_short_network() {
         "合計の余りを出している: {power}"
     );
     assert_eq!(power["shortAt"], serde_json::json!([]));
+    assert_eq!(fresh["shortages"], serde_json::json!([]));
     assert_eq!(power["isolatedFacilities"], serde_json::json!([]));
     let [x, y] = [
         fresh["highway"]["end"][0].as_i64().unwrap(),
@@ -625,6 +626,17 @@ fn observe_points_at_the_short_network() {
     assert_eq!(power["capacity"], 0);
     assert!(power["demand"].as_u64().unwrap() > 0);
     assert!(power["main"]["headroom"].as_i64().unwrap() < 0);
+    // 足りないとき lowHeadroom は偽だが、shortage と shortages で足りないことが分かる。
+    assert_eq!(power["main"]["lowHeadroom"], false);
+    assert_eq!(power["main"]["shortage"], true);
+    assert_eq!(
+        power["main"]["shortBy"].as_i64().unwrap(),
+        -power["main"]["headroom"].as_i64().unwrap()
+    );
+    assert!(
+        o["shortages"].as_array().unwrap().contains(&"power".into()),
+        "{o}"
+    );
     assert_eq!(power["main"]["at"], power["shortAt"][0]["at"]);
     assert_eq!(power["shortNetworks"], 1);
     let at = &power["shortAt"][0]["at"];
@@ -672,6 +684,7 @@ fn observe_shows_power_plants_cut_off_from_the_main_network() {
         main["capacity"].as_i64().unwrap() - main["demand"].as_i64().unwrap()
     );
     assert!(power.get("headroom").is_none(), "{power}");
+    assert_eq!(main["shortage"], true, "{power}");
     // 孤立した施設は、置いた道路ごとにもうひとつの網として others に数えられる。
     assert!(others["networks"].as_u64().unwrap() >= 1, "{power}");
 }

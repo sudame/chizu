@@ -55,11 +55,13 @@ observe の sinceLastObserve（前の observe からの増減）:
   見る数は、お金、収支、人口、就業、幸福度、車、転入、需要、建物の数、電気と水道の余裕、施設の数、買ったチャンクの数である。
   new の直後の observe は、new が見た街との増減になる。前の observe がないとき（フィードバックのディレクトリなど）は null で、何も書かない。
 
+observe の shortages: 主の網の余りが負の種類（"power"、"water"）の一覧。足りているときは空。lowHeadroom は足りないと偽になるので、足りないことはここか main.shortage で読む。
 observe の utilities（power と water）:
   capacity と demand 道路網をまたいだ供給量と需要の合計。この合計から余りは出さない。つながっていない施設の分まで足されて、
   主の網が足りないのに余っているように見えるからである。余りは次の 2 つに分けて読む。
   main 主の網（需要がいちばん大きい網。どの網にも需要がなければ null）の capacity、demand、headroom（その差。負なら足りない）、
   headroomPermille（供給量に対する余りの千分率。供給量 0 なら null）、lowHeadroom（余りが 0 以上 1 割未満。画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）、
+  shortage（headroom < 0。足りなくて新築が止まる）、shortBy（足りない量。足りているときは 0）、
   at（網の中で需要が最も大きい建物の道路に面したマス）。
   others 主の網以外で、施設か建物のある道路網の networks（数）と capacity、demand、headroom（その差）。
   shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at。at を map で見れば、どの網かが分かる。
@@ -916,6 +918,9 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 "headroom": headroom,
                 "headroomPermille": permille,
                 "lowHeadroom": b.demand > 0 && headroom >= 0 && permille.is_some_and(|p| p < 100),
+                // 足りない（headroom < 0）。lowHeadroom は足りないと偽になるので、足りないことはこちらで読む。
+                "shortage": headroom < 0,
+                "shortBy": (-headroom).max(0),
                 "at": balance.spots[i].map(|p| json!([p.x, p.y])),
             })
         });
@@ -949,6 +954,12 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "isolatedFacilities": isolated,
         })
     };
+    let utilities = json!({"power": utility(0), "water": utility(1)});
+    // 主の網の余りが負の種類（power、water）。lowHeadroom は足りないと偽になるので、先頭近くで足りないことを知らせる。
+    let shortages: Vec<&str> = ["power", "water"]
+        .into_iter()
+        .filter(|k| utilities[k]["main"]["shortage"] == true)
+        .collect();
     let (growth, stalled) = world.growth_report();
     let facilities = by_service(|k| world.facilities().iter().filter(|f| f.kind == k).count());
     let finances = world.finances();
@@ -1036,7 +1047,8 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "watered": count(&|b| b.supply.water),
         },
         "facilities": facilities,
-        "utilities": {"power": utility(0), "water": utility(1)},
+        "utilities": utilities,
+        "shortages": shortages,
         // 需要があるのに建たないとき、新築の候補の間口のうち、電気か水道の余裕がなくて建たないものの数。
         // その網の電気か水道の余裕が足りない。区画の需要が 0 以下なら、余裕の有無にかかわらず数えない。施設を足すか、施設のある網へ道路でつなぐ。
         // 施設のない網（道路が 1 マス離れているなど）かどうかは、utilities の networksWithoutFacility で見分ける。
