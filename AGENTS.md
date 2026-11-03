@@ -15,7 +15,7 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 ## 作業の手順
 
 1. 作業は、マネージャーが用意した worktree の中で行う。すでに worktree の中にいるので、新しく worktree を作らず、本体のディレクトリにも移らない。`git worktree add` と `gwq` は使わない。
-2. 作業の途中は、変えたところに絞って確かめる。`mise run test` と `mise run lint` は WASM の LTO を含む重いビルドを何本も回すので、PR を作る直前に 1 回だけ回し、両方が通ることを確かめる。
+2. 作業の途中は、変えたところに絞って確かめる。`mise run test` と `mise run lint` は重いビルドとテストを何本も回すので、PR を作る直前に 1 回だけ回し、両方が通ることを確かめる。
    - Rust：`RAYON_NUM_THREADS=2 mise run cargo -- nextest run -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ。`RAYON_NUM_THREADS=2` は test:rust と同じく、rayon のスレッドが待つあいだに CPU を使い切らないようにする
    - 画面：`mise run test:web`、`mise run lint:web`
    - WASM の境目や描画を変えたときだけ：`mise run test:wasm`
@@ -48,6 +48,8 @@ mise run test:wasm     # ビルドしたページをヘッドレスの Chrome �
 mise run build         # build:wasm と build:web をまとめて回す
 mise run build:wasm    # chizu-wasm をスレッドつきでビルドし、wasm-bindgen で web/wasm につなぎのコードを作る
 mise run build:web     # Vite で web/dist にビルドする
+mise run build:wasm-test  # test:wasm と lint:web が使う WASM。手元では LTO のない wasm-dev、CI では wasm-release でビルドする
+mise run build:web-test   # test:wasm が使う。build:wasm-test の WASM で、build:web と同じく Vite で web/dist にビルドする
 mise run dev           # WASM をビルドしてから Vite の開発サーバーを立てる
 mise run play          # 遊ぶ用の開発サーバーを立てっぱなしにし、origin の main が進んだら立て直す
 mise run test:play     # scripts/play.sh の小さな関数を確かめる
