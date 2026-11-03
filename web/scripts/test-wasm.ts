@@ -1203,7 +1203,10 @@ try {
   const growth = page.locator("#growth-notice");
   await page
     .waitForFunction(
-      () => document.querySelector<HTMLElement>("#growth-notice")?.hidden === false,
+      () =>
+        /余裕がなく.*新築が止まっている/.test(
+          document.querySelector<HTMLElement>("#growth-notice")?.textContent ?? "",
+        ),
       undefined,
       {
         timeout: TIMEOUT_MS,
@@ -1324,10 +1327,13 @@ try {
     `発電所と浄水場を置ける（${plant.text}、${pump.text}）`,
   );
   await waitUnsupplied("zero");
-  // 施設を置いて余裕が戻ると、建たない理由の知らせは消える
+  // 施設を置いて余裕が戻ると、建たない理由の知らせは消える。空き区画がない知らせは、別の理由なので残ってよい
   await page
     .waitForFunction(
-      () => document.querySelector<HTMLElement>("#growth-notice")?.hidden === true,
+      () =>
+        !/余裕がなく/.test(
+          document.querySelector<HTMLElement>("#growth-notice")?.textContent ?? "",
+        ),
       undefined,
       {
         timeout: TIMEOUT_MS,
@@ -1335,7 +1341,7 @@ try {
     )
     .catch(() => undefined);
   check(
-    !(await growth.isVisible()),
+    !/余裕がなく/.test((await growth.textContent()) ?? ""),
     `施設を置いて余裕が戻ると、建たない理由の知らせが消える（${await growth.textContent()}）`,
   );
   // 道路を消して入口を失った浄水場は、孤立した施設として知らせが出る。押すとそこへ移る。

@@ -441,6 +441,15 @@ impl Sim {
         out
     }
 
+    /// 区画の種類（住宅・商業・工業・オフィスの順）ごとに、需要が正なのに空き区画がなければ 1、そうでなければ 0 を並べる。
+    /// 定義は `chizu_core::World::lot_shortage`。電気や水道の余裕とは別の読み取りで、状態は変えない。
+    pub fn lot_shortage(&self) -> Vec<f64> {
+        self.world
+            .lot_shortage()
+            .map(|b| f64::from(u8::from(b)))
+            .to_vec()
+    }
+
     /// 収支の見込みを次の数で返す。税率の上限（‰）、区画の種類ごとの税率（‰）、区画の種類ごとの税収、
     /// 道路の維持費、発電所と浄水場の維持費。区画の種類の順は住宅、商業、工業、オフィス。
     /// 金額はどれも 1 日あたりである。
@@ -817,6 +826,19 @@ mod tests {
             "{s:?}"
         );
         assert_eq!(s[2], 3.0, "{s:?}");
+    }
+
+    /// 何も塗っていない街では、需要が正の区画だけが 1 になる。
+    #[test]
+    fn lot_shortage_is_one_per_zone_with_demand_and_no_free_lot() {
+        let sim = Sim::new(404);
+        let flags = sim.lot_shortage();
+        assert_eq!(flags.len(), 4);
+        let demand = &sim.city_stats()[3..7];
+        for z in 0..4 {
+            assert_eq!(flags[z] == 1.0, demand[z] > 0.0, "{flags:?} {demand:?}");
+        }
+        assert_eq!(flags[0], 1.0, "{flags:?}");
     }
 
     /// つながっていない通りの発電所は、孤立した施設として出る。余りは主の網だけで数え、ほかの網に分ける。

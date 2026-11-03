@@ -676,6 +676,29 @@ fn observe_shows_power_plants_cut_off_from_the_main_network() {
     assert!(others["networks"].as_u64().unwrap() >= 1, "{power}");
 }
 
+/// 需要が正なのに塗った区画がなければ noFreeLot が真で、塗れば偽になる。
+#[test]
+fn observe_shows_when_demand_has_no_free_lot() {
+    let dir = session("agent-no-free-lot");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let obs = json(&cli(&["agent", "observe", d]));
+    assert!(obs["demand"]["Residential"].as_i64().unwrap() > 0, "{obs}");
+    assert_eq!(obs["growth"]["Residential"]["fronts"], 0, "{obs}");
+    assert_eq!(obs["growth"]["Residential"]["noFreeLot"], true, "{obs}");
+    let setup = write(
+        &dir.join("setup.json"),
+        &serde_json::json!([
+            {"type":"BuildRoad","from":[0,0],"to":[30,0],"kind":"Small"},
+            {"type":"PaintZone","area":[[0,1],[30,6]],"zone":"Residential"},
+        ])
+        .to_string(),
+    );
+    cli(&["agent", "act", d, &setup]);
+    let obs = json(&cli(&["agent", "observe", d]));
+    assert_eq!(obs["growth"]["Residential"]["noFreeLot"], false, "{obs}");
+}
+
 /// 施設のない道路網に建つ分は電気と水道の余裕で止まり、observe の growth と networksWithoutFacility に出る。
 #[test]
 fn observe_shows_why_growth_is_blocked() {
@@ -699,6 +722,7 @@ fn observe_shows_why_growth_is_blocked() {
         for key in ["fronts", "blocked", "noPower", "noWater"] {
             assert!(g[key].is_u64(), "{zone}.{key}: {g}");
         }
+        assert!(g["noFreeLot"].is_boolean(), "{zone}: {g}");
     }
     cli(&["agent", "advance", d, "6000"]);
     let obs = json(&cli(&["agent", "observe", d]));

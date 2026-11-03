@@ -70,6 +70,8 @@ observe の utilities（power と water）:
 
 observe の growth（新築が電気か水道の余裕で止まっている間口）:
   区画の種類ごとに fronts 候補の間口、blocked 止まっている数、noPower と noWater そのうち電気、水道の余裕がない数。
+  noFreeLot 需要が正なのに、建てる候補の間口（fronts）が 1 つもない。塗った区画が建ち尽くしたか、塗っていない。電気や水道の余裕とは関係がない。
+    画面は、これが半日（ゲーム内）続くと「○○の需要があるのに、空いている○○の区画がない」と知らせる。区画を塗り足すと偽になる。
   stalledAt 止まっている道路網ごとの at（止まっている間口のうち座標が最小のマス）と、noPower、noWater（その網に足りないもの）。
   画面の知らせを押したときに映る場所と同じ。止まっている網がなければ空の配列。at を map で見れば、どの網かが分かる。
 
@@ -730,11 +732,16 @@ fn migration(m: MigrationOutlook) -> Value {
 }
 
 /// 区画の種類ごとの止まっている間口の数に、止まっている道路網の一覧 `stalledAt` を添える。
-fn growth_json(growth: &[GrowthBlock; 4], stalled: &[StalledNetwork]) -> Value {
+fn growth_json(
+    growth: &[GrowthBlock; 4],
+    stalled: &[StalledNetwork],
+    no_free_lot: &[bool; 4],
+) -> Value {
     let mut out = by_zone(|z| {
         let g = growth[z.index()];
         json!({
             "fronts": g.fronts,
+            "noFreeLot": no_free_lot[z.index()],
             "blocked": g.blocked,
             "noPower": g.no_power,
             "noWater": g.no_water,
@@ -931,7 +938,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
         // 施設のない網（道路が 1 マス離れているなど）かどうかは、utilities の networksWithoutFacility で見分ける。
         // stalledAt は、新築が止まっている道路網ごとの、止まっている間口のうち座標が最小のマス at と、足りないもの。
         // 画面の「建たない理由」の知らせを押したときに映る場所と同じ。at を map で見れば、どの網かが分かる。
-        "growth": growth_json(&growth, &stalled),
+        "growth": growth_json(&growth, &stalled, &world.lot_shortage()),
         "land": {
             "chunkSide": CHUNK_SIDE,
             "ownedChunks": owned,

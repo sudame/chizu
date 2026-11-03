@@ -201,6 +201,11 @@ impl Simulation {
         self.0.isolated_facilities()
     }
 
+    /// 区画の種類ごとに、需要が正なのに空き区画がないかを 1 か 0 で並べた 4 個の数。並びは `sim::Sim::lot_shortage` にある。
+    pub fn lot_shortage(&self) -> Vec<f64> {
+        self.0.lot_shortage()
+    }
+
     /// 収支の見込みの 12 個の数。並びは `sim::Sim::finance` にある。
     pub fn finance(&self) -> Vec<f64> {
         self.0.finance()

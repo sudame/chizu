@@ -2,12 +2,16 @@ import { describe, expect, test } from "vitest";
 import {
   growthNotice,
   isolatedNotice,
+  LOT_SHORTAGE_TICKS,
+  lotNotice,
   noticeView,
   parseGrowthBlocks,
   parseIsolated,
   parseStalls,
+  persistedLotShortage,
   pickStall,
   sameView,
+  trackLotShortage,
 } from "./growth-notice.ts";
 
 /** 区画ごとの [止まっている数, 電気, 水道] から overview の並びを作る。 */
@@ -158,5 +162,53 @@ describe("つながっていない施設の知らせ", () => {
     const targets = [...parseStalls([40, 12, 3]), ...isolated];
     expect(pickStall(targets, null)).toMatchObject({ x: 3, y: 4 });
     expect(pickStall(targets, { x: 3, y: 4 })).toMatchObject({ x: 10, y: -59 });
+  });
+});
+
+describe("空き区画がない知らせ", () => {
+  const COMMERCIAL = 1;
+
+  test("続いた長さが足りるまでは出ず、足りたら出る", () => {
+    let since = trackLotShortage([], [0, 1, 0, 0], 1000);
+    expect(since).toEqual([null, 1000, null, null]);
+    expect(persistedLotShortage(since, 1000 + LOT_SHORTAGE_TICKS - 1)).toEqual([]);
+    since = trackLotShortage(since, [0, 1, 0, 0], 1000 + LOT_SHORTAGE_TICKS);
+    expect(since[COMMERCIAL]).toBe(1000);
+    expect(persistedLotShortage(since, 1000 + LOT_SHORTAGE_TICKS)).toEqual([COMMERCIAL]);
+  });
+
+  test("区画が埋まるか空きができたら数え直し、すぐ戻っても出ない", () => {
+    let since = trackLotShortage([], [0, 1, 0, 0], 0);
+    since = trackLotShortage(since, [0, 0, 0, 0], LOT_SHORTAGE_TICKS - 10);
+    expect(since).toEqual([null, null, null, null]);
+    since = trackLotShortage(since, [0, 1, 0, 0], LOT_SHORTAGE_TICKS);
+    expect(persistedLotShortage(since, LOT_SHORTAGE_TICKS + 10)).toEqual([]);
+  });
+
+  test("tick が戻ったら数え直す", () => {
+    const since = trackLotShortage([5000, null, null, null], [1, 0, 0, 0], 100);
+    expect(since[0]).toBe(100);
+  });
+
+  test("見出しに区画の種類を挙げる", () => {
+    expect(lotNotice([])).toBeNull();
+    expect(lotNotice([COMMERCIAL])?.headline).toBe(
+      "商業の需要があるのに、空いている商業の区画がない",
+    );
+    expect(lotNotice([1, 3])?.headline).toBe(
+      "商業・オフィスの需要があるのに、空いている区画がない",
+    );
+  });
+
+  test("ほかの知らせと一緒のときは行動の文の後ろに足し、移る先には数えない", () => {
+    const none = parseGrowthBlocks([]);
+    const only = noticeView(none, [], [], [COMMERCIAL]);
+    expect(only?.headline).toContain("商業の需要があるのに");
+    expect(only?.jump).toBeNull();
+    const both = noticeView(none, [], [{ x: 1, y: 2, kind: 1 }], [COMMERCIAL]);
+    expect(both?.headline).toContain("商業の需要があるのに");
+    expect(both?.action).toContain("つながっていない");
+    expect(both?.jump).toBe("つながっていない施設へ移る");
+    expect(noticeView(none, [], [], [])).toBeNull();
   });
 });
