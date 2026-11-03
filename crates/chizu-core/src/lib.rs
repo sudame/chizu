@@ -32,7 +32,8 @@ pub use clock::{GameTime, TICKS_PER_DAY};
 pub use command::{Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
 pub use id::{BuildingId, CitizenId, HouseholdId, TripId};
 pub use movement::{
-    CarPath, Congestion, Mover, Noted, SidewalkPos, Trip, Trips, WalkAhead, WalkPath,
+    CarPath, Congestion, Mover, Noted, ParkingTally, Rescues, SidewalkPos, Trip, Trips, WalkAhead,
+    WalkPath,
 };
 pub use network::{
     Dir, KindChange, Lane, LaneId, LaneMode, Line, LinkId, Network, Node, NodeControl, Segment,

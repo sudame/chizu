@@ -69,6 +69,19 @@ impl StateHash for Then {
     }
 }
 
+/// 車で向かおうとした移動の、駐車場の決まり方の数。読み取り用で、状態ハッシュには入れない。
+/// 始まりからの積み上げで、日ごとの数は 2 つの時点の差で求める。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkingTally {
+    /// 車で走り始めた移動の数。
+    pub drives: u64,
+    /// そのうち、行き先の建物の駐車場が満車か、そこへ車か歩きで届かず、近くのほかの建物の駐車場に
+    /// 停めに向かった数。
+    pub parked_elsewhere: u64,
+    /// 行き先の近くの駐車場がどこも満車で、車で向かうのをやめた数。やめた移動は、歩けるなら歩く。
+    pub lots_full: u64,
+}
+
 /// 1 つの駐車場の、停めてある台数と、向かっている車のために押さえた台数。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Lot {
@@ -229,6 +242,11 @@ impl Trip {
 }
 
 impl Trips {
+    /// 車で向かおうとした移動の、駐車場の決まり方の数。
+    pub fn parking_tally(&self) -> ParkingTally {
+        self.parking_tally
+    }
+
     /// 建物 `b` の駐車場の台数。
     pub fn lot(&self, b: BuildingId) -> Lot {
         self.parking.get(b)
@@ -287,9 +305,12 @@ impl Trips {
     ) -> Option<TripId> {
         router.sync(net);
         // 近い順に試し、車でも歩いても行ける最初の駐車場にする。
-        let (lot, park_at) = self
-            .parking
-            .candidates(buildings, to, buildings.get(to)?)
+        let candidates = self.parking.candidates(buildings, to, buildings.get(to)?);
+        if candidates.is_empty() {
+            self.parking_tally.lots_full = self.parking_tally.lots_full.saturating_add(1);
+            return None;
+        }
+        let (lot, park_at) = candidates
             .into_iter()
             .filter_map(|lot| Some((lot, building_spot(net, buildings.get(lot)?)?)))
             .find(|(_, at)| {
@@ -306,6 +327,11 @@ impl Trips {
             to: dest,
         };
         self.parking.reserve(lot);
+        let tally = &mut self.parking_tally;
+        tally.drives = tally.drives.saturating_add(1);
+        if lot != to {
+            tally.parked_elsewhere = tally.parked_elsewhere.saturating_add(1);
+        }
         Some(id)
     }
 

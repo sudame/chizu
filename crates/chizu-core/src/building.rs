@@ -15,6 +15,10 @@ use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{TilePos, TileRect};
 use crate::units::{LaneOffset, Tick};
 
+mod parking;
+
+pub use parking::{ParkingCut, ParkingLayout, SLOTS_PER_TILE};
+
 /// 建物の段階の上限。
 pub const MAX_LEVEL: u8 = 5;
 
@@ -95,9 +99,9 @@ impl Building {
         (h >> 32) % 1_000
     }
 
-    /// 駐車場の台数。1 マスに段階の数だけ停められる。
+    /// 駐車場の台数。平面と建物の中の駐車場の台数の和である（[`Building::parking_layout`]）。
     pub fn parking_spaces(&self) -> u64 {
-        self.tile_count() * u64::from(self.level)
+        self.parking_layout().total()
     }
 }
 

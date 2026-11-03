@@ -160,9 +160,10 @@ fn a_full_destination_sends_the_car_to_the_nearest_free_lot() {
     assert_eq!(lot(&s, near), (0, 1));
     s.drive(home, shop).unwrap();
     assert_eq!(lot(&s, other), (0, 1));
-    // 遠い建物は範囲の外なので、どこも満車で車では行けない。駐車場は変わらない。
-    let before = s.trips.clone();
+    // 遠い建物は範囲の外なので、どこも満車で車では行けない。満車で車をやめた数のほかは変わらない。
+    let mut before = s.trips.clone();
     assert_eq!(s.drive(far, shop), None);
+    before.parking_tally.lots_full += 1;
     assert_eq!(s.trips, before);
     let modes = s.run(second);
     assert_eq!(
@@ -172,6 +173,59 @@ fn a_full_destination_sends_the_car_to_the_nearest_free_lot() {
     assert_eq!(lot(&s, near), (1, 0));
     let walked = s.trips.get(second);
     assert!(walked.is_none());
+}
+
+#[test]
+fn drives_sent_elsewhere_and_given_up_on_full_lots_are_counted() {
+    let (mut s, ids) = Street::new(&[30, 5, 9, 1, 40]);
+    let (home, shop, far) = (ids[0], ids[1], ids[4]);
+    for _ in 0..3 {
+        s.drive(home, shop).unwrap();
+    }
+    assert_eq!(s.drive(far, shop), None);
+    let hash = state_hash_of(&s.trips);
+    assert_eq!(
+        s.trips.parking_tally(),
+        ParkingTally {
+            drives: 3,
+            parked_elsewhere: 2,
+            lots_full: 1,
+        }
+    );
+    // 数は状態ハッシュに入らない。
+    let mut other = s.trips.clone();
+    other.parking_tally = ParkingTally::default();
+    assert_eq!(state_hash_of(&other), hash);
+}
+
+#[test]
+fn cars_sent_to_another_lot_are_told_apart_until_they_park() {
+    let (mut s, ids) = Street::new(&[30, 5, 9]);
+    let (home, shop) = (ids[0], ids[1]);
+    let first = s.drive(home, shop).unwrap();
+    let second = s.drive(home, shop).unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..1_000 {
+        let (a, b) = (s.trips.get(first), s.trips.get(second));
+        if a.is_none() && b.is_none() {
+            break;
+        }
+        assert!(!a.is_some_and(Trip::parks_elsewhere));
+        if let Some(t) = b {
+            seen.push((t.mode(), t.parks_elsewhere()));
+        }
+        s.step();
+    }
+    seen.dedup();
+    // 車まで歩くあいだと走るあいだは、ほかの建物へ回された車と分かる。停めて歩き出したら分からなくてよい。
+    assert_eq!(
+        seen,
+        [
+            (LaneMode::Sidewalk, true),
+            (LaneMode::Car, true),
+            (LaneMode::Sidewalk, false),
+        ]
+    );
 }
 
 #[test]
