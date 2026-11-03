@@ -126,7 +126,7 @@ function sendBuildings(sim: Simulation): void {
 }
 
 // 需要は税率、幸福度、人口、職のない住民で、建物の表が変わらなくても動く。住民の数だけ数え直すので、間引いて送る。
-// 送るのは前と数が違うときだけで、コマンドのあとはすぐ確かめる
+// 送るのは前と数が違うときだけで、コマンドのあとはすぐ確かめる。一時停止中は街が進まないので、タイマーからは確かめない
 const STATS_INTERVAL_MS = 500;
 let lastStatsAt = Number.NEGATIVE_INFINITY;
 let sentStats = "";
@@ -205,7 +205,9 @@ function run(sim: Simulation): {
     sendRoads(sim);
     sendSignals(sim);
     sendBuildings(sim);
-    sendCityStats(sim, now);
+    if (!paused) {
+      sendCityStats(sim, now);
+    }
     sendFinance(sim, now);
     sendOverview(sim, now, paused);
     sendChunks(sim);

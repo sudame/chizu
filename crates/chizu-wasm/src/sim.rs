@@ -56,6 +56,8 @@ pub struct Sim {
     unrecorded_ops: u32,
     /// 建物の表の版の控え。`(記録の件数, 建つ・育つが走った回数, 版)` で、前の 2 つが変わったときだけ計算し直す。
     buildings_version: Cell<Option<(usize, u64, f64)>>,
+    /// 街の数字の電気と水道の分の控え。`(供給の版, 値)` で、版が変わったときだけ計算し直す。
+    utility_cache: Cell<Option<(u64, [f64; 14])>>,
 }
 
 /// 記録したコマンドを適用した結果。
@@ -85,6 +87,7 @@ impl Sim {
             movers_key: None,
             unrecorded_ops: 0,
             buildings_version: Cell::new(None),
+            utility_cache: Cell::new(None),
         }
     }
 
@@ -440,11 +443,7 @@ impl Sim {
         ];
         let breakdown = demand_factors(&self.world.city_stats());
         out.extend(breakdown.totals().map(|d| d as f64));
-        let [power, water, power_short, water_short] = crate::layers::utility_totals(&self.world);
-        let need: u64 = buildings.iter().map(|(_, b)| building_demand(b)).sum();
-        out.extend([power, water, need, power_short, water_short].map(|v| v as f64));
-        out.extend(crate::layers::utility_gaps(&self.world).map(|v| v as f64));
-        out.extend(crate::layers::utility_main(&self.world).map(|v| v as f64));
+        out.extend(self.utility_numbers());
         debug_assert_eq!(out.len(), CITY_STATS_FIXED);
         // 固定の並びのあとに、需要の内訳を区画の種類（住宅・商業・工業・オフィスの順）ごとに並べる。
         // 種類ごとに、要因の数、そのあとに要因ごとの `[要因の番号, 寄与]`。番号は `DemandFactorKind` の値である。
@@ -455,6 +454,37 @@ impl Sim {
                 out.extend([f64::from(f.kind as u8), f.value as f64]);
             }
         }
+        out
+    }
+
+    /// 街の数字のうち、電気と水道の 14 個。電気の供給量、水道の供給量、需要、足りない網の数（電気、水道）、
+    /// 施設のない網の数と不足量、主の網の値と、ほかの網の数。
+    /// 道路と建物の全体をたどって求めるので、建物の表と道路網の版（[`crate::layers::supply_version`]）が
+    /// 変わらないあいだは前の値を使い回す。
+    fn utility_numbers(&self) -> [f64; 14] {
+        let version = crate::layers::supply_version(self);
+        if let Some((cached, numbers)) = self.utility_cache.get()
+            && cached == version
+        {
+            return numbers;
+        }
+        let (totals, main, gaps) = crate::layers::utility_summary(&self.world);
+        let [power, water, power_short, water_short] = totals;
+        let need: u64 = self
+            .world
+            .buildings()
+            .iter()
+            .map(|(_, b)| building_demand(b))
+            .sum();
+        let mut out = [0.0; 14];
+        let values = [power, water, need, power_short, water_short]
+            .into_iter()
+            .chain(gaps)
+            .chain(main);
+        for (slot, v) in out.iter_mut().zip(values) {
+            *slot = v as f64;
+        }
+        self.utility_cache.set(Some((version, out)));
         out
     }
 
@@ -1225,6 +1255,46 @@ mod tests {
         assert_eq!(after[tax_at + 1], -25.0);
         assert_eq!(after[3], before[3] - 25.0);
         assert_ne!(before, after);
+    }
+
+    /// 電気と水道の分を使い回しても、毎回求め直した値と同じである(道路や施設を足したあとも)。
+    #[test]
+    fn cached_utility_numbers_match_a_fresh_computation() {
+        let fresh = |sim: &Sim| -> Vec<f64> {
+            let [power, water, power_short, water_short] =
+                crate::layers::utility_totals(sim.world());
+            let need: u64 = sim
+                .world()
+                .buildings()
+                .iter()
+                .map(|(_, b)| building_demand(b))
+                .sum();
+            [power, water, need, power_short, water_short]
+                .into_iter()
+                .chain(crate::layers::utility_gaps(sim.world()))
+                .chain(crate::layers::utility_main(sim.world()))
+                .map(|v| v as f64)
+                .collect()
+        };
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 5), (10, 5))).unwrap();
+        for step in 0..6 {
+            assert_eq!(sim.city_stats()[7..21], fresh(&sim)[..], "{step}");
+            // 2 回目は使い回しで、同じ値になる。
+            assert_eq!(sim.city_stats()[7..21], fresh(&sim)[..], "{step}");
+            let kind = if step % 2 == 0 {
+                ServiceKind::PowerPlant
+            } else {
+                ServiceKind::WaterPump
+            };
+            sim.submit(Command::PlaceBuilding {
+                kind,
+                at: TilePos::new(2 + 4 * step, 9),
+                rotation: 2,
+            })
+            .ok();
+            sim.advance(200);
+        }
     }
 
     const STATS_LAYOUT_FILE: &str = concat!(
