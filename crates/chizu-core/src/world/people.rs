@@ -408,7 +408,7 @@ impl World {
             self.population.set_home(h, None, self.tick);
             let members = self.population.members(h).expect("世帯がない").to_vec();
             for id in members {
-                self.population.set_workplace(id, None);
+                self.set_workplace(id, None);
                 self.population.set_schedule(id, ScheduleState::default());
             }
         }
@@ -418,7 +418,7 @@ impl World {
             .filter(|id| gone(self.population.citizen(*id).and_then(|r| r.workplace)))
             .collect();
         for id in jobless {
-            self.population.set_workplace(id, None);
+            self.set_workplace(id, None);
             self.population.set_schedule(id, ScheduleState::default());
         }
     }
@@ -518,6 +518,19 @@ impl World {
         }
     }
 
+    /// 住民 `id` の職場を `workplace` にする。職場が変わるかなくなったら、その住民が家でない所に停めた
+    /// 世帯の車を、どこにもないものに戻す。前の職場に停めたまま、誰も乗らずに残らないようにするためである。
+    fn set_workplace(&mut self, id: CitizenId, workplace: Option<BuildingId>) {
+        let Some(row) = self.population.citizen(id) else {
+            return;
+        };
+        if row.workplace != workplace {
+            let home = self.population.home(row.household).flatten();
+            self.trips.return_car(row.household, id, home);
+        }
+        self.population.set_workplace(id, workplace);
+    }
+
     /// 職場を割り当て直し、職場の変わった住民の予定を立て直す。
     fn update_jobs(&mut self) {
         for (id, workplace) in assign_jobs(
@@ -531,7 +544,7 @@ impl World {
                 .population
                 .citizen(id)
                 .map(|r| (r.workplace, r.schedule));
-            self.population.set_workplace(id, workplace);
+            self.set_workplace(id, workplace);
             let schedule = match workplace {
                 Some(w) => {
                     // 勤め先を乗り換えた住民が、今日まだ来ていない出発の時刻を持っているとき。
@@ -654,6 +667,36 @@ pub(crate) mod tests {
         for _ in 0..days * TICKS_PER_DAY {
             w.step();
         }
+    }
+
+    /// 職場に車を停めた住民が職を失うと、その車は職場に残らず、どこにもないものに戻る。
+    /// 残すと、働かない本人は職場へ行かないので、世帯のほかの人も車を使えないままになる。
+    #[test]
+    fn a_car_left_at_work_returns_when_its_driver_loses_the_job() {
+        use crate::movement::HouseholdCar;
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 1);
+        let away = |w: &World| {
+            let p = w.population();
+            p.household_ids()
+                .find_map(|h| match w.trips().household_car(h) {
+                    Some(HouseholdCar::Parked { lot, by }) if p.home(h).flatten() != Some(lot) => {
+                        Some((h, lot, by))
+                    }
+                    _ => None,
+                })
+        };
+        for _ in 0..TICKS_PER_DAY {
+            if away(&w).is_some() {
+                break;
+            }
+            w.step();
+        }
+        let (h, lot, by) = away(&w).expect("家でない所に停めた車がない");
+        let parked = w.trips().lot(lot).parked;
+        w.set_workplace(by, None);
+        assert_eq!(w.trips().household_car(h), None);
+        assert_eq!(w.trips().lot(lot).parked, parked - 1);
     }
 
     #[test]

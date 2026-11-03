@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use chizu_core::{CommandLog, SNAPSHOT_VERSION, SnapshotError, World, replay};
+use chizu_core::{CommandLog, HouseholdCar, SNAPSHOT_VERSION, SnapshotError, World, replay};
 
 /// ゴールデンの記録はすべて種 42 で作ってある。
 const SEED: u64 = 42;
@@ -177,4 +177,39 @@ fn a_snapshot_the_caller_rejects_is_refused() {
     );
     let back = World::from_snapshot_where(&bytes, |w| w.tick().0 == 1).unwrap();
     assert!(back == world);
+}
+
+/// 世帯の車が移動に使われているあいだに書き出して読み戻しても、車のいる所と、その後の街が変わらない。
+#[test]
+fn snapshot_keeps_household_cars_in_use() {
+    let (_, log) = golden_logs()
+        .into_iter()
+        .find(|(name, _)| name == "commute")
+        .expect("commute の記録がない");
+    let in_use = |w: &World| {
+        w.population()
+            .household_ids()
+            .filter(|h| matches!(w.trips().household_car(*h), Some(HouseholdCar::InUse(_))))
+            .count()
+    };
+    let mut world = World::new(SEED);
+    replay(&mut world, &log, 0);
+    for _ in 0..20_000 {
+        if in_use(&world) > 0 {
+            break;
+        }
+        replay(&mut world, &log, 1);
+    }
+    assert!(in_use(&world) > 0, "車を使う世帯が出てこない");
+    let mut back = round_trip(&world);
+    assert!(back == world);
+    for h in world.population().household_ids() {
+        assert_eq!(
+            back.trips().household_car(h),
+            world.trips().household_car(h)
+        );
+    }
+    replay(&mut world, &log, 500);
+    replay(&mut back, &log, 500);
+    assert_eq!(back.state_hash(), world.state_hash());
 }

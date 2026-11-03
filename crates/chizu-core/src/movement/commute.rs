@@ -7,8 +7,9 @@
 //! 移動の主体ごとに、誰がどこへ向かっているかを覚えておき、移動が終わったら返す。
 //!
 //! 車は世帯ごとに 1 台で、世帯の中で同時に車を使えるのは 1 人だけである。世帯の車のいる所
-//! （[`HouseholdCar`]）を覚え、次に車で出るときはそこから車を出す。車を使えるのは、車が出発の建物に
-//! 停めてあるときか、自分で停めた車のとき（満車で近くの別の建物に停めたときも含む）だけである。
+//! （[`HouseholdCar`]）を覚え、次に車で出るときはそこから車を出す。車を使えるのは、車が家に停めてあって
+//! 家から出るときか、自分で停めた車のとき（満車で近くの別の建物に停めたときも含む）だけである。
+//! 職場が変わるかなくなった住民が家でない所に停めた車は、どこにもないものに戻す（[`Trips::return_car`]）。
 //! ほかの住民が乗っているときや、離れた所に停めてあるときは、車がないものとして歩く。
 //! 世帯の車がまだどこにもなければ、車は出発の建物から現れる。停めてある台数は世帯の数を超えて増えない。
 
@@ -169,7 +170,7 @@ impl Trips {
                     None => None,
                     Some(HouseholdCar::Parked { lot, .. }) if buildings.get(lot).is_none() => None,
                     Some(HouseholdCar::Parked { lot, by })
-                        if by == r.who.citizen || lot == r.from =>
+                        if by == r.who.citizen || Some(lot) == r.home && lot == r.from =>
                     {
                         Some(lot)
                     }
@@ -232,6 +233,24 @@ impl Trips {
     /// 街を出る世帯の、停めてある車を駐車場から外す。
     pub fn forget_car(&mut self, household: HouseholdId) {
         if let Some(HouseholdCar::Parked { lot, .. }) = self.commuters.cars.remove(&household) {
+            self.parking.unpark(lot);
+        }
+    }
+
+    /// 住民 `citizen` が家（`home`）でない所に停めた世帯の車を、どこにもないものに戻す。職場が変わったり
+    /// なくなったりした住民の車が、前の職場に停めたまま残らないようにする。次に車で出る住民の出発の建物から
+    /// 車が現れる。
+    pub fn return_car(
+        &mut self,
+        household: HouseholdId,
+        citizen: CitizenId,
+        home: Option<BuildingId>,
+    ) {
+        if let Some(HouseholdCar::Parked { lot, by }) = self.commuters.cars.get(&household).copied()
+            && by == citizen
+            && Some(lot) != home
+        {
+            self.commuters.cars.remove(&household);
             self.parking.unpark(lot);
         }
     }
