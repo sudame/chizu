@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use chizu_core::movement::signal;
 
 use chizu_core::{
-    Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, Heading, LaneMode,
-    LaneOffset, Money, RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind,
+    Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, Heading, HouseholdCar,
+    LaneMode, LaneOffset, Money, RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind,
     SidewalkPos, SimSpeed, StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind,
     replay, rng,
 };
@@ -886,7 +886,7 @@ fn losing_the_job_while_at_the_shop_keeps_tables_consistent() {
 }
 
 /// 通勤のシナリオを 20 日回しても、駐車場に停めてある車が増え続けない。停めてある車はどれも、
-/// 住民が自分の車として覚えている 1 台で、停めてある台数は住民の数を超えない。
+/// 世帯が自分の車として覚えている 1 台で、停めてある台数は世帯の数を超えない。
 #[test]
 fn parked_cars_do_not_pile_up_over_days() {
     let log = commute();
@@ -897,13 +897,16 @@ fn parked_cars_do_not_pile_up_over_days() {
         let parked: u64 = world.trips().lots().map(|(_, l)| u64::from(l.parked)).sum();
         let p = world.population();
         let owned = p
-            .citizen_ids()
-            .filter_map(|id| world.trips().parked_car(id))
+            .household_ids()
+            .filter_map(|h| match world.trips().household_car(h) {
+                Some(HouseholdCar::Parked { lot, .. }) => Some(lot),
+                _ => None,
+            })
             .filter(|b| world.buildings().get(*b).is_some())
             .count() as u64;
         assert_eq!(parked, owned, "{day} 日目：持ち主のいない車が停めてある");
         assert!(
-            parked <= p.citizen_count() as u64,
+            parked <= p.household_count() as u64,
             "{day} 日目：{parked} 台"
         );
         by_day.push(parked);

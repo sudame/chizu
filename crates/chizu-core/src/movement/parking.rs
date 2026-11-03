@@ -23,6 +23,7 @@ use super::{
     Ends, SidewalkPos, Trip, Trips, candidates, car, junction, lane_shift, make_trip, plan, pos,
 };
 use crate::building::{Building, Buildings, ParkingCut, SLOT_WIDTH_MM};
+use crate::command::ZoneKind;
 use crate::id::{BuildingId, TripId};
 use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId, TILE_MM};
 use crate::routing::AstarRouter;
@@ -88,6 +89,9 @@ pub struct ParkingTally {
     pub parked_elsewhere: u64,
     /// 行き先の近くの駐車場がどこも満車で、車で向かうのをやめた数。やめた移動は、歩けるなら歩く。
     pub lots_full: u64,
+    /// 世帯の車をほかの住民が使っているか、離れた所に停めてあって、車で向かえなかった通勤の数。
+    /// 向かえなかった移動は、歩けるなら歩く。
+    pub no_car: u64,
 }
 
 /// 1 つの駐車場の、停めてある台数と、向かっている車のために押さえた台数。
@@ -166,18 +170,21 @@ impl Parking {
         had
     }
 
-    fn is_free(&self, id: BuildingId, b: &Building) -> bool {
+    /// 家が `home` の運転する人が、建物 `id` の駐車場に停められるか。空きがあり、住宅なら運転する人の
+    /// 家であるときに限る。住宅の駐車場は、その建物の住民だけが使う。
+    fn is_free(&self, id: BuildingId, b: &Building, home: Option<BuildingId>) -> bool {
         let l = self.get(id);
-        u64::from(l.parked) + u64::from(l.reserved) < b.parking_spaces()
+        (b.zone != ZoneKind::Residential || home == Some(id))
+            && u64::from(l.parked) + u64::from(l.reserved) < b.parking_spaces()
     }
 
-    /// 行き先 `to` の近くで空きのある駐車場を、試す順に返す。行き先そのものを先に、そのあとは
-    /// [`PARK_RADIUS`] マスの中の建物を近い順に並べる。同じ距離なら番号の小さい建物を先にする。
+    /// 家が `home` の運転する人が停められる、行き先 `to` の近くの駐車場を、試す順に返す。行き先そのものを
+    /// 先に、そのあとは [`PARK_RADIUS`] マスの中の建物を近い順に並べる。同じ距離なら番号の小さい建物を先にする。
     fn candidates(
         &self,
         buildings: &Buildings,
-        to: BuildingId,
-        dest: &Building,
+        (to, dest): (BuildingId, &Building),
+        home: Option<BuildingId>,
     ) -> Vec<BuildingId> {
         let r = i64::try_from(PARK_RADIUS).expect("範囲が i64 に収まらない");
         let at = |dx: i64, dy: i64| {
@@ -190,11 +197,11 @@ impl Parking {
             .fronts_in(area)
             .filter(|id| *id != to)
             .filter_map(|id| Some((id, buildings.get(id)?)))
-            .filter(|(id, b)| self.is_free(*id, b))
+            .filter(|(id, b)| self.is_free(*id, b, home))
             .map(|(id, b)| (dist(b.front), id))
             .collect();
         near.sort_unstable();
-        let first = self.is_free(to, dest).then_some(to);
+        let first = self.is_free(to, dest, home).then_some(to);
         first
             .into_iter()
             .chain(near.into_iter().map(|(_, id)| id))
@@ -484,7 +491,8 @@ impl Trips {
 
     /// 建物 `from` から建物 `to` へ、歩く → 車 → 歩く で向かう移動を作る。行き先の駐車場の空きは
     /// このときに押さえ、`from` に停めてある車があれば 1 台出す。建物がないか、行き先の近くがどこも満車か、
-    /// 3 つの区切りのどれかの経路がなければ `None` で、駐車場も変えない。
+    /// 3 つの区切りのどれかの経路がなければ `None` で、駐車場も変えない。運転する人は住民ではないものとし、
+    /// 住宅の駐車場には停めない。
     pub fn spawn_drive(
         &mut self,
         net: &Network,
@@ -493,11 +501,12 @@ impl Trips {
         (from, to): (BuildingId, BuildingId),
         now: Tick,
     ) -> Option<TripId> {
-        self.spawn_drive_taking(net, router, buildings, (from, to), Some(from), now)
+        self.spawn_drive_taking(net, router, buildings, (from, to), Some(from), None, now)
     }
 
-    /// [`Trips::spawn_drive`] と同じだが、停めてある車を出す駐車場を `take` で決める。`None` なら
-    /// どの駐車場からも出さない。
+    /// [`Trips::spawn_drive`] と同じだが、停めてある車を出す駐車場を `take` で決め、運転する人の家を
+    /// `home` で渡す。`take` が `None` ならどの駐車場からも出さない。
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_drive_taking(
         &mut self,
         net: &Network,
@@ -505,6 +514,7 @@ impl Trips {
         buildings: &Buildings,
         (from, to): (BuildingId, BuildingId),
         take: Option<BuildingId>,
+        home: Option<BuildingId>,
         now: Tick,
     ) -> Option<TripId> {
         let from_b = buildings.get(from)?;
@@ -513,7 +523,15 @@ impl Trips {
         let origin = reachable_lot_spot(net, router, from_b)?;
         let dest = building_spot(net, buildings.get(to)?)?;
         let took = take.filter(|b| self.parking.unpark(*b));
-        let id = self.start_drive(net, router, buildings, (door, origin), (to, dest), now);
+        let id = self.start_drive(
+            net,
+            router,
+            buildings,
+            (door, origin),
+            (to, dest),
+            home,
+            now,
+        );
         if let (None, Some(b)) = (id, took) {
             self.parking.update(b, |l| {
                 l.parked = l.parked.checked_add(1).expect("停めた台数があふれた");
@@ -523,7 +541,8 @@ impl Trips {
     }
 
     /// 出入口 `door` から駐車場の出入りの位置 `origin` まで歩き、そこから建物 `to`（出入口 `dest`）へ
-    /// 車で向かう移動を作る。
+    /// 車で向かう移動を作る。運転する人の家は `home` である。
+    #[allow(clippy::too_many_arguments)]
     fn start_drive(
         &mut self,
         net: &Network,
@@ -531,11 +550,14 @@ impl Trips {
         buildings: &Buildings,
         (door, origin): (SidewalkPos, SidewalkPos),
         (to, dest): (BuildingId, SidewalkPos),
+        home: Option<BuildingId>,
         now: Tick,
     ) -> Option<TripId> {
         router.sync(net);
         // 近い順に試し、車でも歩いても行ける最初の駐車場にする。
-        let candidates = self.parking.candidates(buildings, to, buildings.get(to)?);
+        let candidates = self
+            .parking
+            .candidates(buildings, (to, buildings.get(to)?), home);
         if candidates.is_empty() {
             self.parking_tally.lots_full = self.parking_tally.lots_full.saturating_add(1);
             return None;

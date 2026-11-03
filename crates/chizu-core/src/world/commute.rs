@@ -40,10 +40,12 @@ impl World {
                 Some((from, to)) => requests.push(CommuteRequest {
                     who: Commuter {
                         citizen: id,
+                        household: row.household,
                         to: row.schedule.next,
                     },
                     from,
                     to,
+                    home,
                     owns_car: self.owns_car(row.household),
                 }),
                 None => stuck.push(id),
@@ -82,8 +84,8 @@ impl World {
             if let Some(t) = self.population.citizen(id).and_then(|r| r.trip) {
                 self.trips.cancel(t);
             }
-            self.trips.forget_car(id);
         }
+        self.trips.forget_car(h);
         self.population.remove_household(h);
     }
 
@@ -106,6 +108,11 @@ impl World {
             self.population.set_trip(c.citizen, None);
             if row.schedule.next == c.to && row.schedule.depart_at.is_none() {
                 arrived.push(c.citizen);
+            } else {
+                // 向かっているあいだに職場が変わるかなくなり、着いても予定どおりの居場所にならない。
+                // 着いた所に停めた車は、本人がもうそこから出ないので、どこにもないものに戻す。
+                let home = self.population.home(row.household).flatten();
+                self.trips.return_car(row.household, c.citizen, home);
             }
         }
         arrived.sort_unstable();

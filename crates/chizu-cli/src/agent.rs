@@ -105,12 +105,13 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  occupiedPermille 停めてある台数と押さえた台数の和の、台数に対する千分率（台数 0 なら null）、
                  fullLots 満車の駐車場の数。
                  台数は建物の種類、大きさ、段階から決まる。住宅の段階 1〜2 は世帯の数、段階 3〜5 は世帯の数の 0.7 倍、
-                 商業と工業は職場の数、オフィスは職場の数の 0.5 倍（端数は切り上げ）。
+                 商業と工業は職場の数、オフィスは職場の数の 0.5 倍（端数は切り上げ）。住宅の駐車場は、その建物の住民だけが使う。
                  redirectedCars いま移動中の車のうち、16 マスの中のほかの建物の駐車場へ停めに向かっている車。行き先の建物の
                  駐車場が満車のときのほか、そこへ車か歩きで届かないときも、近くのほかの駐車場に回る。
-                 次の 3 つは始まりからの積み上げで、日ごとの数は 2 つの observe の差で求める。
+                 次の 4 つは始まりからの積み上げで、日ごとの数は 2 つの observe の差で求める。
                  drives 車で走り始めた移動の数、parkedElsewhere そのうちほかの建物の駐車場に回った数（redirectedCars と同じ決まり）、
-                 lotsFull 行き先の近くの駐車場がどこも満車で、車で向かうのをやめた数（やめた移動は、歩けるなら歩く）。
+                 lotsFull 行き先の近くの駐車場がどこも満車で、車で向かうのをやめた数（やめた移動は、歩けるなら歩く）、
+                 noCar 車は世帯に 1 台で、ほかの住民が乗っているか、離れた所に停めてあって、車で向かえなかった数（歩けるなら歩く）。
                  fullLots、redirectedCars、lotsFull が多いのは、駐車場が足りないということである。
   traffic.rescues 詰まりをほどく救済の、始まりからの積み上げ。teleported 止まったままの車を行き先に着いたことにした数、
                  walkedInstead 車線に出られないまま待ち続けた車を、歩く移動に切り替えた数、
@@ -886,6 +887,7 @@ fn parking(world: &World) -> Value {
         drives: _,
         parked_elsewhere: _,
         lots_full: _,
+        no_car: _,
     } = world.trips().parking_tally();
     let redirected = world
         .trips()
@@ -909,6 +911,7 @@ fn parking(world: &World) -> Value {
         "drives": tally.drives,
         "parkedElsewhere": tally.parked_elsewhere,
         "lotsFull": tally.lots_full,
+        "noCar": tally.no_car,
     })
 }
 
