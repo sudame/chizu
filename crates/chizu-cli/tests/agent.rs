@@ -643,6 +643,50 @@ fn observe_points_at_the_short_network() {
     assert!(at[0].is_i64() && at[1].is_i64(), "{power}");
 }
 
+/// 供給が 1 以上ある網でも、需要が供給を超えたら shortage と shortBy が出て、shortages に種類が並ぶ。
+/// そのとき lowHeadroom は偽である。電気は足りていて、水道だけが足りない街を作る。
+#[test]
+fn observe_shows_a_shortage_when_supply_is_positive() {
+    let dir = session("agent-short-positive-supply");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let fresh = json(&cli(&["agent", "observe", d]));
+    let [x, y] = [
+        fresh["highway"]["end"][0].as_i64().unwrap(),
+        fresh["highway"]["end"][1].as_i64().unwrap(),
+    ];
+    let inward = -fresh["highway"]["outward"][0].as_i64().unwrap();
+    let (a, b) = (x + inward, x + 90 * inward);
+    let cmds = write(
+        &dir.join("c.json"),
+        &serde_json::json!([
+            {"type":"BuildRoad","from":[x,y],"to":[b,y],"kind":"Medium"},
+            {"type":"PaintZone","area":[[a,y+1],[b,y+6]],"zone":"Residential"},
+            {"type":"PaintZone","area":[[x+22*inward,y-6],[b,y-1]],"zone":"Industrial"},
+            {"type":"PlaceBuilding","kind":"PowerPlant","at":[x+10*inward,y-1],"rotation":2},
+            {"type":"PlaceBuilding","kind":"PowerPlant","at":[x+13*inward,y-1],"rotation":2},
+            {"type":"PlaceBuilding","kind":"PowerPlant","at":[x+16*inward,y-1],"rotation":2},
+            {"type":"PlaceBuilding","kind":"WaterPump","at":[x+19*inward,y-1],"rotation":2},
+        ])
+        .to_string(),
+    );
+    cli(&["agent", "act", d, &cmds]);
+    cli(&["agent", "advance", d, &(20 * 7200).to_string()]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let water = &o["utilities"]["water"];
+    let main = &water["main"];
+    assert!(main["capacity"].as_u64().unwrap() > 0, "{water}");
+    let headroom = main["headroom"].as_i64().unwrap();
+    assert!(headroom < 0, "足りない街にならなかった: {water}");
+    assert_eq!(main["shortage"], true);
+    assert_eq!(main["lowHeadroom"], false);
+    assert_eq!(main["shortBy"].as_i64().unwrap(), -headroom);
+    // 1 棟分（48）だけ足りない。#141 と同じ止まり方である。
+    assert_eq!(main["shortBy"], 48);
+    assert_eq!(o["utilities"]["power"]["main"]["shortage"], false);
+    assert_eq!(o["shortages"], serde_json::json!(["water"]), "{o}");
+}
+
 /// Issue #139 の街（発電所 2 基が主の網から切れた道路の脇にある）では、孤立した発電所が出て、
 /// つながっていない分の余りが主の網の余りに混ざらない。
 /// 記録は当時のもので、いまの中核で再生するとハッシュは食い違うが、置いた施設の位置は変わらない。

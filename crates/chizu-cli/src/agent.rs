@@ -955,7 +955,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
         })
     };
     let utilities = json!({"power": utility(0), "water": utility(1)});
-    // 主の網の余りが負の種類（power、water）。lowHeadroom は足りないと偽になるので、先頭近くで足りないことを知らせる。
+    // 主の網の余りが負の種類（power、water）。lowHeadroom は足りないと偽になるので、足りないことは shortage と shortages で知らせる。
     let shortages: Vec<&str> = ["power", "water"]
         .into_iter()
         .filter(|k| utilities[k]["main"]["shortage"] == true)

@@ -14,8 +14,6 @@ import {
   utilityKey,
   utilityLowHeadroom,
   utilityNotice,
-  utilityNotices,
-  utilityOverDemand,
   utilityShortage,
 } from "./city-panel.ts";
 import { CITY_STATS_LENGTH, FACTOR_KIND, validCityStats } from "./protocol/city-stats.ts";
@@ -110,21 +108,6 @@ describe("街の数字", () => {
       ...(shortage?.reasons ?? []),
       "水道の余りが 6% になった。浄水場を足す用意をする",
     ]);
-  });
-
-  test("余りが -48 で届いていない建物が 0 でも、足りないことを知らせる", () => {
-    // 水道は 3,000 に対して需要 3,048。電気は余っている。新築が止まるだけで、届いていない建物はまだない。
-    const stats = parseCityStats([5, 0, 0, 0, 0, 0, 0, 3600, 3000, 3048]);
-    expect(utilityShortage(stats, 0)).toBeNull();
-    expect(utilityOverDemand(stats)?.reasons).toEqual([
-      "水道が 48 足りず、新築が止まっている。浄水場を足す",
-    ]);
-    const notices = utilityNotices(stats, 0);
-    expect(notices).toHaveLength(1);
-    expect(notices[0]?.details).toEqual(["水道が 48 足りず、新築が止まっている。浄水場を足す"]);
-    expect(notices[0]?.key.startsWith("short:")).toBe(true);
-    // 足りているときは出ない。
-    expect(utilityOverDemand(parseCityStats([5, 0, 0, 0, 0, 0, 0, 3600, 3000, 3000]))).toBeNull();
   });
 
   test("棒は住宅・商業・工業・オフィスの順に並び、正は上、負は下へ伸びる", () => {

@@ -188,42 +188,16 @@ export function utilityLowHeadroom(stats: CityStats): UtilityShortage | null {
   return { headline: "電気か水道の余りが少なくなっている", reasons };
 }
 
-/**
- * 主の網の需要が供給量を超えていて、新築が止まっているときの知らせ。届いていない建物の数が 0 でも出す。
- * 新築は余りが 1 棟分に満たないと止まるので、まだ誰も困っていないうちに足りなくなる。
- * 届いていない建物の知らせ（utilityShortage）がすでに足りない量を言っている種類は、二重に出さない。
- */
-export function utilityOverDemand(stats: CityStats): UtilityShortage | null {
-  const reasons: string[] = [];
-  const m = mainView(stats);
-  const n = (v: number) => v.toLocaleString("ja-JP");
-  const add = (name: string, facility: string, supply: number, covered: number) => {
-    if (m.demand <= supply || covered > 0) {
-      return;
-    }
-    reasons.push(`${name}が ${n(m.demand - supply)} 足りず、新築が止まっている。${facility}を足す`);
-  };
-  add("電気", "発電所", m.power, stats.powerGap);
-  add("水道", "浄水場", m.water, stats.waterGap);
-  if (reasons.length === 0) {
-    return null;
-  }
-  return { headline: "電気か水道が足りず、新築が止まっている", reasons };
-}
-
 /** 足りない知らせと、足りていないほうの余りの知らせを並べる。どちらもなければ null。 */
 export function utilityNotice(
   stats: CityStats,
   shortage: UtilityShortage | null,
 ): UtilityShortage | null {
-  const parts = [shortage, utilityOverDemand(stats), utilityLowHeadroom(stats)].filter(
-    (p): p is UtilityShortage => p !== null,
-  );
-  const first = parts[0];
-  if (first === undefined) {
-    return null;
+  const low = utilityLowHeadroom(stats);
+  if (shortage !== null && low !== null) {
+    return { headline: shortage.headline, reasons: [...shortage.reasons, ...low.reasons] };
   }
-  return { headline: first.headline, reasons: parts.flatMap((p) => p.reasons) };
+  return shortage ?? low;
 }
 
 export type BarLayout = { value: number; top: number; height: number };
@@ -385,7 +359,7 @@ export function utilityNotices(stats: CityStats, unsupplied: number): Notice[] {
   return [
     {
       id: "utility",
-      key: utilityKey(shown.reasons, shortage !== null || utilityOverDemand(stats) !== null),
+      key: utilityKey(shown.reasons, shortage !== null),
       headline: shown.headline,
       details: shown.reasons,
       jump: null,
