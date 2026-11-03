@@ -111,7 +111,11 @@ impl Street {
     /// `ids` の移動がどれも駐車場の出入りの位置まで歩いて車に乗るまで進める。
     fn board(&mut self, ids: &[TripId]) {
         for _ in 0..20 {
-            let car = |id: &TripId| self.trips.get(*id).is_some_and(|t| t.mode() == LaneMode::Car);
+            let car = |id: &TripId| {
+                self.trips
+                    .get(*id)
+                    .is_some_and(|t| t.mode() == LaneMode::Car)
+            };
             if ids.iter().all(car) {
                 return;
             }
@@ -632,11 +636,17 @@ fn a_front_strip_opens_in_the_middle_of_its_slots() {
     let net = street_with_junctions(&[10]);
     // 1 マスの商業の段階 1 は 1 台で、帯は枠 1 つ（2.5m）。交差点から遠い東の辺に寄せ、その真ん中から出入りする。
     let one = wide(&net, ZoneKind::Commercial, 11, (1, 1), 1);
-    assert_eq!(one.parking_layout().cut, ParkingCut::FrontStrip { slots: 1 });
+    assert_eq!(
+        one.parking_layout().cut,
+        ParkingCut::FrontStrip { slots: 1 }
+    );
     assert_eq!(spot_x(&net, &one), mid(11) + 4_000 - 1_250);
     // 間口 2 マスの工業の段階 4 は 6 台で、帯は 15m。東の端の辺から 7.5m 内に入った所である。
     let two = wide(&net, ZoneKind::Industrial, 13, (2, 1), 4);
-    assert_eq!(two.parking_layout().cut, ParkingCut::FrontStrip { slots: 6 });
+    assert_eq!(
+        two.parking_layout().cut,
+        ParkingCut::FrontStrip { slots: 6 }
+    );
     assert_eq!(spot_x(&net, &two), mid(13) + 4_000 - 7_500);
 }
 
@@ -678,7 +688,10 @@ fn arriving_cars_turn_into_the_lot_without_stopping_the_lane() {
             };
             let v = t.speed().0;
             if let Some(before) = prev.insert(id, v) {
-                assert!(before - v <= CAR_DECEL, "減速の上限を破った {before} -> {v}");
+                assert!(
+                    before - v <= CAR_DECEL,
+                    "減速の上限を破った {before} -> {v}"
+                );
             }
             if id == first && t.offset() > LaneOffset(16_000) {
                 first_min = first_min.min(v);

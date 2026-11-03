@@ -314,9 +314,7 @@ fn spots_near(road: TilePos, step: (i8, i8), d: i64) -> SmallVec<[SidewalkPos; 2
 /// 車のリンク `link` の、始まりから `at` の位置から、リンクの両端の交差点のうち近いほうまでの距離（mm）。
 /// どちらの端も交差点でなければ `u32::MAX`。
 fn junction_clearance(net: &Network, link: LinkId, at: LaneOffset) -> u32 {
-    let Some((seg, (_, _, len))) = net
-        .segment(link.segment)
-        .zip(pos::link_geometry(net, link))
+    let Some((seg, (_, _, len))) = net.segment(link.segment).zip(pos::link_geometry(net, link))
     else {
         return u32::MAX;
     };
