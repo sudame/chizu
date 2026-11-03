@@ -115,7 +115,23 @@ pub struct Trip {
     departed: Tick,
     /// 車線や歩道が変わった直後の、描くずれの移り変わり。描画のためだけの値で、状態ハッシュには入れない。
     blend: Option<lane_shift::Blend>,
+    /// 歩き出した出入口の、リンクの始まりからの距離。描画のためだけの値で、状態ハッシュにも保存データにも
+    /// 入れず、比べるときも無視する。
+    #[serde(skip)]
+    origin: Origin,
 }
+
+/// [`Trip::origin`]。比べると常に等しい。
+#[derive(Clone, Copy, Debug, Default)]
+struct Origin(LaneOffset);
+
+impl PartialEq for Origin {
+    fn eq(&self, _: &Origin) -> bool {
+        true
+    }
+}
+
+impl Eq for Origin {}
 
 impl Trip {
     pub fn route(&self) -> &Route {
@@ -245,7 +261,8 @@ impl Trip {
             return None;
         }
         let ahead = near_end.then(|| self.walk_ahead(net)).flatten();
-        if !near_start && ahead.is_none() {
+        // 渡っているあいだは、道筋が求められなくても、画面が交差点の中心に描かないよう値を返す。
+        if !near_start && ahead.is_none() && self.offset.0 <= len {
             return None;
         }
         let (x, y) = self.lane_target(net, self.link());
@@ -255,20 +272,66 @@ impl Trip {
             len: self.link_len,
             lane_shift: (Mm(x), Mm(y)),
             entered,
+            from: if entered {
+                LaneOffset(0)
+            } else {
+                self.origin.0
+            },
+            to: self.last_leg().then_some(self.dest_offset),
             ahead,
         })
     }
 
+    /// リンクの終わりのノードを抜ける道筋。網が変わって区間やノードがなくなっていれば `None`。
     fn walk_ahead(&self, net: &Network) -> Option<WalkAhead> {
         let link = self.link();
         let next = *self.route.links.get(self.leg as usize + 1)?;
-        let node = car::end_node(net, link);
-        let (far, arms) = self.departure(net);
-        let corners = crossing::corner_route(net, node, (link, self.walk.far), (next, far));
-        (corners.len() >= 2).then(|| WalkAhead {
+        // 網を変えた直後は、次の `step` で経路を直すまで、経路のリンクが網にないことがある。
+        net.segment(next.segment)?;
+        let node = crossing::end_node(net, link)?;
+        let (_, _, next_len) = pos::link_geometry(net, next)?;
+        let (arms, corners) = match &self.across {
+            // 渡り始めた人は、固定した腕から角の並びを作る。
+            Some((far, arms)) => {
+                let corners = crossing::corner_route(
+                    net,
+                    node,
+                    (link, self.walk.far),
+                    (next, *far),
+                    Some(arms.as_slice()),
+                );
+                (arms.clone(), corners)
+            }
+            None => {
+                let len = self.route.links.len();
+                let need = (self.leg as usize + 2 == len).then_some(self.walk.far_end);
+                let then = self.route.links.get(self.leg as usize + 2).map(|l| {
+                    let need = (self.leg as usize + 3 == len).then_some(self.walk.far_end);
+                    (*l, need)
+                });
+                let (_, arms, corners) = crossing::depart_route(
+                    net,
+                    node,
+                    (link, self.walk.far),
+                    next,
+                    need,
+                    then,
+                    true,
+                );
+                (arms, corners)
+            }
+        };
+        let next_end = if self.leg as usize + 2 == self.route.links.len() {
+            self.dest_offset
+        } else {
+            next_len
+        };
+        (corners.len() >= 2).then_some(WalkAhead {
             node,
             corners,
-            arms: arms.to_vec(),
+            arms,
+            next_len,
+            next_end,
         })
     }
 
@@ -453,7 +516,7 @@ pub struct Mover {
     /// 車なら、ノードの前後を曲線でつないで描くための道筋。歩く人は `None`。
     pub path: Option<CarPath>,
     /// 歩く人なら、交差点の前後で歩道の角を回って描くための道筋。車と、交差点の近くにいない人は `None`。
-    pub walk: Option<WalkPath>,
+    pub walk: Option<Box<WalkPath>>,
 }
 
 /// 歩く人の、ノードの前後で `WalkPath` を求める距離（mm）。リンクの両端からこの距離の中にいる人だけが
@@ -474,6 +537,11 @@ pub struct WalkPath {
     pub lane_shift: (Mm, Mm),
     /// 前のリンクからノードを抜けてきたか。経路の最初のリンクなら `false` で、出入口から歩き出している。
     pub entered: bool,
+    /// 歩き出した出入口の、リンクの始まりからの距離。ノードを抜けてきたなら 0 である。保存データから
+    /// 読み込んだ直後は分からないので 0 になる。
+    pub from: LaneOffset,
+    /// 経路の最後のリンクなら、行き先の出入口の、リンクの始まりからの距離。
+    pub to: Option<LaneOffset>,
     /// リンクの終わりのノードを抜ける道筋。終わりの近くにいないか、最後のリンクなら `None`。
     pub ahead: Option<WalkAhead>,
 }
@@ -483,9 +551,12 @@ pub struct WalkPath {
 pub struct WalkAhead {
     pub node: NodeId,
     /// 回る角を通る順に並べたもの（[`crossing::corner_route`]）。
-    pub corners: Vec<(SegmentId, bool)>,
+    pub corners: SmallVec<[(SegmentId, bool); 8]>,
     /// 渡る腕の区間。渡る順に並ぶ。
-    pub arms: Vec<SegmentId>,
+    pub arms: crossing::Arms,
+    /// 次のリンクの長さと、そこで歩き終わる距離（最後のリンクなら行き先の出入口、そうでなければリンクの長さ）。
+    pub next_len: LaneOffset,
+    pub next_end: LaneOffset,
 }
 
 /// 車の、いまのリンクの上の位置と、抜けてきたリンク。画面は、リンクの終わりのノードの手前で待つ車を
@@ -1048,7 +1119,7 @@ impl Trips {
                     mode: t.mode,
                     shift: t.shift(net),
                     path: t.car_path(net),
-                    walk: t.walk_path(net),
+                    walk: t.walk_path(net).map(Box::new),
                 })
             })
             .collect()
@@ -1087,6 +1158,7 @@ fn make_trip(
         across: None,
         departed: now,
         blend: None,
+        origin: Origin(from),
     };
     t.enter(net, from, None);
     t

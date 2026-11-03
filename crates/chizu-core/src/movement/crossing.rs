@@ -166,6 +166,31 @@ impl Corners {
     /// 高速道路の腕は、横断歩道なしに越えるので、渡る腕には入れない。横断歩道を外した腕は、越えるなら
     /// 横断歩道があるときと同じく渡る（車道に人が出るので、車はその前で止まる）。
     fn walk(&self, p: usize, q: usize) -> Way {
+        let (cw, ccw) = self.ways(p, q);
+        if cw.key() <= ccw.key() { cw } else { ccw }
+    }
+
+    /// 角 `p` から角 `q` へ道筋 `way` で回るときに通る角を、通る順に並べる。
+    fn route(&self, p: usize, q: usize, way: &Way) -> Route {
+        let m = 2 * self.arms.len();
+        let mut out = Route::new();
+        let mut at = p;
+        loop {
+            out.push((self.arms[at / 2].0, at % 2 == 1));
+            if at == q {
+                break;
+            }
+            at = if way.forward {
+                (at + 1) % m
+            } else {
+                (at + m - 1) % m
+            };
+        }
+        out
+    }
+
+    /// 角 `p` から角 `q` へ、番号の増える向きに回る道筋と、減る向きに回る道筋。
+    fn ways(&self, p: usize, q: usize) -> (Way, Way) {
         let m = 2 * self.arms.len();
         let way = |forward: bool| {
             let mut w = Way {
@@ -195,48 +220,49 @@ impl Corners {
             }
             w
         };
-        let (cw, ccw) = (way(true), way(false));
-        if cw.key() <= ccw.key() { cw } else { ccw }
+        (way(true), way(false))
     }
 }
 
 /// 歩道のリンク `from` の `from_far` の側からノード `node` に入り、リンク `to` の `to_far` の側へ出る人が
 /// 回る角を、通る順に並べる。角は、腕の区間と、その腕の時計回りの側かどうかで表す。
 /// 隣り合う 2 つの角が同じ腕のものなら、その腕の車道を渡る（高速道路の腕は、渡らずに越える）。
-/// 描画のためだけに使い、状態には影響しない。
+///
+/// `fixed` は、渡り始めた人が渡る腕として固定している並びである。渡っている途中で横断歩道を外したり
+/// 戻したりしても、渡る腕を変えないために、その並びと合う向きに回る。合う向きがなければ、いまの網で
+/// 選ぶ向きに回る。描画のためだけに使い、状態には影響しない。
 pub fn corner_route(
     net: &Network,
     node: NodeId,
     (from, from_far): (LinkId, bool),
     (to, to_far): (LinkId, bool),
-) -> Vec<(SegmentId, bool)> {
+    fixed: Option<&[SegmentId]>,
+) -> Route {
     let Some(c) = Corners::of(net, node) else {
-        return Vec::new();
+        return Route::new();
     };
     let (Some(i), Some(j)) = (c.index(from.segment), c.index(to.segment)) else {
-        return Vec::new();
+        return Route::new();
     };
-    let m = 2 * c.arms.len();
     let (p, q) = (2 * i + usize::from(from_far), 2 * j + usize::from(!to_far));
-    let way = c.walk(p, q);
-    let mut out = Vec::new();
-    let mut at = p;
-    loop {
-        out.push((c.arms[at / 2].0, at % 2 == 1));
-        if at == q {
-            break;
+    let way = match fixed {
+        Some(arms) => {
+            let (cw, ccw) = c.ways(p, q);
+            if cw.arms.as_slice() == arms {
+                cw
+            } else if ccw.arms.as_slice() == arms {
+                ccw
+            } else {
+                c.walk(p, q)
+            }
         }
-        at = if way.forward {
-            (at + 1) % m
-        } else {
-            (at + m - 1) % m
-        };
-    }
-    out
+        None => c.walk(p, q),
+    };
+    c.route(p, q, &way)
 }
 
 /// リンク `link` の終わりのノード。
-fn end_node(net: &Network, link: LinkId) -> Option<NodeId> {
+pub(super) fn end_node(net: &Network, link: LinkId) -> Option<NodeId> {
     let s = net.segment(link.segment)?;
     Some(match link.dir {
         Dir::Forward => s.b,
@@ -298,14 +324,37 @@ pub(crate) fn removed_crossings(
 pub fn depart(
     net: &Network,
     node: NodeId,
-    (from, from_far): (LinkId, bool),
+    from: (LinkId, bool),
     to: LinkId,
     need: Option<bool>,
     then: Option<(LinkId, Option<bool>)>,
 ) -> (bool, Arms) {
+    let (side, arms, _) = depart_route(net, node, from, to, need, then, false);
+    (side, arms)
+}
+
+/// 回る角の並び（[`corner_route`]）。
+pub type Route = SmallVec<[(SegmentId, bool); 8]>;
+
+/// [`depart`] と同じ向きと渡る腕を求め、`with_route` なら、回る角の並びも同じ道筋から返す。
+/// 並びは描画のためだけに使う。
+pub(crate) fn depart_route(
+    net: &Network,
+    node: NodeId,
+    (from, from_far): (LinkId, bool),
+    to: LinkId,
+    need: Option<bool>,
+    then: Option<(LinkId, Option<bool>)>,
+    with_route: bool,
+) -> (bool, Arms, Route) {
     let junction = junction::is_junction(net, node);
     if let (false, Some(side)) = (junction, need) {
-        return (side, Arms::new());
+        let route = if with_route {
+            corner_route(net, node, (from, from_far), (to, side), None)
+        } else {
+            Route::new()
+        };
+        return (side, Arms::new(), route);
     }
     // `to` の終わりの交差点で、側 `far` から入って越える、横断歩道を外した腕の数。
     let ahead_node = then.and_then(|(next, need)| {
@@ -341,13 +390,20 @@ pub fn depart(
             (highways, removed + ahead(far), arms)
         };
         let side = need.unwrap_or_else(|| key(true) < key(false));
-        Some((side, c.walk(p, q(side)).arms))
+        let way = c.walk(p, q(side));
+        let route = if with_route {
+            c.route(p, q(side), &way)
+        } else {
+            Route::new()
+        };
+        Some((side, way.arms, route))
     });
-    let (side, arms) = found.unwrap_or((need.unwrap_or(from_far), Arms::new()));
+    let (side, arms, route) =
+        found.unwrap_or((need.unwrap_or(from_far), Arms::new(), Route::new()));
     if junction {
-        (side, arms)
+        (side, arms, route)
     } else {
-        (side, Arms::new())
+        (side, Arms::new(), route)
     }
 }
 

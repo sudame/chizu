@@ -19,16 +19,17 @@
 
 use chizu_core::movement::crossing;
 use chizu_core::movement::{WALK_WINDOW_MM, WalkAhead, WalkPath};
-use chizu_core::{Network, NodeId, SegmentId, SegmentKind};
+use chizu_core::{Network, NodeId, SegmentId};
+use smallvec::SmallVec;
 
 use crate::car_path::{
-    Drawn, V, ZEBRA_LENGTH, arc_length, bezier, center, control, dist, edge, geom, is_bend,
-    is_junction, mm,
+    Drawn, V, ZEBRA_LENGTH, arc_length, bezier, center, control, dist, geom, is_bend, is_junction,
+    mm, node_half,
 };
 
-/// 出ていく腕の角から窓の終わりまでを写すとき、角の位置を窓の長さの何割までに抑えるか。人が後ろへ
-/// 戻らないようにする。
-const MAX_STOP: f64 = 0.8;
+/// 窓の中で、角の位置を窓の長さの何割までに抑えるか。窓の中の人の進みが、中核の半分より遅くならず、
+/// 後ろへも戻らないようにする。
+const MAX_STOP: f64 = 0.5;
 
 /// 描く道筋の 1 区切り。
 #[derive(Clone, Copy, Debug)]
@@ -36,6 +37,8 @@ enum Piece {
     Line(V, V),
     Quad(V, V, V),
 }
+
+type Pieces = SmallVec<[Piece; 8]>;
 
 impl Piece {
     fn length(&self) -> f64 {
@@ -45,51 +48,89 @@ impl Piece {
         }
     }
 
-    /// 長さ `s` の所の位置と向き。
+    /// 長さ `s` の所の位置と向き。`length` はこの区切りの長さである。
     fn at(&self, s: f64, length: f64) -> (V, V) {
+        let t = if length > 0.0 { s / length } else { 1.0 };
         match *self {
-            Piece::Line(a, b) => {
-                let t = if length > 0.0 { s / length } else { 1.0 };
-                (
-                    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t),
-                    (b.0 - a.0, b.1 - a.1),
-                )
-            }
-            Piece::Quad(a, c, b) => {
-                let t = if length > 0.0 { s / length } else { 1.0 };
-                bezier(a, c, b, t.clamp(0.0, 1.0))
-            }
+            Piece::Line(a, b) => (
+                (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t),
+                (b.0 - a.0, b.1 - a.1),
+            ),
+            Piece::Quad(a, c, b) => bezier(a, c, b, t.clamp(0.0, 1.0)),
         }
     }
 }
 
 /// 区切りを順に並べた道筋の、長さの割合 `f` の所。
-fn along_pieces(pieces: &[Piece], f: f64) -> Drawn {
-    let lens: Vec<f64> = pieces.iter().map(Piece::length).collect();
-    let total: f64 = lens.iter().sum();
-    let mut left = f.clamp(0.0, 1.0) * total;
-    let mut found = ((0.0, 0.0), (1.0, 0.0));
+fn along_pieces(pieces: &[Piece], f: f64) -> Option<Drawn> {
+    let lens: SmallVec<[f64; 8]> = pieces.iter().map(Piece::length).collect();
+    let mut left = f.clamp(0.0, 1.0) * lens.iter().sum::<f64>();
+    let mut found = None;
     for (k, (p, &l)) in pieces.iter().zip(&lens).enumerate() {
-        found = p.at(left.min(l), l);
+        found = Some(p.at(left.min(l), l));
         if left <= l || k + 1 == pieces.len() {
             break;
         }
         left -= l;
     }
-    let (pos, d) = found;
+    let (pos, d) = found?;
     let d = if d.0.abs() + d.1.abs() < 1e-9 {
         (1.0, 0.0)
     } else {
         d
     };
-    Drawn {
+    Some(Drawn {
         x: pos.0,
         y: pos.1,
         angle: d.1.atan2(d.0),
+    })
+}
+
+/// 角の位置と、腕の向きの単位ベクトル、腕の区間。
+#[derive(Clone, Copy, Debug)]
+struct Point {
+    p: V,
+    u: V,
+    seg: SegmentId,
+}
+
+type Points = SmallVec<[Point; 8]>;
+
+/// ノードの中心と、道路の端までのいちばん広い半分の幅（mm）。1 回の描画で 1 度だけ求める。
+struct Node {
+    id: NodeId,
+    c: V,
+    half: f64,
+    junction: bool,
+}
+
+impl Node {
+    fn of(net: &Network, id: NodeId) -> Option<Node> {
+        Some(Node {
+            id,
+            c: center(net, id)?,
+            half: node_half(net, id),
+            junction: is_junction(net, id),
+        })
+    }
+
+    /// 腕の 1 歩 `step` の向きへ、角の位置までの距離（mm）。交差点なら横断歩道の縞の真ん中、
+    /// 角（2 本だけがつながるノード）なら道路の端である。
+    fn along(&self, step: (i64, i64)) -> f64 {
+        let edge = if step.0 != 0 && step.1 != 0 {
+            self.half * core::f64::consts::SQRT_2
+        } else {
+            self.half
+        };
+        edge + if self.junction {
+            ZEBRA_LENGTH / 2.0
+        } else {
+            0.0
+        }
     }
 }
 
-/// ノード `node` から区間 `seg` の腕の向きへ出る 1 歩。
+/// ノードから区間 `seg` の腕の向きへ出る 1 歩。
 fn arm_step(net: &Network, node: NodeId, seg: SegmentId) -> Option<(i64, i64)> {
     let s = net.segment(seg)?;
     let line = net.segment_line(seg)?;
@@ -105,33 +146,36 @@ fn unit(step: (i64, i64)) -> V {
     (step.0 as f64 / len, step.1 as f64 / len)
 }
 
-/// ノード `node` から区間 `seg` の腕へ、角の位置までの距離（mm）。交差点なら横断歩道の縞の真ん中、
-/// 角（2 本だけがつながるノード）なら道路の端である。
-fn corner_along(net: &Network, node: NodeId, seg: SegmentId) -> Option<f64> {
-    let step = arm_step(net, node, seg)?;
-    let zebra = is_junction(net, node);
-    Some(edge(net, node, step) + if zebra { ZEBRA_LENGTH / 2.0 } else { 0.0 })
+/// 歩く人が窓の中で写し替える長さ。リンクの長さ `len` の半分と、歩き終わる距離 `end` を超えない。
+fn window(len: f64, end: f64) -> f64 {
+    f64::from(WALK_WINDOW_MM).min(len / 2.0).min(end).max(0.0)
 }
 
-/// ノード `node` の腕 `seg` の角の位置（歩道の中心線の上）と、腕の向きの単位ベクトル。
-/// `cw` は、腕の時計回りの側かどうか（出ていく向きの右）。
-fn corner(net: &Network, node: NodeId, seg: SegmentId, cw: bool) -> Option<(V, V)> {
-    let step = arm_step(net, node, seg)?;
+/// 窓の長さ `w` の中に収まる、角までの距離。
+fn capped(along: f64, w: f64) -> f64 {
+    along.min(MAX_STOP * w)
+}
+
+/// 腕 `seg` の角の位置（歩道の中心線の上）。`cw` は、腕の時計回りの側かどうか（出ていく向きの右）。
+/// `cap` があれば、ノードからの距離をそれ以下に抑える。
+fn corner(net: &Network, node: &Node, seg: SegmentId, cw: bool, cap: Option<f64>) -> Option<Point> {
+    let step = arm_step(net, node.id, seg)?;
     let u = unit(step);
-    let kind: SegmentKind = net.segment(seg)?.kind;
+    let kind = net.segment(seg)?.kind;
     let d = (i64::from(kind.car_lanes_per_side()) * kind.lane_width_mm()
         + kind.sidewalk_width_mm() / 2) as f64;
     // 腕の向きの左は画面で (u.1, -u.0) の向きである。
     let side = if cw { -d } else { d };
-    let c = center(net, node)?;
-    let along = corner_along(net, node, seg)?;
-    Some((
-        (
-            c.0 + u.0 * along + u.1 * side,
-            c.1 + u.1 * along - u.0 * side,
+    let along = node.along(step);
+    let along = cap.map_or(along, |c| along.min(c));
+    Some(Point {
+        p: (
+            node.c.0 + u.0 * along + u.1 * side,
+            node.c.1 + u.1 * along - u.0 * side,
         ),
         u,
-    ))
+        seg,
+    })
 }
 
 /// 窓を使うノードか。3 本以上がつながる交差点か、向きを変える角である。
@@ -141,54 +185,51 @@ fn windowed(net: &Network, node: NodeId) -> bool {
 
 /// 角 `a` から角 `b` への区切り。同じ腕の角どうしならまっすぐ、違う腕なら歩道の中心線が交わる所を
 /// 通る曲線で結ぶ。
-fn step_piece(a: (V, V, SegmentId), b: (V, V, SegmentId)) -> Piece {
-    if a.2 == b.2 {
-        Piece::Line(a.0, b.0)
+fn step_piece(a: &Point, b: &Point) -> Piece {
+    if a.seg == b.seg {
+        Piece::Line(a.p, b.p)
     } else {
-        let inward = (-a.1.0, -a.1.1);
-        Piece::Quad(a.0, control(a.0, inward, b.0, b.1), b.0)
+        let inward = (-a.u.0, -a.u.1);
+        Piece::Quad(a.p, control(a.p, inward, b.p, b.u), b.p)
     }
 }
 
-/// 通る道筋を、横断歩道を渡る前の区切りと、渡る横断歩道ごとの区切りに分けたもの。
-struct Pass {
-    /// 最初の横断歩道の手前の角（渡らなければ、出ていく腕の角）まで。リンク上の点から始まる。
-    approach: Vec<Piece>,
-    /// 渡る横断歩道と、渡り終えた所から次の横断歩道の手前の角（最後なら、出ていく腕の角）まで。
-    crossings: Vec<Vec<Piece>>,
-}
-
-fn pass(net: &Network, ahead: &WalkAhead, from: V) -> Option<Pass> {
-    let node = ahead.node;
-    let points: Vec<(V, V, SegmentId)> = ahead
-        .corners
-        .iter()
-        .map(|&(s, cw)| corner(net, node, s, cw).map(|(p, u)| (p, u, s)))
-        .collect::<Option<_>>()?;
-    let (first, last) = (points.first()?, points.last()?);
-    let mut pass = Pass {
-        approach: vec![Piece::Line(from, first.0)],
-        crossings: Vec::new(),
+/// 通る道筋の区切りのうち `want` のもの。`None` なら、リンク上の点 `from` から最初の横断歩道の手前の
+/// 角（渡らなければ出ていく腕の角）まで、`Some(k)` なら、k 番めに渡る横断歩道と、渡り終えた所から次の
+/// 横断歩道の手前の角（最後なら出ていく腕の角）までである。
+fn stage(
+    points: &[Point],
+    arms: &[SegmentId],
+    junction: bool,
+    from: V,
+    want: Option<usize>,
+) -> Pieces {
+    let mut out = Pieces::new();
+    let (Some(first), Some(last)) = (points.first(), points.last()) else {
+        return out;
     };
-    if !is_junction(net, node) {
-        // 2 本だけがつながる角では、車道を渡らない。入る角から出る角へ、1 本の曲線で結ぶ。
-        pass.approach.push(step_piece(*first, *last));
-        return Some(pass);
+    if want.is_none() {
+        out.push(Piece::Line(from, first.p));
     }
-    let mut arms = ahead.arms.iter().peekable();
+    if !junction {
+        // 2 本だけがつながる角では、車道を渡らない。入る角から出る角へ、1 本の曲線で結ぶ。
+        if want.is_none() {
+            out.push(step_piece(first, last));
+        }
+        return out;
+    }
+    let mut next = 0;
+    let mut now = None;
     for w in points.windows(2) {
-        let piece = step_piece(w[0], w[1]);
-        let crossing = w[0].2 == w[1].2 && arms.peek().is_some_and(|&&s| s == w[0].2);
-        if crossing {
-            arms.next();
-            pass.crossings.push(vec![piece]);
-        } else if let Some(stage) = pass.crossings.last_mut() {
-            stage.push(piece);
-        } else {
-            pass.approach.push(piece);
+        if w[0].seg == w[1].seg && arms.get(next) == Some(&w[0].seg) {
+            now = Some(next);
+            next += 1;
+        }
+        if now == want {
+            out.push(step_piece(&w[0], &w[1]));
         }
     }
-    Some(pass)
+    out
 }
 
 /// 歩く人を描く位置と向き。窓の外にいるなど、写し替えない人は `None` で、中核の位置のまま描く。
@@ -206,49 +247,86 @@ pub fn draw(net: &Network, wp: &WalkPath) -> Option<Drawn> {
         y: start.1 + g.dir.1 * along + lat.1,
         angle: g.dir.1.atan2(g.dir.0),
     };
-    let window = f64::from(WALK_WINDOW_MM);
+    // 歩き出す出入口と、歩き終わる出入口は、中核の位置と描く位置が合うように、窓の外に置く。
+    let begin = f64::from(wp.from.0).min(len);
+    let end = wp.to.map_or(len, |t| f64::from(t.0).min(len));
     let from_node = wp.entered && windowed(net, g.from);
+    let ws = if from_node { window(len, end) } else { 0.0 };
+    if from_node && ws >= 1.0 && o < ws {
+        let node = Node::of(net, g.from)?;
+        let stop = capped(node.along(arm_step(net, g.from, wp.link.segment)?), ws);
+        return Some(on_link(stop + o * (ws - stop) / ws));
+    }
     let ahead = wp
         .ahead
         .as_ref()
         .filter(|a| a.node == g.to && windowed(net, g.to));
-    let ws = if from_node {
-        window.min(len / 2.0)
-    } else {
-        0.0
+    let we = ahead.map_or(0.0, |_| {
+        f64::from(WALK_WINDOW_MM)
+            .min(len - ws)
+            .min(len - begin)
+            .max(0.0)
+    });
+    let ahead = ahead.filter(|_| we >= 1.0);
+    let crossing = o > len;
+    let Some(ahead) = ahead else {
+        if crossing {
+            // 道筋が求められないときも、交差点の中心には描かない。
+            let node = Node::of(net, g.to)?;
+            let step = arm_step(net, g.to, wp.link.segment)?;
+            return Some(on_link(len - node.along((-step.0, -step.1)).min(len / 2.0)));
+        }
+        return None;
     };
-    let we = if ahead.is_some() {
-        window.min(len - ws)
-    } else {
-        0.0
-    };
-    if from_node && o < ws {
-        let stop = corner_along(net, g.from, wp.link.segment)?.min(MAX_STOP * ws);
-        return Some(on_link(stop + o * (ws - stop) / ws));
-    }
-    let ahead = ahead?;
-    if o <= len - we {
+    if !crossing && o <= len - we {
         return None;
     }
-    let pass = pass(net, ahead, {
-        let d = on_link(len - we);
-        (d.x, d.y)
-    })?;
-    if o <= len {
-        return Some(along_pieces(&pass.approach, (o - (len - we)) / we));
-    }
-    // 渡っているあいだ。渡る腕の横断歩道を順に並べた道のりの上の位置から、どの横断歩道のどこかを求める。
-    let mut x = o - len;
-    let last = pass.crossings.len().checked_sub(1)?;
-    for (k, (stage, &arm)) in pass.crossings.iter().zip(&ahead.arms).enumerate() {
-        let w = f64::from(crossing::width(net, arm));
-        if x < w || k == last {
-            let f = if w > 0.0 { (x / w).min(1.0) } else { 1.0 };
-            return Some(along_pieces(stage, f));
+    let node = Node::of(net, g.to)?;
+    let from = on_link(len - we);
+    match pass(net, ahead, &node, we) {
+        Some(points) => {
+            let from = (from.x, from.y);
+            if !crossing {
+                let pieces = stage(&points, &ahead.arms, node.junction, from, None);
+                return along_pieces(&pieces, (o - (len - we)) / we);
+            }
+            // 渡っているあいだ。渡る腕の横断歩道を順に並べた道のりの上の位置から、どの横断歩道のどこかを求める。
+            let mut x = o - len;
+            for (k, &arm) in ahead.arms.iter().enumerate() {
+                let w = f64::from(crossing::width(net, arm));
+                if x < w || k + 1 == ahead.arms.len() {
+                    let pieces = stage(&points, &ahead.arms, node.junction, from, Some(k));
+                    let f = if w > 0.0 { (x / w).min(1.0) } else { 1.0 };
+                    return along_pieces(&pieces, f);
+                }
+                x -= w;
+            }
+            None
         }
-        x -= w;
+        None => {
+            let along = capped(node.along(arm_step(net, g.to, wp.link.segment)?), we);
+            crossing.then(|| on_link(len - along))
+        }
     }
-    None
+}
+
+/// 通る角の位置を、通る順に並べる。入る角は窓の長さ `we` に収まる所に、出る角は次のリンクの窓に収まる所に置く。
+fn pass(net: &Network, ahead: &WalkAhead, node: &Node, we: f64) -> Option<Points> {
+    let last = ahead.corners.len().checked_sub(1)?;
+    let wn = window(f64::from(ahead.next_len.0), f64::from(ahead.next_end.0));
+    ahead
+        .corners
+        .iter()
+        .enumerate()
+        .map(|(k, &(seg, cw))| {
+            let cap = match k {
+                0 => Some(MAX_STOP * we),
+                k if k == last => Some(MAX_STOP * wn),
+                _ => None,
+            };
+            corner(net, node, seg, cw, cap)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -396,6 +474,8 @@ mod tests {
                 len: LaneOffset(80_000),
                 lane_shift: lane,
                 entered: true,
+                from: LaneOffset(0),
+                to: None,
                 ahead: None,
             };
             draw(net, &wp)
@@ -453,7 +533,7 @@ mod tests {
         let (from, to) = (link_of(t(0, 10), t(10, 10)), link_of(t(10, 10), t(20, 10)));
         // 東へ歩いて直進する、右の歩道の人。
         let (far, arms) = crossing::depart(net, node, (from, false), to, None, None);
-        let corners = crossing::corner_route(net, node, (from, false), (to, far));
+        let corners = crossing::corner_route(net, node, (from, false), (to, far), None);
         assert!(!arms.is_empty());
         let len = 80_000;
         let path = |offset: u32| WalkPath {
@@ -462,10 +542,14 @@ mod tests {
             len: LaneOffset(len),
             lane_shift: (Mm(0), Mm(2_880)),
             entered: false,
+            from: LaneOffset(0),
+            to: None,
             ahead: Some(chizu_core::WalkAhead {
                 node,
                 corners: corners.clone(),
-                arms: arms.to_vec(),
+                arms: arms.clone(),
+                next_len: LaneOffset(80_000),
+                next_end: LaneOffset(80_000),
             }),
         };
         let at = |offset: u32| draw(net, &path(offset)).expect("窓の中");
@@ -496,5 +580,313 @@ mod tests {
             assert!(dist((d.x, d.y), (prev.x, prev.y)) < 1_000.0);
             prev = d;
         }
+    }
+
+    // ここから、網の変化、出入口、横断歩道の取り外し、1 マスのリンクの確かめ。
+
+    use chizu_core::{Heading, Money, SidewalkPos};
+
+    fn big_world() -> World {
+        World::new_with_money(1, Money(1_000_000_000))
+    }
+
+    fn road(w: &mut World, a: (i64, i64), b: (i64, i64)) {
+        let c = Command::BuildRoad {
+            from: TilePos::new(a.0, a.1),
+            to: TilePos::new(b.0, b.1),
+            kind: RoadKind::Medium,
+        };
+        let out = w.apply(&c);
+        assert_eq!(out, chizu_core::ApplyOutcome::Applied, "{a:?}-{b:?}");
+    }
+
+    fn link_of(w: &World, from: (i64, i64), to: (i64, i64)) -> LinkId {
+        let net = w.network();
+        let (from, to) = (TilePos::new(from.0, from.1), TilePos::new(to.0, to.1));
+        net.segments()
+            .find_map(|(s, _)| {
+                let l = net.segment_line(s)?;
+                let dir = if l.start == from && l.end() == to {
+                    Dir::Forward
+                } else if l.start == to && l.end() == from {
+                    Dir::Backward
+                } else {
+                    return None;
+                };
+                Some(LinkId {
+                    segment: s,
+                    dir,
+                    mode: LaneMode::Sidewalk,
+                })
+            })
+            .expect("区間がない")
+    }
+
+    fn link_len(w: &World, l: LinkId) -> u32 {
+        w.network().segment_line(l.segment).unwrap().length().0 as u32
+    }
+
+    fn spawn(w: &mut World, a: (LinkId, u32), b: (LinkId, u32)) {
+        let at = |(l, o): (LinkId, u32)| {
+            SidewalkPos::on_link(w.network(), l, LaneOffset(o)).expect("歩道がない")
+        };
+        let (pa, pb) = (at(a), at(b));
+        w.spawn_walk(pa, pb).expect("歩く人を出せない");
+    }
+
+    fn rect30() -> TileRect {
+        TileRect {
+            min: TilePos::new(0, 0),
+            max: TilePos::new(30, 30),
+        }
+    }
+
+    /// 描く位置。道筋がなければ中核の位置と同じ。
+    fn drawn_or_core(w: &World, m: &chizu_core::Mover) -> V {
+        let core = (
+            m.pos.x.0 as f64 + m.shift.0.0 as f64,
+            m.pos.y.0 as f64 + m.shift.1.0 as f64,
+        );
+        m.walk
+            .as_ref()
+            .and_then(|p| draw(w.network(), p))
+            .map_or(core, |d| (d.x, d.y))
+    }
+
+    /// 交差点の手前の窓に入った人がいる街を作る。
+    fn town_with_walker_near_end() -> World {
+        let mut w = big_world();
+        road(&mut w, (0, 10), (20, 10));
+        road(&mut w, (10, 0), (10, 20));
+        let west = link_of(&w, (0, 10), (10, 10));
+        let east = link_of(&w, (10, 10), (20, 10));
+        spawn(&mut w, (west, 16_000), (east, 40_000));
+        for _ in 0..500 {
+            w.step();
+            let near = w
+                .movers_in(rect30())
+                .iter()
+                .any(|m| m.walk.as_ref().is_some_and(|p| p.ahead.is_some()));
+            if near {
+                return w;
+            }
+        }
+        panic!("人が交差点の手前に着かない");
+    }
+
+    #[test]
+    fn changing_the_network_before_the_next_step_does_not_panic() {
+        // 網を変えた直後は、次の step で経路を直すまで、経路のリンクが網にない。壊す場合と、T 字につないで
+        // 区間を分ける場合の両方で、描く準備と描く位置の計算が落ちない。
+        for tee in [false, true] {
+            let mut w = town_with_walker_near_end();
+            if tee {
+                road(&mut w, (5, 5), (5, 15));
+            } else {
+                let area = TileRect {
+                    min: TilePos::new(3, 10),
+                    max: TilePos::new(3, 10),
+                };
+                let out = w.apply(&Command::Bulldoze { area });
+                assert_eq!(out, chizu_core::ApplyOutcome::Applied);
+            }
+            for m in w.movers_in(rect30()) {
+                let _ = drawn_or_core(&w, &m);
+            }
+        }
+    }
+
+    #[test]
+    fn a_crosswalk_removed_while_crossing_keeps_the_walker_off_the_middle() {
+        let mut w = town_with_walker_near_end();
+        let node = {
+            let west = link_of(&w, (0, 10), (10, 10));
+            w.network().segment(west.segment).unwrap().b
+        };
+        let mut toggled = false;
+        let mut last: Option<V> = None;
+        let mut seen = 0;
+        for _ in 0..400 {
+            w.step();
+            for m in w.movers_in(rect30()) {
+                let Some(p) = m.walk.as_ref() else { continue };
+                let d = drawn_or_core(&w, &m);
+                assert!(dist(d, NODE) > 2_500.0, "交差点の中心に描かれた {d:?}");
+                if let Some(l) = last {
+                    assert!(dist(d, l) < 3_000.0, "飛んだ {l:?} -> {d:?}");
+                }
+                last = Some(d);
+                seen += 1;
+                if !toggled && p.offset > p.len {
+                    toggled = true;
+                    let off = Command::SetCrosswalk {
+                        node,
+                        arm: Heading::S,
+                        on: false,
+                    };
+                    w.apply(&off);
+                }
+            }
+        }
+        assert!(toggled && seen > 0);
+    }
+
+    /// 中核の位置（歩道のずれつき）の、リンク `link` の始まりから `o` の所。
+    fn core_at(w: &World, link: LinkId, o: u32, lane: (Mm, Mm)) -> V {
+        let net = w.network();
+        let g = geom(net, link).unwrap();
+        let s = center(net, g.from).unwrap();
+        let o = f64::from(o);
+        (
+            s.0 + g.dir.0 * o + lane.0.0 as f64,
+            s.1 + g.dir.1 * o + lane.1.0 as f64,
+        )
+    }
+
+    /// (10, 10) で、東西、南北、斜めの道路が交わる街。
+    fn star() -> World {
+        let mut w = big_world();
+        road(&mut w, (0, 10), (20, 10));
+        road(&mut w, (10, 0), (10, 20));
+        road(&mut w, (0, 0), (20, 20));
+        w
+    }
+
+    fn ahead_of(w: &World, from: LinkId, to: LinkId) -> chizu_core::WalkAhead {
+        use chizu_core::movement::crossing;
+        let net = w.network();
+        let seg = net.segment(from.segment).unwrap();
+        let node = match from.dir {
+            Dir::Forward => seg.b,
+            Dir::Backward => seg.a,
+        };
+        let (far, arms) = crossing::depart(net, node, (from, false), to, None, None);
+        let len = link_len(w, to);
+        chizu_core::WalkAhead {
+            node,
+            corners: crossing::corner_route(net, node, (from, false), (to, far), None),
+            arms,
+            next_len: LaneOffset(len),
+            next_end: LaneOffset(len),
+        }
+    }
+
+    #[test]
+    fn a_door_inside_the_window_keeps_the_drawn_position_on_the_core_position() {
+        let w = star();
+        let lane = (Mm(0), Mm(2_880));
+        let diag_lane = (Mm(-2_036), Mm(2_036));
+        // 着く人。交差点を抜けた先の出入口が、始まりの窓の中にある。直交は 8,000、斜めは 5,657。
+        for (to, door, lane) in [
+            (link_of(&w, (10, 10), (20, 10)), 8_000_u32, lane),
+            (link_of(&w, (10, 10), (20, 20)), 5_657, diag_lane),
+        ] {
+            let len = link_len(&w, to);
+            for o in [0, door / 2, door - 1, door] {
+                let wp = WalkPath {
+                    link: to,
+                    offset: LaneOffset(o),
+                    len: LaneOffset(len),
+                    lane_shift: lane,
+                    entered: true,
+                    from: LaneOffset(0),
+                    to: Some(LaneOffset(door)),
+                    ahead: None,
+                };
+                let want = core_at(&w, to, o, lane);
+                let got = draw(w.network(), &wp).map_or(want, |d| (d.x, d.y));
+                if o + 1 >= door {
+                    assert!(dist(got, want) < 2.0, "{o}: {got:?} {want:?}");
+                }
+            }
+        }
+        // 出る人。出入口が、終わりの窓の中にある。
+        for (from, door_from_end, lane) in [
+            (link_of(&w, (0, 10), (10, 10)), 8_000_u32, lane),
+            (link_of(&w, (0, 0), (10, 10)), 5_657, diag_lane),
+        ] {
+            let len = link_len(&w, from);
+            let to = link_of(&w, (10, 10), (20, 10));
+            let ahead = ahead_of(&w, from, to);
+            let door = len - door_from_end;
+            for o in [door, door + 1, door + door_from_end / 2] {
+                let wp = WalkPath {
+                    link: from,
+                    offset: LaneOffset(o),
+                    len: LaneOffset(len),
+                    lane_shift: lane,
+                    entered: false,
+                    from: LaneOffset(door),
+                    to: None,
+                    ahead: Some(ahead.clone()),
+                };
+                let want = core_at(&w, from, o, lane);
+                let got = draw(w.network(), &wp).map_or(want, |d| (d.x, d.y));
+                if o <= door + 1 {
+                    assert!(dist(got, want) < 2.0, "{o}: {got:?} {want:?}");
+                }
+            }
+        }
+    }
+
+    /// 1 マスのリンク `short` の上で、描く位置が進む向きに戻らず、中核の半分近い速さで進むこと。
+    fn check_one_tile(w: &mut World, before: LinkId, short: LinkId, after: (LinkId, u32)) {
+        let start = link_len(w, before) - 16_000;
+        spawn(w, (before, start), after);
+        let g = geom(w.network(), short).unwrap();
+        let along = |a: V, b: V| (a.0 - b.0) * g.dir.0 + (a.1 - b.1) * g.dir.1;
+        let mut prev: Option<(V, V)> = None;
+        let mut frames = 0;
+        for _ in 0..2_000 {
+            w.step();
+            for m in w.movers_in(rect30()) {
+                let Some(p) = m.walk.as_ref().filter(|p| p.link == short) else {
+                    prev = None;
+                    continue;
+                };
+                if p.offset > p.len {
+                    prev = None;
+                    continue;
+                }
+                let core = (
+                    m.pos.x.0 as f64 + m.shift.0.0 as f64,
+                    m.pos.y.0 as f64 + m.shift.1.0 as f64,
+                );
+                let d = drawn_or_core(w, &m);
+                if let Some((pd, pc)) = prev {
+                    let (moved, core_moved) = (along(d, pd), along(core, pc));
+                    let at = p.offset.0;
+                    assert!(moved > -1.0, "戻った: {moved} ({at})");
+                    assert!(
+                        moved >= 0.4 * core_moved - 1.0,
+                        "遅い: {moved} / {core_moved} ({at})"
+                    );
+                    frames += 1;
+                }
+                prev = Some((d, core));
+            }
+        }
+        assert!(frames > 3);
+    }
+
+    #[test]
+    fn on_a_one_tile_link_the_walker_neither_steps_back_nor_crawls() {
+        let mut w = big_world();
+        road(&mut w, (0, 10), (30, 10));
+        road(&mut w, (10, 0), (10, 20));
+        road(&mut w, (11, 0), (11, 20));
+        let before = link_of(&w, (0, 10), (10, 10));
+        let short = link_of(&w, (10, 10), (11, 10));
+        let after = (link_of(&w, (11, 10), (30, 10)), 40_000);
+        check_one_tile(&mut w, before, short, after);
+
+        let mut w = big_world();
+        road(&mut w, (0, 0), (30, 30));
+        road(&mut w, (10, 0), (10, 20));
+        road(&mut w, (11, 0), (11, 20));
+        let before = link_of(&w, (0, 0), (10, 10));
+        let short = link_of(&w, (10, 10), (11, 11));
+        let after = (link_of(&w, (11, 11), (30, 30)), 40_000);
+        check_one_tile(&mut w, before, short, after);
     }
 }
