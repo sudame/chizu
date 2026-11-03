@@ -29,10 +29,12 @@ runs:
           ~/.cargo/git
         key: cargo-registry-${{ inputs.registry }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
         restore-keys: cargo-registry-${{ inputs.registry }}-
+    # 成果物は profile、依存の feature、rustflags でも変わるので、Cargo.toml と .cargo/config.toml もキーに入れる。
+    # ci.yml の actions/cache/save のキーも同じにする。
     # キーが外れたら前の main のキャッシュから戻し、足りない分だけビルドし直す
     - id: target
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: target
-        key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+        key: cargo-target-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', '.cargo/config.toml') }}
         restore-keys: cargo-target-${{ github.job }}-
