@@ -794,6 +794,38 @@ fn delays_steer_cars_to_the_parallel_road_and_survive_a_rebuild() {
     assert_eq!(router.route_batch(&[req])[0], free[0]);
 }
 
+/// 覚えている結果の大きさが、残っている結果から数え直した値と同じであることを確かめる。
+fn check_cached_size(router: &AstarRouter) {
+    let want: usize = router.cache.values().map(size_of_entry).sum();
+    assert_eq!(router.cached_size(), want);
+}
+
+#[test]
+fn cached_size_follows_the_cache_through_delays_and_bands() {
+    let n = grid(6);
+    let mut router = AstarRouter::new(&n);
+    router.route_batch(&requests(&n, 300));
+    let walks = router
+        .cache
+        .keys()
+        .filter(|k| k.mode == LaneMode::Sidewalk)
+        .count();
+    assert!(walks > 0 && walks < router.cached());
+    check_cached_size(&router);
+    // 遅れが変わると車の結果だけを捨てるので、大きさも歩く結果のぶんだけになる。
+    let car = n.links().find(|l| l.mode == LaneMode::Car).unwrap();
+    router.set_delays(&Delays::from_sorted([(car, 5_000)]));
+    assert_eq!(router.cached(), walks);
+    check_cached_size(&router);
+    // 数え直した大きさから、また覚え足していける。
+    router.route_batch(&requests(&n, 300));
+    check_cached_size(&router);
+    router.set_band(1);
+    assert_eq!((router.cached(), router.cached_size()), (0, 0));
+    router.route_batch(&requests(&n, 300));
+    check_cached_size(&router);
+}
+
 #[test]
 fn surely_connected_links_always_have_a_route() {
     let mut n = grid(3);
