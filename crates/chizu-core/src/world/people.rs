@@ -520,13 +520,47 @@ impl World {
 
     /// 職場を割り当て直し、職場の変わった住民の予定を立て直す。
     fn update_jobs(&mut self) {
-        for (id, workplace) in assign_jobs(&self.population, &self.buildings, self.tax_permille) {
+        for (id, workplace) in assign_jobs(
+            &self.population,
+            &self.buildings,
+            self.tax_permille,
+            self.seed,
+            self.tick,
+        ) {
+            let before = self
+                .population
+                .citizen(id)
+                .map(|r| (r.workplace, r.schedule));
             self.population.set_workplace(id, workplace);
             let schedule = match workplace {
-                Some(w) => ScheduleState {
-                    next: Activity::Work,
-                    depart_at: Some(self.next_leave_home(id, w)),
-                },
+                Some(w) => {
+                    // 勤め先を乗り換えた住民が、今日まだ来ていない出発の時刻を持っているとき。
+                    // 勤務帯が同じなら、その時刻をそのまま残す。違うなら新しい勤務帯で引き直すが、
+                    // 引き直した時刻が翌日になるなら、元の時刻を残す。そうしないと、その日の出勤を飛ばしてしまう。
+                    let (old, kept) = match before {
+                        Some((Some(old), s)) if s.next == Activity::Work => {
+                            (Some(old), s.depart_at.filter(|t| *t > self.tick))
+                        }
+                        _ => (None, None),
+                    };
+                    let today = |t: Tick| t.0 / TICKS_PER_DAY == self.tick.0 / TICKS_PER_DAY;
+                    let depart_at = match (old, kept) {
+                        (Some(old), Some(t)) if self.shift_at(old) == self.shift_at(w) => t,
+                        (Some(_), Some(t)) => {
+                            let redrawn = self.next_leave_home(id, w);
+                            if today(t) && !today(redrawn) {
+                                t
+                            } else {
+                                redrawn
+                            }
+                        }
+                        _ => self.next_leave_home(id, w),
+                    };
+                    ScheduleState {
+                        next: Activity::Work,
+                        depart_at: Some(depart_at),
+                    }
+                }
                 None => ScheduleState::default(),
             };
             self.population.set_schedule(id, schedule);
@@ -1194,5 +1228,250 @@ pub(crate) mod tests {
         let mut served = city(&zones);
         run_days(&mut served, 4);
         assert!(served.city_stats().citizens > late.citizens * 2);
+    }
+
+    /// 家から職場までの出入口の直線距離（m）。
+    fn commute_of(w: &World, id: CitizenId) -> Option<u64> {
+        let p = w.population();
+        let row = p.citizen(id)?;
+        let home = w.buildings().get(p.home(row.household).flatten()?)?;
+        let work = w.buildings().get(row.workplace?)?;
+        Some(crate::jobs::commute_meters(home, work))
+    }
+
+    /// 通勤の距離の分布は、住民ごとの家と職場の出入口から数えた値と合う。
+    #[test]
+    fn commute_distances_count_the_fronts_of_home_and_work() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 3);
+        let mut meters: Vec<u64> = w
+            .population()
+            .citizen_ids()
+            .filter_map(|id| commute_of(&w, id))
+            .collect();
+        meters.sort_unstable();
+        assert!(meters.len() > 50, "通勤する住民が少ない：{}", meters.len());
+        let d = w.commute_distances();
+        assert_eq!(d.commuters, meters.len() as u64);
+        assert_eq!(d.median_m, Some(meters[meters.len() / 2]));
+        let count = |f: &dyn Fn(u64) -> bool| meters.iter().filter(|m| f(**m)).count() as u64;
+        assert_eq!(d.under_500m, count(&|m| m < 500));
+        assert_eq!(d.under_1km, count(&|m| (500..1000).contains(&m)));
+        assert_eq!(d.from_1km, count(&|m| m >= 1000));
+        assert_eq!(d.under_500m + d.under_1km + d.from_1km, d.commuters);
+    }
+
+    /// 職の割り当ては、働く年齢で家のある住民だけを対象にし、家から近い職場を選ぶ。
+    #[test]
+    fn assign_jobs_gives_nearby_jobs_to_housed_workers_only() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 3);
+        let tax = ZoneKind::ALL.map(|z| w.tax_permille(z));
+        let p = w.population();
+        let b = w.buildings();
+        let changes = crate::jobs::assign_jobs(p, b, tax, w.seed(), w.tick());
+        // 空いている職場の出入口。
+        let workers = crate::jobs::workers_by_building(p, b);
+        let open: Vec<TilePos> = b
+            .iter()
+            .filter(|(id, x)| {
+                x.workplaces_at(tax[x.zone.index()]) > workers.get(id).copied().unwrap_or(0)
+            })
+            .map(|(_, x)| x.front)
+            .collect();
+        assert!(!open.is_empty());
+        let (mut picked, mut all, mut n) = (0_u64, 0_u64, 0_u64);
+        for (id, job) in changes {
+            let row = p.citizen(id).unwrap();
+            let Some(job) = job else { continue };
+            assert!(
+                crate::citizens::WORKING_AGES.contains(&row.age),
+                "働く年齢でない住民に職がついた"
+            );
+            let home = p
+                .home(row.household)
+                .flatten()
+                .expect("家のない住民に職がついた");
+            let at = b.get(home).unwrap().front;
+            let d = |t: TilePos| t.x.abs_diff(at.x).pow(2) + t.y.abs_diff(at.y).pow(2);
+            picked += d(b.get(job).unwrap().front);
+            all += open.iter().map(|t| d(*t)).sum::<u64>() / open.len() as u64;
+            n += 1;
+        }
+        assert!(n > 0, "職が割り当てられない");
+        // 空きの中から偏りなく選んだときの距離の 2 乗の平均より、はっきり近い。
+        assert!(
+            picked * 2 < all,
+            "近い職場を選んでいない：{picked} / {all} ({n} 人)"
+        );
+    }
+
+    /// あとから近くに職場の区画ができると、すでに勤めている住民が乗り換え、通勤の距離が縮む。
+    #[test]
+    fn workers_move_to_new_nearby_jobs() {
+        let zones = [
+            ZoneKind::Residential,
+            ZoneKind::Residential,
+            ZoneKind::Residential,
+            ZoneKind::Industrial,
+        ];
+        let mut w = city(&zones);
+        run_days(&mut w, 5);
+        let before: BTreeMap<CitizenId, u64> = w
+            .population()
+            .citizen_ids()
+            .filter_map(|id| Some((id, commute_of(&w, id)?)))
+            .collect();
+        assert!(before.len() > 50, "勤める住民が少ない：{}", before.len());
+        road(&mut w, (-60, 22), (20, 22));
+        for (y0, y1) in [(17, 21), (23, 27)] {
+            let area = TileRect::from_corners(TilePos::new(-59, y0), TilePos::new(19, y1));
+            let zone = Some(ZoneKind::Industrial);
+            apply(&mut w, Command::PaintZone { area, zone });
+        }
+        run_days(&mut w, 8);
+        // 前から勤めていて、家も同じままの住民の通勤の距離の合計。
+        let same: Vec<(u64, u64)> = before
+            .iter()
+            .filter_map(|(id, was)| Some((*was, commute_of(&w, *id)?)))
+            .collect();
+        assert!(same.len() > 30, "残った住民が少ない：{}", same.len());
+        let (was, now): (u64, u64) = same.iter().fold((0, 0), |a, s| (a.0 + s.0, a.1 + s.1));
+        assert!(now * 10 < was * 9, "通勤の距離が縮まない：{was} → {now}");
+    }
+
+    /// 住宅の帯 3 つと、`work` の帯 1 つの街を 5 日回し、そのあとで近くに工場の区画を足す。
+    fn city_with_late_factories(work: ZoneKind) -> World {
+        let zones = [
+            ZoneKind::Residential,
+            ZoneKind::Residential,
+            ZoneKind::Residential,
+            work,
+        ];
+        let mut w = city(&zones);
+        run_days(&mut w, 5);
+        road(&mut w, (-60, 22), (20, 22));
+        for (y0, y1) in [(17, 21), (23, 27)] {
+            let area = TileRect::from_corners(TilePos::new(-59, y0), TilePos::new(19, y1));
+            let zone = Some(ZoneKind::Industrial);
+            apply(&mut w, Command::PaintZone { area, zone });
+        }
+        w
+    }
+
+    fn snapshot(w: &World) -> BTreeMap<CitizenId, crate::citizens::CitizenRow> {
+        let p = w.population();
+        p.citizen_ids()
+            .map(|id| (id, p.citizen(id).unwrap()))
+            .collect()
+    }
+
+    /// 職場の更新の tick をまたいで 8 日進め、その前後の住民の行を `f(tick, 前, 後)` に渡す。
+    fn across_job_updates(
+        w: &mut World,
+        mut f: impl FnMut(
+            &World,
+            Tick,
+            &BTreeMap<CitizenId, crate::citizens::CitizenRow>,
+            &BTreeMap<CitizenId, crate::citizens::CitizenRow>,
+        ),
+    ) {
+        for _ in 0..8 * TICKS_PER_DAY {
+            if !w.tick().0.is_multiple_of(JOB_INTERVAL) {
+                w.step();
+                continue;
+            }
+            let before = snapshot(w);
+            let now = w.tick();
+            w.step();
+            f(w, now, &before, &snapshot(w));
+        }
+    }
+
+    /// 通勤の途中の住民、職場にいる住民、店にいる住民は、近くに職場ができても乗り換えない。
+    /// 乗り換えるのは、家で出発を待っている住民だけである。
+    #[test]
+    fn only_waiting_workers_switch() {
+        let (mut moving, mut at_work, mut at_shop, mut waiting_switched) = (0, 0, 0, 0);
+        // 店のある街と、ない街の両方を見る。
+        for first in [ZoneKind::Industrial, ZoneKind::Commercial] {
+            let mut w = city_with_late_factories(first);
+            across_job_updates(&mut w, |w, _, before, after| {
+                for (id, was) in before {
+                    let Some(is) = after.get(id) else { continue };
+                    let (Some(from), Some(_)) = (was.workplace, is.workplace) else {
+                        continue;
+                    };
+                    let kind = if was.trip.is_some() {
+                        moving += 1;
+                        "移動の途中"
+                    } else if w.errands.at_shop(*id).is_some() {
+                        at_shop += 1;
+                        "店"
+                    } else if was.schedule.next != Activity::Work {
+                        at_work += 1;
+                        "職場"
+                    } else {
+                        if is.workplace != Some(from) {
+                            waiting_switched += 1;
+                        }
+                        continue;
+                    };
+                    assert_eq!(is.workplace, Some(from), "{kind}にいる住民が乗り換えた");
+                }
+            });
+        }
+        assert!(
+            moving > 0 && at_work > 0 && at_shop > 0,
+            "{moving} {at_work} {at_shop}"
+        );
+        assert!(waiting_switched > 0, "誰も乗り換えない");
+    }
+
+    /// 乗り換えた住民は、その日の出勤を飛ばさない。勤務帯が同じなら出発の時刻を変えず、
+    /// 違うなら新しい勤務帯で引き直す。引き直した時刻が翌日になるなら、元の時刻を残す。
+    #[test]
+    fn switching_workers_still_leave_today() {
+        for (first, same_shift) in [(ZoneKind::Industrial, true), (ZoneKind::Commercial, false)] {
+            let mut w = city_with_late_factories(first);
+            let (mut switched, mut redrawn) = (0, 0);
+            across_job_updates(&mut w, |w, now, before, after| {
+                let day = |t: Tick| t.0 / TICKS_PER_DAY;
+                for (id, was) in before {
+                    let Some(is) = after.get(id) else { continue };
+                    let (Some(from), Some(to)) = (was.workplace, is.workplace) else {
+                        continue;
+                    };
+                    let Some(t) = was
+                        .schedule
+                        .depart_at
+                        .filter(|t| *t > now && day(*t) == day(now))
+                    else {
+                        continue;
+                    };
+                    if from == to || was.trip.is_some() || was.schedule.next != Activity::Work {
+                        continue;
+                    }
+                    switched += 1;
+                    let new = is
+                        .schedule
+                        .depart_at
+                        .expect("乗り換えた住民に出発の時刻がない");
+                    assert!(new > now && day(new) == day(now), "その日の出勤を飛ばした");
+                    let shift = |b: BuildingId| Shift::of(w.buildings().get(b).unwrap().zone);
+                    if shift(from) == shift(to) {
+                        assert_eq!(new, t, "同じ勤務帯なのに出発の時刻が変わった");
+                    } else if new != t {
+                        redrawn += 1;
+                    }
+                }
+            });
+            assert!(switched > 0, "誰も乗り換えない");
+            assert_eq!(
+                redrawn > 0,
+                !same_shift,
+                "{first:?}: 引き直した住民 {redrawn} 人"
+            );
+        }
     }
 }
