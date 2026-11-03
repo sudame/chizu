@@ -91,7 +91,7 @@ dir = "web"
 run = "pnpm exec vitest run"
 
 [tasks."test:wasm"]
-description = "ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかと、保存と読み込み、朝の通勤と昼の買い物の描画を確かめる"
+description = "ビルドしたページをヘッドレスの Chrome で開き、スレッドつきの WASM が動くかと、保存と読み込み、朝の通勤と昼の買い物の描画、何日も回した街がネイティブと一致するかを確かめる"
 depends = ["build:web-test"]
 dir = "web"
 run = [
@@ -99,6 +99,7 @@ run = [
   "node scripts/test-save.ts",
   "node scripts/test-commute.ts",
   "node scripts/test-commute.ts errand",
+  "node scripts/test-long-run.ts",
 ]
 
 [tasks."test:play"]
