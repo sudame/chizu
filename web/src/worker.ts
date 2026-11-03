@@ -141,6 +141,25 @@ function sendBuildings(sim: Simulation): void {
   ]);
 }
 
+// 停めてある車の台数は毎 tick 変わるが、画面に出す精度ではおよそ 1 秒に 1 回で足りる。送るのは前と数が違うときだけにする。
+// 一時停止中は街が進まないので、最初の 1 回のあとは送らない
+const PARKED_INTERVAL_MS = 1000;
+let lastParkedAt = Number.NEGATIVE_INFINITY;
+let sentParked = "";
+function sendParked(sim: Simulation, now: number, paused: boolean): void {
+  const first = lastParkedAt === Number.NEGATIVE_INFINITY;
+  if (!first && (paused || now - lastParkedAt < PARKED_INTERVAL_MS)) {
+    return;
+  }
+  lastParkedAt = now;
+  const data = sim.parked();
+  const key = data.join(",");
+  if (key !== sentParked) {
+    sentParked = key;
+    reply({ kind: "parked", data }, [data.buffer]);
+  }
+}
+
 // 需要は税率、幸福度、人口、職のない住民で、建物の表が変わらなくても動く。住民の数だけ数え直すので、間引いて送る。
 // 送るのは前と数が違うときだけで、コマンドのあとはすぐ確かめる。一時停止中は街が進まないので、タイマーからは確かめない
 const STATS_INTERVAL_MS = 500;
@@ -220,6 +239,7 @@ function run(sim: Simulation): {
     sendRoads(sim);
     sendSignals(sim);
     sendBuildings(sim);
+    sendParked(sim, now, paused);
     if (!paused) {
       sendCityStats(sim, now);
     }

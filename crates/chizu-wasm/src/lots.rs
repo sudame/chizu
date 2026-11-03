@@ -8,6 +8,7 @@
 use chizu_core::building::{Building, ParkingCut, SLOT_WIDTH_MM, SLOTS_PER_TILE};
 use chizu_core::movement::{LotEnd, lot_end};
 use chizu_core::network::{Network, TILE_MM};
+use chizu_core::world::World;
 
 /// 1 つの枠の奥行き（マス）。5m である。
 const SLOT_DEPTH: f64 = 5_000.0 / TILE_MM as f64;
@@ -154,6 +155,32 @@ pub fn encode<'a>(net: &Network, buildings: impl Iterator<Item = &'a Building>) 
             out.extend(s.rect);
             out.extend([s.open.0 as f64, s.open.1 as f64, s.count as f64]);
         }
+    }
+    out
+}
+
+/// 停めてある台数。平面の駐車場のある建物のうち、1 台以上停めてある建物だけを、次の並びで続ける。
+///
+/// `[建物の min の x, min の y, 停めてある台数]`。建物の番号の順に並べる。
+/// 建物は `encode` と同じ鍵（min の x と y）で引く。台数は平面と建物の中の合計で、
+/// どの枠に置くかは画面が決める。状態は変えない。
+pub fn encode_parked(world: &World) -> Vec<f64> {
+    let mut out = Vec::new();
+    for (id, lot) in world.trips().lots() {
+        if lot.parked == 0 {
+            continue;
+        }
+        let Some(b) = world.buildings().get(id) else {
+            continue;
+        };
+        if b.parking_layout().surface == 0 {
+            continue;
+        }
+        out.extend([
+            b.area.min.x as f64,
+            b.area.min.y as f64,
+            f64::from(lot.parked),
+        ]);
     }
     out
 }
@@ -530,5 +557,30 @@ mod tests {
             }
         }
         assert!(multi_column > 0, "2 列にまたがる切り欠きを確かめていない");
+    }
+
+    #[test]
+    fn encode_parked_lists_parked_cars_by_building_key() {
+        use chizu_core::{CommandLog, World, replay};
+        // 人が遊んだ街（種 0）。途中まで再生すると、車が駐車場に停まっている
+        let log = CommandLog::decode(include_bytes!("../tests/fixtures/town.rec"))
+            .expect("記録が読めない");
+        let mut world = World::new(0);
+        replay(&mut world, &log, 100_000);
+        let data = encode_parked(&world);
+        assert!(!data.is_empty(), "停めてある車が1台もない");
+        assert_eq!(data.len() % 3, 0);
+        let mut total = 0.0;
+        for rec in data.chunks(3) {
+            let (id, b) = world
+                .buildings()
+                .iter()
+                .find(|(_, b)| b.area.min.x as f64 == rec[0] && b.area.min.y as f64 == rec[1])
+                .expect("鍵の建物がない");
+            assert!(b.parking_layout().surface > 0);
+            assert_eq!(rec[2], f64::from(world.trips().lot(id).parked));
+            total += rec[2];
+        }
+        assert!(total >= 1.0);
     }
 }

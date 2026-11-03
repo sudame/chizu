@@ -116,6 +116,10 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ kind: "mover-paths", data: new Float64Array([1, 0, 0]) })).toBe(true);
     expect(isWorkerToMain({ kind: "mover-paths", data: [1, 0, 0] })).toBe(false);
     expect(isWorkerToMain({ kind: "mover-paths", data: new Float64Array(2) })).toBe(false);
+    expect(isWorkerToMain({ kind: "parked", data: new Float64Array([10, 20, 3]) })).toBe(true);
+    expect(isWorkerToMain({ kind: "parked", data: new Float64Array() })).toBe(true);
+    expect(isWorkerToMain({ kind: "parked", data: new Float64Array(2) })).toBe(false);
+    expect(isWorkerToMain({ kind: "parked", data: [10, 20, 3] })).toBe(false);
     expect(isWorkerToMain({ kind: "outcome", outcome: "Applied" })).toBe(false);
     expect(isWorkerToMain({ kind: "outcome", id: 1, seq: "1", outcome: "Applied" })).toBe(false);
     expect(isWorkerToMain({ type: "wasm_bindgen_worker_ready" })).toBe(false);
