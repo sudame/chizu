@@ -333,6 +333,40 @@ describe("地区と施設の名前", () => {
     expect(first?.ox).toBe(15);
     expect(near.find((c) => c.text.endsWith("発電所"))?.style.color).toBe("#a8500a");
   });
+
+  test("寄りの名前は、まとまりのいちばん右の記号から試し、標準はまとまりの記号の右から試す", () => {
+    const facilities = [
+      [0, 0, 1, 1, 2],
+      [4, 0, 5, 1, 2],
+      [8, 0, 9, 1, 2],
+    ].flat();
+    const groups = facilityLabels(0, facilities, () => false);
+    expect(groups[0]?.members.map((m) => m.x)).toEqual([1, 5, 9]);
+    const vp = { width: 800, height: 300 };
+    const std = facilityCandidates(groups, { x: 5, y: 1, zoom: 8 }, vp, STAGE_STANDARD, measure)[0];
+    const near = facilityCandidates(groups, { x: 5, y: 1, zoom: 16 }, vp, STAGE_NEAR, measure)[0];
+    expect(std?.wx).toBe(groups[0]?.centerX);
+    expect(near?.wx).toBe(9);
+    expect(near?.ox).toBe(15);
+    // 置き方の違う候補は、右、左、下、上の順に並ぶ
+    const all = facilityCandidates(groups, { x: 5, y: 1, zoom: 8 }, vp, STAGE_STANDARD, measure);
+    // 1 つのまとまりは 1 つの候補で、置き方の違いは alternatives に持つ
+    expect(all).toHaveLength(1);
+    const options = [all[0], ...(all[0]?.alternatives ?? [])];
+    expect(options.map((c) => c?.id.split("|").at(-3))).toEqual(["r", "l", "b", "t"]);
+    // いちばん右の記号の右が画面の外にあるときは、収まる置き方を出す
+    const narrow = { width: 300, height: 300 };
+    const fallback = facilityCandidates(
+      groups,
+      { x: 0, y: 1, zoom: 16 },
+      narrow,
+      STAGE_NEAR,
+      measure,
+    );
+    expect(fallback.length).toBeGreaterThan(0);
+    const boxes = fallback.flatMap((c) => [c, ...(c.alternatives ?? [])]).map((c) => c.box);
+    expect(boxes.every((b) => b.x1 <= narrow.width && b.x0 >= 0)).toBe(true);
+  });
 });
 
 describe("出し入れ", () => {

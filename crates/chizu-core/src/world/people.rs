@@ -28,7 +28,7 @@ use crate::service::Components;
 use crate::units::Tick;
 use crate::world::economy::TICKS_PER_HOUR;
 
-/// 移住を見る間隔（tick）。等速で 2 秒に 1 回である。
+/// 移住を見る間隔（tick）。60 tick（ゲーム内 12 分）ごとである。
 pub const MIGRATION_INTERVAL: u64 = 60;
 
 /// 住みたい人がいるときに、1 回に外から来る世帯の数の下限。
@@ -55,7 +55,7 @@ pub const APPEAL_FULL_MARGIN: u64 = 36;
 /// 家のない世帯が街を出ていくまでの時間（tick）。ゲーム内の 1 日である。
 pub const HOMELESS_LEAVE_TICKS: u64 = TICKS_PER_DAY;
 
-/// 職場の割り当てを見直す間隔（tick）。等速で 10 秒に 1 回である。
+/// 職場の割り当てを見直す間隔（tick）。300 tick（ゲーム内 1 時間）ごとである。
 pub const JOB_INTERVAL: u64 = 300;
 
 /// 職場の区画ごとの勤務の時間帯。

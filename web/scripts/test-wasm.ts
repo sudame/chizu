@@ -20,8 +20,8 @@ import { chooseLayer, pickSpeed, pickTool, zoomInTo } from "./ui.ts";
 
 const TIMEOUT_MS = 30_000;
 const MIN_THREADS = 2;
-const TICKS_PER_SECOND = 30;
-const FAST_SPEED = 48;
+const TICKS_PER_SECOND = 5;
+const FAST_SPEED = 288;
 // chizu-core の clock.rs と world.rs の値
 const TICKS_PER_DAY = 7_200;
 const GAME_SECONDS_PER_TICK = 12;
@@ -120,10 +120,10 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
   );
   const speedLabels = await page.locator("#speeds button[data-speed]").allTextContents();
   check(
-    speedLabels.join(",") === "1 倍,4 倍,16 倍" &&
+    speedLabels.join(",") === "1 倍,6 倍,48 倍" &&
       (await page.locator('#speeds button[data-speed="1"]').getAttribute("aria-pressed")) ===
         "true",
-    `帯の速度は 1、4、16 倍で、いまの速度が押した状態で出る（${speedLabels.join(",")}）`,
+    `帯の速度は 1、6、48 倍で、いまの速度が押した状態で出る（${speedLabels.join(",")}）`,
   );
   const covered = async () =>
     page.evaluate(() => {
@@ -137,7 +137,7 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
       (await page.locator("#city-numbers").isVisible()) &&
       (await page.locator("#demand").isVisible()) &&
       (await page.locator("#overview").isVisible()) &&
-      (await page.locator('#controls button[data-speed="48"]').isVisible()) &&
+      (await page.locator('#controls button[data-speed="288"]').isVisible()) &&
       (await page.locator("#save-open").isVisible()),
     "「⋯」を押すと、建物、電気と水道、需要、人口と幸福度、ほかの速度と保存が出る",
   );
@@ -436,8 +436,8 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
   // 補間そのものは Vitest（mover-interpolation.test.ts）で確かめる。ここでは、画面に補間が効いていることだけを見る。
   // tick が変わらない続きの 2 枠のあいだで位置が変わっていれば、tick に頼らず補間で動いている。
   // 枠の回数や間隔には頼らず、見つかるまで待つ。寄りの段は描画が重く、CI では 1 枠のあいだに tick が
-  // 進みきって同じ tick の枠が続かないことがあるので、0.25 倍に落として 1 tick を長くしてから見る
-  await setSpeed(0.25);
+  // 進みきって同じ tick の枠が続かないことがあるので、等速（1 tick が 200ms）で見る
+  await setSpeed(1);
   const interpolated = await page.evaluate(
     (timeoutMs) =>
       new Promise<boolean>((resolve) => {
@@ -469,8 +469,8 @@ async function checkDevWalks(page: Page, at: string): Promise<void> {
     await page.locator("#dev-flag").isVisible(),
     "開発用の道具を使うと、再現できないことの印が出る",
   );
-  // 48 倍で着くまで進めたあと、等速に戻しても描かれないことで、送られなくなったのではなく着いて消えたと分かる
-  await setSpeed(48);
+  // 最高速で着くまで進めたあと、等速に戻しても描かれないことで、送られなくなったのではなく着いて消えたと分かる
+  await setSpeed(FAST_SPEED);
   await waitMap("drawnMovers", "0", "eq");
   await setSpeed(1);
   const tickAtNormal = Number(await hud.getAttribute("data-tick"));
@@ -543,23 +543,15 @@ try {
   const normal = await ticksIn(2_000);
   check(
     normal >= TICKS_PER_SECOND && normal <= TICKS_PER_SECOND * 4,
-    `等速で 2 秒待つと時計が 60 tick ほど進む（${normal} tick）`,
+    `等速で 2 秒待つと時計が 10 tick ほど進む（${normal} tick）`,
   );
 
-  await pickSpeed(page, 0.5);
-  await hud.and(page.locator('[data-speed="0.5"]')).waitFor({ timeout: TIMEOUT_MS });
-  const half = await ticksIn(2_000);
+  await pickSpeed(page, 6);
+  await hud.and(page.locator('[data-speed="6"]')).waitFor({ timeout: TIMEOUT_MS });
+  const six = await ticksIn(2_000);
   check(
-    half >= normal * 0.3 && half <= normal * 0.7,
-    `0.5 倍にすると等速の半分ほど進む（${half} tick、等速は ${normal} tick）`,
-  );
-
-  await pickSpeed(page, 0.25);
-  await hud.and(page.locator('[data-speed="0.25"]')).waitFor({ timeout: TIMEOUT_MS });
-  const quarter = await ticksIn(2_000);
-  check(
-    quarter >= normal * 0.15 && quarter <= normal * 0.35,
-    `0.25 倍にすると等速の 4 分の 1 ほど進む（${quarter} tick、等速は ${normal} tick）`,
+    six >= normal * 3 && six <= normal * 9,
+    `6 倍にすると等速の 6 倍ほど進む（${six} tick、等速は ${normal} tick）`,
   );
 
   await pickSpeed(page, FAST_SPEED);
@@ -1410,17 +1402,15 @@ try {
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   const layerOn = await waitColor(isGreen);
   check(isGreen(layerOn), `発電所を置くと、届いている緑に変わる（${layerOn.join(", ")}）`);
-  // 電気の主題図では地図を白で薄めるが、発電所は薄めずにそのまま（橙）出す。
+  // 電気の主題図では地図を白で薄めるが、発電所の敷地は薄めずにそのまま（淡い橙）出す。
   // 水道を選ぶと電気は外れ（一度に 1 つだけ）、発電所は白で薄まる
   const plantPixel = () => {
     const p = tilePoint(54, 34);
     return pixel(p.x, p.y);
   };
-  const isPlainPlant = (c: number[]) =>
-    (c[0] ?? 0) > 200 && (c[1] ?? 0) > 100 && (c[1] ?? 0) < 160 && (c[2] ?? 0) < 60;
-  // 白の 50% で薄めた発電所。青が 255 の半分ほどまで上がる
-  const isWashedPlant = (c: number[]) =>
-    (c[0] ?? 0) > 230 && (c[1] ?? 0) > 170 && (c[2] ?? 0) > 120 && (c[2] ?? 0) < 160;
+  // 発電所の敷地の面は淡い橙（#f8e3cf）で、白の 50% で薄めると #fcf1e7 になる。青の強さが違う
+  const isPlainPlant = (c: number[]) => near(c, "#f8e3cf", 3);
+  const isWashedPlant = (c: number[]) => near(c, mixHex("#f8e3cf", "#ffffff", 0.5), 3);
   let plantElectric = await plantPixel();
   for (let i = 0; i < 100 && !isPlainPlant(plantElectric); i++) {
     await page.waitForTimeout(100);
@@ -1428,7 +1418,7 @@ try {
   }
   check(
     isPlainPlant(plantElectric),
-    `電気の主題図では、発電所を薄めずにそのまま出す（${plantElectric.join(", ")}）`,
+    `電気の主題図では、発電所の敷地を薄めずにそのまま出す（${plantElectric.join(", ")}）`,
   );
   // 主題図と関係のない地面は白の 50% で薄める
   const groundPoint = tilePoint(45, 45);
@@ -1556,10 +1546,36 @@ try {
     `主題図を「なし」に戻すと、交通の線は消える（${offRoad.join(", ")}）`,
   );
   const markAfter = await markPixels();
+  // 発電所の敷地は、どの段でも淡い橙の面（#f8e3cf）で描かれる
   const plantColor = await colorOfTile(54, 34);
   check(
-    !anyYellow(markAfter) && (plantColor[0] ?? 0) > 200 && (plantColor[2] ?? 0) < 100,
-    `施設が橙で描かれ、建物に供給が届いて印が消える（施設 ${plantColor.join(", ")}、印の場所 ${markAfter.map((c) => c.join(",")).join(" ")}）`,
+    !anyYellow(markAfter) && near(plantColor, "#f8e3cf", 3),
+    `施設の敷地が淡い橙で描かれ、建物に供給が届いて印が消える（敷地 ${plantColor.join(", ")}、印の場所 ${markAfter.map((c) => c.join(",")).join(" ")}）`,
+  );
+  // 発電所の記号は、敷地の中心に、地図の上に重ねたラベルの canvas に橙の丸（#e8710a）で描かれる。
+  // 丸の左寄り（半径 8px の丸で、絵の稲妻より外）を読む。ラベルの置き場所が決まったあとに描かれるので、橙になるまで待つ
+  const symbolAt = {
+    x: cx + (55 - view.x) * view.zoom - 5,
+    y: cy + (35 - view.y) * view.zoom,
+  };
+  const symbolPixel = () =>
+    page.evaluate((at) => {
+      const canvas = document.querySelector<HTMLCanvasElement>("#labels");
+      const dpr = window.devicePixelRatio;
+      const d = canvas
+        ?.getContext("2d")
+        ?.getImageData(Math.round(at.x * dpr), Math.round(at.y * dpr), 1, 1).data;
+      return [d?.[0] ?? 0, d?.[1] ?? 0, d?.[2] ?? 0, d?.[3] ?? 0];
+    }, symbolAt);
+  const untilSymbol = Date.now() + TIMEOUT_MS;
+  let symbolColor = await symbolPixel();
+  while (!near(symbolColor, "#e8710a", 4) && Date.now() < untilSymbol) {
+    await page.waitForTimeout(100);
+    symbolColor = await symbolPixel();
+  }
+  check(
+    near(symbolColor, "#e8710a", 4),
+    `発電所の記号が橙の丸で描かれる（${symbolColor.join(", ")}）`,
   );
   // 「見る」で建物を押すと様子のパネルが出て、何もないところを押すと閉じる
   await page.locator('button[data-tool="none"]').click();

@@ -4,6 +4,14 @@
 
 import { TILE_WATER } from "../protocol/messages.ts";
 import {
+  drawSymbol,
+  layoutSymbols,
+  type PlacedSymbol,
+  SYMBOL_BORDER,
+  symbolBox,
+  symbolLook,
+} from "./facility-symbols.ts";
+import {
   type CameraView,
   type Candidate,
   type DistrictLabel,
@@ -15,8 +23,8 @@ import {
   LabelFader,
   type LabelSize,
   nextLabelStage,
+  type Obstacle,
   placeLabels,
-  type Rect,
   type RoadRun,
   roadCandidates,
   roadRuns,
@@ -39,6 +47,8 @@ const VERTICAL_ADVANCE = 1.05;
 // 覚えておく画像の数の上限。超えたら全部捨てて作り直す
 const MAX_SPRITES = 2000;
 // 地図の上に重なるパネル。見えているものの下にはラベルを置かない
+// この濃さ（入れ替わりの途中の半分）より薄い記号は、ラベルを置けない範囲に入れない
+const OBSTACLE_ALPHA = 0.5;
 const PANEL_SELECTOR = "[data-map-panel]";
 
 type Sprite = { image: HTMLCanvasElement; w: number; h: number };
@@ -69,6 +79,7 @@ export class LabelLayer {
   #runs: RoadRun[] = [];
   #districts: DistrictLabel[] = [];
   #facilityLabels: FacilityLabel[] = [];
+  #symbols: PlacedSymbol[] = [];
   #roadsDirty = false;
   #placesDirty = false;
   #stage = STAGE_STANDARD;
@@ -204,12 +215,31 @@ export class LabelLayer {
       const s = this.#sprite(text, style, vertical);
       return { w: s.w, h: s.h };
     };
+    // 記号の位置は 1 回だけ求め、名前の候補と置けない範囲と描画で使う
+    this.#symbols = layoutSymbols(this.#facilityLabels, camera, viewport);
     const candidates: Candidate[] = [
       ...roadCandidates(this.#runs, camera, viewport, this.#stage, measure),
       ...districtCandidates(this.#districts, camera, viewport, this.#stage, measure),
-      ...facilityCandidates(this.#facilityLabels, camera, viewport, this.#stage, measure),
+      ...facilityCandidates(
+        this.#facilityLabels,
+        camera,
+        viewport,
+        this.#stage,
+        measure,
+        this.#symbols,
+      ),
     ];
-    const placed = placeLabels(candidates, this.#fader.shown(), this.#readObstacles());
+    // 描いている記号は、ほかのラベルを置けない範囲にする。入れ替わりの途中は、濃いほうの記号だけにする
+    // （名前を置く段が切り替わる倍率 12 で、薄いほうと濃いほうが入れ替わる）。
+    // 名前を添える記号は、名前の置き方で余白を外す
+    const look = symbolLook(camera.zoom);
+    const symbolObstacles: Obstacle[] = this.#symbols
+      .filter((s) => s.alpha > OBSTACLE_ALPHA)
+      .map((s) => ({ ...symbolBox(s, look.radius), owner: s.key }));
+    const placed = placeLabels(candidates, this.#fader.shown(), [
+      ...this.#readObstacles(),
+      ...symbolObstacles,
+    ]);
     this.#fader.update(placed);
     // test:wasm が読む
     const texts = placed.map((c) => c.text).join("|");
@@ -221,9 +251,9 @@ export class LabelLayer {
   }
 
   /** 見えているパネルの範囲。置き場所を求めるたびに読み直す。 */
-  #readObstacles(): Rect[] {
+  #readObstacles(): Obstacle[] {
     const map = this.canvas.getBoundingClientRect();
-    const out: Rect[] = [];
+    const out: Obstacle[] = [];
     for (const el of document.querySelectorAll(PANEL_SELECTOR)) {
       const r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
@@ -249,6 +279,7 @@ export class LabelLayer {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, width, height);
     }
+    this.#drawSymbols(camera, viewport);
     for (const { label, alpha } of this.#fader.items()) {
       const sprite = this.#sprite(label.text, label.style, label.vertical);
       const sx = (label.wx - camera.x) * camera.zoom + viewport.width / 2;
@@ -266,6 +297,27 @@ export class LabelLayer {
         ctx.setTransform(c, s, -s, c, sx * dpr, sy * dpr);
         ctx.drawImage(sprite.image, label.ox, label.oy, sprite.w, sprite.h);
       }
+    }
+    ctx.globalAlpha = 1;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  /** 施設の丸い記号。ラベルの下に描く。画面の外のものは描かない。 */
+  #drawSymbols(camera: CameraView, viewport: Viewport): void {
+    const ctx = this.#ctx;
+    const look = symbolLook(camera.zoom);
+    const reach = look.radius + SYMBOL_BORDER + 2;
+    ctx.setTransform(this.#dpr, 0, 0, this.#dpr, 0, 0);
+    for (const s of this.#symbols) {
+      if (
+        s.sx < -reach ||
+        s.sy < -reach ||
+        s.sx > viewport.width + reach ||
+        s.sy > viewport.height + reach
+      ) {
+        continue;
+      }
+      drawSymbol(ctx, s, look);
     }
     ctx.globalAlpha = 1;
     ctx.setTransform(1, 0, 0, 1, 0, 0);

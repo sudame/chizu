@@ -210,8 +210,8 @@ observe の removedCrosswalks:
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
   {"type":"SetTaxRate","zone":"Residential"|...,"permille":0..300}
       税率を千分率で決める。
-  {"type":"SetSimSpeed","speed":1..48}
-      画面での速さの倍率。advance の進み方は変わらない。
+  {"type":"SetSimSpeed","speed":1..288}
+      画面での速さの倍率。1 倍は実時間の 1 秒に 5 tick で、288 倍は 1 日を 5 秒で回す。advance の進み方は変わらない。
 
 act の結果:
   results に、コマンドごとに outcome を返す。

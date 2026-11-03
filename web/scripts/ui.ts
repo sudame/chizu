@@ -34,7 +34,7 @@ export async function openHudDetails(page: Page): Promise<void> {
   }
 }
 
-/** 帯にない速度（0.25、0.5、48 倍）は詳細の欄の中にあるので、開いてから押す。 */
+/** 帯にない速度（288 倍）は詳細の欄の中にあるので、開いてから押す。 */
 export async function pickSpeed(page: Page, speed: number | string): Promise<void> {
   const button = page.locator(`button[data-speed="${speed}"]`);
   if (!(await button.isVisible())) {

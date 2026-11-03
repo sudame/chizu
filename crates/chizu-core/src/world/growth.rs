@@ -30,7 +30,7 @@ use crate::units::LaneOffset;
 use crate::world::{ApplyOutcome, DenyReason};
 use crate::zone::ZONE_DEPTH;
 
-/// 建物が建つ・育つかを見る間隔（tick）。等速で 1 秒に 1 回である。
+/// 建物が建つ・育つかを見る間隔（tick）。30 tick（ゲーム内 6 分）ごとである。
 pub const GROWTH_INTERVAL: u64 = 30;
 
 /// 建物の奥行きの上限（マス）。区画の奥行きいっぱいまで建つので、奥に空きのマスが残らない。
@@ -812,7 +812,7 @@ mod tests {
     #[test]
     fn houses_grow_along_a_zoned_street_within_minutes() {
         let mut w = served_street();
-        // 等速で 1 分。
+        // 1,800 tick（ゲーム内 6 時間）。
         run(&mut w, 30 * 60);
         assert!(
             w.buildings().len() >= 5,
