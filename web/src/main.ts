@@ -39,6 +39,7 @@ import {
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { DetailCache } from "./map/detail.ts";
 import { LabelLayer } from "./map/label-layer.ts";
+import { MoverPaths } from "./map/mover-interpolation.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
 import {
   BULLDOZE_EDGE_COLOR,
@@ -254,6 +255,8 @@ const WHEEL_LINE_PIXELS = 16;
 // 開始地点の買ってあるチャンク（-1〜1）の真ん中から見始める
 const camera = new Camera(CHUNK_SIDE / 2, CHUNK_SIDE / 2, 4);
 const store = new ChunkStore();
+// Worker から届いた、車を描く道筋
+const moverPaths = new MoverPaths();
 // WebGL2 を使えなくても、時計と操作は動かす
 let mapError: string | null = null;
 function createRenderer(): MapRenderer | null {
@@ -449,6 +452,7 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
           header,
           reader.movers(header.moverCount),
           performance.now(),
+          moverPaths,
         ) ?? 0);
   // test:wasm が読む
   mapCanvas.dataset.drawnMovers = String(movers);
@@ -1154,6 +1158,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);
     mapCanvas.dataset.roadSegments = String(message.segments.length / SEGMENT_STRIDE);
+    return;
+  }
+  if (message.kind === "mover-paths") {
+    moverPaths.receive(message.data);
     return;
   }
   if (message.kind === "signals") {

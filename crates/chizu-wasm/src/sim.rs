@@ -52,8 +52,8 @@ pub struct Sim {
     movers_base: ChunkCoord,
     /// その前の回に集めた移動体。集め直すたびに `movers` と入れ替える。
     movers_before: Vec<Mover>,
-    /// 曲線の上に描いた車の、曲線の始まり。描画のためだけに覚え、状態には入れない。
-    arcs: crate::movers::Arcs,
+    /// 移動体を描くために覚えておく、車ごとの覚え書きと道筋。描画のためだけに覚え、状態には入れない。
+    mover_memory: crate::movers::Memory,
     /// `movers` を集めたときの（tick、記録の件数、範囲、記録に入らない操作の回数）。どれも変わらなければ集め直さない。
     movers_key: Option<(Tick, usize, Option<TileRect>, u32)>,
     /// 記録に入らない操作（開発用の道具）をした回数。1 回でもあれば、記録を再生しても同じ状態にならない。
@@ -89,7 +89,7 @@ impl Sim {
             movers: Vec::new(),
             movers_base: ChunkCoord::default(),
             movers_before: Vec::new(),
-            arcs: crate::movers::Arcs::new(),
+            mover_memory: crate::movers::Memory::default(),
             movers_key: None,
             unrecorded_ops: 0,
             buildings_version: Cell::new(None),
@@ -330,7 +330,7 @@ impl Sim {
     }
 
     /// 見える範囲の移動体を集め直す。tick、記録、範囲、記録に入らない操作のどれも変わっていなければ前の結果を使う。
-    fn collect_movers(&mut self) {
+    pub fn collect_movers(&mut self) {
         let key = (
             self.world.tick(),
             self.log.len(),
@@ -353,7 +353,7 @@ impl Sim {
                     &self.world,
                     v,
                     &mut self.movers,
-                    &mut self.arcs,
+                    &mut self.mover_memory,
                     before,
                 );
             }
@@ -362,6 +362,11 @@ impl Sim {
                 self.movers_base = ChunkCoord::default();
             }
         }
+    }
+
+    /// 前に渡してから新しく求めた、車を描く道筋（`car_path::Paths::take` の並び）。
+    pub fn take_mover_paths(&mut self) -> Vec<f64> {
+        self.mover_memory.paths.take()
     }
 
     /// 建物の表の版。建物が建つ、消える、段階が上がるたびに変わる。表の状態ハッシュの下位 52 ビットを使う。

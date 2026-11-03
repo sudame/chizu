@@ -960,7 +960,7 @@ mod tests {
 
     // ここから、網を変えたときの確かめ。画面と同じく、前の回に描いたものを引き継いで描く。
 
-    use crate::movers::{Arcs, Before, KIND_WALK, visible_movers};
+    use crate::movers::{Before, KIND_WALK, Memory, visible_movers};
     use crate::snapshot::Mover as Drawn2;
 
     /// 画面の側。`visible_movers` を、前の回の結果を引き継いで呼ぶ。
@@ -969,7 +969,7 @@ mod tests {
         out: Vec<Drawn2>,
         before: Vec<Drawn2>,
         base: chizu_core::ChunkCoord,
-        arcs: Arcs,
+        memory: Memory,
     }
 
     impl Screen {
@@ -980,7 +980,7 @@ mod tests {
                 out: &self.before,
                 base: self.base,
             };
-            self.base = visible_movers(w, rect30(), &mut self.out, &mut self.arcs, before);
+            self.base = visible_movers(w, rect30(), &mut self.out, &mut self.memory, before);
             assert_eq!(self.base, chizu_core::ChunkCoord::new(0, 0));
             self.out
                 .iter()
