@@ -23,8 +23,8 @@ use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
-    DayTraffic, DenyReason, GameTime, Heading, Line, MigrationOutlook, NodeControl, ServiceKind,
-    TilePos, TileRect, Traffic, World, ZoneKind, replay,
+    CommuteDistances, DayTraffic, DenyReason, GameTime, Heading, Line, MigrationOutlook,
+    NodeControl, ServiceKind, TilePos, TileRect, Traffic, World, ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -96,6 +96,10 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  ゲーム内の日ごとの結果で、arrived 着いた数、abandoned 道路が変わるなどして途中で着けなくなった数、
                  noRoute 出発のときに経路がなく始められなかった数、avgTravelTicks と avgTravelMinutes 着いた移動の平均の移動時間
                  （1 tick は 12 秒）。着いた移動がなければ null。yesterday は始まって 1 日たつまでは null。
+  commute        通勤の距離の分布。職のある住民の、家から職場までの出入口の直線距離（道のりではない）で数える。
+                 commuters 数えた住民、medianMeters 中央値（m）、under500m 500m 未満、from500mTo1km 500m 以上 1km 未満、
+                 from1km 1km 以上の人数。職のない住民は数えない。住民は職のない間、家から近い空きのある職場を選ぶので、
+                 職住を近づける区画の置き方は、この分布が短いほうへ寄ることで確かめられる。
   migration      転入。wantingHouseholds 移住の処理（60 tick ごと）1 回で外から来ようとする世帯の数、
                  vacantHomes 外の世界と道路でつながった住宅の空き戸数、homelessHouseholds と homelessCitizens 家がなく空き家を待つ世帯と住民、
                  blockedHouseholds 来ようとしても空き家が足りず入れない世帯の数。
@@ -789,6 +793,23 @@ fn citizen_places(p: CitizenPlaces) -> Value {
     })
 }
 
+fn commute(c: CommuteDistances) -> Value {
+    let CommuteDistances {
+        commuters,
+        median_m,
+        under_500m,
+        under_1km,
+        from_1km,
+    } = c;
+    json!({
+        "commuters": commuters,
+        "medianMeters": median_m,
+        "under500m": under_500m,
+        "from500mTo1km": under_1km,
+        "from1km": from_1km,
+    })
+}
+
 fn migration(m: MigrationOutlook) -> Value {
     let MigrationOutlook {
         wanting_households,
@@ -989,6 +1010,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
         },
         "citizenPlaces": citizen_places(world.citizen_places()),
         "traffic": traffic(world, before),
+        "commute": commute(world.commute_distances()),
         "migration": migration(world.migration_outlook()),
         "demand": by_zone(|z| demand[z.index()]),
         "demandFactors": by_zone(|z| {

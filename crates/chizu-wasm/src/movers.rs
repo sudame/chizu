@@ -4,9 +4,11 @@
 use chizu_core::network::{DIAGONAL_TILE_MM, TILE_MM};
 use chizu_core::{
     CHUNK_SIDE, ChunkCoord, Dir, LaneMode, LaneOffset, LinkId, Mover as CoreMover, SidewalkPos,
-    TilePos, TileRect, World,
+    TilePos, TileRect, TripId, World,
 };
+use std::collections::BTreeMap;
 
+use crate::car_path;
 use crate::snapshot::{MAX_MOVERS, Mover};
 
 /// 移動体の種類の番号。画面の `web/src/map/movers.ts` と同じ。
@@ -58,9 +60,18 @@ fn keep_nearest(found: &mut Vec<CoreMover>, view: TileRect, limit: usize) {
     found.truncate(limit);
 }
 
+/// 曲線の上に描いた車ごとの、曲線の始まり（`car_path::Entry`）。描画のためだけに覚える。
+pub type Arcs = BTreeMap<TripId, car_path::Entry>;
+
 /// `view` の移動体を、基準のチャンク（`view.min` のチャンク）の原点からのマスの座標に直して `out` に入れ、
 /// 基準のチャンクを返す。上限を超えたら、`view` の真ん中に近いものを残す。
-pub fn visible_movers(world: &World, view: TileRect, out: &mut Vec<Mover>) -> ChunkCoord {
+/// `arcs` は前の回に曲線の上に描いた車の曲線の始まりで、この回のものに入れ替える。
+pub fn visible_movers(
+    world: &World,
+    view: TileRect,
+    out: &mut Vec<Mover>,
+    arcs: &mut Arcs,
+) -> ChunkCoord {
     let base = view.min.chunk().unwrap_or_default();
     let side = CHUNK_SIDE as i64;
     let origin = |c: i32| i64::from(c) * side * TILE_MM;
@@ -70,14 +81,36 @@ pub fn visible_movers(world: &World, view: TileRect, out: &mut Vec<Mover>) -> Ch
     // 基準の原点からの差は画面の広さに収まるので、f64 を経て f32 に直しても桁は足りる。
     let tiles = |v: i64, o: i64| (v.saturating_sub(o) as f64 / TILE_MM as f64) as f32;
     out.clear();
-    // 中心線の上の位置に、車線や歩道に寄せるずれを足して描く。
-    out.extend(found.iter().map(|m| Mover {
-        x: tiles(m.pos.x.0.saturating_add(m.shift.0.0), ox),
-        y: tiles(m.pos.y.0.saturating_add(m.shift.1.0), oy),
-        heading: heading_code(m.heading),
-        kind: kind_of(m),
-        id: m.id.index,
-        generation: u32::from(m.id.generation),
+    let net = world.network();
+    let from_mm = |v: f64, o: i64| ((v - o as f64) / TILE_MM as f64) as f32;
+    let before = core::mem::take(arcs);
+    out.extend(found.iter().map(|m| {
+        // 車は、ノードの前後を曲線でつないだ道筋の上に描く（`car_path`）。
+        let drawn = m
+            .path
+            .and_then(|p| car_path::draw(net, &p, m.shift, before.get(&m.id)));
+        if let Some((d, entry)) = drawn {
+            if let Some(e) = entry {
+                arcs.insert(m.id, e);
+            }
+            return Mover {
+                x: from_mm(d.x, ox),
+                y: from_mm(d.y, oy),
+                heading: car_path::angle_code(d.angle),
+                kind: kind_of(m),
+                id: m.id.index,
+                generation: u32::from(m.id.generation),
+            };
+        }
+        // 中心線の上の位置に、車線や歩道に寄せるずれを足して描く。
+        Mover {
+            x: tiles(m.pos.x.0.saturating_add(m.shift.0.0), ox),
+            y: tiles(m.pos.y.0.saturating_add(m.shift.1.0), oy),
+            heading: heading_code(m.heading),
+            kind: kind_of(m),
+            id: m.id.index,
+            generation: u32::from(m.id.generation),
+        }
     }));
     base
 }
@@ -189,7 +222,7 @@ mod tests {
         let n = spawn_dev_walks(&mut w, TilePos::new(2, 10), TilePos::new(25, 10), 30);
         assert_eq!(n, 30);
         let mut first = Vec::new();
-        let base = visible_movers(&w, all(), &mut first);
+        let base = visible_movers(&w, all(), &mut first, &mut Arcs::new());
         assert_eq!(base, ChunkCoord::new(-1, -1));
         assert_eq!(first.len(), 30);
         assert!(first.iter().all(|m| m.kind == KIND_WALK));
@@ -206,12 +239,12 @@ mod tests {
             w.step();
         }
         let mut later = Vec::new();
-        visible_movers(&w, all(), &mut later);
+        visible_movers(&w, all(), &mut later, &mut Arcs::new());
         assert_ne!(first, later);
         for _ in 0..2_000 {
             w.step();
         }
-        visible_movers(&w, all(), &mut later);
+        visible_movers(&w, all(), &mut later, &mut Arcs::new());
         assert!(later.is_empty());
     }
 
@@ -241,6 +274,7 @@ mod tests {
             heading: (1, 0),
             mode: LaneMode::Sidewalk,
             shift: (Mm(0), Mm(0)),
+            path: None,
         };
         let mut found = vec![
             at(0, 9_000),
@@ -275,6 +309,7 @@ mod tests {
             heading: (0, 1),
             mode,
             shift: (Mm(0), Mm(0)),
+            path: None,
         };
         assert_eq!(kind_of(&m(LaneMode::Sidewalk)), KIND_WALK);
         assert_eq!(kind_of(&m(LaneMode::Car)), KIND_CAR);

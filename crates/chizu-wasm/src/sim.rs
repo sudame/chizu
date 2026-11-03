@@ -50,6 +50,8 @@ pub struct Sim {
     /// 最後に集めた移動体と、その基準のチャンク。
     movers: Vec<Mover>,
     movers_base: ChunkCoord,
+    /// 曲線の上に描いた車の、曲線の始まり。描画のためだけに覚え、状態には入れない。
+    arcs: crate::movers::Arcs,
     /// `movers` を集めたときの（tick、記録の件数、範囲、記録に入らない操作の回数）。どれも変わらなければ集め直さない。
     movers_key: Option<(Tick, usize, Option<TileRect>, u32)>,
     /// 記録に入らない操作（開発用の道具）をした回数。1 回でもあれば、記録を再生しても同じ状態にならない。
@@ -84,6 +86,7 @@ impl Sim {
             mover_view: None,
             movers: Vec::new(),
             movers_base: ChunkCoord::default(),
+            arcs: crate::movers::Arcs::new(),
             movers_key: None,
             unrecorded_ops: 0,
             buildings_version: Cell::new(None),
@@ -337,7 +340,8 @@ impl Sim {
         self.movers_key = Some(key);
         match self.mover_view {
             Some(v) => {
-                self.movers_base = crate::movers::visible_movers(&self.world, v, &mut self.movers);
+                self.movers_base =
+                    crate::movers::visible_movers(&self.world, v, &mut self.movers, &mut self.arcs);
             }
             None => {
                 self.movers.clear();

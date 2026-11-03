@@ -1,5 +1,6 @@
 //! chizu-core と画面（Web Worker）のあいだの受け渡しの層。
 
+pub mod car_path;
 pub mod command_input;
 pub mod inspect;
 pub mod layers;
