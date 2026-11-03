@@ -98,21 +98,77 @@ export function pickStall<T extends { x: number; y: number }>(
   return sorted.find((s) => before(last, s)) ?? sorted[0] ?? null;
 }
 
+/**
+ * 空き区画がない状態が続いたら知らせる長さ（tick）。ゲーム内の半日である（1 日は 7200 tick）。
+ * 区画が建ち尽くした直後や、塗り足してすぐ建ち尽くす間は需要が残っていても、
+ * 次の区画を塗る間に知らせが出入りしてちらつく。半日あれば、気づいて塗る時間として足りる。
+ */
+export const LOT_SHORTAGE_TICKS = 3600;
+
+/** 区画の種類ごとに、空き区画がない状態になった tick。なければ null。 */
+export type LotShortageSince = (number | null)[];
+
+/**
+ * overview の flags（区画の種類ごとの 1 か 0）と今の tick から、空き区画のない状態が始まった tick を更新する。
+ * 偽に戻った区画は数え直す。tick が戻った（読み込みや新しい街）ときも数え直す。
+ */
+export function trackLotShortage(
+  since: LotShortageSince,
+  flags: number[],
+  tick: number,
+): LotShortageSince {
+  return ZONE_NAMES.map((_, z) => {
+    if ((flags[z] ?? 0) !== 1) {
+      return null;
+    }
+    const start = since[z] ?? null;
+    return start === null || start > tick ? tick : start;
+  });
+}
+
+/** 空き区画がない状態が LOT_SHORTAGE_TICKS 以上続いている区画の番号。 */
+export function persistedLotShortage(since: LotShortageSince, tick: number): number[] {
+  return ZONE_NAMES.flatMap((_, z) => {
+    const start = since[z] ?? null;
+    return start !== null && tick - start >= LOT_SHORTAGE_TICKS ? [z] : [];
+  });
+}
+
+/** 需要があるのに空き区画がない。zones は区画の種類の番号で、なければ null。 */
+export function lotNotice(zones: number[]): GrowthNotice | null {
+  if (zones.length === 0) {
+    return null;
+  }
+  const names = zones.map((z) => ZONE_NAMES[z]);
+  const one = names.length === 1;
+  return {
+    headline: one
+      ? `${names[0]}の需要があるのに、空いている${names[0]}の区画がない`
+      : `${names.join("・")}の需要があるのに、空いている区画がない`,
+    action: one ? `${names[0]}の区画を塗り足す` : "その種類の区画を塗り足す",
+  };
+}
+
 /** 知らせの見た目。ボタンの文言は移る先の数と種類で決まる。 */
 export type NoticeView = { headline: string; action: string; jump: string | null };
 
 /**
- * 止まっている区画の知らせと、つながっていない施設の知らせを 1 つにまとめる。どちらもなければ null。
- * 両方あるときは、見出しは区画の知らせで、施設の知らせを行動の文の後ろに足す。
+ * 止まっている区画、空き区画がない、つながっていない施設の知らせを 1 つにまとめる。どれもなければ null。
+ * 複数あるときは、見出しは先頭の知らせで、残りの知らせを行動の文の後ろに足す。
  */
 export function noticeView(
   blocks: GrowthBlocks,
   stalls: Stall[],
   isolated: Isolated[] = [],
+  lotZones: number[] = [],
 ): NoticeView | null {
   const growth = growthNotice(blocks);
+  const lot = lotNotice(lotZones);
   const cut = isolatedNotice(isolated);
-  if (growth === null && cut === null) {
+  // 知らせは、区画、空き区画、施設の順に並べる。先頭が見出しで、残りは見出しの文を行動の文の後ろに足す。
+  const notices = [growth, lot, cut].filter((n): n is GrowthNotice => n !== null);
+  const [first, ...rest] = notices;
+  if (first === undefined) {
     return null;
   }
   const targets = (growth === null ? 0 : stalls.length) + isolated.length;
@@ -128,11 +184,8 @@ export function noticeView(
       : targets > 1
         ? `${what}へ移る（押すたびに次の${cut === null ? "道路網" : "場所"}）`
         : `${what}へ移る`;
-  if (growth !== null && cut !== null) {
-    return { headline: growth.headline, action: `${growth.action}。${cut.headline}`, jump };
-  }
-  const only = growth ?? cut;
-  return only === null ? null : { ...only, jump };
+  const action = [first.action, ...rest.map((n) => n.headline)].join("。");
+  return { headline: first.headline, action, jump };
 }
 
 /** 前に出した見た目と同じなら、DOM に触らなくてよい。触ると読み上げが繰り返され、フォーカスも外れる。 */
@@ -152,7 +205,12 @@ export function sameView(a: NoticeView | null, b: NoticeView | null): boolean {
  * 要素は index.html に置いてあり、ここでは文言だけを書き換える。読み上げるのは見出しの文だけである。
  */
 export function setupGrowthNotice(jump: (x: number, y: number) => void): {
-  render: (blocks: GrowthBlocks, stalls: Stall[], isolated?: Isolated[]) => void;
+  render: (
+    blocks: GrowthBlocks,
+    stalls: Stall[],
+    isolated?: Isolated[],
+    lotZones?: number[],
+  ) => void;
 } {
   const root = document.querySelector<HTMLElement>("#growth-notice");
   const head = document.querySelector<HTMLElement>("#growth-notice-head");
@@ -170,13 +228,13 @@ export function setupGrowthNotice(jump: (x: number, y: number) => void): {
     jump(picked.x, picked.y);
   });
   return {
-    render(blocks, next, isolated = []) {
-      const view = noticeView(blocks, next, isolated);
+    render(blocks, next, isolated = [], lotZones = []) {
+      const view = noticeView(blocks, next, isolated, lotZones);
       // 区画の知らせが出ていないときの止まっている網には移らない
       const stalled = growthNotice(blocks) === null ? [] : next;
       targets = [...stalled, ...isolated];
-      if (view === null) {
-        // 知らせが消えたら、次は最初の網から数え直す
+      if (targets.length === 0) {
+        // 移る先がなくなったら、次は最初の網から数え直す
         last = null;
       }
       if (root === null || head === null || action === null || button === null) {

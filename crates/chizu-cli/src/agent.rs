@@ -2,8 +2,10 @@
 //!
 //! 遊んでいる街はセッションのディレクトリに、種と tick を書いた `state.json` と、
 //! 操作の記録の `commands.rec` で持つ。フィードバックの `feedback/<日時>-<番号>/` と同じ形である。
-//! 呼び出しのあいだに状態は持たず、毎回、種から作った街に記録を再生していまの tick の街を作り直す。
+//! 呼び出しのたびに、記録を再生していまの tick の街を作り直す。`agent new` で作ったセッションでは、
+//! 再生の途中の街を [`cache`] に置き、次の呼び出しはそこから続きを再生する。
 
+mod cache;
 mod command_json;
 mod export;
 mod map;
@@ -11,6 +13,7 @@ mod map;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use cache::Cache;
 use chizu_core::building::{Building, CityStats, demand, jobs_kept_permille, residential_tax_pull};
 use chizu_core::service::supply_balance;
 use chizu_core::world::economy::Finances;
@@ -37,6 +40,9 @@ pub const USAGE: &str = r#"使い方:
 <dir> は state.json と commands.rec を置くディレクトリである。act と advance は agent new で作ったディレクトリにだけ書く。
 feedback/<日時>-<番号>/ は observe ではそのまま見られ、続きを遊ぶときは new --from で写してから遊ぶ。
 act と advance は、記録を再生したハッシュが state.json の stateHash と食い違うときは何も書かずに止まる。
+agent new で作ったセッションには、再生の途中の街を replay-cache.bin に置き、次の呼び出しはそこから続きを再生する。
+正しい記録は state.json と commands.rec で、キャッシュは消してもよい。chizu-cli を作り直したときや、
+記録の先頭と合わないとき、壊れているときは、捨てて種から再生し直す。
 <commands.json> に - を渡すと標準入力から読む。中身はコマンドの配列か、コマンド 1 つである。
 map と export のほかのサブコマンドは、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
 
@@ -64,6 +70,8 @@ observe の utilities（power と water）:
 
 observe の growth（新築が電気か水道の余裕で止まっている間口）:
   区画の種類ごとに fronts 候補の間口、blocked 止まっている数、noPower と noWater そのうち電気、水道の余裕がない数。
+  noFreeLot 需要が正なのに、建てる候補の間口（fronts）が 1 つもない。塗った区画が建ち尽くしたときだけ真で、塗ったことのない種類は偽。電気や水道の余裕とは関係がない。
+    画面は、これが半日（ゲーム内）続くと「○○の需要があるのに、空いている○○の区画がない」と知らせる。区画を塗り足すと偽になる。
   stalledAt 止まっている道路網ごとの at（止まっている間口のうち座標が最小のマス）と、noPower、noWater（その網に足りないもの）。
   画面の知らせを押したときに映る場所と同じ。止まっている網がなければ空の配列。at を map で見れば、どの網かが分かる。
 
@@ -137,6 +145,10 @@ observe の removedCrosswalks:
   {"type":"BuildRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
       道路を引く。縦か横か 45 度の斜めの直線だけで、1 マスあたり 250、450、750 かかる。
       既存の道路に重ねると Denied（Overlap）になる。種類を変えるときは UpgradeRoad を使う。
+      始点か終点が道路のないマスで、引く向きの 1 歩外に道路（高速道路は内側の端だけ）があれば、そのマスまで 1 マス
+      延ばして交差点でつなぐ（延ばした 1 マスも費用がかかる）。延ばしたときは結果の joined に実際の from と to が出る。
+      平行に隣り合う道路や、1 マス離れた道路にはつながない。所持金が延ばしたぶんに足りないときも延ばさない。
+      "join":false を足すと延ばさない（道路の 1 マス手前で止める行き止まりを引くときに使う。省くと true）。どの道路にもつながらなければ結果に warning が出る。
   {"type":"UpgradeRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
       直線と同じ 1 歩を通る既存の道路の区間を、区間ごと kind に変える（上げるのにも下げるのにも使う）。
       直線の形は BuildRoad と同じ決まりで、直線が区間の一部しか通らなくても、ノードからノードまでの区間全体が変わる。
@@ -221,6 +233,10 @@ struct Session {
     seed: u64,
     tick: u64,
     log: CommandLog,
+    /// 再生の途中の街を置くキャッシュ。実行ファイルを読めなければ `None`。
+    cache: Option<Cache>,
+    /// [`Session::save`] でキャッシュに書くバイト列。
+    checkpoint: Option<Vec<u8>>,
     /// ロックを外さないよう、書き終えるまで持つ。
     _lock: Option<File>,
 }
@@ -272,27 +288,52 @@ fn read_saved(dir: &Path) -> Result<Saved, String> {
     })
 }
 
+/// tick `tick` の街を作るときに、止まっている車の見本とキャッシュに置く街を取る tick。
+fn mark_of(tick: u64, window: u64) -> u64 {
+    tick - window.min(tick)
+}
+
+/// 作り直した街。
+struct Rebuilt {
+    world: World,
+    /// 止まっている車を見分けるための、[`STOPPED_TICKS`] tick 前の車の位置。
+    before: CarSample,
+    /// 次の呼び出しのために書くキャッシュ。書かなくてよいときは `None`。
+    checkpoint: Option<Vec<u8>>,
+}
+
 impl Saved {
-    /// 種から作った街に記録を再生して、いまの tick の街を作る。
-    fn world(&self) -> World {
-        let mut world = World::new(self.seed);
-        replay(&mut world, &self.log, self.tick);
-        world
+    /// いまの tick の街を作る。`read` のキャッシュが使えればそこから、使えなければ種から作った街に記録を再生する。
+    /// `keep` を渡すと、[`STOPPED_TICKS`] tick 前の街をそのキャッシュに書くバイト列にして返す。
+    fn rebuild(&self, read: Option<&Cache>, keep: Option<&Cache>) -> Rebuilt {
+        self.rebuild_over(STOPPED_TICKS, read, keep)
     }
 
-    /// `world` に加えて、止まっている車を見分けるための、[`STOPPED_TICKS`] tick 前の車の位置を返す。
-    /// 続きを回すだけなので、街は `world` と同じになる。
-    fn world_sampled(&self) -> (World, CarSample) {
-        self.world_sampled_over(STOPPED_TICKS)
-    }
-
-    fn world_sampled_over(&self, window: u64) -> (World, CarSample) {
-        let mut world = World::new(self.seed);
-        let window = window.min(self.tick);
-        replay(&mut world, &self.log, self.tick - window);
+    fn rebuild_over(&self, window: u64, read: Option<&Cache>, keep: Option<&Cache>) -> Rebuilt {
+        let mark = mark_of(self.tick, window);
+        let loaded = read.and_then(|c| c.load(self.seed, &self.log, mark));
+        let from_cache = loaded.as_ref().map(|w| (w.tick(), w.next_seq()));
+        let mut world = loaded.unwrap_or_else(|| World::new(self.seed));
+        let start = world.tick().0;
+        replay(&mut world, &self.log, mark - start);
         let before = world.car_sample();
-        replay(&mut world, &self.log, window);
-        (world, before)
+        // 読んだキャッシュと同じ街を、同じファイルに書き直すことはしない。
+        let unchanged = from_cache == Some((world.tick(), world.next_seq()))
+            && read.zip(keep).is_some_and(|(r, k)| r.path() == k.path());
+        let checkpoint = keep
+            .filter(|_| !unchanged)
+            .map(|c| c.encode(&world, &self.log));
+        replay(&mut world, &self.log, self.tick - mark);
+        Rebuilt {
+            world,
+            before,
+            checkpoint,
+        }
+    }
+
+    /// `agent new` で作ったセッションか。ロックのファイルがあるかは `locked` で受け取る。
+    fn is_session(&self, locked: bool) -> bool {
+        locked && self.state.contains_key(SESSION_KEY)
     }
 
     fn saved_hash(&self) -> Option<&str> {
@@ -332,7 +373,7 @@ fn tmp_path(path: &Path) -> PathBuf {
 
 impl Session {
     /// 空のディレクトリに、新しいセッションを作る。
-    fn create(dir: &Path, saved: Saved) -> Result<Session, String> {
+    fn create(dir: &Path, saved: Saved, checkpoint: Option<Vec<u8>>) -> Result<Session, String> {
         let taken = || {
             if dir.join(STATE_FILE).exists() || dir.join(RECORD_FILE).exists() {
                 Err(format!("{} にはもうセッションがある", dir.display()))
@@ -356,6 +397,8 @@ impl Session {
             seed: saved.seed,
             tick: saved.tick,
             log: saved.log,
+            cache: Cache::here(dir),
+            checkpoint,
             _lock: lock,
         })
     }
@@ -373,7 +416,10 @@ impl Session {
                 dir.display()
             ));
         }
-        let world = saved.world();
+        let cache = Cache::here(dir);
+        let Rebuilt {
+            world, checkpoint, ..
+        } = saved.rebuild(cache.as_ref(), cache.as_ref());
         let hash = hash_text(&world);
         if saved.saved_hash() != Some(hash.as_str()) {
             return Err(format!(
@@ -393,6 +439,8 @@ impl Session {
             seed: saved.seed,
             tick: saved.tick,
             log: saved.log,
+            cache,
+            checkpoint,
             _lock: lock,
         };
         Ok((session, world))
@@ -424,6 +472,10 @@ impl Session {
             std::fs::rename(tmp_path(path), path)
                 .map_err(|e| format!("{} に書けない: {e}", path.display()))?;
         }
+        // キャッシュは記録の先頭と突き合わせて使うので、記録より先に書いても後に書いてもよい。
+        if let (Some(cache), Some(bytes)) = (&self.cache, self.checkpoint.take()) {
+            cache.store(&bytes);
+        }
         Ok(())
     }
 }
@@ -443,19 +495,42 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
         .map(|(i, value)| {
             let kind = value.get("type").cloned().unwrap_or(Value::Null);
             let invalid = |message: String| json!({"index": i, "type": kind, "outcome": "Invalid", "message": message});
-            let value = match command_json::resolve_node_at(value, |t| world.network().node_at(t)) {
+            // join は CLI だけが読む欄で、記録には入らない。
+            let (value, join) = match take_join(value) {
                 Ok(v) => v,
                 Err(e) => return invalid(e),
             };
-            let command = match command_json::parse(&value) {
+            let value = match command_json::resolve_node_at(&value, |t| world.network().node_at(t)) {
+                Ok(v) => v,
+                Err(e) => return invalid(e),
+            };
+            let mut command = match command_json::parse(&value) {
                 Ok(c) => c,
                 Err(e) => return invalid(e),
             };
+            // 端のすぐ外に道路があれば、そこまで延ばしてつなぐ。記録に入るのも延ばした形である。
+            let mut joined = None;
+            let mut isolated = false;
+            if let Command::BuildRoad { from, to, kind } = command {
+                let (f, t) = if join {
+                    world.joined_road(from, to, kind)
+                } else {
+                    (from, to)
+                };
+                if (f, t) != (from, to) {
+                    joined = Some(json!({"from": [f.x, f.y], "to": [t.x, t.y]}));
+                    command = Command::BuildRoad { from: f, to: t, kind };
+                }
+                isolated = !is_joined_to_network(world, f, t);
+            }
             let seq = match log.record(world.tick(), command) {
                 Ok(seq) => seq,
                 Err(e) => return invalid(e.to_string()),
             };
             let mut out = json!({"index": i, "type": kind});
+            if let Some(joined) = joined {
+                out["joined"] = joined;
+            }
             if verbose {
                 // 角の順番などをそろえたあとの、記録に入った形を返す。
                 out["command"] = command_json::to_json(command);
@@ -475,9 +550,38 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                 }
             };
             out["outcome"] = json!(outcome);
+            if isolated && outcome == "Applied" {
+                out["warning"] = json!(ISOLATED_ROAD_WARNING);
+            }
             out
         })
         .collect()
+}
+
+/// BuildRoad の `"join"`（延ばさない指定）を取り除いて返す。省くと true である。BuildRoad 以外には書けない。
+fn take_join(value: &Value) -> Result<(Value, bool), String> {
+    let mut out = value.clone();
+    let Some(join) = out.as_object_mut().and_then(|o| o.remove("join")) else {
+        return Ok((out, true));
+    };
+    if value.get("type").and_then(Value::as_str) != Some("BuildRoad") {
+        return Err("join は BuildRoad にだけ書ける".into());
+    }
+    join.as_bool()
+        .map(|b| (out, b))
+        .ok_or_else(|| "join は true か false で書く".into())
+}
+
+/// 引いた道路がどの道路ともつながらなかったときの知らせ。
+const ISOLATED_ROAD_WARNING: &str = "既存の道路につながっていない。電気と水道が届かず、区画が建たない（端を既存の道路や高速道路の端に合わせるとつながる）";
+
+/// 道路 `from` → `to` が、引く前の網のどこかにつながるか。道路が 1 本もない網では比べるものがないので真にする。
+fn is_joined_to_network(world: &World, from: TilePos, to: TilePos) -> bool {
+    let net = world.network();
+    if net.segments().count() == 0 {
+        return true;
+    }
+    Line::between(from, to).is_ok_and(|line| line.tiles().any(|t| net.is_joinable(t)))
 }
 
 /// `notOwned` に載せるマスとチャンクの数の上限。
@@ -705,11 +809,16 @@ fn migration(m: MigrationOutlook) -> Value {
 }
 
 /// 区画の種類ごとの止まっている間口の数に、止まっている道路網の一覧 `stalledAt` を添える。
-fn growth_json(growth: &[GrowthBlock; 4], stalled: &[StalledNetwork]) -> Value {
+fn growth_json(
+    growth: &[GrowthBlock; 4],
+    stalled: &[StalledNetwork],
+    no_free_lot: &[bool; 4],
+) -> Value {
     let mut out = by_zone(|z| {
         let g = growth[z.index()];
         json!({
             "fronts": g.fronts,
+            "noFreeLot": no_free_lot[z.index()],
             "blocked": g.blocked,
             "noPower": g.no_power,
             "noWater": g.no_water,
@@ -907,7 +1016,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
         // 施設のない網（道路が 1 マス離れているなど）かどうかは、utilities の networksWithoutFacility で見分ける。
         // stalledAt は、新築が止まっている道路網ごとの、止まっている間口のうち座標が最小のマス at と、足りないもの。
         // 画面の「建たない理由」の知らせを押したときに映る場所と同じ。at を map で見れば、どの網かが分かる。
-        "growth": growth_json(&growth, &stalled),
+        "growth": growth_json(&growth, &stalled, &world.lot_shortage()),
         "land": {
             "chunkSide": CHUNK_SIDE,
             "ownedChunks": owned,
@@ -1109,8 +1218,16 @@ fn print(value: &Value) -> String {
 }
 
 /// 新しいセッションを作り、街の様子を返す。`from` があれば、そのディレクトリの種、tick、記録を写す。
+///
+/// 写すときは写し元のキャッシュを使わず、記録を先頭から再生する。写し直すのは、食い違ったセッションから
+/// 記録だけで立ち直るための手段だからである。写し先には、その再生の結果でキャッシュを書く。
 fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, String> {
-    let (world, before) = from.world_sampled();
+    let keep = Cache::here(Path::new(dir));
+    let Rebuilt {
+        world,
+        before,
+        checkpoint,
+    } = from.rebuild(None, keep.as_ref());
     let copied = from_dir.map(|d| {
         let hash = hash_text(&world);
         let recorded = from.saved_hash().map(str::to_string);
@@ -1132,7 +1249,7 @@ fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, 
         }
         c
     });
-    let mut s = Session::create(Path::new(dir), from)?;
+    let mut s = Session::create(Path::new(dir), from, checkpoint)?;
     s.save(&world)?;
     let mut out = observe(&world, &before);
     // new が見せた街を、次の observe の増減の起点にする。
@@ -1146,14 +1263,24 @@ fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, 
 /// 読むだけで開く。人間のフィードバックも見られるよう、セッションでなくても読む。ロックは返り値が持つ。
 /// 最後の欄は、`agent new` で作ったセッションかどうか。
 /// `exclusive` はロックを排他にする（observe が増減の記録を書くため）。
+/// セッションならキャッシュから作り直し、排他のロックを取ったときだけキャッシュを書き直す。
 fn open_for_read(
     dir: &Path,
     exclusive: bool,
 ) -> Result<(Option<File>, World, CarSample, bool), String> {
     let lock = lock(dir, exclusive, false)?;
     let saved = read_saved(dir)?;
-    let is_session = lock.is_some() && saved.state.contains_key(SESSION_KEY);
-    let (world, before) = saved.world_sampled();
+    let is_session = saved.is_session(lock.is_some());
+    let cache = Cache::here(dir).filter(|_| is_session);
+    let keep = cache.as_ref().filter(|_| exclusive);
+    let Rebuilt {
+        world,
+        before,
+        checkpoint,
+    } = saved.rebuild(cache.as_ref(), keep);
+    if let (Some(c), Some(bytes)) = (keep, checkpoint) {
+        c.store(&bytes);
+    }
     let hash = hash_text(&world);
     if let Some(recorded) = saved.saved_hash()
         && recorded != hash
@@ -1167,9 +1294,10 @@ fn open_for_read(
 
 /// 再現の手順を markdown にする。何も書かない。
 fn export_markdown(dir: &Path) -> Result<String, String> {
-    let _lock = lock(dir, false, false)?;
+    let lock = lock(dir, false, false)?;
     let saved = read_saved(dir)?;
-    let world = saved.world();
+    let cache = Cache::here(dir).filter(|_| saved.is_session(lock.is_some()));
+    let world = saved.rebuild(cache.as_ref(), None).world;
     let hash = hash_text(&world);
     let record = saved.log.encode();
     let state_json = export::repro_state(
@@ -1187,6 +1315,11 @@ fn export_markdown(dir: &Path) -> Result<String, String> {
         record: &record,
         state_json: &state_json,
     }))
+}
+
+/// キャッシュの鍵（実行ファイルの xxh3）をいまの実行ファイルで決める。`main` の先頭で、ロックを待つ前に呼ぶ。
+pub fn fix_build_key() {
+    cache::build_key();
 }
 
 /// `agent` のあとの引数を受けて、標準出力に書く文字列を返す。
@@ -1233,8 +1366,15 @@ pub fn run(args: &[String]) -> Result<String, String> {
                 .tick
                 .checked_add(ticks)
                 .ok_or_else(|| "tick があふれる".to_string())?;
-            // 読み込んだときに tick まで適用してあるので、続きを回す。
-            replay(&mut world, &s.log, ticks);
+            // 読み込んだときに tick まで適用してあるので、続きを回す。キャッシュは進めた先の手前で取り直す。
+            let mark = mark_of(s.tick, STOPPED_TICKS);
+            let start = world.tick().0;
+            if mark > start {
+                replay(&mut world, &s.log, mark - start);
+                s.checkpoint = s.cache.as_ref().map(|c| c.encode(&world, &s.log));
+            }
+            let now = world.tick().0;
+            replay(&mut world, &s.log, s.tick - now);
             s.save(&world)?;
             Ok(print(&json!({
                 "tick": s.tick,
@@ -1373,14 +1513,11 @@ mod tests {
         }
     }
 
-    /// 止まっている車を見分ける見本は、いまでなく `window` tick 前の車の位置である。
-    #[test]
-    fn sample_is_taken_a_window_before_now() {
-        let seed = 42;
+    /// 家と職場を車で行くほど（500m）離して置いた、長い 1 本道の街を、車が走っている朝のどこかまで進める。
+    fn commuting_town(seed: u64) -> (World, CommandLog) {
         let line = chizu_core::world::highway_line(seed);
         let (x, y) = (line.start.x, line.start.y);
         let inward = -line.step.0 as i64;
-        // 家と職場を車で行くほど（500m）離して置いた、長い 1 本道。
         let at = |d: i64| x + inward * d;
         let mut log = CommandLog::new();
         let mut world = World::new(seed);
@@ -1393,26 +1530,125 @@ mod tests {
         ]))
         .unwrap();
         act(&mut world, &mut log, &cmds, false);
-        // 車が走っている朝のどこかまで進める。
-        let (mut found, mut tick) = (None, 0);
-        while tick < 5 * TICKS_PER_DAY_FOR_TEST && found.is_none() {
+        let mut tick = 0;
+        while tick < 5 * TICKS_PER_DAY_FOR_TEST {
             replay(&mut world, &log, 25);
             tick += 25;
             let day_tick = tick % TICKS_PER_DAY_FOR_TEST;
-            let moving = world.car_sample();
-            if tick > 3 * TICKS_PER_DAY_FOR_TEST && day_tick > 2000 && !moving.is_empty() {
-                found = Some(tick);
+            if tick > 3 * TICKS_PER_DAY_FOR_TEST
+                && day_tick > 2000
+                && !world.car_sample().is_empty()
+            {
+                return (world, log);
             }
         }
-        let tick = found.expect("車が走らなかった");
-        let saved = Saved {
+        panic!("車が走らなかった");
+    }
+
+    fn saved_at(seed: u64, tick: u64, log: &CommandLog) -> Saved {
+        Saved {
             state: Map::new(),
             seed,
-            tick: world.tick().0,
+            tick,
             log: log.clone(),
+        }
+    }
+
+    /// キャッシュから作り直した街と車の見本は、種から再生したものと同じになる。
+    /// キャッシュを書いたあとにコマンドを足し、時間を進めても同じである。
+    #[test]
+    fn rebuild_from_cache_matches_full_replay() {
+        let seed = 42;
+        let dir = std::env::temp_dir().join(format!("chizu-agent-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = Cache::new(&dir, 1);
+        let (mut world, mut log) = commuting_town(seed);
+        let first = world.tick().0;
+        let built = saved_at(seed, first, &log).rebuild(None, Some(&cache));
+        assert_eq!(built.world, world);
+        cache.store(&built.checkpoint.expect("キャッシュに書くものがない"));
+        let cached = saved_at(seed, first, &log).rebuild(Some(&cache), Some(&cache));
+        assert_eq!(cached.world, world);
+        assert_eq!(cached.before, built.before);
+        assert!(!built.before.is_empty(), "車が走っていない");
+        // 書いたキャッシュと同じ街なら、書き直すものはない。
+        assert!(cached.checkpoint.is_none());
+
+        // キャッシュを書いた tick より後に、コマンドを足して進める。
+        let more = [json!({"type":"SetTaxRate","zone":"Residential","permille":130})];
+        act(&mut world, &mut log, &more, false);
+        replay(&mut world, &log, 200 - STOPPED_TICKS);
+        let before = world.car_sample();
+        replay(&mut world, &log, STOPPED_TICKS);
+        let second = world.tick().0;
+        let cached = saved_at(seed, second, &log).rebuild(Some(&cache), Some(&cache));
+        assert_eq!(cached.world, world);
+        assert_eq!(cached.world.state_hash(), world.state_hash());
+        assert_eq!(cached.before, before);
+        assert!(cached.checkpoint.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// new --from は写し元のキャッシュを使わず、記録を先頭から再生する。
+    /// 写し元に、検査は通るが別の街の入ったキャッシュがあっても、写した街は記録の再生と同じになる。
+    #[test]
+    fn new_from_ignores_the_source_cache() {
+        let seed = 42;
+        let base = std::env::temp_dir().join(format!("chizu-agent-from-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (src, dst) = (base.join("src"), base.join("dst"));
+        std::fs::create_dir_all(&src).unwrap();
+        // 件数の同じ 2 つの記録。道路の長さだけが違う。
+        let town = |len: i64| {
+            let mut log = CommandLog::new();
+            let mut world = World::new(seed);
+            let cmds = [
+                json!({"type":"BuildRoad","from":[0,0],"to":[len,0],"kind":"Medium"}),
+                json!({"type":"PaintZone","area":[[0,1],[24,6]],"zone":"Residential"}),
+            ];
+            act(&mut world, &mut log, &cmds, false);
+            replay(&mut world, &log, 300);
+            (world, log)
         };
-        assert_eq!(tick, saved.tick);
-        let (replayed, before) = saved.world_sampled_over(50);
+        let (real, log) = town(20);
+        let (other, _) = town(30);
+        assert_ne!(real.state_hash(), other.state_hash());
+        // 別の街を、写し元の記録の先頭に合わせた見出しで書く。
+        let cache = Cache::here(&src).expect("実行ファイルを読めない");
+        cache.store(&cache.encode(&other, &log));
+        let from = saved_at(seed, 400, &log);
+        // 写し元のキャッシュを読めば、別の街から続けてしまう。
+        let fooled = from.rebuild(Some(&cache), None).world;
+        assert_ne!(fooled.state_hash(), {
+            let mut w = World::new(seed);
+            replay(&mut w, &log, 400);
+            w.state_hash()
+        });
+
+        let made = new_session(dst.to_str().unwrap(), from, Some(src.to_str().unwrap())).unwrap();
+        let mut fresh = World::new(seed);
+        replay(&mut fresh, &log, 400);
+        assert_eq!(made["stateHash"], hash_text(&fresh));
+        // 写し先のキャッシュは、記録の再生と同じ街になる。
+        let copied = saved_at(seed, 400, &log)
+            .rebuild(Cache::here(&dst).as_ref(), None)
+            .world;
+        assert_eq!(copied, fresh);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// 止まっている車を見分ける見本は、いまでなく `window` tick 前の車の位置である。
+    #[test]
+    fn sample_is_taken_a_window_before_now() {
+        let seed = 42;
+        let (world, log) = commuting_town(seed);
+        let tick = world.tick().0;
+        let saved = saved_at(seed, tick, &log);
+        let Rebuilt {
+            world: replayed,
+            before,
+            ..
+        } = saved.rebuild_over(50, None, None);
         assert_eq!(replayed.state_hash(), world.state_hash());
         // 見本は 50 tick 前の車の位置で、別に 50 tick 手前まで再生した街の位置と一致する。
         let mut earlier = World::new(seed);

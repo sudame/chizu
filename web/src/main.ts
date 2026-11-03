@@ -10,10 +10,13 @@ import {
   setupFinance,
 } from "./finance.ts";
 import {
+  type LotShortageSince,
   parseGrowthBlocks,
   parseIsolated,
   parseStalls,
+  persistedLotShortage,
   setupGrowthNotice,
+  trackLotShortage,
 } from "./growth-notice.ts";
 import { setupHudPanel, trackHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
@@ -553,6 +556,8 @@ let manualRotation: number | null = null;
 let probe: { service: ServiceName; x: number; y: number; results: ServiceProbe } | null = null;
 let probeSent = "";
 let money = 0;
+// 空き区画がない状態が続いた長さは、Worker の tick で数える（描画は背景のタブで止まる）
+let lotShortageSince: LotShortageSince = [];
 let roadStart: Tile | null = null;
 let roadIndex: RoadIndex = EMPTY_ROAD_INDEX;
 // 最後に届いた道路の区間（chizu-wasm の road_segments）。種類を変える道具の見積もりに使う
@@ -1126,10 +1131,12 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "overview") {
     renderOverview(parseOverview(message.overview));
+    lotShortageSince = trackLotShortage(lotShortageSince, message.lotShortage, message.tick);
     growthNotice.render(
       parseGrowthBlocks(message.overview),
       parseStalls(message.stalls),
       parseIsolated(message.isolated),
+      persistedLotShortage(lotShortageSince, message.tick),
     );
     return;
   }
