@@ -55,6 +55,7 @@ import {
   PREVIEW_OK_EDGE_COLOR,
   PREVIEW_ROAD_FILL_ALPHA,
 } from "./map/palette.ts";
+import { ParkedCache, parseParked } from "./map/parked.ts";
 import { MapRenderer } from "./map/renderer.ts";
 import {
   type BuildingMeshes,
@@ -279,6 +280,8 @@ let buildings: BuildingMeshes | null = null;
 let signals: Geometry | null = null;
 // 細部の段で描き足すもの。細部の段に入っているときだけ、見えている範囲のぶんを作る
 const detail = new DetailCache();
+// 駐車場に停まっている車の頂点（寄りの段から、見えている範囲のぶんだけ作る）
+const parkedCars = new ParkedCache();
 // 主題図。選んだものはブラウザに覚えさせ、次に開いたときも同じものにする
 let theme: ThemeId = loadTheme(themeStorage());
 const layersOf = (id: ThemeId): number[] => {
@@ -401,6 +404,7 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
     renderer?.roads.setSignals(signals);
   }
   detail.invalidate();
+  parkedCars.invalidate();
   applyTheme();
   updatePreview();
 });
@@ -441,6 +445,7 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   sendView(range);
   rebuildTraffic();
   rebuildDetail(vp);
+  rebuildParked(vp);
   updateThemeLegend();
   const drawn = renderer?.draw(camera, vp, range) ?? 0;
   labels.frame(camera, vp, performance.now());
@@ -479,6 +484,27 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   updateScale(camera.zoom);
   zoomInButton.disabled = camera.zoom >= MAX_ZOOM;
   zoomOutButton.disabled = camera.zoom <= MIN_ZOOM;
+}
+
+/** 寄りの段に入っていて、台数か駐車場の形が変わったか、画面が前に作った範囲を出たら、停まっている車の頂点を作り直す。 */
+function rebuildParked(vp: Viewport): void {
+  const min = camera.screenToWorld(0, 0, vp);
+  const max = camera.screenToWorld(vp.width, vp.height, vp);
+  const started = performance.now();
+  const meshes = parkedCars.update(camera.zoom, {
+    minX: min.x,
+    minY: min.y,
+    maxX: max.x,
+    maxY: max.y,
+  });
+  if (meshes === null) {
+    return;
+  }
+  renderer?.roads.setParked(meshes);
+  // 手元の計測用。parkedMs は頂点を作って送るまでにかかった時間（ミリ秒）
+  mapCanvas.dataset.parkedMs = (performance.now() - started).toFixed(2);
+  mapCanvas.dataset.parkedBuilds = String(parkedCars.builds);
+  mapCanvas.dataset.parkedVertices = String(meshes.cars.vertexCount);
 }
 
 /** 細部の段に入っていて、画面が前に作った範囲を出たか、形が変わっていれば、細部の頂点を作り直す。 */
@@ -1179,6 +1205,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "buildings") {
     buildings = buildingMeshes(message.buildings, message.facilities, message.lots);
     detail.setBuildings(message.buildings, message.lots);
+    parkedCars.setLots(parseLots(message.lots));
     renderer?.roads.setBuildings(buildings);
     labels.setBuildings(message.buildings, message.facilities);
     const stats = parseCityStats(message.stats);
@@ -1196,6 +1223,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
       roof === undefined ? "" : [roof.minX, roof.minY, roof.maxX, roof.maxY].join(",");
     mapCanvas.dataset.unsupplied = String(unsuppliedCount(message.buildings));
     mapCanvas.dataset.facilities = String(message.facilities.length / FACILITY_STRIDE);
+    return;
+  }
+  if (message.kind === "parked") {
+    parkedCars.setParked(parseParked(message.data));
     return;
   }
   if (message.kind === "cityStats") {

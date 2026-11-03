@@ -1262,6 +1262,8 @@ const MESH_NAMES = [
   "bodies",
   "lotEdges",
   "lotLines",
+  "parked",
+  "parkedFine",
   "roofs",
   "marks",
   "minor",
@@ -1299,6 +1301,9 @@ export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
     // 駐車場の縁は寄りの描き方に合わせ、枠の白線は車と人と同じ倍率で溶け込む（枠が細かすぎる倍率では描かない）
     ["lotEdges", w.detail],
     ["lotLines", w.movers],
+    // 停まっている車は、車と人と同じ倍率で溶け込む。窓と屋根は細部の段で足す
+    ["parked", w.movers],
+    ["parkedFine", w.fine],
     // 細部の段では、寄りの描き方に描き足す（detail.ts）
     ["roofs", w.fine],
     ["marks", w.marks],
@@ -1395,6 +1400,12 @@ export class RoadLayer {
     this.#upload("facilities", meshes.facilities);
     this.#upload("bodies", meshes.bodies);
     this.#upload("marks", meshes.marks);
+  }
+
+  /** 停まっている車（parked.ts）。 */
+  setParked(meshes: { cars: MeshSource; fine: MeshSource }): void {
+    this.#upload("parked", meshes.cars);
+    this.#upload("parkedFine", meshes.fine);
   }
 
   setRoads(meshes: RoadMeshes): void {

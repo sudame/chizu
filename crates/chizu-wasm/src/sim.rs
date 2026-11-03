@@ -424,6 +424,12 @@ impl Sim {
         )
     }
 
+    /// 停めてある車の台数を、平面の駐車場のある建物の分だけ返す。並びは [`crate::lots::encode_parked`] にある。
+    /// 台数は毎 tick 変わるので、画面へは三重バッファの外で、およそ 1 秒に 1 回送る。
+    pub fn parked(&self) -> Vec<f64> {
+        crate::lots::encode_parked(&self.world)
+    }
+
     /// 施設を `at` に置けるかを、向き 0〜3 のそれぞれについて中核の判定で調べる。状態は変えない。
     pub fn service_probe(&self, kind: ServiceKind, at: TilePos) -> [Result<(), DenyReason>; 4] {
         [0, 1, 2, 3].map(|r| self.world.check_service(kind, at, r).map(|_| ()))

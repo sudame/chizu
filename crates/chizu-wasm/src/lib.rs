@@ -156,6 +156,11 @@ impl Simulation {
         self.0.lots()
     }
 
+    /// 停めてある車の台数。並びは `lots::encode_parked` にある。毎 tick 変わるので、三重バッファの外で間引いて送る。
+    pub fn parked(&self) -> Vec<f64> {
+        self.0.parked()
+    }
+
     /// 施設を間口のマス (x, y) に置けるかを、向き 0〜3 の順に返す。置けるなら null、置けないなら理由の文。
     /// `service` は `ServiceKind` の値である。
     pub fn service_probe(&self, service: u8, x: f64, y: f64) -> Result<js_sys::Array, JsError> {
