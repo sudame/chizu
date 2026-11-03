@@ -191,6 +191,28 @@ describe("ParkedCache", () => {
     expect(c.builds).toBe(2);
   });
 
+  test("lots にない鍵（平面の枠のない建物）の台数が変わっても、作り直さない", () => {
+    const c = fresh();
+    expect(c.update(16, VIEW)).not.toBeNull();
+    c.setParked(
+      new Map([
+        [lotKey(10, 20), 4],
+        [lotKey(30, 30), 5],
+      ]),
+    );
+    expect(c.update(16, VIEW)).toBeNull();
+    c.setParked(
+      new Map([
+        [lotKey(10, 20), 4],
+        [lotKey(30, 30), 9],
+      ]),
+    );
+    expect(c.update(16, VIEW)).toBeNull();
+    c.setParked(only(4));
+    expect(c.update(16, VIEW)).toBeNull();
+    expect(c.builds).toBe(1);
+  });
+
   test("作った範囲の外の台数だけが変わっても、作り直さない", () => {
     const lots = new Map([
       [lotKey(10, 20), LOT],

@@ -745,6 +745,14 @@ export function parkingLabels(
   return out;
 }
 
+/** 建物の中の台数の表が前と違うか。数が同じでも、鍵が入れ替わっていれば違うとする。 */
+export function indoorChanged(
+  before: ReadonlyMap<string, number>,
+  after: ReadonlyMap<string, number>,
+): boolean {
+  return before.size !== after.size || [...after].some(([key, count]) => before.get(key) !== count);
+}
+
 /** 建物の中の台数の候補。「P 12」のように、青い盾に白い字で建物の中心へ置く。画面に収まるものだけを出す。 */
 export function parkingCandidates(
   labels: readonly ParkingLabel[],

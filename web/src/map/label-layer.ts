@@ -20,6 +20,7 @@ import {
   type FacilityLabel,
   facilityCandidates,
   facilityLabels,
+  indoorChanged,
   LabelFader,
   type LabelSize,
   nextLabelStage,
@@ -164,10 +165,7 @@ export class LabelLayer {
   setIndoorParked(indoor: ReadonlyMap<string, number>): void {
     const before = this.#indoor;
     this.#indoor = indoor;
-    if (
-      before.size !== indoor.size ||
-      [...indoor].some(([key, count]) => before.get(key) !== count)
-    ) {
+    if (indoorChanged(before, indoor)) {
       this.#parkingDirty = true;
     }
   }

@@ -7,6 +7,7 @@ import {
   FADE_MS,
   facilityCandidates,
   facilityLabels,
+  indoorChanged,
   LabelFader,
   type LabelKind,
   labelStyle,
@@ -448,5 +449,16 @@ describe("建物の中の駐車場の台数", () => {
     if (p === undefined) throw new Error("候補がない");
     const road = candidate("road", 7, p.box);
     expect(placeLabels([p, road], new Set(), []).map((c) => c.id)).toEqual(["road"]);
+  });
+
+  test("数が同じで鍵だけが入れ替わったときも、変わったとして出し直す", () => {
+    const a = new Map([["10,20", 5]]);
+    expect(indoorChanged(a, new Map([["10,20", 5]]))).toBe(false);
+    expect(indoorChanged(a, new Map([["30,40", 5]]))).toBe(true);
+    expect(indoorChanged(a, new Map([["10,20", 6]]))).toBe(true);
+    expect(indoorChanged(a, new Map())).toBe(true);
+    // 出し直した先の建物に、ラベルが付く
+    const next = parkingLabels(buildings, new Map([["30,40", 5]]));
+    expect(next.map((l) => l.key)).toEqual(["30,40"]);
   });
 });
