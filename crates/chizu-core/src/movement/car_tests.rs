@@ -538,6 +538,84 @@ fn a_car_from_the_curb_does_not_take_the_room_of_a_car_entering_from_the_junctio
     assert!(arrived.contains(&z), "路肩で待っていた車が出発しない");
 }
 
+/// 西の `west` の道路から、交差点 (10,0) を東の中の道路（片側 2 車線）へ抜ける車を、交差点の手前に
+/// 1 台置く。そのあと、東の道路の (14,0) から `n` 台を順に出す。手前の車と、出した車を返す。
+fn from_the_curb_onto_two_lanes(west: RoadKind, n: usize) -> (Cars, TripId, Vec<TripId>) {
+    let mut net = Network::new();
+    road(&mut net, (0, 0), (10, 0), west);
+    road(&mut net, (10, 0), (40, 0), RoadKind::Medium);
+    road(&mut net, (10, 0), (10, 10), RoadKind::Small);
+    let mut c = Cars::new(net);
+    let approach = c.drive(at(8, 0, (1, 0), 0), at(39, 0, (1, 0), 0));
+    let curb = (0..n)
+        .map(|_| c.drive(at(14, 0, (1, 0), 0), at(39, 0, (1, 0), 0)))
+        .collect();
+    (c, approach, curb)
+}
+
+/// 出した車の、出した位置と、車線ごとの位置。待っている車は入れない。
+fn curb_spots(c: &Cars, curb: &[TripId]) -> (u32, BTreeMap<LaneId, Vec<u32>>) {
+    let first = c.trips.get(curb[0]).unwrap();
+    assert!(!first.waiting_to_depart());
+    let spot = first.offset().0;
+    let mut by_lane = BTreeMap::<LaneId, Vec<u32>>::new();
+    for t in curb.iter().map(|id| c.trips.get(*id).unwrap()) {
+        if !t.waiting_to_depart() {
+            by_lane.entry(t.lane()).or_default().push(t.offset().0);
+        }
+    }
+    (spot, by_lane)
+}
+
+#[test]
+fn only_the_lane_a_junction_car_enters_keeps_curb_cars_near_their_spot() {
+    // 片側 2 車線どうしでは、手前の車は同じ番号の車線にしか入らない。その車線だけを守る。
+    let (c, approach, curb) = from_the_curb_onto_two_lanes(RoadKind::Medium, 9);
+    let from = c.trips.get(approach).unwrap().lane();
+    let link = c.trips.get(curb[0]).unwrap().link();
+    let lanes: Vec<LaneId> = c.net.link_lanes(link).collect();
+    let entered: Vec<LaneId> = c
+        .router
+        .connectors()
+        .iter()
+        .filter(|x| x.from == from && lanes.contains(&x.to))
+        .map(|x| x.to)
+        .collect();
+    let [guarded] = entered[..] else {
+        panic!("手前の車が入る車線が 1 本でない {entered:?}");
+    };
+    let (spot, by_lane) = curb_spots(&c, &curb);
+    // 守る車線には、出した位置から車 2 台ぶんまでの 3 台だけが入る。
+    assert_eq!(
+        by_lane[&guarded],
+        [spot, spot - SPACING, spot - 2 * SPACING]
+    );
+    // 守らない車線には、車 2 台ぶんより後ろへ下げて入る。
+    let other = lanes.iter().find(|l| **l != guarded).unwrap();
+    assert!(by_lane[other].iter().any(|at| *at < spot - 2 * SPACING));
+    assert_eq!(by_lane.values().map(Vec::len).sum::<usize>(), 8);
+    assert!(c.trips.get(curb[8]).unwrap().waiting_to_depart());
+}
+
+#[test]
+fn every_lane_a_junction_car_may_choose_keeps_curb_cars_near_their_spot() {
+    // 片側 1 車線から 2 車線へ抜ける車は、どちらの車線にも入れる。車の少ない車線を選ぶので、路肩の車を
+    // 置くと選ぶ車線が変わりうる。どちらの車線にも、車 2 台ぶんより後ろへは下げない。
+    let (mut c, approach, curb) = from_the_curb_onto_two_lanes(RoadKind::Small, 7);
+    let (spot, by_lane) = curb_spots(&c, &curb);
+    assert_eq!(by_lane.len(), 2);
+    for at in by_lane.values() {
+        assert_eq!(at, &[spot, spot - SPACING, spot - 2 * SPACING]);
+    }
+    assert!(c.trips.get(curb[6]).unwrap().waiting_to_depart());
+    // 手前の車が先へ進めば、待っていた車も出て着く。
+    let mut arrived = Vec::new();
+    for _ in 0..300 {
+        arrived.extend(c.step());
+    }
+    assert!(arrived.contains(&approach) && arrived.contains(&curb[6]));
+}
+
 #[test]
 fn rerouting_keeps_cars_side_by_side_in_their_lanes() {
     let mut n = Network::new();

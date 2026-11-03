@@ -411,7 +411,7 @@ impl Trips {
             let (zones, entering) = if mode == LaneMode::Car && !legs.is_empty() {
                 (
                     super::crossing::jay_zones(net, &self.rows),
-                    car::entered_from_junctions(&self.rows, net, router.connectors()),
+                    car::Entering::of(&self.rows, net, router.connectors()),
                 )
             } else {
                 Default::default()

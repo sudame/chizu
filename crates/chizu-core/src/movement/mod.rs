@@ -32,7 +32,7 @@ mod tests;
 mod upgrade_tests;
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
@@ -933,10 +933,10 @@ impl Trips {
         let (zones, entering) = if mode == LaneMode::Car {
             (
                 crossing::jay_zones(net, &self.rows),
-                car::entered_from_junctions(&self.rows, net, router.connectors()),
+                car::Entering::of(&self.rows, net, router.connectors()),
             )
         } else {
-            (BTreeMap::new(), BTreeSet::new())
+            (BTreeMap::new(), car::Entering::default())
         };
         resolved
             .iter()
