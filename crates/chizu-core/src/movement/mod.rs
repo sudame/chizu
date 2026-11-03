@@ -41,7 +41,7 @@ use smallvec::SmallVec;
 use rayon::prelude::*;
 
 pub use car::{CAR_ACCEL, CAR_DECEL, CAR_LENGTH, MIN_GAP};
-pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, OWNER_DRIVE_MIN_MM};
+pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, HouseholdCar, OWNER_DRIVE_MIN_MM};
 pub use congestion::{Congestion, classify as classify_congestion};
 pub use junction::Rescues;
 pub use parking::{

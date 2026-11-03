@@ -5,8 +5,12 @@
 //! 持たない世帯の住民は [`DRIVE_MIN_MM`] 以上なら歩く → 車 → 歩く で向かい、
 //! それより近いか、車で行けなければ歩く。
 //! 移動の主体ごとに、誰がどこへ向かっているかを覚えておき、移動が終わったら返す。
-//! 住民ごとに自分の車を停めた駐車場も覚え、次に車で出るときはそこから車を出す。満車で別の建物に
-//! 停めた車も、持ち主が乗って出るので、停めてある台数は住民の数を超えて増えない。
+//!
+//! 車は世帯ごとに 1 台で、世帯の中で同時に車を使えるのは 1 人だけである。世帯の車のいる所
+//! （[`HouseholdCar`]）を覚え、次に車で出るときはそこから車を出す。車を使えるのは、車が出発の建物に
+//! 停めてあるときか、自分で停めた車のとき（満車で近くの別の建物に停めたときも含む）だけである。
+//! ほかの住民が乗っているときや、離れた所に停めてあるときは、車がないものとして歩く。
+//! 世帯の車がまだどこにもなければ、車は出発の建物から現れる。停めてある台数は世帯の数を超えて増えない。
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,7 +18,7 @@ use std::collections::BTreeMap;
 use super::{Trips, building_spot};
 use crate::building::Buildings;
 use crate::citizens::Activity;
-use crate::id::{BuildingId, CitizenId, TripId};
+use crate::id::{BuildingId, CitizenId, HouseholdId, TripId};
 use crate::network::{Network, TILE_MM};
 use crate::routing::AstarRouter;
 use crate::state_hash::{StateHash, StateHasher};
@@ -27,34 +31,81 @@ pub const DRIVE_MIN_MM: i64 = 500_000;
 /// これより近ければ歩いて行ける。
 pub const OWNER_DRIVE_MIN_MM: i64 = 150_000;
 
-/// 移動している住民と、その行き先。
+/// 移動している住民と、その世帯と行き先。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Commuter {
     pub citizen: CitizenId,
+    pub household: HouseholdId,
     pub to: Activity,
 }
 
 impl StateHash for Commuter {
     fn write_state(&self, h: &mut StateHasher) {
         h.write(&self.citizen);
+        h.write(&self.household);
         h.write(&self.to);
     }
 }
 
-/// 移動の主体ごとの、移動している住民と、住民ごとの車を停めた駐車場。
+/// 世帯の車のいる所。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HouseholdCar {
+    /// 駐車場 `lot` に停めてある。`by` は停めた住民である。
+    Parked { lot: BuildingId, by: CitizenId },
+    /// 移動 `0` が使っている。
+    InUse(TripId),
+}
+
+impl StateHash for HouseholdCar {
+    fn write_state(&self, h: &mut StateHasher) {
+        match self {
+            HouseholdCar::Parked { lot, by } => {
+                h.write(&0_u8);
+                h.write(lot);
+                h.write(by);
+            }
+            HouseholdCar::InUse(trip) => {
+                h.write(&1_u8);
+                h.write(trip);
+            }
+        }
+    }
+}
+
+/// 移動の主体ごとの、移動している住民と、世帯ごとの車のいる所。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Commuters {
     by_trip: BTreeMap<TripId, Commuter>,
-    /// 住民が自分の車を停めた駐車場。次に車で出るときは、ここから車を出す。
-    cars: BTreeMap<CitizenId, BuildingId>,
+    /// 世帯の車のいる所。どこにもない世帯は持たない。
+    cars: BTreeMap<HouseholdId, HouseholdCar>,
 }
 
 impl Commuters {
-    /// 移動 `trip` の車を駐車場 `lot` に停めた。通勤でなければ何もしない。
-    pub(super) fn parked(&mut self, trip: TripId, lot: BuildingId) {
-        if let Some(c) = self.by_trip.get(&trip) {
-            self.cars.insert(c.citizen, lot);
+    /// 移動 `trip` の車を駐車場 `lot` に停めた。通勤でないか、世帯の車でなければ何もせず `false`。
+    pub(super) fn parked(&mut self, trip: TripId, lot: BuildingId) -> bool {
+        let Some(c) = self.by_trip.get(&trip) else {
+            return false;
+        };
+        let Some(car) = self.cars.get_mut(&c.household) else {
+            return false;
+        };
+        if *car != HouseholdCar::InUse(trip) {
+            return false;
         }
+        *car = HouseholdCar::Parked {
+            lot,
+            by: c.citizen,
+        };
+        true
+    }
+
+    /// 移動 `trip` を覚えていた分を消す。世帯の車を使ったまま停めずに終わったなら、車はどこにもないものとする。
+    fn forget_trip(&mut self, trip: TripId) -> Option<Commuter> {
+        let c = self.by_trip.remove(&trip)?;
+        if self.cars.get(&c.household) == Some(&HouseholdCar::InUse(trip)) {
+            self.cars.remove(&c.household);
+        }
+        Some(c)
     }
 }
 
@@ -71,6 +122,8 @@ pub struct CommuteRequest {
     pub who: Commuter,
     pub from: BuildingId,
     pub to: BuildingId,
+    /// 住民の家。住宅の駐車場は、そこに住む住民だけが使える。
+    pub home: Option<BuildingId>,
     /// 住民の世帯が車を持つか。
     pub owns_car: bool,
 }
@@ -99,6 +152,7 @@ fn far_enough(buildings: &Buildings, a: BuildingId, b: BuildingId, owns_car: boo
 impl Trips {
     /// 通勤の移動をまとめて作り、依頼の順に ID を返す。車で向かう依頼から 1 件ずつ作り、
     /// 車で行けなかった依頼と近い依頼は、歩く移動としてまとめて作る。どちらでも行けなければ `None`。
+    /// 同じ世帯の依頼が並んだら、先の依頼が世帯の車を使う。
     pub fn start_commutes(
         &mut self,
         net: &Network,
@@ -113,11 +167,33 @@ impl Trips {
                 if !far_enough(buildings, r.from, r.to, r.owns_car) {
                     return None;
                 }
-                // 住民の車が停めてあれば、その駐車場から出す。なければ車は出発の建物から現れる。
-                let take = self.commuters.cars.get(&r.who.citizen).copied();
-                let id =
-                    self.spawn_drive_taking(net, router, buildings, (r.from, r.to), take, now)?;
-                self.commuters.cars.remove(&r.who.citizen);
+                // 車が停めてあれば、その駐車場から出す。まだどこにもなければ、車は出発の建物から現れる。
+                let take = match self.commuters.cars.get(&r.who.household).copied() {
+                    None => None,
+                    Some(HouseholdCar::Parked { lot, .. }) if buildings.get(lot).is_none() => None,
+                    Some(HouseholdCar::Parked { lot, by })
+                        if by == r.who.citizen || lot == r.from =>
+                    {
+                        Some(lot)
+                    }
+                    Some(_) => {
+                        let tally = &mut self.parking_tally;
+                        tally.no_car = tally.no_car.saturating_add(1);
+                        return None;
+                    }
+                };
+                let id = self.spawn_drive_taking(
+                    net,
+                    router,
+                    buildings,
+                    (r.from, r.to),
+                    take,
+                    r.home,
+                    now,
+                )?;
+                self.commuters
+                    .cars
+                    .insert(r.who.household, HouseholdCar::InUse(id));
                 Some(id)
             })
             .collect();
@@ -143,7 +219,7 @@ impl Trips {
 
     /// 移動が終わった主体 `id` の住民を返し、覚えていた分を消す。通勤でなければ `None`。
     pub fn take_commuter(&mut self, id: TripId) -> Option<Commuter> {
-        self.commuters.by_trip.remove(&id)
+        self.commuters.forget_trip(id)
     }
 
     /// 移動している住民。
@@ -151,21 +227,21 @@ impl Trips {
         self.commuters.by_trip.get(&id).copied()
     }
 
-    /// 住民が車を停めた駐車場。
-    pub fn parked_car(&self, citizen: CitizenId) -> Option<BuildingId> {
-        self.commuters.cars.get(&citizen).copied()
+    /// 世帯の車のいる所。
+    pub fn household_car(&self, household: HouseholdId) -> Option<HouseholdCar> {
+        self.commuters.cars.get(&household).copied()
     }
 
-    /// 街を出る住民の、停めてある車を駐車場から外す。
-    pub fn forget_car(&mut self, citizen: CitizenId) {
-        if let Some(lot) = self.commuters.cars.remove(&citizen) {
+    /// 街を出る世帯の、停めてある車を駐車場から外す。
+    pub fn forget_car(&mut self, household: HouseholdId) {
+        if let Some(HouseholdCar::Parked { lot, .. }) = self.commuters.cars.remove(&household) {
             self.parking.unpark(lot);
         }
     }
 
     /// 移動を途中でやめさせる。押さえていた駐車場の空きは返す。
     pub fn cancel(&mut self, id: TripId) {
-        self.commuters.by_trip.remove(&id);
+        self.commuters.forget_trip(id);
         self.remove(id);
     }
 }

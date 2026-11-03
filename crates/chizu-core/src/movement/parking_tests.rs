@@ -206,6 +206,7 @@ fn drives_sent_elsewhere_and_given_up_on_full_lots_are_counted() {
             drives: 3,
             parked_elsewhere: 2,
             lots_full: 1,
+            no_car: 0,
         }
     );
     // 数は状態ハッシュに入らない。
@@ -505,12 +506,16 @@ fn the_drawn_shift_slides_between_the_sidewalk_and_either_lane() {
 #[test]
 fn between_150_and_500_m_only_households_with_a_car_drive() {
     use crate::citizens::Activity;
-    use crate::id::CitizenId;
+    use crate::id::{CitizenId, HouseholdId};
     use crate::movement::parking::Then;
     // 30 マスは 240m である。
     let (mut s, ids) = Street::new(&[0, 30]);
     let who = |index| Commuter {
         citizen: CitizenId {
+            index,
+            generation: 0,
+        },
+        household: HouseholdId {
             index,
             generation: 0,
         },
@@ -520,6 +525,7 @@ fn between_150_and_500_m_only_households_with_a_car_drive() {
         who: who(index),
         from: ids[0],
         to: ids[1],
+        home: None,
         owns_car,
     };
     let requests = [request(0, true), request(1, false)];

@@ -40,10 +40,12 @@ impl World {
                 Some((from, to)) => requests.push(CommuteRequest {
                     who: Commuter {
                         citizen: id,
+                        household: row.household,
                         to: row.schedule.next,
                     },
                     from,
                     to,
+                    home,
                     owns_car: self.owns_car(row.household),
                 }),
                 None => stuck.push(id),
@@ -82,8 +84,8 @@ impl World {
             if let Some(t) = self.population.citizen(id).and_then(|r| r.trip) {
                 self.trips.cancel(t);
             }
-            self.trips.forget_car(id);
         }
+        self.trips.forget_car(h);
         self.population.remove_household(h);
     }
 
