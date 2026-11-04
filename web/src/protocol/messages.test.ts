@@ -49,7 +49,7 @@ describe("isWorkerToMain", () => {
       buildings: new Float64Array(7),
       facilities: new Float64Array(5),
       lots: new Float64Array(0),
-      stats: [...Array.from({ length: 21 }, (_, i) => i), 0, 0, 0, 0],
+      stats: [...Array.from({ length: 24 }, (_, i) => i), 0, 0, 0, 0],
     };
     expect(isWorkerToMain({ ...buildings, facilities: new Float64Array(4) })).toBe(false);
     expect(isWorkerToMain(buildings)).toBe(true);

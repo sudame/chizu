@@ -36,6 +36,10 @@ export type CityStats = {
   /** 主の網以外で、施設か建物のある道路網の数。 */
   powerOthers: number;
   waterOthers: number;
+  /** 主の網の余りが住民の何人分か（電気、水道）。足りないときは負。peopleKnown が偽のとき（人口か需要が 0）は使わない。 */
+  powerPeople: number;
+  waterPeople: number;
+  peopleKnown: boolean;
   /** 住宅・商業・工業・オフィスの順の、需要の内訳。寄与の合計がその区画の需要である。 */
   demandFactors: DemandFactor[][];
 };
@@ -86,6 +90,9 @@ export function parseCityStats(stats: number[]): CityStats {
     mainDemand: at(18),
     powerOthers: at(19),
     waterOthers: at(20),
+    powerPeople: at(21),
+    waterPeople: at(22),
+    peopleKnown: at(23) === 1,
   };
 }
 
@@ -120,12 +127,24 @@ function mainView(stats: CityStats) {
   };
 }
 
+/** 余りが住民の何人分かの言い方。余りは 10 人の位に切り捨て、足りない人数は 10 人の位に切り上げて「約」を付ける。 */
+export function formatPeople(people: number): string {
+  const n = (v: number) => v.toLocaleString("ja-JP");
+  if (people < 0) {
+    // 足りない人数は多めに数える（中核と同じ向き）ので、10 人の位で切り上げる
+    const short = -people;
+    return `約 ${n(short >= 100 ? Math.ceil(short / 10) * 10 : short)} 人分足りない`;
+  }
+  return `あと 約 ${n(people >= 100 ? Math.floor(people / 10) * 10 : people)} 人分`;
+}
+
 /** 電気と水道の、主の網の供給量と需要の 1 行。ほかに道路網があれば、その数を添える。 */
 export function formatUtilities(stats: CityStats): string {
   const n = (v: number) => v.toLocaleString("ja-JP");
   const m = mainView(stats);
   const others = (count: number) => (count > 0 ? `（ほかの網 ${n(count)}）` : "");
-  return `電気 ${n(m.power)} / 需要 ${n(m.demand)}${others(m.powerOthers)}・水道 ${n(m.water)} / 需要 ${n(m.demand)}${others(m.waterOthers)}`;
+  const people = (v: number) => (stats.peopleKnown ? `（${formatPeople(v)}）` : "");
+  return `電気 ${n(m.power)} / 需要 ${n(m.demand)}${people(stats.powerPeople)}${others(m.powerOthers)}・水道 ${n(m.water)} / 需要 ${n(m.demand)}${people(stats.waterPeople)}${others(m.waterOthers)}`;
 }
 
 /**
@@ -171,17 +190,18 @@ export const LOW_HEADROOM_PERCENT = 10;
 export function utilityLowHeadroom(stats: CityStats): UtilityShortage | null {
   const reasons: string[] = [];
   const m = mainView(stats);
-  const add = (name: string, facility: string, supply: number) => {
+  const add = (name: string, facility: string, supply: number, people: number) => {
     if (supply <= 0 || m.demand > supply) {
       return;
     }
     const left = Math.floor(((supply - m.demand) * 100) / supply);
     if (left < LOW_HEADROOM_PERCENT) {
-      reasons.push(`${name}の余りが ${left}% になった。${facility}を足す用意をする`);
+      const rest = stats.peopleKnown ? `（${formatPeople(people)}）` : "";
+      reasons.push(`${name}の余りが ${left}% になった${rest}。${facility}を足す用意をする`);
     }
   };
-  add("電気", "発電所", m.power);
-  add("水道", "浄水場", m.water);
+  add("電気", "発電所", m.power, stats.powerPeople);
+  add("水道", "浄水場", m.water, stats.waterPeople);
   if (reasons.length === 0) {
     return null;
   }

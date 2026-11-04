@@ -17,7 +17,7 @@ use cache::Cache;
 use chizu_core::building::{
     Building, CityStats, demand, demand_factors, jobs_kept_permille, residential_tax_pull,
 };
-use chizu_core::service::supply_balance;
+use chizu_core::service::{headroom_people, supply_balance};
 use chizu_core::world::economy::Finances;
 use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
@@ -61,10 +61,15 @@ observe の utilities（power と water）:
   capacity と demand 道路網をまたいだ供給量と需要の合計。この合計から余りは出さない。つながっていない施設の分まで足されて、
   主の網が足りないのに余っているように見えるからである。余りは次の 2 つに分けて読む。
   main 主の網（需要がいちばん大きい網。どの網にも需要がなければ null）の capacity、demand、headroom（その差。負なら足りない）、
-  headroomPermille（供給量に対する余りの千分率。供給量 0 なら null）、lowHeadroom（余りが 0 以上 1 割未満。画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）、
+  headroomPermille（供給量に対する余りの千分率。供給量 0 なら null）、
+  headroomPeople（余りが住民の何人分か。足りないときは足りない人数が負の値で出る。人口か需要の合計が 0 なら null。式は下）、lowHeadroom（余りが 0 以上 1 割未満。画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）、
   shortage（headroom < 0。足りなくて新築が止まる）、shortBy（足りない量。足りているときは 0）、
   at（網の中で需要が最も大きい建物の道路に面したマス）。
-  others 主の網以外で、施設か建物のある道路網の networks（数）と capacity、demand、headroom（その差）。
+  others 主の網以外で、施設か建物のある道路網の networks（数）と capacity、demand、headroom（その差）、headroomPeople、
+    each（その網ごとの capacity、demand、headroom、headroomPeople、代表のマス at）。
+  headroomPeople の式: headroom × population.housedCitizens ÷ 街の需要の合計（utilities.*.demand）を整数で求め、小数は切り捨てる。
+    住民 1 人あたりの需要を、住宅だけでなく商業・工業・オフィスの職場の需要も含めた街全体の「需要の合計 ÷ 家に住んでいる人（housedCitizens）」とみなした人数である。
+    空き家や、外とつながっていない建物の需要も含むので、少なめに出ることがある。
   shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at。at を map で見れば、どの網かが分かる。
   isolatedFacilities 孤立した施設の at の一覧。電気は発電所、水道は浄水場について数える。次のどちらかに当たる施設である。
     入口がない（面した道路が消えた）。
@@ -87,7 +92,10 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  （道路の種類を下げて車線を外れ、車線に戻るのを待つ車も含む）、
                  waitingAtCurb 建物の駐車場の中で、車線に出る順番を待っている車、moving それ以外。
                  着く車は駐車場の出入りの位置で車線から外れ、車線の上では止まらない。
-                 stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。waitingAtCurb が多いのは、
+                 queued 道路の上で、いまこの tick に速さ 0 の車。地図の混み具合の `X` が「止まっている」とみなす物差しと同じで、
+                 信号や交差点で止まっては進む列も入る（moving などとは重なる。合計には足さない）。
+                 stopped は 100 tick 動いていない、動けなくなった車だけを数え、止まっては進む列は入らない。
+                 地図の詰まりと見比べるときは queued を見る。stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。waitingAtCurb が多いのは、
                  建物の前の車線が埋まって出られない車が多いということである。
   traffic.walkers 車道を渡るところの歩く人。atCrosswalks 交差点の横断歩道を渡っているか渡るのを待っている人、
                  midblock 区間の途中で道路を横切っているか横切るのを待っている人。横断歩道は 3 本以上の道路が集まる
@@ -820,6 +828,7 @@ fn cars(world: &World, before: &CarSample) -> Value {
         "total": now.len(),
         "moving": now.len() - stopped - waiting,
         "stopped": stopped,
+        "queued": now.queued_on_road(),
         "waitingAtCurb": waiting,
         "stoppedAfterTicks": STOPPED_TICKS,
     })
@@ -1060,6 +1069,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
     let count = |f: &dyn Fn(&Building) -> bool| buildings.iter().filter(|(_, b)| f(b)).count();
     let balance = supply_balance(world.network(), world.facilities(), buildings);
     let isolated = world.isolated_facilities();
+    let housed = world.housed_citizens();
     let utility = |slot: usize| {
         let (mut capacity, mut need, mut bare) = (0_u64, 0_u64, 0_u64);
         let mut short = Vec::new();
@@ -1090,6 +1100,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 "demand": b.demand,
                 "headroom": headroom,
                 "headroomPermille": permille,
+                "headroomPeople": headroom_people(headroom, need, housed),
                 "lowHeadroom": b.demand > 0 && headroom >= 0 && permille.is_some_and(|p| p < 100),
                 // 足りない（headroom < 0）。lowHeadroom は足りないと偽になるので、足りないことはこちらで読む。
                 "shortage": headroom < 0,
@@ -1098,11 +1109,20 @@ fn observe(world: &World, before: &CarSample) -> Value {
             })
         });
         let (mut o_networks, mut o_capacity, mut o_demand) = (0_u64, 0_u64, 0_u64);
+        let mut o_each = Vec::new();
         for (i, c) in balance.components.iter().enumerate() {
             if Some(i) != main_idx && (c[slot].capacity > 0 || c[slot].demand > 0) {
                 o_networks += 1;
                 o_capacity += c[slot].capacity;
                 o_demand += c[slot].demand;
+                let headroom = i128::from(c[slot].capacity) - i128::from(c[slot].demand);
+                o_each.push(json!({
+                    "capacity": c[slot].capacity,
+                    "demand": c[slot].demand,
+                    "headroom": headroom,
+                    "headroomPeople": headroom_people(headroom, need, housed),
+                    "at": balance.spots[i].map(|p| json!([p.x, p.y])),
+                }));
             }
         }
         let kind = [ServiceKind::PowerPlant, ServiceKind::WaterPump][slot];
@@ -1120,6 +1140,12 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 "capacity": o_capacity,
                 "demand": o_demand,
                 "headroom": i128::from(o_capacity) - i128::from(o_demand),
+                "headroomPeople": headroom_people(
+                    i128::from(o_capacity) - i128::from(o_demand),
+                    need,
+                    housed,
+                ),
+                "each": o_each,
             },
             "shortNetworks": short.len(),
             "networksWithoutFacility": bare,
@@ -1307,6 +1333,7 @@ const WATCHED: &[&str] = &[
     "/citizenPlaces/homeless",
     "/traffic/cars/total",
     "/traffic/cars/stopped",
+    "/traffic/cars/queued",
     "/traffic/cars/waitingAtCurb",
     "/parking/redirectedCars",
     "/migration/wantingHouseholds",
@@ -1327,9 +1354,11 @@ const WATCHED: &[&str] = &[
     "/facilities/PowerPlant",
     "/facilities/WaterPump",
     "/utilities/power/main/headroom",
+    "/utilities/power/main/headroomPeople",
     "/utilities/power/others/headroom",
     "/utilities/power/shortNetworks",
     "/utilities/water/main/headroom",
+    "/utilities/water/main/headroomPeople",
     "/utilities/water/others/headroom",
     "/utilities/water/shortNetworks",
     "/land/milestone",
