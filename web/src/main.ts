@@ -21,6 +21,7 @@ import {
   type LotShortageSince,
   parseGrowthBlocks,
   parseIsolated,
+  parseParkingShortage,
   parseStalls,
   persistedLotShortage,
   trackLotShortage,
@@ -1258,6 +1259,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
         parseStalls(message.stalls),
         parseIsolated(message.isolated),
         persistedLotShortage(lotShortageSince, message.tick),
+        parseParkingShortage(message.parkingShortage),
       ),
     );
     return;

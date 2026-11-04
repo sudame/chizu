@@ -23,9 +23,9 @@ use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
-    CommuteDistances, DayTraffic, DenyReason, GameTime, Heading, Line, MigrationOutlook,
-    NodeControl, NodeId, ParkingTally, Rescues, ServiceKind, TilePos, TileRect, Traffic, World,
-    ZoneKind, replay,
+    CommuteDistances, DailyLotMisses, DayTraffic, DenyReason, GameTime, Heading, Line, LotMisses,
+    MigrationOutlook, NodeControl, NodeId, ParkingTally, Rescues, ServiceKind, TICKS_PER_DAY,
+    TilePos, TileRect, Traffic, World, ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -111,6 +111,7 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
   parking        建物の駐車場。byZone 区画の種類ごとに、spaces 停められる台数の合計（surface 敷地を切り欠いた平面の駐車場、
                  indoor 建物の中の駐車場の内訳）、parked 停めてある台数、reserved 向かっている車のために押さえた台数、
                  occupiedPermille 停めてある台数と押さえた台数の和の、台数に対する千分率（台数 0 なら null）、
+                 parkedPermille 停めてある台数だけの千分率（押さえた分を含まない）、
                  fullLots 満車の駐車場の数。
                  台数は建物の種類、大きさ、段階から決まる。住宅の段階 1〜2 は世帯の数、段階 3〜5 は世帯の数の 0.7 倍、
                  商業と工業は職場の数、オフィスは職場の数の 0.5 倍（端数は切り上げ）。住宅の駐車場は、その建物の住民だけが使う。
@@ -127,6 +128,12 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  同じ職場で働く家族が停めた車なら、ここに入る）、carAtHome 車は家にあるが、出発する本人が家にいない、
                  other そのほか（家のない住民の通勤で、車が停めてあった場合）。
                  fullLots、redirectedCars、lotsFull が多いのは、駐車場が足りないということである。
+                 shortages 行き先にした車が満車で車をやめた建物の上位 10 件。満車で車をやめた数（今日と前の日の和）の多い順で、
+                 同じなら位置（x、y の順）。at 建物が占めるマスの最小の座標、zone 区画の種類、level 段階、spaces 台数、
+                 parked 停めてある台数、reserved 押さえた台数、today と yesterday ゲーム内の今日と前の日の、
+                 その建物を行き先にした移動の lotsFull（近くがどこも満車で車をやめた数）と
+                 parkedElsewhere（行き先の駐車場に停められず、ほかの建物の駐車場に回った数）。
+                 画面の知らせは、同じ数え方で満車で車をやめた数が SHORTAGE_LOTS_FULL（3）以上の建物を挙げる。
   traffic.rescues 詰まりをほどく救済の、始まりからの積み上げ。teleported 止まったままの車を行き先に着いたことにした数、
                  walkedInstead 車線に出られないまま待ち続けた車を、歩く移動に切り替えた数、
                  passedStuck 交差点の中で止まった車を無視して入った数。
@@ -968,6 +975,27 @@ fn parking(world: &World) -> Value {
         z.reserved += u64::from(lot.reserved);
         z.full += u64::from(layout.total() > 0 && used >= layout.total());
     }
+    let day = world.tick().0 / TICKS_PER_DAY;
+    let shortages = rank_shortages(
+        world
+            .trips()
+            .lot_misses(day)
+            .filter_map(|(id, m)| {
+                let b = world.buildings().get(id)?;
+                let lot = world.trips().lot(id);
+                Some(ShortageRow {
+                    at: (b.area.min.x, b.area.min.y),
+                    zone: b.zone,
+                    level: b.level,
+                    spaces: b.parking_spaces(),
+                    parked: lot.parked,
+                    reserved: lot.reserved,
+                    today: m.today,
+                    yesterday: m.yesterday,
+                })
+            })
+            .collect(),
+    );
     // 中核に欄が足されたらここで止まり、observe に出すかを決められるよう、`..` なしで分解する。
     let tally @ ParkingTally {
         drives: _,
@@ -994,9 +1022,11 @@ fn parking(world: &World) -> Value {
                 "parked": z.parked,
                 "reserved": z.reserved,
                 "occupiedPermille": (z.spaces > 0).then(|| (z.parked + z.reserved) * 1000 / z.spaces),
+                "parkedPermille": (z.spaces > 0).then(|| z.parked * 1000 / z.spaces),
                 "fullLots": z.full,
             })
         }),
+        "shortages": shortages,
         "redirectedCars": redirected,
         "drives": tally.drives,
         "parkedElsewhere": tally.parked_elsewhere,
@@ -1009,6 +1039,57 @@ fn parking(world: &World) -> Value {
             "other": tally.no_car_other,
         },
     })
+}
+
+/// observe の `parking.shortages` に出す建物の数の上限。
+const SHORTAGE_LIMIT: usize = 10;
+
+/// 駐車場で困った車が行き先にした建物 1 つ。
+struct ShortageRow {
+    /// 建物が占めるマスのうち、座標が最小のマス。
+    at: (i64, i64),
+    zone: ZoneKind,
+    level: u8,
+    spaces: u64,
+    parked: u32,
+    reserved: u32,
+    today: LotMisses,
+    yesterday: LotMisses,
+}
+
+impl ShortageRow {
+    /// 満車で車をやめた数の、今日と前の日の和。
+    fn full(&self) -> u32 {
+        DailyLotMisses {
+            today: self.today,
+            yesterday: self.yesterday,
+        }
+        .lots_full()
+    }
+}
+
+/// 満車で車をやめた数（今日と前の日の和）の多い順に、同じなら位置（x、y の順）で並べ、上位だけを JSON にする。
+/// 満車で車をやめたことのない建物は出さない。
+fn rank_shortages(mut rows: Vec<ShortageRow>) -> Vec<Value> {
+    rows.retain(|r| r.full() > 0);
+    rows.sort_by(|a, b| b.full().cmp(&a.full()).then(a.at.cmp(&b.at)));
+    let misses =
+        |m: LotMisses| json!({"lotsFull": m.lots_full, "parkedElsewhere": m.parked_elsewhere});
+    rows.into_iter()
+        .take(SHORTAGE_LIMIT)
+        .map(|r| {
+            json!({
+                "at": [r.at.0, r.at.1],
+                "zone": format!("{:?}", r.zone),
+                "level": r.level,
+                "spaces": r.spaces,
+                "parked": r.parked,
+                "reserved": r.reserved,
+                "today": misses(r.today),
+                "yesterday": misses(r.yesterday),
+            })
+        })
+        .collect()
 }
 
 /// 区画の種類ごとの止まっている間口の数に、止まっている道路網の一覧 `stalledAt` を添える。
@@ -1660,6 +1741,45 @@ mod tests {
     use super::*;
 
     const TICKS_PER_DAY_FOR_TEST: u64 = chizu_core::TICKS_PER_DAY;
+
+    fn shortage(at: (i64, i64), today: u32, yesterday: u32) -> ShortageRow {
+        let full = |lots_full| LotMisses {
+            lots_full,
+            parked_elsewhere: 0,
+        };
+        ShortageRow {
+            at,
+            zone: ZoneKind::Commercial,
+            level: 1,
+            spaces: 4,
+            parked: 2,
+            reserved: 1,
+            today: full(today),
+            yesterday: full(yesterday),
+        }
+    }
+
+    /// 満車で車をやめた数の多い順で、同じなら位置の順。0 の建物は出さず、上位だけを出す。
+    #[test]
+    fn shortages_are_ranked_by_lots_full_then_position() {
+        let rows = vec![
+            shortage((9, 1), 1, 1),
+            shortage((3, 8), 5, 0),
+            shortage((3, 2), 0, 5),
+            shortage((0, 0), 0, 0),
+            shortage((7, 7), 9, 0),
+        ];
+        let out = rank_shortages(rows);
+        let at: Vec<_> = out.iter().map(|v| v["at"].clone()).collect();
+        assert_eq!(
+            at,
+            [json!([7, 7]), json!([3, 2]), json!([3, 8]), json!([9, 1])]
+        );
+        assert_eq!(out[0]["today"]["lotsFull"], 9);
+        assert_eq!(out[1]["yesterday"]["lotsFull"], 5);
+        let many: Vec<_> = (0..30).map(|i| shortage((i, 0), 1, 0)).collect();
+        assert_eq!(rank_shortages(many).len(), SHORTAGE_LIMIT);
+    }
 
     fn commands() -> Vec<Value> {
         serde_json::from_value(json!([

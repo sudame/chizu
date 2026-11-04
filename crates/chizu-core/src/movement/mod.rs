@@ -45,7 +45,8 @@ pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, HouseholdCar, OWNER_DR
 pub use congestion::{Congestion, classify as classify_congestion};
 pub use junction::Rescues;
 pub use parking::{
-    Lot, LotEnd, PARK_RADIUS, ParkingTally, building_spot, lot_end, lot_spot, lot_tiles,
+    DailyLotMisses, Lot, LotEnd, LotMisses, PARK_RADIUS, ParkingTally, SHORTAGE_LOTS_FULL,
+    building_spot, lot_end, lot_spot, lot_tiles,
 };
 pub use pos::SidewalkPos;
 
@@ -566,6 +567,8 @@ pub struct Trips {
     rescues: junction::Rescues,
     /// 車で向かおうとした移動の、駐車場の決まり方の数。状態ハッシュには入れない。
     parking_tally: parking::ParkingTally,
+    /// 建物ごとの、行き先にした車が駐車場で困った数。状態ハッシュには入れない。
+    lot_misses: parking::MissTable,
     /// 直前の `step` と `reroute` で消えた移動の結果。状態ハッシュには入れない。
     finished: BTreeMap<TripId, Finished>,
     /// 直前の `step` の信号を決めた様子。画面に灯火を出すために控える。状態ハッシュには入れない。

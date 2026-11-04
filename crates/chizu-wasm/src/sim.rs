@@ -642,6 +642,30 @@ impl Sim {
         out
     }
 
+    /// 駐車場が足りない建物ごとに `[建物が占めるマスの最小の x, y, 区画の種類, 満車で車をやめた数]`。
+    /// 区画の種類は住宅・商業・工業・オフィスの順の番号、数は今日と前の日の和で、
+    /// それが `chizu_core::SHORTAGE_LOTS_FULL` 以上の建物だけを出す。建物の番号の順に並ぶ。
+    /// 状態は変えない。
+    pub fn parking_shortage(&self) -> Vec<f64> {
+        let day = self.world.tick().0 / chizu_core::TICKS_PER_DAY;
+        let mut out = Vec::new();
+        for (id, m) in self.world.trips().lot_misses(day) {
+            let full = m.lots_full();
+            let Some(b) = self.world.buildings().get(id) else {
+                continue;
+            };
+            if full >= chizu_core::SHORTAGE_LOTS_FULL {
+                out.extend([
+                    b.area.min.x as f64,
+                    b.area.min.y as f64,
+                    b.zone.index() as f64,
+                    f64::from(full),
+                ]);
+            }
+        }
+        out
+    }
+
     /// いまの tick。画面の知らせが、状態の続いた長さを Worker の時計で数えるために使う。
     pub fn current_tick(&self) -> f64 {
         self.world.tick().0 as f64
@@ -1094,6 +1118,11 @@ mod tests {
     }
 
     /// つながっていない通りの発電所は、孤立した施設として出る。余りは主の網だけで数え、ほかの網に分ける。
+    #[test]
+    fn a_new_city_has_no_parking_shortage() {
+        assert!(Sim::new(0).parking_shortage().is_empty());
+    }
+
     #[test]
     fn isolated_facilities_and_main_network_numbers_are_reported_apart() {
         let mut sim = Sim::new(0);

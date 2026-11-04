@@ -23,6 +23,7 @@ use super::{
     Ends, SidewalkPos, Trip, Trips, candidates, car, junction, lane_shift, make_trip, plan, pos,
 };
 use crate::building::{Building, Buildings, ParkingCut, SLOT_WIDTH_MM};
+use crate::clock::TICKS_PER_DAY;
 use crate::command::ZoneKind;
 use crate::id::{BuildingId, TripId};
 use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId, TILE_MM};
@@ -100,6 +101,102 @@ pub struct ParkingTally {
     pub no_car_at_home: u64,
     /// `no_car` のうち、上のどれにも当てはまらない数（家のない住民の通勤で、車が停めてあった場合）。
     pub no_car_other: u64,
+}
+
+/// ある建物を行き先にした車が、駐車場で困った数。ゲーム内の 1 日ぶん。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LotMisses {
+    /// 近くの駐車場がどこも満車で、車で向かうのをやめた数。
+    pub lots_full: u32,
+    /// 行き先の建物の駐車場に停められず、近くのほかの建物の駐車場に回った数。
+    pub parked_elsewhere: u32,
+}
+
+impl LotMisses {
+    fn is_empty(self) -> bool {
+        self == LotMisses::default()
+    }
+}
+
+/// 建物の今日と前の日で、満車で車をやめた数の和がこれ以上なら、駐車場が足りないとみなす（画面の知らせの目安）。
+pub const SHORTAGE_LOTS_FULL: u32 = 3;
+
+impl DailyLotMisses {
+    /// 満車で車をやめた数の、今日と前の日の和。
+    pub fn lots_full(self) -> u32 {
+        self.today
+            .lots_full
+            .saturating_add(self.yesterday.lots_full)
+    }
+}
+
+/// 建物ごとの [`LotMisses`]。数えた日と、その前の日だけを持つ。読み取り用で、状態ハッシュには入れない。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct DayMisses {
+    /// `today` を数えた日（0 から数える）。
+    day: u64,
+    today: LotMisses,
+    /// `day` の前の日。
+    yesterday: LotMisses,
+}
+
+impl DayMisses {
+    /// `day` の欄に送る。日が 1 つ進んだなら今日を前の日にし、2 日以上空いたら両方を空にする。
+    fn rolled(self, day: u64) -> DayMisses {
+        if self.day == day {
+            self
+        } else {
+            DayMisses {
+                day,
+                today: LotMisses::default(),
+                yesterday: if self.day + 1 == day {
+                    self.today
+                } else {
+                    LotMisses::default()
+                },
+            }
+        }
+    }
+}
+
+/// 建物の今日と前の日の [`LotMisses`]。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DailyLotMisses {
+    pub today: LotMisses,
+    pub yesterday: LotMisses,
+}
+
+/// 建物ごとの、駐車場で困った数。困ったことのない建物と、2 日以上前を最後に困った建物は持ち続けるが、
+/// 読み出しでは空として出す。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct MissTable {
+    by_building: BTreeMap<BuildingId, DayMisses>,
+}
+
+impl MissTable {
+    pub(super) fn add(&mut self, b: BuildingId, day: u64, f: impl FnOnce(&mut LotMisses)) {
+        let e = self.by_building.entry(b).or_default();
+        *e = e.rolled(day);
+        f(&mut e.today);
+    }
+
+    /// `day` の時点で、困った数のある建物を番号の順に返す。
+    pub(super) fn at(&self, day: u64) -> impl Iterator<Item = (BuildingId, DailyLotMisses)> + '_ {
+        self.by_building.iter().filter_map(move |(id, m)| {
+            let m = m.rolled(day);
+            (!(m.today.is_empty() && m.yesterday.is_empty())).then_some((
+                *id,
+                DailyLotMisses {
+                    today: m.today,
+                    yesterday: m.yesterday,
+                },
+            ))
+        })
+    }
+
+    pub(super) fn retain(&mut self, f: impl FnMut(&BuildingId, &mut DayMisses) -> bool) {
+        self.by_building.retain(f);
+    }
 }
 
 /// 1 つの駐車場の、停めてある台数と、向かっている車のために押さえた台数。
@@ -487,6 +584,12 @@ impl Trips {
         self.parking_tally
     }
 
+    /// ゲーム内の日 `day` の時点で、行き先にした車が駐車場で困った建物を、番号の順に返す。
+    /// 困った数は今日と前の日で、どちらも 0 の建物は出さない。
+    pub fn lot_misses(&self, day: u64) -> impl Iterator<Item = (BuildingId, DailyLotMisses)> + '_ {
+        self.lot_misses.at(day)
+    }
+
     /// 建物 `b` の駐車場の台数。
     pub fn lot(&self, b: BuildingId) -> Lot {
         self.parking.get(b)
@@ -568,6 +671,9 @@ impl Trips {
             .candidates(buildings, (to, buildings.get(to)?), home);
         if candidates.is_empty() {
             self.parking_tally.lots_full = self.parking_tally.lots_full.saturating_add(1);
+            self.lot_misses.add(to, now.0 / TICKS_PER_DAY, |m| {
+                m.lots_full = m.lots_full.saturating_add(1);
+            });
             return None;
         }
         let (lot, park_at) = candidates.into_iter().find_map(|lot| {
@@ -590,6 +696,9 @@ impl Trips {
         tally.drives = tally.drives.saturating_add(1);
         if lot != to {
             tally.parked_elsewhere = tally.parked_elsewhere.saturating_add(1);
+            self.lot_misses.add(to, now.0 / TICKS_PER_DAY, |m| {
+                m.parked_elsewhere = m.parked_elsewhere.saturating_add(1);
+            });
         }
         Some(id)
     }
@@ -599,6 +708,7 @@ impl Trips {
         self.parking
             .lots
             .retain(|id, _| buildings.get(*id).is_some());
+        self.lot_misses.retain(|id, _| buildings.get(*id).is_some());
     }
 
     /// 主体を消す。押さえていた駐車場の空きは返す。

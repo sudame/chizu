@@ -68,6 +68,7 @@ describe("isWorkerToMain", () => {
       stalls: [40, 12, 3],
       isolated: [10, -59, 1],
       lotShortage: [0, 1, 0, 0],
+      parkingShortage: [12, 30, 1, 5],
       tick: 3600,
     };
     expect(isWorkerToMain(overview)).toBe(true);
@@ -79,6 +80,9 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ ...overview, isolated: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, lotShortage: [0, 1] })).toBe(false);
     expect(isWorkerToMain({ ...overview, lotShortage: undefined })).toBe(false);
+    expect(isWorkerToMain({ ...overview, parkingShortage: [] })).toBe(true);
+    expect(isWorkerToMain({ ...overview, parkingShortage: [1, 2, 3] })).toBe(false);
+    expect(isWorkerToMain({ ...overview, parkingShortage: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, tick: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, overview: [1, 2] })).toBe(false);
     expect(
