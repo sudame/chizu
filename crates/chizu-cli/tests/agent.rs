@@ -640,7 +640,7 @@ fn observe_points_at_the_short_network() {
     assert_eq!(power["main"]["at"], power["shortAt"][0]["at"]);
     assert_eq!(power["shortNetworks"], 1);
     // 足りないときは、足りない人数が負の値で出る。人口が 0 なら人数は決まらず null。
-    let people = o["population"]["citizens"].as_i64().unwrap();
+    let people = o["population"]["housedCitizens"].as_i64().unwrap();
     if people == 0 {
         assert!(power["main"]["headroomPeople"].is_null(), "{power}");
     } else {
@@ -694,7 +694,7 @@ fn observe_shows_a_shortage_when_supply_is_positive() {
     // 1 棟分（48）だけ足りない。#141 と同じ止まり方である。
     assert_eq!(main["shortBy"], 48);
     // 余りが負なので、足りない人数が負の値で出る。式は headroom × 人口 ÷ 需要の合計の切り捨て。
-    let citizens = i128::from(o["population"]["citizens"].as_u64().unwrap());
+    let citizens = i128::from(o["population"]["housedCitizens"].as_u64().unwrap());
     let demand = i128::from(water["demand"].as_u64().unwrap());
     assert!(citizens > 0 && demand > 0, "{o}");
     let want = (i128::from(headroom) * citizens).div_euclid(demand);

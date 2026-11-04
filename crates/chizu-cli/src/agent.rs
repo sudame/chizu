@@ -67,8 +67,8 @@ observe の utilities（power と water）:
   at（網の中で需要が最も大きい建物の道路に面したマス）。
   others 主の網以外で、施設か建物のある道路網の networks（数）と capacity、demand、headroom（その差）、headroomPeople、
     each（その網ごとの capacity、demand、headroom、headroomPeople、代表のマス at）。
-  headroomPeople の式: headroom × population.citizens ÷ 街の需要の合計（utilities.*.demand）を整数で求め、小数は切り捨てる。
-    住民 1 人あたりの需要を、住宅だけでなく商業・工業・オフィスの職場の需要も含めた街全体の「需要の合計 ÷ 人口」とみなした人数である。
+  headroomPeople の式: headroom × population.housedCitizens ÷ 街の需要の合計（utilities.*.demand）を整数で求め、小数は切り捨てる。
+    住民 1 人あたりの需要を、住宅だけでなく商業・工業・オフィスの職場の需要も含めた街全体の「需要の合計 ÷ 家に住んでいる人（housedCitizens）」とみなした人数である。
   shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at。at を map で見れば、どの網かが分かる。
   isolatedFacilities 孤立した施設の at の一覧。電気は発電所、水道は浄水場について数える。次のどちらかに当たる施設である。
     入口がない（面した道路が消えた）。
@@ -1064,6 +1064,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
     let count = |f: &dyn Fn(&Building) -> bool| buildings.iter().filter(|(_, b)| f(b)).count();
     let balance = supply_balance(world.network(), world.facilities(), buildings);
     let isolated = world.isolated_facilities();
+    let housed = world.housed_citizens();
     let utility = |slot: usize| {
         let (mut capacity, mut need, mut bare) = (0_u64, 0_u64, 0_u64);
         let mut short = Vec::new();
@@ -1094,7 +1095,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 "demand": b.demand,
                 "headroom": headroom,
                 "headroomPermille": permille,
-                "headroomPeople": headroom_people(headroom, need, citizens),
+                "headroomPeople": headroom_people(headroom, need, housed),
                 "lowHeadroom": b.demand > 0 && headroom >= 0 && permille.is_some_and(|p| p < 100),
                 // 足りない（headroom < 0）。lowHeadroom は足りないと偽になるので、足りないことはこちらで読む。
                 "shortage": headroom < 0,
@@ -1114,7 +1115,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
                     "capacity": c[slot].capacity,
                     "demand": c[slot].demand,
                     "headroom": headroom,
-                    "headroomPeople": headroom_people(headroom, need, citizens),
+                    "headroomPeople": headroom_people(headroom, need, housed),
                     "at": balance.spots[i].map(|p| json!([p.x, p.y])),
                 }));
             }
@@ -1137,7 +1138,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 "headroomPeople": headroom_people(
                     i128::from(o_capacity) - i128::from(o_demand),
                     need,
-                    citizens,
+                    housed,
                 ),
                 "each": o_each,
             },

@@ -586,7 +586,7 @@ impl Sim {
         } else {
             (power, water, need)
         };
-        let citizens = self.world.city_stats().citizens;
+        let citizens = self.world.housed_citizens();
         let people = |capacity: f64| {
             chizu_core::service::headroom_people(
                 capacity as i128 - demand as i128,
@@ -1136,7 +1136,7 @@ mod tests {
             ]
         );
         // 主の網は電気が 0 で足りない。水道は余りがあるので正、電気は負の人数になる。
-        let citizens = sim.world().city_stats().citizens;
+        let citizens = sim.world().housed_citizens();
         if citizens > 0 {
             assert_eq!(stats[23], 1.0, "{stats:?}");
             assert!(stats[21] < 0.0 && stats[22] > 0.0, "{stats:?}");
