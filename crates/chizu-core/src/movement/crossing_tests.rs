@@ -220,6 +220,106 @@ fn a_car_gets_through_a_steady_stream_of_walkers() {
 }
 
 #[test]
+fn a_car_waiting_for_walkers_keeps_its_turn_while_the_crossing_flow_keeps_coming() {
+    // 北から南へ抜ける車 c が、出ていく南の腕の横断歩道を渡る人 P に譲って待つ。c と交わる西から東への
+    // 直進は途切れずに来る。c は人に譲るあいだ道筋を押さえないので、西からの車が先に入り、人が渡り終えた
+    // 直後も、その車が交差点の中にいる。c が待ち始めたあとに横断歩道の前に来た人 Q たちは、c より短く
+    // 待っている。c は人に譲った長さを失わず、Q たちより先に入る。
+    // P を放す tick と、西からの車の来る周期との組み合わせを変えて確かめる。
+    for extra in 0..8 {
+        keeps_its_turn(u64::from(crossing::PED_WAIT) + 40 + extra);
+    }
+}
+
+/// [`a_car_waiting_for_walkers_keeps_its_turn_while_the_crossing_flow_keeps_coming`] の場面で、P を `hold` tick
+/// 止めておく。
+fn keeps_its_turn(hold: u64) {
+    let (n, node) = crossroads();
+    let mut t = Town::new(n);
+    let south = link(&t.net, (10, 10), (10, 11), LaneMode::Car).segment;
+    let west_cars = |t: &mut Town, k: u64| {
+        if k % 2 == 0 {
+            t.drive(at(1, 10, (1, 0), 0), at(19, 10, (1, 0), 0));
+        }
+    };
+    // 渡り始めたか、渡り終えた人の数。
+    let started = |t: &Town, qs: &[TripId]| {
+        qs.iter()
+            .filter(|q| {
+                t.trips
+                    .get(**q)
+                    .is_none_or(|q| q.leg > 0 || q.offset > q.link_len)
+            })
+            .count()
+    };
+    let p = t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0));
+    let mut k = 0;
+    // P が横断歩道のなかほどに来るまで進める。
+    let mid = loop {
+        west_cars(&mut t, k);
+        t.step(node);
+        k += 1;
+        let w = t.trips.get(p).expect("P が渡りきった");
+        let into = w.offset.0.saturating_sub(w.link_len.0);
+        if into >= crossing::width(&t.net, south) / 2 {
+            break w.offset;
+        }
+    };
+    // P をなかほどで止めておくあいだに、c が来て P に譲り、Q たちが横断歩道の前に並ぶ。P は PED_WAIT より
+    // 長く横断歩道にいるので、Q たちのうち先に来た人は長く待った人になる。
+    let c = t.drive(at(10, 5, (0, 1), 0), at(10, 18, (0, 1), 0));
+    let mut qs = Vec::new();
+    for j in 0..hold {
+        west_cars(&mut t, k);
+        if j >= 20 {
+            qs.push(t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0)));
+        }
+        t.step(node);
+        k += 1;
+        t.trips.rows[p.slot()].as_mut().unwrap().offset = mid;
+        assert_eq!(
+            started(&t, &qs),
+            0,
+            "{hold}: c より短く待った人が先に渡り始めた {j}"
+        );
+    }
+    let car = t.trips.get(c).expect("c がない");
+    assert!(
+        car.link().segment != south && car.yielded > 0,
+        "c が P に譲っていない"
+    );
+    let waited = qs
+        .iter()
+        .filter_map(|q| t.trips.get(*q))
+        .map(|q| q.waited)
+        .max()
+        .unwrap_or(0);
+    assert!(
+        waited >= crossing::PED_WAIT,
+        "長く待った人がいない {waited}"
+    );
+    // P を放す。c が入るまで、Q たちは渡り始めない。
+    let mut entered = None;
+    for j in 0..u64::from(junction::RESCUE) {
+        west_cars(&mut t, k);
+        t.step(node);
+        k += 1;
+        if t.trips.get(c).is_none_or(|c| c.link().segment == south) {
+            entered = Some(j);
+            break;
+        }
+        assert_eq!(
+            started(&t, &qs),
+            0,
+            "{hold}: c より短く待った人が先に渡り始めた {j}"
+        );
+    }
+    let entered = entered.expect("c が入れない");
+    // P が渡りきるのと、交差点の中の車が抜けるのを待つだけである。
+    assert!(entered < 10, "{hold}: c が待ちすぎた {entered}");
+}
+
+#[test]
 fn walkers_obey_the_signal() {
     let (mut n, node) = crossroads();
     n.set_signal(node, true).unwrap();

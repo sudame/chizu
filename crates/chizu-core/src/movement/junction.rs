@@ -48,8 +48,10 @@
 //! 大きく戻す。2 つの動きの弦の端が円の上で互い違いに並べば、道筋が交わる。
 //!
 //! 入ってくる腕か出ていく腕の横断歩道を人が渡っているか、長く待った人が渡ろうとしている候補は、
-//! 止まりきれない車を除いて止める（`crossing`）。そのうち、横断歩道の人がいなければ入れた候補は、
-//! 人に譲った候補として返し、人に譲った tick 数を数えさせる。
+//! 止まりきれない車を除いて止める（`crossing`）。そのうち、先の車線に空きがあり、交差点の中で止まった車に
+//! 道筋を塞がれていない候補は、人に譲った候補として返し、人に譲った tick 数を数えさせる。動いている車に
+//! 道筋を塞がれていても数える。人に譲る候補は道筋を押さえず、交わる車を先に通すので、その車を待つ tick も
+//! 人のための待ちだからである。
 //!
 //! 信号（`signal`）のある交差点では、先に黄と赤の腕から来た候補を、止まりきれない車を除いて
 //! ノードの手前で止め、残りの候補をこの順で決める。止めた候補は動きを置かないので、青の腕の車を
@@ -235,7 +237,8 @@ pub(super) struct Inside {
 pub(super) struct Held {
     /// ノードの手前で止める候補の `id`。小さい順に並ぶ。
     pub ids: Vec<usize>,
-    /// 止める候補のうち、横断歩道の人がいなければ入れた候補の `id`。小さい順に並ぶ。
+    /// 止める候補のうち、横断歩道の人に譲って待つ候補の `id`。小さい順に並ぶ。先の車線に空きがあり、
+    /// 交差点の中で止まった車に道筋を塞がれていない候補で、動いている車に塞がれていても入れる。
     pub yielded: Vec<usize>,
     /// 交差点の中で止まった車を無視して入れた候補の数。
     pub passed: u64,
@@ -324,11 +327,18 @@ pub(super) fn holds(
                     .any(|(m, _)| m.conflicts_in(mv))
             };
             // 待ちすぎた車は、交差点の中で止まった車の脇をすり抜けて入る。
-            let clear = c.room && !blocked(c.waited >= GIVE_UP);
+            let skip_stopped = c.waited >= GIVE_UP;
+            let clear = c.room && !blocked(skip_stopped);
             let free = clear && !peds(c);
             if !(c.committed || free) {
                 held.push(c.id);
-                if clear {
+                // 動いている車に道筋を塞がれていても、人に譲った tick として数える。人に譲るあいだは道筋を
+                // 押さえず、交わる車を先に通すので、その車を待つ tick も人のための待ちである。
+                let stuck = !skip_stopped
+                    && placed
+                        .iter()
+                        .any(|(m, stopped)| *stopped && m.conflicts_in(mv));
+                if c.room && peds(c) && !stuck {
                     yielded.push(c.id);
                 }
             } else if !c.committed && blocked(false) {
