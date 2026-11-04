@@ -788,22 +788,27 @@ mod tests {
         assert_eq!(sim.world().network().segments().count(), 2);
         assert!(zonable(&sim, 126, 25));
         assert!(!zonable(&sim, 128, 25));
-        // 水辺のあるチャンクを買い、水辺のマスの 2 マス先から道路を引いても、水辺のマスは塗れない
+        // 水辺のあるチャンクを買い、水辺のマスのすぐ南に道路を引く。道路の脇にある水辺のマスは塗れず、
+        // その隣の水辺でないマスは塗れる
         let east = ChunkCoord::new(2, 0);
         let (mut sim, water) = (0..256)
             .find_map(|seed| {
                 let sim = Sim::new(seed);
                 let tiles = sim.chunk_tiles(east);
                 let is_water = |x: usize, y: usize| tiles[y * CHUNK_SIDE + x] & TILE_WATER != 0;
-                let at = (0..CHUNK_SIDE)
-                    .flat_map(|y| (0..CHUNK_SIDE - 5).map(move |x| (x, y)))
-                    .find(|&(x, y)| is_water(x, y) && (1..=5).all(|d| !is_water(x + d, y)))?;
+                let at = (2..CHUNK_SIDE - 3)
+                    .flat_map(|x| (0..CHUNK_SIDE - 1).map(move |y| (x, y)))
+                    .find(|&(x, y)| {
+                        is_water(x, y)
+                            && !is_water(x + 1, y)
+                            && (x - 2..=x + 2).all(|rx| !is_water(rx, y + 1))
+                    })?;
                 Some((seed, (128 + at.0 as i64, at.1 as i64)))
             })
             .map(|(seed, at)| {
                 let mut sim = Sim::new(seed);
                 sim.submit(Command::BuyChunk { coord: east }).unwrap();
-                sim.submit(road((at.0 + 2, at.1), (at.0 + 4, at.1)))
+                sim.submit(road((at.0 - 2, at.1 + 1), (at.0 + 2, at.1 + 1)))
                     .unwrap();
                 (sim, at)
             })
@@ -814,20 +819,19 @@ mod tests {
                 .all(|r| r.outcome == ApplyOutcome::Applied)
         );
         assert!(!zonable(&sim, water.0, water.1));
-        // 道路の脇で、水辺でないマスは塗れる
-        let beside = [-1, 1]
-            .into_iter()
-            .map(|dy| (water.0 + 3, water.1 + dy))
-            .find(|&(x, y)| {
-                let t = TilePos::new(x, y);
-                let (lx, ly) = t.local();
-                t.chunk().is_some_and(|c| {
-                    sim.world().chunk(c).is_some()
-                        && sim.chunk_tiles(c)[ly * CHUNK_SIDE + lx] & TILE_WATER == 0
-                })
-            })
-            .expect("道路の脇に水辺でないマスがない");
-        assert!(zonable(&sim, beside.0, beside.1));
+        assert!(zonable(&sim, water.0 + 1, water.1));
+    }
+
+    #[test]
+    fn buying_a_chunk_bumps_the_tiles_version_of_its_neighbours() {
+        let mut sim = Sim::new(0);
+        let (near, far) = (ChunkCoord::new(1, 0), ChunkCoord::new(-1, -1));
+        let east = ChunkCoord::new(2, 0);
+        let (v_near, v_far) = (sim.chunk_tiles_version(near), sim.chunk_tiles_version(far));
+        sim.submit(Command::BuyChunk { coord: east }).unwrap();
+        assert!(sim.world().chunk(east).is_some());
+        assert!(sim.chunk_tiles_version(near) > v_near);
+        assert_eq!(sim.chunk_tiles_version(far), v_far);
     }
 
     #[test]
