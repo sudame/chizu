@@ -146,6 +146,8 @@ observe の demandFactors（demand の内訳）:
                tax が負なら商業の税を下げると、要る職場が増える。
   Industrial   workers は、働く年齢の住民から商業の分を引いた残りのうち工業へ回る分。existing が上回るなら、住民を増やす。商業を塗ると工業に回る分はさらに減る。
   Office       workers は同じ残りのうちオフィスへ回る分（工業とオフィスが両方塗られていれば 4 割）。existing が上回るなら、住民を増やす。
+               働き手といまの職場が釣り合うと、demand は小さな負（-1〜-18 ほど）で揺れる。これは行き詰まりではなく釣り合いの印で、
+               空き間口があれば、正になったときに建つ。
                工業とオフィスの税が負なら、その区画の税を下げる。
 
 observe の税の影響（税率を上げたときの代償）:
@@ -193,7 +195,7 @@ observe の removedCrosswalks:
       始点か終点が道路のないマスで、引く向きの 1 歩外に道路（高速道路は内側の端だけ）があれば、そのマスまで 1 マス
       延ばして交差点でつなぐ（延ばした 1 マスも費用がかかる）。延ばしたときは結果の joined に実際の from と to が出る。
       平行に隣り合う道路や、1 マス離れた道路にはつながない。所持金が延ばしたぶんに足りないときも延ばさない。
-      "join":false を足すと延ばさない（道路の 1 マス手前で止める行き止まりを引くときに使う。省くと true）。どの道路にもつながらなければ結果に warning が出る。
+      "join":false を足すと延ばさない（道路の 1 マス手前で止める行き止まりを引くときに使う。省くと true）。引いた時点でつながらなくても、同じ配列のあとのコマンドでつながれば出ない（配列の最後でどの道路にもつながらない道路にだけ、結果に warning が出る）。
   {"type":"UpgradeRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
       直線と同じ 1 歩を通る既存の道路の区間を、区間ごと kind に変える（上げるのにも下げるのにも使う）。
       直線の形は BuildRoad と同じ決まりで、直線が区間の一部しか通らなくても、ノードからノードまでの区間全体が変わる。
@@ -534,7 +536,9 @@ fn hash_text(world: &World) -> String {
 ///
 /// 結果は短く、`verbose` のときだけ記録に入った形のコマンドを添える。
 fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: bool) -> Vec<Value> {
-    commands
+    // 引いた時点でどの道路にもつながらなかった道路。配列の最後に、あとのコマンドでつながったかを判定し直す。
+    let mut isolated_roads: Vec<(usize, TilePos, TilePos)> = Vec::new();
+    let mut results: Vec<Value> = commands
         .iter()
         .enumerate()
         .map(|(i, value)| {
@@ -595,12 +599,40 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                 }
             };
             out["outcome"] = json!(outcome);
-            if isolated && outcome == "Applied" {
-                out["warning"] = json!(ISOLATED_ROAD_WARNING);
+            if isolated
+                && outcome == "Applied"
+                && let Command::BuildRoad { from, to, .. } = command
+            {
+                isolated_roads.push((i, from, to));
             }
             out
         })
-        .collect()
+        .collect();
+    for (i, from, to) in isolated_roads {
+        if !is_joined_after(world, from, to) {
+            results[i]["warning"] = json!(ISOLATED_ROAD_WARNING);
+        }
+    }
+    results
+}
+
+/// 引いたあとの網で、道路 `from` → `to` が、自分の線の外へ延びる別の区間につながっているか。
+/// 区間の両端が線の上にあれば、その区間は自分の一部である。
+fn is_joined_after(world: &World, from: TilePos, to: TilePos) -> bool {
+    let net = world.network();
+    let Ok(line) = Line::between(from, to) else {
+        return true;
+    };
+    let on_line = |t: TilePos| line.position_of(t).is_some();
+    line.tiles().any(|t| {
+        net.segments_through(t).into_iter().any(|id| {
+            net.segment(id).is_some_and(|seg| {
+                [seg.a, seg.b]
+                    .into_iter()
+                    .any(|n| net.node(n).is_some_and(|n| !on_line(n.tile())))
+            })
+        })
+    })
 }
 
 /// BuildRoad の `"join"`（延ばさない指定）を取り除いて返す。省くと true である。BuildRoad 以外には書けない。
@@ -617,7 +649,7 @@ fn take_join(value: &Value) -> Result<(Value, bool), String> {
         .ok_or_else(|| "join は true か false で書く".into())
 }
 
-/// 引いた道路がどの道路ともつながらなかったときの知らせ。
+/// 配列の最後になっても、引いた道路がどの道路ともつながらなかったときの知らせ。
 const ISOLATED_ROAD_WARNING: &str = "既存の道路につながっていない。電気と水道が届かず、区画が建たない（端を既存の道路や高速道路の端に合わせるとつながる）";
 
 /// 道路 `from` → `to` が、引く前の網のどこかにつながるか。道路が 1 本もない網では比べるものがないので真にする。
