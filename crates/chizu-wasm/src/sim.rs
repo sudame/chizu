@@ -1117,12 +1117,12 @@ mod tests {
         assert!(sim.city_stats()[3] > 0.0);
     }
 
-    /// つながっていない通りの発電所は、孤立した施設として出る。余りは主の網だけで数え、ほかの網に分ける。
     #[test]
     fn a_new_city_has_no_parking_shortage() {
         assert!(Sim::new(0).parking_shortage().is_empty());
     }
 
+    /// つながっていない通りの発電所は、孤立した施設として出る。余りは主の網だけで数え、ほかの網に分ける。
     #[test]
     fn isolated_facilities_and_main_network_numbers_are_reported_apart() {
         let mut sim = Sim::new(0);
