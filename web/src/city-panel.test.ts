@@ -7,6 +7,7 @@ import {
   demandFactorLines,
   factorLabel,
   formatCityNumbers,
+  formatPeople,
   formatUtilities,
   parseCityStats,
   shownZone,
@@ -42,6 +43,9 @@ describe("街の数字", () => {
       mainDemand: 25,
       powerOthers: 1,
       waterOthers: 0,
+      powerPeople: 0,
+      waterPeople: 0,
+      peopleKnown: false,
       demandFactors: [[], [], [], []],
     });
     expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 0, 1200, 1, 2]))).toBe(
@@ -63,6 +67,30 @@ describe("街の数字", () => {
     expect(utilityLowHeadroom(stats)?.reasons).toEqual([
       "電気の余りが 2% になった。発電所を足す用意をする",
     ]);
+  });
+
+  test("余りが住民の何人分かを、電気と水道の欄と余りの知らせに添える", () => {
+    // 主の網は電気 3,600 に需要 3,500。余りは電気が約 40 人分、水道が 1,234 人分、人数が決まっている。
+    const known = parseCityStats([
+      5, 0, 0, 0, 0, 0, 0, 3600, 5000, 3500, 0, 0, 0, 0, 0, 0, 3600, 5000, 3500, 0, 0, 40, 1234, 1,
+    ]);
+    expect(formatUtilities(known)).toBe(
+      "電気 3,600 / 需要 3,500（あと 約 40 人分）・水道 5,000 / 需要 3,500（あと 約 1,230 人分）",
+    );
+    expect(utilityLowHeadroom(known)?.reasons).toEqual([
+      "電気の余りが 2% になった（あと 約 40 人分）。発電所を足す用意をする",
+    ]);
+    // 人口が 0 などで人数が決まらないときは出さない
+    const unknown = parseCityStats([
+      5, 0, 0, 0, 0, 0, 0, 3600, 5000, 3500, 0, 0, 0, 0, 0, 0, 3600, 5000, 3500, 0, 0, 0, 0, 0,
+    ]);
+    expect(formatUtilities(unknown)).toBe("電気 3,600 / 需要 3,500・水道 5,000 / 需要 3,500");
+  });
+
+  test("足りないときは、足りない人数で言う", () => {
+    expect(formatPeople(-1234)).toBe("約 1,230 人分足りない");
+    expect(formatPeople(0)).toBe("あと 約 0 人分");
+    expect(formatPeople(42)).toBe("あと 約 42 人分");
   });
 
   test("届いていない建物がなければ知らせない", () => {
@@ -140,7 +168,7 @@ describe("街の数字", () => {
 describe("需要の内訳", () => {
   // 住宅 2 件、商業 0 件、工業 0 件、オフィス 3 件の内訳。件数のあとに [kind, value] が続く。
   const tail = [2, 0, 20, 4, -30, 0, 0, 3, 7, 140, 3, -9, 8, -200];
-  const stats = parseCityStats([...new Array(21).fill(0), ...tail]);
+  const stats = parseCityStats([...new Array(24).fill(0), ...tail]);
 
   test("city_stats の末尾から区画の種類ごとの内訳を読む", () => {
     expect(stats.demandFactors).toEqual([
@@ -157,7 +185,7 @@ describe("需要の内訳", () => {
       ],
     ]);
     // 内訳が付いていない並びでも読める。
-    expect(parseCityStats(new Array(21).fill(0)).demandFactors).toEqual([[], [], [], []]);
+    expect(parseCityStats(new Array(24).fill(0)).demandFactors).toEqual([[], [], [], []]);
   });
 
   test("寄与の大きい順に並べ、正と負が分かる言葉で出す", () => {
@@ -170,16 +198,16 @@ describe("需要の内訳", () => {
   });
 
   test("寄与が 0 の要因は出さず、同じ大きさなら正が先に来る", () => {
-    const s = parseCityStats([...new Array(21).fill(0), 2, 1, 0, 3, 0, 0, 0, 0]);
+    const s = parseCityStats([...new Array(24).fill(0), 2, 1, 0, 3, 0, 0, 0, 0]);
     expect(demandFactorLines(s, 0)).toEqual([]);
-    const tie = parseCityStats([...new Array(21).fill(0), 2, 3, -5, 1, 5, 0, 0, 0]);
+    const tie = parseCityStats([...new Array(24).fill(0), 2, 3, -5, 1, 5, 0, 0, 0]);
     expect(demandFactorLines(tie, 0).map((l) => l.value)).toEqual([5, -5]);
   });
 
   test("幸福度と税は、符号で言い方が変わる", () => {
-    const s = parseCityStats([...new Array(21).fill(0), 2, 2, 10, 3, 12, 0, 0, 0]);
+    const s = parseCityStats([...new Array(24).fill(0), 2, 2, 10, 3, 12, 0, 0, 0]);
     expect(demandFactorLines(s, 0).map((l) => l.label)).toEqual(["税が低い", "幸福度が高い"]);
-    const bad = parseCityStats([...new Array(21).fill(0), 2, 2, -10, 3, -12, 0, 0, 0]);
+    const bad = parseCityStats([...new Array(24).fill(0), 2, 2, -10, 3, -12, 0, 0, 0]);
     expect(demandFactorLines(bad, 0).map((l) => l.label)).toEqual(["税が高い", "幸福度が低い"]);
   });
 

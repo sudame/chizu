@@ -22,7 +22,7 @@ pub const OVERVIEW_LENGTH: usize = 21;
 
 /// [`Sim::city_stats`] が返す数のうち、固定の並びの個数。そのあとに需要の内訳が続く。
 /// 画面の側は `city-stats-layout.json` から読むので、変えたら `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` で書き直す。
-pub const CITY_STATS_FIXED: usize = 21;
+pub const CITY_STATS_FIXED: usize = 24;
 
 /// 画面の側が読む、街の数字の並びと要因の番号の表。
 pub fn city_stats_layout_json() -> String {
@@ -528,12 +528,14 @@ impl Sim {
         out
     }
 
-    /// 街の数字を次の 21 個の数で返す。建物の数、世帯の上限、雇える職場の数（税率が高いと建物の上限より少ない）、
+    /// 街の数字を次の 24 個の数で返す。建物の数、世帯の上限、雇える職場の数（税率が高いと建物の上限より少ない）、
     /// 住宅・商業・工業・オフィスの需要、電気の供給量、水道の供給量、電気と水道の需要、
     /// 電気と水道のそれぞれで供給量が需要に足りない網の数、
     /// 電気と水道のそれぞれで施設のない網の数、電気と水道のそれぞれの不足量、
     /// 主の網（需要がいちばん大きい網）の電気の供給量、水道の供給量、需要、
-    /// 主の網以外で施設か建物のある網の数（電気、水道の順）。
+    /// 主の網以外で施設か建物のある網の数（電気、水道の順）、
+    /// 主の網の電気と水道の余りが住民の何人分か（足りないときは負）、その人数が決まるか（決まれば 1、人口か需要が 0 なら 0）。
+    /// 人数の求め方は `chizu_core::service::headroom_people` にある。建物がまだなく主の網がないうちは、施設の供給量の合計で見る。
     /// 供給量は道路網につながった施設の合計である。余りは網をまたいで足さず、主の網で見る。
     /// そのあとに、需要の内訳が続く。区画の種類ごとに、要因の数と、要因ごとの `[要因の番号, 寄与]` を並べる。
     pub fn city_stats(&self) -> Vec<f64> {
@@ -549,7 +551,9 @@ impl Sim {
         ];
         let breakdown = demand_factors(&self.world.city_stats());
         out.extend(breakdown.totals().map(|d| d as f64));
-        out.extend(self.utility_numbers());
+        let utility = self.utility_numbers();
+        out.extend(utility);
+        out.extend(self.headroom_people_numbers(&utility));
         debug_assert_eq!(out.len(), CITY_STATS_FIXED);
         // 固定の並びのあとに、需要の内訳を区画の種類（住宅・商業・工業・オフィスの順）ごとに並べる。
         // 種類ごとに、要因の数、そのあとに要因ごとの `[要因の番号, 寄与]`。番号は `DemandFactorKind` の値である。
@@ -561,6 +565,39 @@ impl Sim {
             }
         }
         out
+    }
+
+    /// 街の数字のうち、余りが住民の何人分かの 3 個。`utility` は [`Sim::utility_numbers`] の値である。
+    /// 住民の数は建物の表が変わらなくても動くので、キャッシュの外で毎回求める。
+    fn headroom_people_numbers(&self, utility: &[f64; 14]) -> [f64; 3] {
+        let [
+            power,
+            water,
+            need,
+            ..,
+            main_power,
+            main_water,
+            main_need,
+            _,
+            _,
+        ] = *utility;
+        let (power, water, demand) = if main_need > 0.0 {
+            (main_power, main_water, main_need)
+        } else {
+            (power, water, need)
+        };
+        let citizens = self.world.city_stats().citizens;
+        let people = |capacity: f64| {
+            chizu_core::service::headroom_people(
+                capacity as i128 - demand as i128,
+                need as u64,
+                citizens,
+            )
+        };
+        match (people(power), people(water)) {
+            (Some(p), Some(w)) => [p as f64, w as f64, 1.0],
+            _ => [0.0, 0.0, 0.0],
+        }
     }
 
     /// 街の数字のうち、電気と水道の 14 個。電気の供給量、水道の供給量、需要、足りない網の数（電気、水道）、
@@ -921,6 +958,8 @@ mod tests {
         let version = sim.buildings_version();
         assert!(sim.buildings().is_empty());
         assert_eq!(sim.city_stats()[..3], [0.0, 0.0, 0.0]);
+        // 人口がないうちは人数が決まらない
+        assert_eq!(sim.city_stats()[21..24], [0.0, 0.0, 0.0]);
         sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
         let buildings = sim.buildings();
         let count = sim.world().buildings().len();
@@ -1096,6 +1135,14 @@ mod tests {
                 0.0
             ]
         );
+        // 主の網は電気が 0 で足りない。水道は余りがあるので正、電気は負の人数になる。
+        let citizens = sim.world().city_stats().citizens;
+        if citizens > 0 {
+            assert_eq!(stats[23], 1.0, "{stats:?}");
+            assert!(stats[21] < 0.0 && stats[22] > 0.0, "{stats:?}");
+        } else {
+            assert_eq!(stats[21..24], [0.0, 0.0, 0.0], "{stats:?}");
+        }
         let isolated = sim.isolated_facilities();
         assert_eq!(isolated.len(), 3, "{isolated:?}");
         assert_eq!(isolated[2], f64::from(ServiceKind::PowerPlant as u8));

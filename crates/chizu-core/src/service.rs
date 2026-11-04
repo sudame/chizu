@@ -170,6 +170,20 @@ impl Balance {
     }
 }
 
+/// 余りが住民の何人分にあたるか。読み取り用で、状態には入れない。
+///
+/// 住民 1 人あたりの需要は、街の需要の合計（`total_demand`。住宅だけでなく、商業・工業・オフィスの職場の分も含む）を
+/// 人口（`citizens`）で割ったものとする。人数は `headroom × citizens ÷ total_demand` を整数で求め、小数は切り捨てる
+/// （余りが負のときは、足りない人数を多めに数える向きに丸める）。
+/// 余りが負なら、足りない人数が負の値で返る。
+/// 人口が 0、または需要の合計が 0 で 1 人あたりの需要が決まらないときは `None`。
+pub fn headroom_people(headroom: i128, total_demand: u64, citizens: u64) -> Option<i128> {
+    if citizens == 0 || total_demand == 0 {
+        return None;
+    }
+    Some((headroom * i128::from(citizens)).div_euclid(i128::from(total_demand)))
+}
+
 /// 道路網の連結成分ごとの、電気と水道の釣り合い。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SupplyBalance {
@@ -553,5 +567,37 @@ pub fn supply_balance(
         spots: spots.into_iter().map(|s| s.map(|(_, p)| p)).collect(),
         components: order.keys().map(|r| t.balance[*r]).collect(),
         segments: roots.into_iter().map(|(id, r)| (id, order[&r])).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::headroom_people;
+
+    #[test]
+    fn headroom_is_divided_by_demand_per_citizen() {
+        // 需要の合計 2,300 を 1,000 人で使う街（1 人あたり 2.3）。余り 920 は 400 人分。
+        assert_eq!(headroom_people(920, 2300, 1000), Some(400));
+    }
+
+    #[test]
+    fn fractions_round_down() {
+        // 920 / 2.3 = 400。余り 919 は 399.56 人なので 399 人。
+        assert_eq!(headroom_people(919, 2300, 1000), Some(399));
+        assert_eq!(headroom_people(0, 2300, 1000), Some(0));
+    }
+
+    #[test]
+    fn a_shortage_is_a_negative_number_of_people() {
+        assert_eq!(headroom_people(-230, 2300, 1000), Some(-100));
+        // 足りない人数は多めに数える
+        assert_eq!(headroom_people(-1, 2300, 1000), Some(-1));
+    }
+
+    #[test]
+    fn unknown_without_people_or_demand() {
+        assert_eq!(headroom_people(500, 2300, 0), None);
+        assert_eq!(headroom_people(500, 0, 1000), None);
+        assert_eq!(headroom_people(500, 0, 0), None);
     }
 }
