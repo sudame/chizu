@@ -1600,8 +1600,8 @@ fn driving_golden() {
 }
 
 /// 同じ道路の碁盤の目に区画を塗った記録。西の 2 列の区画は住宅、東の 2 列はオフィスと商業にする。
-/// 区画の角から向かいの角へは、費用の同じ経路がたくさんある。
-fn grid_city() -> CommandLog {
+/// 区画の角から向かいの角へは、費用の同じ経路がたくさんある。道路の種類は `kind` にする。
+fn grid_city(kind: RoadKind) -> CommandLog {
     let mut log = CommandLog::new();
     let mut rec = |tick: u64, c: Command| {
         log.record(Tick(tick), c).unwrap();
@@ -1613,7 +1613,7 @@ fn grid_city() -> CommandLog {
                 Command::BuildRoad {
                     from: TilePos::new(from.0, from.1),
                     to: TilePos::new(to.0, to.1),
-                    kind: RoadKind::Small,
+                    kind,
                 },
             );
         }
@@ -1659,7 +1659,7 @@ fn grid_city() -> CommandLog {
 fn grid_driving_golden() {
     const SEED: u64 = 42;
     const TICKS: u64 = 2_600;
-    let log = grid_city();
+    let log = grid_city(RoadKind::Small);
     let mut world = World::new(SEED);
     let stats = replay(&mut world, &log, 4);
     assert_eq!(stats.denied, 0);
@@ -1707,6 +1707,27 @@ fn grid_driving_golden() {
         "同じ 2 つのリンクを結ぶ車が、みな同じ経路を通る"
     );
     compare_golden("grid_driving_burst", &burst);
+    assert!(
+        end.trips().len() < 200,
+        "着かずに残った移動が多い {}",
+        end.trips().len()
+    );
+}
+
+/// 片側 2 車線の中くらいの道路の碁盤の目で車を行き来させる。2 車線の腕から 2 車線の腕へ曲がる車が、
+/// 交差点の先の車線ごとに合流と道筋の交わりを決める。その決め方を変えると、ハッシュが変わる。
+#[test]
+fn medium_grid_driving_golden() {
+    const SEED: u64 = 42;
+    const TICKS: u64 = 2_600;
+    let log = grid_city(RoadKind::Medium);
+    let mut world = World::new(SEED);
+    let stats = replay(&mut world, &log, 4);
+    assert_eq!(stats.denied, 0);
+    let (got, spawned, end) = driving_checkpoints_on(&log, SEED, TICKS);
+    assert!(spawned > 300, "作れた移動が少ない {spawned}");
+    assert_eq!(driving_checkpoints_on(&log, SEED, TICKS).0, got);
+    compare_golden("medium_grid_driving", &got);
     assert!(
         end.trips().len() < 200,
         "着かずに残った移動が多い {}",

@@ -113,13 +113,14 @@ impl Cars {
 
 #[test]
 fn a_car_on_the_minor_road_yields_to_the_main_road() {
-    // 中くらいの道路を東へ走る車と、北から来て東へ合流する小さい道路の車。
+    // 中くらいの道路を東へ走る車と、北から来て右へ曲がり、西へ向かう小さい道路の車。右折は東へ走る車の
+    // 道筋と、どの車線を走っていても交わる。
     let mut n = Network::new();
     road(&mut n, (0, 10), (30, 10), RoadKind::Medium);
     road(&mut n, (10, 0), (10, 10), RoadKind::Small);
     let mut c = Cars::new(n);
     let main = c.drive(at(5, 10, (1, 0), 0), at(25, 10, (1, 0), 0));
-    let side = c.drive(at(10, 8, (0, 1), 4_000), at(25, 10, (1, 0), 0));
+    let side = c.drive(at(10, 8, (0, 1), 4_000), at(2, 10, (-1, 0), 0));
     let (main_first, side_first) = (
         c.trips.get(main).unwrap().link(),
         c.trips.get(side).unwrap().link(),
