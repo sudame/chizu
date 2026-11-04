@@ -8,7 +8,7 @@ use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
 use chizu_core::world::economy::{chunk_slots, milestone_population};
 use chizu_core::world::growth::GROWTH_INTERVAL;
-use chizu_core::zone::{ZONE_DEPTH, near_road};
+use chizu_core::zone::ZONE_DEPTH;
 use chizu_core::{
     ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
     Layer, Line, NodeControl, SegmentKind, ServiceKind, StateHasher, TerrainTiles, Tick, TilePos,
@@ -130,6 +130,21 @@ impl Sim {
         let outcome = self.world.apply_recorded(seq, &command);
         if outcome == ApplyOutcome::Applied {
             self.mark_near_road_changes(&touched);
+            // 隣のチャンクを買うと、辺の近くの塗れるマスが変わる。
+            if let Command::BuyChunk { coord } = command {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let n = ChunkCoord::new(
+                            coord.cx.saturating_add(dx),
+                            coord.cy.saturating_add(dy),
+                        );
+                        if (dx, dy) != (0, 0) && self.world.chunk(n).is_some() {
+                            let c = self.near_road_changes.entry(n).or_insert(0);
+                            *c = c.wrapping_add(1);
+                        }
+                    }
+                }
+            }
         }
         self.reports.push(Report { seq, outcome });
         Ok(seq)
@@ -162,7 +177,7 @@ impl Sim {
         let max = TilePos::new(min.x + side - 1, min.y + side - 1);
         let near = chunk
             .owned()
-            .then(|| near_road(self.world.network(), TileRect { min, max }));
+            .then(|| self.world.buildable_mask(TileRect { min, max }, None));
         for (i, tile) in tiles.iter_mut().enumerate() {
             let road = layer.occupancy[i] == TileUse::Road;
             if road {
@@ -642,7 +657,7 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::NothingToBulldoze => "範囲に取り壊せるものがない",
         DenyReason::NotAdjacent => "買った土地に接していない",
         DenyReason::AlreadyOwned => "もう買ってある",
-        DenyReason::NoZonableTile => "道路沿いに区画を塗れるマスがない",
+        DenyReason::NoZonableTile => "道路に面した所から続く、区画を塗れるマスがない",
         DenyReason::ZoneUnchanged => "変わるマスがない",
         DenyReason::Occupied => "ほかの施設か道路がある",
         DenyReason::NoRoadAccess => "道路に面していない",
@@ -799,7 +814,20 @@ mod tests {
                 .all(|r| r.outcome == ApplyOutcome::Applied)
         );
         assert!(!zonable(&sim, water.0, water.1));
-        assert!(zonable(&sim, water.0 + 1, water.1));
+        // 道路の脇で、水辺でないマスは塗れる
+        let beside = [-1, 1]
+            .into_iter()
+            .map(|dy| (water.0 + 3, water.1 + dy))
+            .find(|&(x, y)| {
+                let t = TilePos::new(x, y);
+                let (lx, ly) = t.local();
+                t.chunk().is_some_and(|c| {
+                    sim.world().chunk(c).is_some()
+                        && sim.chunk_tiles(c)[ly * CHUNK_SIDE + lx] & TILE_WATER == 0
+                })
+            })
+            .expect("道路の脇に水辺でないマスがない");
+        assert!(zonable(&sim, beside.0, beside.1));
     }
 
     #[test]

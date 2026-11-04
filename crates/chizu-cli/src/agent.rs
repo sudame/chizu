@@ -205,7 +205,10 @@ observe の removedCrosswalks:
   {"type":"Bulldoze","area":[[x,y],[x,y]]}
       範囲の道路、施設、建物を取り壊す。
   {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"Commercial"|"Industrial"|"Office"|null}
-      区画を塗る。null は消す。道路から 6 マス以内の空きマスだけが塗られる。1 辺は 256 マスまで。
+      区画を塗る。null は消す。塗れるのは、建物が建つマス（道路に面した空きマスと、そこから道路と反対へ
+      6 マスまで、塗れるマスが途切れず続く空きマス）だけである。道路の脇を空けて奥だけを塗る、道路の端の外や
+      空きを挟んだ先を塗る、といった塗れないマスが混ざると、塗れるマスだけを塗って AppliedPartly を返す。
+      塗れるマスが 1 つもなければ Denied（NoZonableTile）である。1 辺は 256 マスまで。
   {"type":"PlaceBuilding","kind":"PowerPlant"|"WaterPump","at":[x,y],"rotation":0..3}
       施設を置く。発電所は 4×4 で 60000、浄水場は 2×2 で 25000。at は間口の角のマスで、
       rotation 0、1、2、3 のとき、at から y-1、x+1、y+1、x-1 の向きに 1 歩のマスが道路でなければならない。
@@ -244,10 +247,11 @@ observe の removedCrosswalks:
 act の結果:
   results に、コマンドごとに outcome を返す。
     Applied        受け付けた
+    AppliedPartly  一部だけ受け付けた。PaintZone で、道路に面した所から続かないマスを塗らなかった。reason は NoZonableTile
     Denied         いまの状態では受け付けなかった。reason に理由（NotOwned、NotEnoughMoney など）がある
     NotImplemented 中核にまだ中身がない
     Invalid        形か値が正しくない。message に理由がある。記録には足さない
-  Applied、Denied、NotImplemented は記録に足す。画面で遊んだときと同じ扱いである。
+  Applied、AppliedPartly、Denied、NotImplemented は記録に足す。画面で遊んだときと同じ扱いである。
   reason が NotOwned のときは notOwned も付き、買っていない土地のマスを示す。
     count 買っていないマスの数、tiles そのマス（先頭の 16 個まで）、
     chunks そのマスを含むチャンクのうち、いま BuyChunk で買えるもの（買った土地と辺で接する。先頭の 16 個まで）、
@@ -592,6 +596,10 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
             #[deny(clippy::wildcard_enum_match_arm)]
             let outcome = match world.apply_recorded(seq, &command) {
                 ApplyOutcome::Applied => "Applied",
+                ApplyOutcome::AppliedPartly(reason) => {
+                    out["reason"] = json!(format!("{reason:?}"));
+                    "AppliedPartly"
+                }
                 ApplyOutcome::NotImplemented => "NotImplemented",
                 ApplyOutcome::Rejected => "Rejected",
                 ApplyOutcome::Denied(reason) => {

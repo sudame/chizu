@@ -108,12 +108,15 @@ impl Simulation {
                 set(&o, "seq", JsValue::from_f64(r.seq as f64));
                 let outcome = match r.outcome {
                     ApplyOutcome::Applied => "Applied",
+                    ApplyOutcome::AppliedPartly(_) => "AppliedPartly",
                     ApplyOutcome::NotImplemented => "NotImplemented",
                     ApplyOutcome::Rejected => "Rejected",
                     ApplyOutcome::Denied(_) => "Denied",
                 };
                 set(&o, "outcome", JsValue::from_str(outcome));
-                if let ApplyOutcome::Denied(reason) = r.outcome {
+                if let ApplyOutcome::Denied(reason) | ApplyOutcome::AppliedPartly(reason) =
+                    r.outcome
+                {
                     set(&o, "reason", JsValue::from_str(sim::deny_text(reason)));
                 }
                 JsValue::from(o)

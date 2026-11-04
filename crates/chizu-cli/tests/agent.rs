@@ -337,7 +337,7 @@ fn discards_broken_or_foreign_caches() {
     );
 }
 
-/// 道路と区画を置いた小さな街。道路は y=0 の x=0〜20 を Medium で引き、区画は x=0〜24、y=1〜6 の住宅である。
+/// 道路と区画を置いた小さな街。道路は y=0 の x=0〜20 を Medium で引き、区画は x=0〜24、y=1〜6 の住宅を塗るが、塗れるのは道路に沿った x=0〜20 だけである。
 fn small_town(name: &str) -> PathBuf {
     let dir = session(name);
     let d = dir.to_str().unwrap();
@@ -364,13 +364,13 @@ fn grid_rows(map: &str, rows: usize, cols: usize) -> Vec<String> {
 fn map_shows_roads_zones_and_land() {
     let dir = small_town("agent-map");
     let d = dir.to_str().unwrap();
-    // x -2〜22、y -2〜7。区画は x=24 までなので、右端の外までは出ない。
+    // x -2〜22、y -2〜7。道路の端の外（x=21 以降）は間口がなく、塗れない。
     let map = cli(&["agent", "map", d, "-2", "-2", "22", "7"]);
     assert!(map.contains("凡例"), "{map}");
     assert!(map.contains("25×10 文字"), "{map}");
     let flat = ".".repeat(25);
     let road = format!("..{}..", "2".repeat(21));
-    let zone = format!("..{}", "r".repeat(23));
+    let zone = format!("..{}..", "r".repeat(21));
     let mut want = vec![flat.clone(), flat.clone(), road];
     want.extend(std::iter::repeat_n(zone, 6));
     want.push(flat);
@@ -1411,4 +1411,34 @@ fn observe_demand_factors_add_up_to_the_demand() {
         assert_eq!(sum, obs["demand"][zone].as_i64().unwrap(), "{zone}: {obs}");
     }
     assert_eq!(obs["demandFactors"]["Residential"][0]["factor"], "base");
+}
+
+#[test]
+fn paint_zone_skips_tiles_cut_off_from_the_road_and_says_so() {
+    let dir = session("agent-paint-frontage");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let road = write(
+        &dir.join("road.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[20,0],"kind":"Medium"}]"#,
+    );
+    cli(&["agent", "act", d, &road]);
+    // 道路の脇（y=1）を空けて、その奥（y=2〜6）だけを塗る。道路から切れているので 1 マスも塗れない。
+    let cut = write(
+        &dir.join("cut.json"),
+        r#"[{"type":"PaintZone","area":[[2,2],[8,6]],"zone":"Residential"}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cut]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "Denied", "{acted}");
+    assert_eq!(r["reason"], "NoZonableTile", "{acted}");
+    // 脇から奥まで一度に塗れば、続く所は塗れる。道路の端の外は間口がなく、塗れない。
+    let ok = write(
+        &dir.join("ok.json"),
+        r#"[{"type":"PaintZone","area":[[2,1],[24,6]],"zone":"Residential"}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &ok]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "AppliedPartly", "{acted}");
+    assert_eq!(r["reason"], "NoZonableTile", "{acted}");
 }
