@@ -143,7 +143,7 @@ pub(super) fn given_up(t: &Trip) -> bool {
 ///
 /// 駐車場から出る車がこの車線で後ろへ下がって入ると、交差点から入ろうとする車の空きを先に取ってしまう。
 /// 列が詰まっていると、交差点の先頭の車は空きを待ち続け、その手前の交差点まで列が延びて輪になる。
-/// 先頭の車は車線の車の数で入る車線を選ぶので、駐車場から出る車を置くと選ぶ車線が変わりうる。そのため、
+/// 先頭の車は車線の車の数と空きで入る車線を選ぶので、駐車場から出る車を置くと選ぶ車線が変わりうる。そのため、
 /// 選びうる車線をすべて守る。
 #[derive(Default)]
 pub(super) struct Entering(BTreeSet<LaneId>);
@@ -312,6 +312,37 @@ pub(super) fn choose_lane(
 ) -> LaneId {
     lane_choices(net, conn, from, node, next, after)
         .into_iter()
+        .min_by_key(|l| (st.count(*l), *l))
+        .expect("候補の車線がない")
+}
+
+/// 交差点で `next` のリンクへ入る車線。左側通行なので、左へ曲がる車は道路の端の車線に、右へ曲がる車は
+/// 中央寄りの車線に入る。こうすると、同じリンクへ左と右から曲がって入る車が、別の車線へ同時に入れる。
+/// その車線に交差点を抜けきるだけの空き（`room`）がなければ、直進と同じく [`choose_lane`] で選ぶ。
+#[allow(clippy::too_many_arguments)]
+fn junction_lane(
+    net: &Network,
+    conn: &[Connector],
+    st: &LaneState,
+    t: &Trip,
+    node: NodeId,
+    next: LinkId,
+    after: Option<LinkId>,
+    room: impl Fn(&LaneId) -> bool,
+) -> LaneId {
+    let pool = lane_choices(net, conn, t.lane, node, next, after);
+    if pool.len() > 1 {
+        let index = |l: &LaneId| net.link_lanes(next).position(|x| x == *l);
+        let side = match junction::Move::new(net, t.link(), next).bend() {
+            1..=3 => pool.iter().min_by_key(|l| index(l)),
+            5..=7 => pool.iter().max_by_key(|l| index(l)),
+            _ => None,
+        };
+        if let Some(l) = side.filter(|l| room(l)) {
+            return *l;
+        }
+    }
+    pool.into_iter()
         .min_by_key(|l| (st.count(*l), *l))
         .expect("候補の車線がない")
 }
@@ -673,6 +704,7 @@ fn look(
                 node,
                 from: prev,
                 to: t.link(),
+                lane: t.lane,
                 stopped: t.speed == MmPerTick::ZERO,
             });
         }
@@ -685,16 +717,20 @@ fn look(
     let node = end_node(net, t.link());
     let next = t.route.links[t.leg as usize + 1];
     let after = t.route.links.get(t.leg as usize + 2).copied();
-    let to_lane = choose_lane(net, conn, st, t.lane, node, next, after);
-    out.next_lane = Some(to_lane);
     if !junction::is_junction(net, node) {
+        out.next_lane = Some(choose_lane(net, conn, st, t.lane, node, next, after));
         return out;
     }
     // 先の車線の最後尾がこの tick も同じ速さで進むとして、入った車が交差点を抜けきれるか。
     // 抜けきれそうになければ、ノードの手前に止まる。
-    let room = st.rear.get(&to_lane).is_none_or(|(at, v)| {
-        i64::from(at.0) + i64::from(v.0) >= i64::from(room_needed(net, node))
-    });
+    let room = |l: &LaneId| {
+        st.rear.get(l).is_none_or(|(at, v)| {
+            i64::from(at.0) + i64::from(v.0) >= i64::from(room_needed(net, node))
+        })
+    };
+    let to_lane = junction_lane(net, conn, st, t, node, next, after, room);
+    out.next_lane = Some(to_lane);
+    let room = room(&to_lane);
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
     out.approach = Some(Approach {
         id: k,
@@ -702,6 +738,7 @@ fn look(
         from: t.link(),
         to: next,
         lane,
+        to_lane,
         class: junction::class(seg.kind),
         committed: stop_speed(t) < i64::from(t.speed.0) - i64::from(CAR_DECEL),
         room,

@@ -530,3 +530,37 @@ fn a_waiting_car_that_gets_a_place_starts_counting_again() {
     assert!(!t.waiting);
     assert_eq!(t.stalled, 0);
 }
+
+#[test]
+fn cars_turning_into_the_same_road_from_both_sides_take_separate_lanes() {
+    // 南北の中くらいの道路（片側 2 車線）に、西と東から小さい道路が突き当たる。西の車は右へ、東の車は左へ
+    // 曲がって、どちらも南へ向かう。左へ曲がる車は道路の端の車線に、右へ曲がる車は中央寄りの車線に入り、
+    // 同じリンクへ同時に入れる。
+    let mut n = Network::new();
+    road(&mut n, (10, 0), (10, 30), RoadKind::Medium);
+    road(&mut n, (0, 10), (10, 10), RoadKind::Small);
+    road(&mut n, (10, 10), (20, 10), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let to = at(10, 25, (0, 1), 0);
+    let west = c.drive(at(8, 10, (1, 0), 4_000), to);
+    let east = c.drive(at(12, 10, (-1, 0), 4_000), to);
+    let south = link(&c.net, (10, 10), (10, 11));
+    let lanes: Vec<LaneId> = c.net.link_lanes(south).collect();
+    let mut entered = [None; 2];
+    for tick in 0..60_u32 {
+        c.step();
+        for (k, id) in [west, east].into_iter().enumerate() {
+            let Some(t) = c.trips.get(id) else { continue };
+            if entered[k].is_none() && car::on_road(t) && t.link() == south {
+                entered[k] = Some((tick, t.lane()));
+            }
+        }
+    }
+    let [Some((tw, lw)), Some((te, le))] = entered else {
+        panic!("南へ入らない {entered:?}");
+    };
+    assert!(tw.abs_diff(te) <= 1, "片方が待った {tw} {te}");
+    assert_eq!((le, lw), (lanes[0], lanes[1]));
+    assert_eq!(c.trips.rescues(), Rescues::default());
+    assert_eq!(c.hard_brakes, 0, "減速の上限を越えた");
+}
