@@ -575,6 +575,9 @@ fn observe_gives_people_and_traffic_counts() {
         n(&cars["moving"]) + n(&cars["stopped"]) + n(&cars["waitingAtCurb"])
     );
     assert_eq!(n(&cars["stoppedAfterTicks"]), 100);
+    // 速さ 0 の車は、動けなくなった車を含み、駐車場の中で待つ車を含まない。
+    assert!(n(&cars["queued"]) >= n(&cars["stopped"]), "{cars}");
+    assert!(n(&cars["queued"]) + n(&cars["waitingAtCurb"]) <= n(&cars["total"]));
     let trips = &o["traffic"]["trips"];
     let yesterday = &trips["yesterday"];
     assert!(n(&yesterday["arrived"]) > 0, "前の日に誰も着いていない");

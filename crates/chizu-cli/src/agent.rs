@@ -87,7 +87,10 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  （道路の種類を下げて車線を外れ、車線に戻るのを待つ車も含む）、
                  waitingAtCurb 建物の駐車場の中で、車線に出る順番を待っている車、moving それ以外。
                  着く車は駐車場の出入りの位置で車線から外れ、車線の上では止まらない。
-                 stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。waitingAtCurb が多いのは、
+                 queued 道路の上で、いまこの tick に速さ 0 の車。地図の混み具合の `X` が「止まっている」とみなす物差しと同じで、
+                 信号や交差点で止まっては進む列も入る（moving などとは重なる。合計には足さない）。
+                 stopped は 100 tick 動いていない、動けなくなった車だけを数え、止まっては進む列は入らない。
+                 地図の詰まりと見比べるときは queued を見る。stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。waitingAtCurb が多いのは、
                  建物の前の車線が埋まって出られない車が多いということである。
   traffic.walkers 車道を渡るところの歩く人。atCrosswalks 交差点の横断歩道を渡っているか渡るのを待っている人、
                  midblock 区間の途中で道路を横切っているか横切るのを待っている人。横断歩道は 3 本以上の道路が集まる
@@ -820,6 +823,7 @@ fn cars(world: &World, before: &CarSample) -> Value {
         "total": now.len(),
         "moving": now.len() - stopped - waiting,
         "stopped": stopped,
+        "queued": now.queued_on_road(),
         "waitingAtCurb": waiting,
         "stoppedAfterTicks": STOPPED_TICKS,
     })
@@ -1307,6 +1311,7 @@ const WATCHED: &[&str] = &[
     "/citizenPlaces/homeless",
     "/traffic/cars/total",
     "/traffic/cars/stopped",
+    "/traffic/cars/queued",
     "/traffic/cars/waitingAtCurb",
     "/parking/redirectedCars",
     "/migration/wantingHouseholds",
