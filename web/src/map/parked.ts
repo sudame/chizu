@@ -4,6 +4,7 @@
 // 描画だけで、乱数は使わない。台数が変わると、同じ枠の車は同じ色のまま、増減した枠だけが変わる。
 // 車と人が現れるのと同じ倍率（寄りの段）から出し、細部の段で走る車と同じ窓と屋根を足す。
 
+import { PARKED_STRIDE } from "../protocol/messages.ts";
 import { type Lot, lotKey, type Strip } from "./lots.ts";
 import { CAR_COLORS, carColorIndex } from "./mover-colors.ts";
 import { CAR_FRONT_WINDOW, CAR_REAR_WINDOW } from "./movers.ts";
@@ -29,8 +30,20 @@ export type TileRect = { minX: number; minY: number; maxX: number; maxY: number 
 /** 停めてある台数。建物の左上のマスで引く。 */
 export function parseParked(data: ArrayLike<number>): Map<string, number> {
   const out = new Map<string, number>();
-  for (let i = 0; i + 3 <= data.length; i += 3) {
+  for (let i = 0; i + PARKED_STRIDE <= data.length; i += PARKED_STRIDE) {
     out.set(lotKey(data[i] ?? 0, data[i + 1] ?? 0), data[i + 2] ?? 0);
+  }
+  return out;
+}
+
+/** 停めてある台数のうち、建物の中に停めてある台数。1 台以上ある建物だけを、建物の左上のマスで引く。 */
+export function parseIndoorParked(data: ArrayLike<number>): Map<string, number> {
+  const out = new Map<string, number>();
+  for (let i = 0; i + PARKED_STRIDE <= data.length; i += PARKED_STRIDE) {
+    const indoor = data[i + 3] ?? 0;
+    if (indoor > 0) {
+      out.set(lotKey(data[i] ?? 0, data[i + 1] ?? 0), indoor);
+    }
   }
   return out;
 }

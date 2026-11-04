@@ -85,8 +85,8 @@ export function lotsWellFormed(data: Float64Array): boolean {
   }
   return i === data.length;
 }
-/** 停めてある台数 1 件の数の個数（建物の min の x と y、停めてある台数）。chizu-wasm の parked と同じ。 */
-export const PARKED_STRIDE = 3;
+/** 停めてある台数 1 件の数の個数（建物の min の x と y、停めてある台数、そのうち建物の中の台数）。chizu-wasm の parked と同じ。 */
+export const PARKED_STRIDE = 4;
 /** 建物の供給の値のうち、電気が届いていることを表す値。水道は 2 を足す。 */
 export const SUPPLY_POWER = 1;
 export const SUPPLY_WATER = 2;
@@ -249,7 +249,7 @@ export type WorkerToMain =
     }
   /**
    * 駐車場に停まっている車の台数。chizu-wasm の parked で、Worker がおよそ 1 秒に 1 回、前と違うときだけ送る。
-   * 平面の駐車場のある建物のうち、1 台以上停めている建物ごとに [建物の min の x, min の y, 停めてある台数] が並ぶ。
+   * 駐車場のある建物のうち、1 台以上停めている建物ごとに [建物の min の x, min の y, 停めてある台数, そのうち建物の中の台数] が並ぶ。
    * 毎 tick 変わる値なので三重バッファには入れない。配列は移譲して送る。
    */
   | { kind: "parked"; data: Float64Array }

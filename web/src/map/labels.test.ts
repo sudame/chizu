@@ -7,12 +7,15 @@ import {
   FADE_MS,
   facilityCandidates,
   facilityLabels,
+  indoorChanged,
   LabelFader,
   type LabelKind,
   labelStyle,
   MAX_CANDIDATES,
   type Measure,
   nextLabelStage,
+  parkingCandidates,
+  parkingLabels,
   placeLabels,
   type Rect,
   ROAD_LABEL_REPEAT,
@@ -104,6 +107,7 @@ describe("重なりと優先", () => {
       ["medium", STAGE_STANDARD],
       ["small", STAGE_NEAR],
       ["district", STAGE_NEAR],
+      ["parking", STAGE_NEAR],
     ];
     const priorities = order.map(([kind, stage]) => labelStyle(kind, stage)?.priority);
     expect(priorities).toEqual([...priorities].sort((a = 0, b = 0) => a - b));
@@ -385,5 +389,76 @@ describe("出し入れ", () => {
     expect([...fader.items()][0]?.alpha).toBeCloseTo(0.75);
     fader.step(FADE_MS);
     expect([...fader.items()]).toEqual([]);
+  });
+});
+
+describe("建物の中の駐車場の台数", () => {
+  // 建物 (10, 20)-(11, 21) と、建物 (30, 40)-(30, 40)。供給などの欄は使わない
+  const buildings = [10, 20, 11, 21, 1, 1, 3, 30, 40, 30, 40, 1, 1, 3];
+  const camera = { x: 11, y: 21, zoom: 16 };
+  const vp = { width: 400, height: 300 };
+
+  test("建物の中に停めてある建物だけを、敷地の中心に結ぶ", () => {
+    const labels = parkingLabels(buildings, new Map([["10,20", 12]]));
+    expect(labels).toEqual([{ key: "10,20", x: 11, y: 21, count: 12 }]);
+    expect(parkingLabels(buildings, new Map())).toEqual([]);
+    expect(parkingLabels(buildings, new Map([["99,99", 3]]))).toEqual([]);
+  });
+
+  test("数字は「P 台数」で出し、台数が変わっても同じラベルのまま字だけ変わる", () => {
+    const at = (n: number) =>
+      parkingCandidates(
+        parkingLabels(buildings, new Map([["10,20", n]])),
+        camera,
+        vp,
+        STAGE_NEAR,
+        measure,
+      );
+    const [a] = at(12);
+    const [b] = at(13);
+    expect(a?.text).toBe("P 12");
+    expect(b?.text).toBe("P 13");
+    expect(a?.id).toBe(b?.id);
+    expect(a?.style).toMatchObject({ shield: true, badge: "#1a73e8", color: "#ffffff" });
+  });
+
+  test("寄りと細部の段だけ出す", () => {
+    const labels = parkingLabels(buildings, new Map([["10,20", 5]]));
+    const count = (stage: number) => parkingCandidates(labels, camera, vp, stage, measure).length;
+    expect(count(STAGE_FAR)).toBe(0);
+    expect(count(STAGE_STANDARD)).toBe(0);
+    expect(count(STAGE_NEAR)).toBe(1);
+    expect(count(STAGE_DETAIL)).toBe(1);
+  });
+
+  test("画面の外の建物は出さない", () => {
+    const labels = parkingLabels(
+      buildings,
+      new Map([
+        ["10,20", 5],
+        ["30,40", 2],
+      ]),
+    );
+    const out = parkingCandidates(labels, camera, vp, STAGE_NEAR, measure);
+    expect(out.map((c) => c.text)).toEqual(["P 5"]);
+  });
+
+  test("ほかのラベルと重なるときは、優先の低い台数のほうを置かない", () => {
+    const labels = parkingLabels(buildings, new Map([["10,20", 5]]));
+    const [p] = parkingCandidates(labels, camera, vp, STAGE_NEAR, measure);
+    if (p === undefined) throw new Error("候補がない");
+    const road = candidate("road", 7, p.box);
+    expect(placeLabels([p, road], new Set(), []).map((c) => c.id)).toEqual(["road"]);
+  });
+
+  test("数が同じで鍵だけが入れ替わったときも、変わったとして出し直す", () => {
+    const a = new Map([["10,20", 5]]);
+    expect(indoorChanged(a, new Map([["10,20", 5]]))).toBe(false);
+    expect(indoorChanged(a, new Map([["30,40", 5]]))).toBe(true);
+    expect(indoorChanged(a, new Map([["10,20", 6]]))).toBe(true);
+    expect(indoorChanged(a, new Map())).toBe(true);
+    // 出し直した先の建物に、ラベルが付く
+    const next = parkingLabels(buildings, new Map([["30,40", 5]]));
+    expect(next.map((l) => l.key)).toEqual(["30,40"]);
   });
 });
