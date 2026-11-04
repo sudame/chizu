@@ -947,13 +947,14 @@ pub(super) fn step(
         if held {
             t.waited = t.waited.saturating_add(1);
         }
-        // いま横断歩道の人のために止まっているのでなければ数え直す。ほかの車や先の車線の空きを待つ車は、
-        // 人を止めない。
-        t.yielded = if yielded[k] {
-            t.yielded.saturating_add(1)
-        } else {
-            0
-        };
+        // 横断歩道の人のために止まった tick を数える。ほかの車や先の車線の空きを待つあいだは数えず、
+        // それまでに人に譲った長さは、交差点の手前で止められているあいだ残す。人が渡り終えた直後に交差点の中の車を待つ車が、
+        // 人に譲った長さを失って、また人に先を越されないようにするためである。
+        if yielded[k] {
+            t.yielded = t.yielded.saturating_add(1);
+        } else if !held {
+            t.yielded = 0;
+        }
         if t.last_leg() {
             if at >= t.dest_offset {
                 arrived.push(i);
