@@ -112,6 +112,10 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  drives 車で走り始めた移動の数、parkedElsewhere そのうちほかの建物の駐車場に回った数（redirectedCars と同じ決まり）、
                  lotsFull 行き先の近くの駐車場がどこも満車で、車で向かうのをやめた数（やめた移動は、歩けるなら歩く）、
                  noCar 車は世帯に 1 台で、ほかの住民が乗っているか、離れた所に停めてあって、車で向かえなかった数（歩けるなら歩く）。
+                 drives、noCar、lotsFull は別々の数で、足すと車で行こうとした移動の数になる（noCar は drives に含まれない）。
+                 noCarBreakdown noCar の内訳で、4 つの和が noCar に等しい。inUse 世帯の車を家族が乗っている、
+                 parkedAway 家族が家でない所（職場など）に停めている、carAtHome 車は家にあるが、出発する本人が家にいない、
+                 other そのほか（家のない住民の通勤で、車が停めてあった場合）。
                  fullLots、redirectedCars、lotsFull が多いのは、駐車場が足りないということである。
   traffic.rescues 詰まりをほどく救済の、始まりからの積み上げ。teleported 止まったままの車を行き先に着いたことにした数、
                  walkedInstead 車線に出られないまま待ち続けた車を、歩く移動に切り替えた数、
@@ -888,6 +892,10 @@ fn parking(world: &World) -> Value {
         parked_elsewhere: _,
         lots_full: _,
         no_car: _,
+        no_car_in_use: _,
+        no_car_parked_away: _,
+        no_car_at_home: _,
+        no_car_other: _,
     } = world.trips().parking_tally();
     let redirected = world
         .trips()
@@ -912,6 +920,12 @@ fn parking(world: &World) -> Value {
         "parkedElsewhere": tally.parked_elsewhere,
         "lotsFull": tally.lots_full,
         "noCar": tally.no_car,
+        "noCarBreakdown": {
+            "inUse": tally.no_car_in_use,
+            "parkedAway": tally.no_car_parked_away,
+            "carAtHome": tally.no_car_at_home,
+            "other": tally.no_car_other,
+        },
     })
 }
 
