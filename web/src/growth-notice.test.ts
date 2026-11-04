@@ -5,13 +5,16 @@ import {
   isolatedNotice,
   LOT_SHORTAGE_TICKS,
   lotNotice,
+  parkingNotice,
   parseGrowthBlocks,
   parseIsolated,
+  parseParkingShortage,
   parseStalls,
   persistedLotShortage,
   pickStall,
   trackLotShortage,
 } from "./growth-notice.ts";
+import { emptyMemory, reconcile } from "./notice-center.ts";
 
 /** 区画ごとの [止まっている数, 電気, 水道] から overview の並びを作る。 */
 const overview = (zones: [number, number, number][]) => {
@@ -236,5 +239,43 @@ describe("空き区画がない知らせ", () => {
     const both = growthNotices(none, [], [{ x: 1, y: 2, kind: 1 }], [COMMERCIAL]);
     expect(both.map((n) => n.id)).toEqual(["lot", "cut"]);
     expect(growthNotices(none, [], [], [])).toEqual([]);
+  });
+
+  describe("駐車場が足りない建物の知らせ", () => {
+    const flat = [12, 30, 1, 5, 40, 8, 1, 3, 2, 2, 0, 4];
+
+    test("平らな配列を読み、種類ごとの棟数を見出しに出す", () => {
+      const shortages = parseParkingShortage(flat);
+      expect(shortages).toHaveLength(3);
+      expect(shortages[0]).toEqual({ x: 12, y: 30, zone: 1, full: 5 });
+      expect(parkingNotice([])).toBeNull();
+      expect(parkingNotice(shortages)?.headline).toBe(
+        "駐車場が足りない建物がある（住宅 1 棟・商業 2 棟）",
+      );
+    });
+
+    test("建物へ移れ、件数が揺れても key は変わらず、種類が増えると変わる", () => {
+      const none = parseGrowthBlocks([]);
+      const [n] = growthNotices(none, [], [], [], parseParkingShortage(flat));
+      expect(n?.id).toBe("parking");
+      expect(n?.jump?.targets).toHaveLength(3);
+      expect(n?.jump?.label).toContain("押すたびに次の建物");
+      const more = growthNotices(none, [], [], [], parseParkingShortage([...flat, 9, 9, 1, 3]));
+      expect(more[0]?.key).toBe(n?.key);
+      const other = growthNotices(none, [], [], [], parseParkingShortage([9, 9, 2, 3]));
+      expect(other[0]?.key).not.toBe(n?.key);
+    });
+
+    test("満車が続くあいだ出て、解消したら一覧から消える", () => {
+      const none = parseGrowthBlocks([]);
+      const shown = growthNotices(none, [], [], [], parseParkingShortage(flat));
+      const first = reconcile(emptyMemory(), shown, 100);
+      expect(first.visible.map((v) => v.id)).toEqual(["parking"]);
+      const again = reconcile(first.memory, shown, 200);
+      expect(again.visible.map((v) => v.id)).toEqual(["parking"]);
+      expect(again.fresh).toEqual([]);
+      const solved = reconcile(again.memory, growthNotices(none, [], [], [], []), 300);
+      expect(solved.visible).toEqual([]);
+    });
   });
 });

@@ -151,6 +151,38 @@ export function lotNotice(zones: number[]): GrowthNotice | null {
   };
 }
 
+/** 駐車場が足りない建物 1 つ。x, y は建物が占めるマスの最小の座標、zone は区画の種類の番号、full は満車で車をやめた数。 */
+export type ParkingShortage = { x: number; y: number; zone: number; full: number };
+
+/** worker から届いた平らな配列 [x, y, 区画の種類, 満車で車をやめた数, ...] を読む。 */
+export function parseParkingShortage(flat: number[]): ParkingShortage[] {
+  const out: ParkingShortage[] = [];
+  for (let i = 0; i + 3 < flat.length; i += 4) {
+    out.push({
+      x: flat[i] ?? 0,
+      y: flat[i + 1] ?? 0,
+      zone: flat[i + 2] ?? 0,
+      full: flat[i + 3] ?? 0,
+    });
+  }
+  return out;
+}
+
+/** 満車で車をやめた建物がある。種類ごとの棟数を見出しに出す。なければ null。 */
+export function parkingNotice(shortages: ParkingShortage[]): GrowthNotice | null {
+  if (shortages.length === 0) {
+    return null;
+  }
+  const parts = ZONE_NAMES.flatMap((name, z) => {
+    const n = shortages.filter((s) => s.zone === z).length;
+    return n > 0 ? [`${name} ${n} 棟`] : [];
+  });
+  return {
+    headline: `駐車場が足りない建物がある（${parts.join("・")}）`,
+    action: "行き先の近くに、駐車場を誰でも使える商業・工業・オフィスの建物を足す",
+  };
+}
+
 const jumpLabel = (what: string, count: number, next: string) =>
   count > 1 ? `${what}へ移る（押すたびに次の${next}）` : `${what}へ移る`;
 
@@ -163,6 +195,7 @@ export function growthNotices(
   stalls: Stall[],
   isolated: Isolated[] = [],
   lotZones: number[] = [],
+  parking: ParkingShortage[] = [],
 ): Notice[] {
   const out: Notice[] = [];
   const growth = growthNotice(blocks);
@@ -187,6 +220,19 @@ export function growthNotices(
       headline: lot.headline,
       details: [lot.action],
       jump: null,
+    });
+  }
+  const park = parkingNotice(parking);
+  if (park !== null) {
+    out.push({
+      id: "parking",
+      key: [...new Set(parking.map((s) => s.zone))].sort().join(","),
+      headline: park.headline,
+      details: [park.action],
+      jump: {
+        label: jumpLabel("駐車場が足りない建物", parking.length, "建物"),
+        targets: parking,
+      },
     });
   }
   const cut = isolatedNotice(isolated);

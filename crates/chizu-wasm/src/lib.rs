@@ -217,6 +217,11 @@ impl Simulation {
         self.0.isolated_facilities()
     }
 
+    /// 駐車場が足りない建物ごとに `[x, y, 区画の種類, 満車で車をやめた数]`。並びは `sim::Sim::parking_shortage` にある。
+    pub fn parking_shortage(&self) -> Vec<f64> {
+        self.0.parking_shortage()
+    }
+
     /// いまの tick。並びは `sim::Sim::current_tick` にある。
     pub fn current_tick(&self) -> f64 {
         self.0.current_tick()

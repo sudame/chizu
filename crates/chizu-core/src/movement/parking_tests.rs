@@ -1,3 +1,4 @@
+use super::parking::MissTable;
 use super::*;
 use crate::building::{Building, Buildings, ParkingCut};
 use crate::command::{RoadKind, ZoneKind};
@@ -180,6 +181,7 @@ fn a_full_destination_sends_the_car_to_the_nearest_free_lot() {
     let mut before = s.trips.clone();
     assert_eq!(s.drive(far, shop), None);
     before.parking_tally.lots_full += 1;
+    before.lot_misses = s.trips.lot_misses.clone();
     assert_eq!(s.trips, before);
     let modes = s.run(second);
     assert_eq!(
@@ -216,7 +218,69 @@ fn drives_sent_elsewhere_and_given_up_on_full_lots_are_counted() {
     // 数は状態ハッシュに入らない。
     let mut other = s.trips.clone();
     other.parking_tally = ParkingTally::default();
+    other.lot_misses = Default::default();
     assert_eq!(state_hash_of(&other), hash);
+}
+
+#[test]
+fn misses_are_counted_per_destination_building() {
+    let (mut s, ids) = Street::new(&[30, 5, 9, 1, 40]);
+    let (home, shop, near, far) = (ids[0], ids[1], ids[2], ids[4]);
+    for _ in 0..3 {
+        s.drive(home, shop).unwrap();
+    }
+    // 満車で車をやめる数は、出発した建物でなく、行き先の建物に数える。
+    assert_eq!(s.drive(far, shop), None);
+    assert_eq!(s.drive(far, shop), None);
+    assert_eq!(s.drive(far, near), None);
+    let missed: Vec<_> = s.trips.lot_misses(0).collect();
+    let at = |id| missed.iter().find(|(b, _)| *b == id).map(|(_, m)| *m);
+    assert_eq!(
+        at(shop),
+        Some(DailyLotMisses {
+            today: LotMisses {
+                lots_full: 2,
+                parked_elsewhere: 2
+            },
+            yesterday: LotMisses::default(),
+        })
+    );
+    assert_eq!(at(home), None);
+    assert!(missed.windows(2).all(|w| w[0].0 < w[1].0), "番号の順");
+    // 数は状態ハッシュに入らない。
+    let hash = state_hash_of(&s.trips);
+    let mut other = s.trips.clone();
+    other.lot_misses = Default::default();
+    assert_eq!(state_hash_of(&other), hash);
+}
+
+#[test]
+fn misses_roll_over_by_day() {
+    let mut t = MissTable::default();
+    let b = BuildingId {
+        index: 0,
+        generation: 0,
+    };
+    t.add(b, 3, |m| m.lots_full += 2);
+    let at = |t: &MissTable, day| t.at(day).map(|(_, m)| m).next();
+    let two = LotMisses {
+        lots_full: 2,
+        parked_elsewhere: 0,
+    };
+    assert_eq!(
+        at(&t, 3).map(|m| (m.today, m.yesterday)),
+        Some((two, LotMisses::default()))
+    );
+    // 次の日には前の日に送られ、そのまた次の日には消える。
+    assert_eq!(
+        at(&t, 4).map(|m| (m.today, m.yesterday)),
+        Some((LotMisses::default(), two))
+    );
+    assert_eq!(at(&t, 5), None);
+    // 書き込みも日をまたぐと送る。
+    t.add(b, 4, |m| m.parked_elsewhere += 1);
+    let m = at(&t, 4).unwrap();
+    assert_eq!((m.today.parked_elsewhere, m.yesterday), (1, two));
 }
 
 #[test]
