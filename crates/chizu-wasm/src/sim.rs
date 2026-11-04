@@ -8,7 +8,7 @@ use chizu_core::record::RecordError;
 use chizu_core::service::building_demand;
 use chizu_core::world::economy::{chunk_slots, milestone_population};
 use chizu_core::world::growth::GROWTH_INTERVAL;
-use chizu_core::zone::{ZONE_DEPTH, near_road};
+use chizu_core::zone::ZONE_DEPTH;
 use chizu_core::{
     ApplyOutcome, CHUNK_AREA, CHUNK_SIDE, ChunkCoord, Command, CommandLog, DenyReason, GameTime,
     Layer, Line, NodeControl, SegmentKind, ServiceKind, StateHasher, TerrainTiles, Tick, TilePos,
@@ -45,6 +45,8 @@ pub struct Sim {
     reports: Vec<Report>,
     /// 道路網が変わって、区画を塗れるマスが変わりうるチャンクに足していく数。画面向けの版に混ぜる。
     near_road_changes: BTreeMap<ChunkCoord, u32>,
+    /// チャンクごとの、辺の近くの建物と施設のマスの控え。`(チャンクの版, 署名)` で、版が変わったときだけ計算し直す。
+    edge_signatures: BTreeMap<ChunkCoord, (u32, u64)>,
     /// 移動体を描く範囲。画面だけが決め、中核には渡さない。`None` なら移動体を書かない。
     mover_view: Option<TileRect>,
     /// 最後に集めた移動体と、その基準のチャンク。
@@ -78,7 +80,7 @@ impl Sim {
 
     /// 記録をすべて適用し終えた `world` から作る。保存データを読み込んだときに使う。
     pub(crate) fn from_parts(world: World, log: CommandLog) -> Sim {
-        Sim {
+        let mut sim = Sim {
             world,
             log,
             paused: false,
@@ -94,7 +96,10 @@ impl Sim {
             unrecorded_ops: 0,
             buildings_version: Cell::new(None),
             utility_cache: Cell::new(None),
-        }
+            edge_signatures: BTreeMap::new(),
+        };
+        sim.note_edge_changes();
+        sim
     }
 
     pub fn world(&self) -> &World {
@@ -130,7 +135,23 @@ impl Sim {
         let outcome = self.world.apply_recorded(seq, &command);
         if outcome == ApplyOutcome::Applied {
             self.mark_near_road_changes(&touched);
+            // 隣のチャンクを買うと、辺の近くの塗れるマスが変わる。
+            if let Command::BuyChunk { coord } = command {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let n = ChunkCoord::new(
+                            coord.cx.saturating_add(dx),
+                            coord.cy.saturating_add(dy),
+                        );
+                        if (dx, dy) != (0, 0) && self.world.chunk(n).is_some() {
+                            let c = self.near_road_changes.entry(n).or_insert(0);
+                            *c = c.wrapping_add(1);
+                        }
+                    }
+                }
+            }
         }
+        self.note_edge_changes();
         self.reports.push(Report { seq, outcome });
         Ok(seq)
     }
@@ -162,7 +183,7 @@ impl Sim {
         let max = TilePos::new(min.x + side - 1, min.y + side - 1);
         let near = chunk
             .owned()
-            .then(|| near_road(self.world.network(), TileRect { min, max }));
+            .then(|| self.world.buildable_mask(TileRect { min, max }, None));
         for (i, tile) in tiles.iter_mut().enumerate() {
             let road = layer.occupancy[i] == TileUse::Road;
             if road {
@@ -185,7 +206,8 @@ impl Sim {
     /// [`Sim::chunk_tiles`] の中身が変わったかを見分ける版。チャンクの版と、そのチャンクの近くで
     /// 道路網が変わった回数から作る。JS の数で誤差なく表せるよう、回数は下位 21 ビットだけを使う。
     pub fn chunk_tiles_version(&self, coord: ChunkCoord) -> f64 {
-        let changes = self.near_road_changes.get(&coord).copied().unwrap_or(0) & ((1 << 21) - 1);
+        let changes = self.near_road_changes.get(&coord).copied().unwrap_or(0);
+        let changes = changes & ((1 << 21) - 1);
         f64::from(self.chunk_version(coord)) * f64::from(1_u32 << 21) + f64::from(changes)
     }
 
@@ -244,6 +266,52 @@ impl Sim {
         }
         for _ in 0..ticks {
             self.world.step();
+        }
+        self.note_edge_changes();
+    }
+
+    /// 辺の近く（`ZONE_DEPTH` マス以内）の建物か施設のマスが変わったチャンクの、隣のチャンクの画面向けの版を上げる。
+    /// 区画を塗れるかは隣のチャンクのマスまでたどるので、そのチャンクの版だけでは古い案内が残る。
+    /// 道路は `mark_near_road_changes` が見るので、ここでは建物と施設のマスだけを見る。
+    fn note_edge_changes(&mut self) {
+        let side = CHUNK_SIDE;
+        let depth = ZONE_DEPTH as usize;
+        let mut changed = Vec::new();
+        for chunk in self.world.chunks() {
+            let coord = chunk.coord();
+            let version = chunk.version();
+            if self.edge_signatures.get(&coord).map(|e| e.0) == Some(version) {
+                continue;
+            }
+            let Some(layer) = chunk.layer(Layer::Ground) else {
+                continue;
+            };
+            let mut sig = 0_u64;
+            for (i, u) in layer.occupancy.iter().enumerate() {
+                let (x, y) = (i % side, i / side);
+                let edge = x < depth || y < depth || x >= side - depth || y >= side - depth;
+                if edge && matches!(u, TileUse::Building | TileUse::Facility) {
+                    sig = sig
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .wrapping_add((i as u64) << 2 | *u as u64);
+                }
+            }
+            let before = self.edge_signatures.insert(coord, (version, sig));
+            if before.is_some_and(|b| b.1 != sig) {
+                changed.push(coord);
+            }
+        }
+        for coord in changed {
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let n =
+                        ChunkCoord::new(coord.cx.saturating_add(dx), coord.cy.saturating_add(dy));
+                    if (dx, dy) != (0, 0) && self.world.chunk(n).is_some() {
+                        let c = self.near_road_changes.entry(n).or_insert(0);
+                        *c = c.wrapping_add(1);
+                    }
+                }
+            }
         }
     }
 
@@ -642,7 +710,7 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::NothingToBulldoze => "範囲に取り壊せるものがない",
         DenyReason::NotAdjacent => "買った土地に接していない",
         DenyReason::AlreadyOwned => "もう買ってある",
-        DenyReason::NoZonableTile => "道路沿いに区画を塗れるマスがない",
+        DenyReason::NoZonableTile => "道路に面した所から続く、区画を塗れるマスがない",
         DenyReason::ZoneUnchanged => "変わるマスがない",
         DenyReason::Occupied => "ほかの施設か道路がある",
         DenyReason::NoRoadAccess => "道路に面していない",
@@ -773,22 +841,27 @@ mod tests {
         assert_eq!(sim.world().network().segments().count(), 2);
         assert!(zonable(&sim, 126, 25));
         assert!(!zonable(&sim, 128, 25));
-        // 水辺のあるチャンクを買い、水辺のマスの 2 マス先から道路を引いても、水辺のマスは塗れない
+        // 水辺のあるチャンクを買い、水辺のマスのすぐ南に道路を引く。道路の脇にある水辺のマスは塗れず、
+        // その隣の水辺でないマスは塗れる
         let east = ChunkCoord::new(2, 0);
         let (mut sim, water) = (0..256)
             .find_map(|seed| {
                 let sim = Sim::new(seed);
                 let tiles = sim.chunk_tiles(east);
                 let is_water = |x: usize, y: usize| tiles[y * CHUNK_SIDE + x] & TILE_WATER != 0;
-                let at = (0..CHUNK_SIDE)
-                    .flat_map(|y| (0..CHUNK_SIDE - 5).map(move |x| (x, y)))
-                    .find(|&(x, y)| is_water(x, y) && (1..=5).all(|d| !is_water(x + d, y)))?;
+                let at = (2..CHUNK_SIDE - 3)
+                    .flat_map(|x| (0..CHUNK_SIDE - 1).map(move |y| (x, y)))
+                    .find(|&(x, y)| {
+                        is_water(x, y)
+                            && !is_water(x + 1, y)
+                            && (x - 2..=x + 2).all(|rx| !is_water(rx, y + 1))
+                    })?;
                 Some((seed, (128 + at.0 as i64, at.1 as i64)))
             })
             .map(|(seed, at)| {
                 let mut sim = Sim::new(seed);
                 sim.submit(Command::BuyChunk { coord: east }).unwrap();
-                sim.submit(road((at.0 + 2, at.1), (at.0 + 4, at.1)))
+                sim.submit(road((at.0 - 2, at.1 + 1), (at.0 + 2, at.1 + 1)))
                     .unwrap();
                 (sim, at)
             })
@@ -800,6 +873,40 @@ mod tests {
         );
         assert!(!zonable(&sim, water.0, water.1));
         assert!(zonable(&sim, water.0 + 1, water.1));
+    }
+
+    #[test]
+    fn buying_a_chunk_bumps_the_tiles_version_of_its_neighbours() {
+        let mut sim = Sim::new(0);
+        let (near, far) = (ChunkCoord::new(1, 0), ChunkCoord::new(-1, -1));
+        let east = ChunkCoord::new(2, 0);
+        let (v_near, v_far) = (sim.chunk_tiles_version(near), sim.chunk_tiles_version(far));
+        sim.submit(Command::BuyChunk { coord: east }).unwrap();
+        assert!(sim.world().chunk(east).is_some());
+        assert!(sim.chunk_tiles_version(near) > v_near);
+        assert_eq!(sim.chunk_tiles_version(far), v_far);
+    }
+
+    #[test]
+    fn a_facility_near_the_edge_bumps_the_tiles_version_of_the_next_chunk() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((100, 30), (127, 30))).unwrap();
+        let (next, far) = (ChunkCoord::new(1, 0), ChunkCoord::new(-1, 0));
+        let (v_next, v_far) = (sim.chunk_tiles_version(next), sim.chunk_tiles_version(far));
+        sim.submit(Command::PlaceBuilding {
+            kind: chizu_core::ServiceKind::PowerPlant,
+            at: TilePos::new(122, 29),
+            rotation: 2,
+        })
+        .unwrap();
+        assert!(sim.world().chunk(next).is_some());
+        assert!(
+            sim.take_reports()
+                .iter()
+                .all(|r| r.outcome == ApplyOutcome::Applied)
+        );
+        assert!(sim.chunk_tiles_version(next) > v_next);
+        assert_eq!(sim.chunk_tiles_version(far), v_far);
     }
 
     #[test]

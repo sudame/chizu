@@ -45,6 +45,9 @@ pub const HIGHWAY_OUTSIDE_TILES: u64 = 1_024;
 pub enum ApplyOutcome {
     /// 状態に反映した。
     Applied,
+    /// 一部だけ状態に反映した。理由は、反映できなかったマスがある理由である。
+    /// 区画を塗るとき、道路の間口から切れたマスを塗らなかった場合に返す。
+    AppliedPartly(DenyReason),
     /// 中核にまだ中身がない種類なので、何もしなかった。
     NotImplemented,
     /// 値が受け付ける範囲の外なので、何もしなかった。記録を通したコマンドは検証済みなので、
@@ -76,7 +79,8 @@ pub enum DenyReason {
     NotAdjacent = 7,
     /// 買う土地をもう買ってある。
     AlreadyOwned = 8,
-    /// 区画を塗る長方形に、塗れるマス（道路から奥行きの範囲にある、買った陸の空きマス）がない。
+    /// 区画を塗る長方形に、塗れるマス（建物の建ちうる、道路に面した間口から奥へ途切れずに続く、買った陸の空きマス）がない。
+    /// 塗れないマスが混ざっていて、塗れるマスだけを塗ったときは、[`ApplyOutcome::AppliedPartly`] に載せて返す。
     NoZonableTile = 9,
     /// 区画を塗っても消しても、変わるマスがない。
     ZoneUnchanged = 10,
@@ -361,9 +365,13 @@ impl World {
 
     /// 長方形の中の、区画を塗れるマスに `zone` を塗る。`None` なら区画を消す。
     fn paint_zone(&mut self, area: TileRect, zone: Option<ZoneKind>) -> ApplyOutcome {
-        let near = zone.map(|_| near_road(&self.network, area));
+        // 塗れるのは、建物の建ちうるマス（道路に面した間口から奥へ途切れずに続くマス）だけである。
+        // 道路から奥行きの範囲にあっても、間口との間に塗れないマスを挟んで切れたマスは塗らない。
+        let near = zone.map(|z| self.buildable_mask(area, Some(z)));
+        let within_depth = zone.map(|_| near_road(&self.network, area));
         let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
         let mut zonable = false;
+        let mut skipped = false;
         for (i, t) in tiles_of(area).enumerate() {
             let Some((coord, chunk)) = t.chunk().and_then(|c| self.chunks.get_key_value(&c)) else {
                 continue;
@@ -376,6 +384,10 @@ impl World {
                     && tiles.occupancy[idx] == TileUse::Empty
                     && self.check_buildable(t).is_ok();
                 if !can {
+                    // 道路から奥行きの範囲にあって塗れるはずの空きマスが、間口から切れて塗れなかった。
+                    skipped |= within_depth.as_ref().is_some_and(|w| w[i])
+                        && tiles.occupancy[idx] == TileUse::Empty
+                        && self.check_buildable(t).is_ok();
                     continue;
                 }
                 zonable = true;
@@ -394,7 +406,11 @@ impl World {
         }
         self.write_zones(edits);
         self.refresh_buildings();
-        ApplyOutcome::Applied
+        if skipped {
+            ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile)
+        } else {
+            ApplyOutcome::Applied
+        }
     }
 
     /// 長方形の中で、道路から奥行きの範囲を外れた区画を消す。

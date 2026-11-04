@@ -55,7 +55,7 @@ export type CommandMessage =
   | { kind: "SetCrosswalk"; x: number; y: number; dx: number; dy: number; on: boolean };
 
 /** コマンドを適用した結果。Rejected は、Worker が受け付けずに記録しなかったときも含む。 */
-export type Outcome = "Applied" | "Denied" | "Rejected" | "NotImplemented";
+export type Outcome = "Applied" | "AppliedPartly" | "Denied" | "Rejected" | "NotImplemented";
 
 /** 区間 1 本の数の個数。chizu-wasm の road_segments と同じ。 */
 export const SEGMENT_STRIDE = 5;

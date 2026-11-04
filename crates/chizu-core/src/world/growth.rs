@@ -357,6 +357,96 @@ impl World {
             .map(|d| d as u8)
     }
 
+    /// 長方形の各マスが、建物の建ちうるマスか。行ごとに並べて返す。状態は変えない。
+    ///
+    /// 建ちうるとは、道路に面した間口のマスから、道路と反対の向きへ途切れずに続く敷地に入れるマスである。
+    /// 縦横の道路なら、間口から奥へ [`MAX_LOT_DEPTH`] マスまでの 1 列に入る。斜めの道路なら、間口を角にした
+    /// 1 辺 [`DIAGONAL_LOT_SIDE`] マスまでの正方形に入る。敷地のマスは、すべて使えるマスでなければならない。
+    ///
+    /// `paint` が `Some(z)` なら、区画 `z` を `area` に塗るときの判定である。使えるマスは、`area` の中の
+    /// 空きマスか、`area` の外ですでに `z` が塗ってあるマスである。`None` なら、区画を塗る道具に示す
+    /// 目安で、買った陸の空きマスをすべて使えるものとして数える。道路、建物、施設のマスは、塗るときと同じく続かない。
+    pub fn buildable_mask(&self, area: TileRect, paint: Option<ZoneKind>) -> Vec<bool> {
+        let (w, h) = crate::zone::rect_size(area).expect("区画の長方形が大きすぎる");
+        let width = usize::try_from(w).expect("区画の長方形が大きすぎる");
+        let mut mask =
+            vec![false; width * usize::try_from(h).expect("区画の長方形が大きすぎる")];
+        let near = crate::zone::near_road(&self.network, area);
+        let mut usable = BTreeMap::<TilePos, bool>::new();
+        let mut dirs = BTreeMap::<TilePos, Option<u8>>::new();
+        let in_area = |t: TilePos| {
+            (area.min.x..=area.max.x).contains(&t.x) && (area.min.y..=area.max.y).contains(&t.y)
+        };
+        let mut usable_at = |this: &World, t: TilePos| -> bool {
+            *usable.entry(t).or_insert_with(|| {
+                if this.check_buildable(t).is_err() {
+                    return false;
+                }
+                match (paint, this.tile_state(t)) {
+                    (None, Some((_, use_))) => use_ == TileUse::Empty,
+                    (Some(z), Some((zone, use_))) => {
+                        use_ == TileUse::Empty && (in_area(t) || zone == Some(z))
+                    }
+                    (_, None) => false,
+                }
+            })
+        };
+        let mut dir_at = |this: &World, t: TilePos| -> Option<u8> {
+            *dirs.entry(t).or_insert_with(|| this.front_dir(t))
+        };
+        for (i, t) in crate::zone::tiles_of(area).enumerate() {
+            if !near[i] || !usable_at(self, t) {
+                continue;
+            }
+            let mut ok = false;
+            // 縦横の道路: t を含む幅 i+1、奥行き j+1 の敷地が、間口 f から続くか。間口の列のどのマスも
+            // 道路に面していればよく、f 以外のマスの `front_dir` が別の向きでも構わない。
+            'axis: for d in 0..4_u8 {
+                let toward = FRONT_DIRS[usize::from(d)];
+                let along = (-toward.1, toward.0);
+                for i in 0..MAX_LOT_SIDE as i64 {
+                    for j in 0..MAX_LOT_DEPTH as i64 {
+                        let f = step(step(t, toward, j), along, -i);
+                        if dir_at(self, f) != Some(d) {
+                            continue;
+                        }
+                        let fits =
+                            lot_tiles(f, toward, i as u64 + 1, j as u64 + 1).all(|(_, c, s)| {
+                                usable_at(self, s) && (c != 0 || self.frontage(s, toward).is_some())
+                            });
+                        if fits {
+                            ok = true;
+                            break 'axis;
+                        }
+                    }
+                }
+            }
+            // 斜めの道路: 間口を角にした正方形に t が入り、その正方形がすべて使えるか。
+            if !ok {
+                'diag: for d in 4..8_u8 {
+                    let (tx, ty) = FRONT_DIRS[usize::from(d)];
+                    for a in 0..DIAGONAL_LOT_SIDE as i64 {
+                        for b in 0..DIAGONAL_LOT_SIDE as i64 {
+                            let f = step(step(t, (tx, 0), a), (0, ty), b);
+                            if dir_at(self, f) != Some(d) {
+                                continue;
+                            }
+                            let side = a.max(b) + 1;
+                            if lot_tiles(f, (tx, ty), side as u64, side as u64)
+                                .all(|(_, _, s)| usable_at(self, s))
+                            {
+                                ok = true;
+                                break 'diag;
+                            }
+                        }
+                    }
+                }
+            }
+            mask[i] = ok;
+        }
+        mask
+    }
+
     /// チャンクの中で書き換えたマスの位置。
     pub(super) fn edited_tiles<T>(edits: &BTreeMap<ChunkCoord, Vec<(usize, T)>>) -> Vec<TilePos> {
         edits
@@ -1685,7 +1775,14 @@ mod tests {
             area: rect(a, b),
             zone: Some(zone),
         };
-        assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+        let outcome = w.apply(&c);
+        assert!(
+            matches!(
+                outcome,
+                ApplyOutcome::Applied | ApplyOutcome::AppliedPartly(_)
+            ),
+            "{c:?} {outcome:?}"
+        );
     }
 
     #[test]
@@ -1812,6 +1909,200 @@ mod tests {
                     _ => {}
                 }
                 check_buildings(&w);
+            }
+        }
+    }
+
+    fn paint_outcome(w: &mut World, a: (i64, i64), b: (i64, i64)) -> ApplyOutcome {
+        w.apply(&Command::PaintZone {
+            area: rect(a, b),
+            zone: Some(ZoneKind::Residential),
+        })
+    }
+
+    fn zoned(w: &World, x: i64, y: i64) -> bool {
+        w.zone_at(TilePos::new(x, y)).is_some()
+    }
+
+    #[test]
+    fn zone_is_paintable_only_where_it_continues_from_the_frontage() {
+        let mut w = World::new(0);
+        street(&mut w, 0, 40);
+        // 道路の脇（y=9）を空けて奥だけを塗っても、道路から切れているので塗れない。
+        assert_eq!(
+            paint_outcome(&mut w, (4, 4), (10, 8)),
+            ApplyOutcome::Denied(DenyReason::NoZonableTile)
+        );
+        assert!(!zoned(&w, 4, 8));
+        // 脇から奥まで続けて塗れる。奥行きの 6 マスめ（y=4）まで塗れる。
+        assert_eq!(
+            paint_outcome(&mut w, (4, 4), (10, 9)),
+            ApplyOutcome::Applied
+        );
+        assert!(zoned(&w, 4, 9) && zoned(&w, 4, 4));
+        // 奥行きの外（y=3）は、道路から切れた所なので塗らない。
+        assert_eq!(
+            paint_outcome(&mut w, (4, 3), (10, 3)),
+            ApplyOutcome::Denied(DenyReason::NoZonableTile)
+        );
+        // すでに塗ってある列に続けば、外側へ塗り足せる。
+        assert_eq!(
+            paint_outcome(&mut w, (12, 9), (12, 9)),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(
+            paint_outcome(&mut w, (12, 4), (12, 8)),
+            ApplyOutcome::Applied
+        );
+        // 道路の端の外は間口がなく、塗れるマスだけが塗られ、塗れなかったことを返す。
+        assert_eq!(
+            paint_outcome(&mut w, (38, 9), (43, 9)),
+            ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile)
+        );
+        assert!(zoned(&w, 40, 9) && !zoned(&w, 41, 9));
+    }
+
+    #[test]
+    fn zone_is_not_paintable_behind_another_kind_of_zone() {
+        let mut w = World::new(0);
+        street(&mut w, 0, 40);
+        // 道路の脇が別の種類の区画だと、その奥に住宅の建物は続かない。
+        let industrial = Command::PaintZone {
+            area: rect((4, 9), (10, 9)),
+            zone: Some(ZoneKind::Industrial),
+        };
+        assert_eq!(w.apply(&industrial), ApplyOutcome::Applied);
+        assert_eq!(
+            paint_outcome(&mut w, (4, 4), (10, 8)),
+            ApplyOutcome::Denied(DenyReason::NoZonableTile)
+        );
+    }
+
+    /// 敷地の一部として建ちうるマスか。間口の候補と大きさを、建てるときと同じ決まりで総当たりする。
+    fn in_some_lot(w: &World, zone: ZoneKind, t: TilePos) -> bool {
+        w.lots.fronts.iter().any(|(front, (z, d))| {
+            if *z != zone {
+                return false;
+            }
+            let toward = FRONT_DIRS[usize::from(*d)];
+            let sizes: Vec<(u64, u64)> = if is_diagonal(toward) {
+                (1..=DIAGONAL_LOT_SIDE).map(|s| (s, s)).collect()
+            } else {
+                (1..=MAX_LOT_SIDE)
+                    .flat_map(|a| (1..=MAX_LOT_DEPTH).map(move |b| (a, b)))
+                    .collect()
+            };
+            sizes.into_iter().any(|(a, b)| {
+                w.lot_fits(zone, *front, toward, a, b)
+                    && lot_tiles(*front, toward, a, b).any(|(_, _, s)| s == t)
+            })
+        })
+    }
+
+    /// 塗れたマスには、需要があれば建物が建つ。塗れるのに、どの敷地にも入らない所は残らない。
+    #[test]
+    fn every_painted_tile_can_be_built_on() {
+        for (roads, area) in [
+            (vec![((0, 10), (40, 10))], ((-6, 0), (46, 20))),
+            (vec![((0, 0), (30, 30))], ((-8, -8), (38, 38))),
+            (
+                vec![((0, 0), (30, 30)), ((0, 15), (30, 15)), ((12, 0), (12, 30))],
+                ((-8, -8), (38, 38)),
+            ),
+        ] {
+            let mut w = World::new(3);
+            for (a, b) in roads {
+                build(&mut w, a, b);
+            }
+            let outcome = paint_outcome(&mut w, area.0, area.1);
+            assert!(matches!(
+                outcome,
+                ApplyOutcome::Applied | ApplyOutcome::AppliedPartly(_)
+            ));
+            let painted = crate::zone::tiles_of(rect(area.0, area.1))
+                .filter(|t| w.zone_at(*t).is_some())
+                .collect::<Vec<_>>();
+            assert!(!painted.is_empty());
+            for t in painted {
+                assert!(in_some_lot(&w, ZoneKind::Residential, t), "{t:?}");
+            }
+        }
+    }
+
+    /// 区画を全面に塗ったと見て、建てる側の決まり（間口の候補と `lot_fits`）で敷地に入りうるマスを総当たりで求める。
+    fn lot_tiles_if_all_zoned(w: &World, area: TileRect) -> Vec<bool> {
+        let zone = ZoneKind::Residential;
+        let mut all = w.clone();
+        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
+        for t in crate::zone::tiles_of(area) {
+            let empty = matches!(all.tile_state(t), Some((_, TileUse::Empty)));
+            if let (true, Some(c)) = (empty && all.check_buildable(t).is_ok(), t.chunk()) {
+                edits
+                    .entry(c)
+                    .or_default()
+                    .push((local_index(t.local().0, t.local().1), Some(zone)));
+            }
+        }
+        all.write_zones(edits);
+        let tiles: Vec<TilePos> = crate::zone::tiles_of(area).collect();
+        tiles.iter().map(|t| in_some_lot(&all, zone, *t)).collect()
+    }
+
+    /// 建てる側の決まりで敷地に入りうるマスは、すべて塗れ、それ以外は塗れない。
+    #[test]
+    fn paintable_tiles_are_exactly_those_a_lot_can_cover() {
+        let mut cases: Vec<(&str, World, TileRect)> = Vec::new();
+        // 交差点から 1 マスだけ突き出た道路。
+        let mut w = World::new(42);
+        build(&mut w, (10, 0), (10, 20));
+        build(&mut w, (-10, 0), (11, 0));
+        cases.push(("突き出た交差点", w, rect((-14, -8), (22, 12))));
+        // 斜めの道路と、横切る道路。
+        let mut w = World::new(3);
+        build(&mut w, (0, 0), (30, 30));
+        build(&mut w, (0, 15), (30, 15));
+        cases.push(("斜めの道路", w, rect((-8, -8), (38, 38))));
+        // 施設の隣。
+        let mut w = World::new(0);
+        street(&mut w, 0, 40);
+        assert_eq!(
+            place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
+            ApplyOutcome::Applied
+        );
+        cases.push(("施設の隣", w, rect((-4, 0), (44, 20))));
+        // 高速道路の脇と、買っていない土地との境目。
+        let mut w = World::new(0);
+        let inner = crate::world::highway_line(0).start;
+        for (f, t) in [
+            ((inner.x - 12, inner.y + 3), (inner.x + 12, inner.y + 3)),
+            ((inner.x + 3, inner.y - 12), (inner.x + 3, inner.y + 12)),
+            ((inner.x - 12, inner.y - 3), (inner.x + 12, inner.y - 3)),
+        ] {
+            let _ = w.apply(&Command::BuildRoad {
+                from: TilePos::new(f.0, f.1),
+                to: TilePos::new(t.0, t.1),
+                kind: RoadKind::Small,
+            });
+        }
+        cases.push((
+            "高速道路と土地の境目",
+            w,
+            TileRect {
+                min: TilePos::new(inner.x - 14, inner.y - 14),
+                max: TilePos::new(inner.x + 14, inner.y + 14),
+            },
+        ));
+        // 買った土地の端（x=127）に沿った道路。
+        let mut w = World::new(0);
+        build(&mut w, (127, 20), (127, 40));
+        build(&mut w, (100, 30), (127, 30));
+        cases.push(("土地の端", w, rect((100, 12), (140, 48))));
+        for (name, w, area) in cases {
+            let want = lot_tiles_if_all_zoned(&w, area);
+            assert!(want.iter().any(|b| *b), "{name}: 敷地に入るマスがない");
+            let got = w.buildable_mask(area, Some(ZoneKind::Residential));
+            for (i, t) in crate::zone::tiles_of(area).enumerate() {
+                assert_eq!(got[i], want[i], "{name} {t:?}");
             }
         }
     }

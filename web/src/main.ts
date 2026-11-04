@@ -1120,6 +1120,7 @@ const DONE: Record<CommandMessage["kind"], string> = {
 function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?: string): void {
   const text: Record<Outcome, string> = {
     Applied: DONE[command],
+    AppliedPartly: `${DONE[command]}（道路に面した所から続かないマスは塗れなかった）`,
     Denied: `できなかった：${reason ?? ""}`,
     Rejected: `受け付けなかった：${reason ?? ""}`,
     NotImplemented: "まだ使えない",

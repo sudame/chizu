@@ -533,7 +533,7 @@ pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
             && e.tick <= world.tick()
         {
             match world.apply_recorded(e.seq, &e.command) {
-                ApplyOutcome::Applied => stats.applied += 1,
+                ApplyOutcome::Applied | ApplyOutcome::AppliedPartly(_) => stats.applied += 1,
                 ApplyOutcome::NotImplemented => stats.not_implemented += 1,
                 ApplyOutcome::Rejected => stats.rejected += 1,
                 ApplyOutcome::Denied(reason) => {
