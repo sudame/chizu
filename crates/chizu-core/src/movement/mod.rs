@@ -160,6 +160,11 @@ impl Trip {
         self.lane
     }
 
+    /// 車線に出るのを待っている車か。車線に戻るのを待つ車も含む。
+    pub fn waiting(&self) -> bool {
+        self.waiting
+    }
+
     /// 駐車場の中で、車線に出る順番を待っている車か。
     pub fn waiting_to_depart(&self) -> bool {
         self.mode == LaneMode::Car && self.waiting && !self.rejoining

@@ -66,7 +66,7 @@ const SAME_SPOT_MM: i64 = 5;
 /// 車線の ID は、道路が分けられると変わるので、位置は車線によらない座標で持つ。
 /// 駐車場の中で車線に出る順番を待っている車は、別に数える。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CarSample(BTreeMap<TripId, (WorldPos, bool, bool)>);
+pub struct CarSample(BTreeMap<TripId, (WorldPos, bool, bool, bool)>);
 
 impl CarSample {
     pub(crate) fn of(trips: &Trips) -> CarSample {
@@ -80,6 +80,7 @@ impl CarSample {
                         (
                             t.position().world(),
                             t.waiting_to_depart(),
+                            t.waiting(),
                             t.speed().0 == 0,
                         ),
                     )
@@ -90,19 +91,22 @@ impl CarSample {
 
     /// 駐車場の中で、車線に出る順番を待っている車の台数。
     pub fn waiting_at_curb(&self) -> usize {
-        self.0.values().filter(|(_, w, _)| *w).count()
+        self.0.values().filter(|(_, w, _, _)| *w).count()
     }
 
     /// 道路の上で、`earlier` から同じ場所（ずれは数 mm まで）にいる車の台数。駐車場の中で待つ車は数えない。
     /// 道路の種類を下げて車線を外れ、車線に戻るのを待つ車は、道路の上で止まっているので数える。
     pub fn stopped_on_road_since(&self, earlier: &CarSample) -> usize {
-        self.unmoved(earlier).filter(|(_, (_, w, _))| !*w).count()
+        self.unmoved(earlier)
+            .filter(|(_, (_, w, _, _))| !*w)
+            .count()
     }
 
-    /// 道路の上で、いま速さ 0 の車の台数。駐車場の中で待つ車は数えない。
+    /// 道路の上で、いま速さ 0 の車の台数。地図の混み具合（`X`）と同じく、車線に出るのを待つ車
+    /// （駐車場の中で待つ車と、車線に戻るのを待つ車）は数えない。
     /// 地図の混み具合（`X`）が「止まっている」とみなす物差しと同じで、止まっては進む列も入る。
     pub fn queued_on_road(&self) -> usize {
-        self.0.values().filter(|(_, w, s)| !*w && *s).count()
+        self.0.values().filter(|(_, _, w, s)| !*w && *s).count()
     }
 
     /// 車の台数。車線に出る順番を待っている車も含む。
@@ -122,13 +126,13 @@ impl CarSample {
     fn unmoved<'a>(
         &'a self,
         earlier: &'a CarSample,
-    ) -> impl Iterator<Item = (&'a TripId, &'a (WorldPos, bool, bool))> + 'a {
+    ) -> impl Iterator<Item = (&'a TripId, &'a (WorldPos, bool, bool, bool))> + 'a {
         let near = |a: Mm, b: Mm| a.0.abs_diff(b.0) <= SAME_SPOT_MM.unsigned_abs();
-        self.0.iter().filter(move |(id, (at, _, _))| {
+        self.0.iter().filter(move |(id, (at, _, _, _))| {
             earlier
                 .0
                 .get(id)
-                .is_some_and(|(p, _, _)| near(p.x, at.x) && near(p.y, at.y))
+                .is_some_and(|(p, _, _, _)| near(p.x, at.x) && near(p.y, at.y))
         })
     }
 }
@@ -392,30 +396,23 @@ mod tests {
         assert!(after.unmoved_since(&before) < before.len(), "車が動かない");
     }
 
-    /// 速さ 0 の車は、動いたことのある車でも `queued_on_road` に入るが、`stopped_on_road_since` には入らない。
+    /// `queued_on_road` は、道路の上を走っていて速さ 0 の車だけを数える。
     #[test]
-    fn queued_cars_are_counted_without_standing_still_for_long() {
-        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
-        run_days(&mut w, 2);
-        let ids: Vec<_> = w.buildings().iter().map(|(id, _)| id).collect();
-        let (from, to) = (ids[0], ids[ids.len() - 1]);
-        let id = w.spawn_drive(from, to).expect("車の移動を作れない");
-        let mut seen = false;
-        for _ in 0..3000 {
-            w.step();
-            let Some(t) = w.trips().get(id) else { break };
-            if t.mode() != crate::LaneMode::Car || t.waiting_to_depart() {
-                continue;
-            }
-            let now = w.car_sample();
-            // 前の標本に載っていない車は、止まっている車に入らない。
-            assert_eq!(now.stopped_on_road_since(&super::CarSample::default()), 0);
-            if t.speed().0 == 0 {
-                assert!(now.queued_on_road() >= 1);
-                seen = true;
-            }
-        }
-        assert!(seen, "速さ 0 の車が現れない");
+    fn queued_counts_only_cars_at_speed_zero_on_the_road() {
+        let at = super::WorldPos::default();
+        let id = |index| crate::TripId {
+            index,
+            generation: 0,
+        };
+        // (位置, 駐車場から出るのを待つ, 車線に出るのを待つ（戻るのを待つ車を含む）, 速さ 0)
+        let sample = super::CarSample(std::collections::BTreeMap::from([
+            (id(0), (at, false, false, true)),
+            (id(1), (at, false, false, false)),
+            (id(2), (at, true, true, true)),
+            (id(3), (at, false, true, true)),
+        ]));
+        assert_eq!(sample.queued_on_road(), 1);
+        assert_eq!(sample.len(), 4);
     }
 
     /// 転入の見込みの数は、世帯の数と食い違わない。
