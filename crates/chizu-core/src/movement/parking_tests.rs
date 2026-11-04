@@ -207,6 +207,10 @@ fn drives_sent_elsewhere_and_given_up_on_full_lots_are_counted() {
             parked_elsewhere: 2,
             lots_full: 1,
             no_car: 0,
+            no_car_in_use: 0,
+            no_car_parked_away: 0,
+            no_car_at_home: 0,
+            no_car_other: 0,
         }
     );
     // 数は状態ハッシュに入らない。
@@ -963,6 +967,52 @@ fn a_household_shares_one_car() {
     assert_eq!(s.trips.household_car(Household::ID), None);
     let again = h.start(&mut s, &[(0, (home, work))]);
     assert!(Household::drives(&s, again[0]));
+}
+
+#[test]
+fn no_car_is_counted_by_reason() {
+    let (mut s, ids) = Street::new(&[0, 30]);
+    let (home, work) = (ids[0], ids[1]);
+    let h = Household { home };
+    let tally = |s: &Street| s.trips.parking_tally();
+    let sum = |s: &Street| {
+        let t = tally(s);
+        t.no_car_in_use + t.no_car_parked_away + t.no_car_at_home + t.no_car_other
+    };
+    // 家族が乗っている。
+    let out = h.start(&mut s, &[(0, (home, work)), (1, (home, work))]);
+    assert_eq!(tally(&s).no_car_in_use, 1);
+    s.run(out[0]);
+    s.trips.take_commuter(out[0]);
+    s.trips.cancel(out[1]);
+    // 家族が職場に停めている。
+    let walk = h.start(&mut s, &[(1, (home, work))]);
+    assert_eq!(tally(&s).no_car_parked_away, 1);
+    s.trips.cancel(walk[0]);
+    // 家のない住民が、職場に停めてある車に乗れない。
+    let request = CommuteRequest {
+        home: None,
+        ..h.request(1, (work, home))
+    };
+    let (net, router) = (&s.net, &mut s.router);
+    let ids = s
+        .trips
+        .start_commutes(net, router, &s.buildings, &[request], Tick::ZERO);
+    assert_eq!(tally(&s).no_car_other, 1);
+    for id in ids.into_iter().flatten() {
+        s.trips.cancel(id);
+    }
+    // 車を家に停めた状態で、家にいない本人が家へ向かう。
+    let back = h.start(&mut s, &[(0, (work, home))]);
+    s.run(back[0]);
+    s.trips.take_commuter(back[0]);
+    assert_eq!(lot(&s, home), (1, 0));
+    let walk = h.start(&mut s, &[(1, (work, home))]);
+    assert_eq!(tally(&s).no_car_at_home, 1);
+    s.trips.cancel(walk[0]);
+    let t = tally(&s);
+    assert_eq!(t.no_car, 4);
+    assert_eq!(sum(&s), t.no_car);
 }
 
 #[test]

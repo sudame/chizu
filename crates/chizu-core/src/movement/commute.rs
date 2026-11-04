@@ -174,9 +174,21 @@ impl Trips {
                     {
                         Some(lot)
                     }
-                    Some(_) => {
+                    Some(car) => {
                         let tally = &mut self.parking_tally;
                         tally.no_car = tally.no_car.saturating_add(1);
+                        // `no_car` の内訳。どれか 1 つだけを増やし、和が `no_car` に等しくなるようにする。
+                        let reason = match car {
+                            HouseholdCar::InUse(_) => &mut tally.no_car_in_use,
+                            HouseholdCar::Parked { .. } if r.home.is_none() => {
+                                &mut tally.no_car_other
+                            }
+                            HouseholdCar::Parked { lot, .. } if Some(lot) == r.home => {
+                                &mut tally.no_car_at_home
+                            }
+                            HouseholdCar::Parked { .. } => &mut tally.no_car_parked_away,
+                        };
+                        *reason = reason.saturating_add(1);
                         return None;
                     }
                 };
