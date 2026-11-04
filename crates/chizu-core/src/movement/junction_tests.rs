@@ -113,13 +113,14 @@ impl Cars {
 
 #[test]
 fn a_car_on_the_minor_road_yields_to_the_main_road() {
-    // 中くらいの道路を東へ走る車と、北から来て東へ合流する小さい道路の車。
+    // 中くらいの道路を東へ走る車と、北から来て右へ曲がり、西へ向かう小さい道路の車。右折は東へ走る車の
+    // 道筋と、どの車線を走っていても交わる。
     let mut n = Network::new();
     road(&mut n, (0, 10), (30, 10), RoadKind::Medium);
     road(&mut n, (10, 0), (10, 10), RoadKind::Small);
     let mut c = Cars::new(n);
     let main = c.drive(at(5, 10, (1, 0), 0), at(25, 10, (1, 0), 0));
-    let side = c.drive(at(10, 8, (0, 1), 4_000), at(25, 10, (1, 0), 0));
+    let side = c.drive(at(10, 8, (0, 1), 4_000), at(2, 10, (-1, 0), 0));
     let (main_first, side_first) = (
         c.trips.get(main).unwrap().link(),
         c.trips.get(side).unwrap().link(),
@@ -529,4 +530,268 @@ fn a_waiting_car_that_gets_a_place_starts_counting_again() {
     let t = c.trips.get(id).unwrap();
     assert!(!t.waiting);
     assert_eq!(t.stalled, 0);
+}
+
+#[test]
+fn cars_turning_into_the_same_road_from_both_sides_take_separate_lanes() {
+    // 南北の中くらいの道路（片側 2 車線）に、西と東から小さい道路が突き当たる。西の車は右へ、東の車は左へ
+    // 曲がって、どちらも南へ向かう。左へ曲がる車は道路の端の車線に、右へ曲がる車は中央寄りの車線に入り、
+    // 同じリンクへ同時に入れる。
+    let mut n = Network::new();
+    road(&mut n, (10, 0), (10, 30), RoadKind::Medium);
+    road(&mut n, (0, 10), (10, 10), RoadKind::Small);
+    road(&mut n, (10, 10), (20, 10), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let to = at(10, 25, (0, 1), 0);
+    let west = c.drive(at(8, 10, (1, 0), 4_000), to);
+    let east = c.drive(at(12, 10, (-1, 0), 4_000), to);
+    let south = link(&c.net, (10, 10), (10, 11));
+    let lanes: Vec<LaneId> = c.net.link_lanes(south).collect();
+    let mut entered = [None; 2];
+    for tick in 0..60_u32 {
+        c.step();
+        for (k, id) in [west, east].into_iter().enumerate() {
+            let Some(t) = c.trips.get(id) else { continue };
+            if entered[k].is_none() && car::on_road(t) && t.link() == south {
+                entered[k] = Some((tick, t.lane()));
+            }
+        }
+    }
+    let [Some((tw, lw)), Some((te, le))] = entered else {
+        panic!("南へ入らない {entered:?}");
+    };
+    // 1 台ずつ合流するなら tick がずれる。同じ tick に入れるのは、別の車線へ入るときだけである。
+    assert_eq!(tw, te, "片方が待った {tw} {te}");
+    // 左折（東の車）が道路の端の車線、右折（西の車）が中央寄りの車線である。
+    assert_eq!(le, lanes[0], "左折が端の車線でない");
+    assert_eq!(lw, lanes[1], "右折が中央寄りの車線でない");
+    assert_eq!(c.trips.rescues(), Rescues::default());
+    assert_eq!(c.hard_brakes, 0, "減速の上限を越えた");
+}
+
+/// (10, 10) で十字に交わる、中くらいの道路（片側 2 車線）の網。
+fn medium_crossroads() -> Network {
+    let mut n = Network::new();
+    road(&mut n, (0, 10), (20, 10), RoadKind::Medium);
+    road(&mut n, (10, 0), (10, 20), RoadKind::Medium);
+    n
+}
+
+/// 十字路の腕（中心から見た隣のマスへのずれ）。
+const ARMS: [(i64, i64); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+
+/// 腕 `a` から入って腕 `b` へ出る、出ていくリンクの `lane` 番の車線へ入る動き。
+fn lane_move(n: &Network, a: (i64, i64), b: (i64, i64), lane: usize) -> Move {
+    let c = (10, 10);
+    let from = link(n, (c.0 + a.0, c.1 + a.1), c);
+    let to = link(n, c, (c.0 + b.0, c.1 + b.1));
+    let l = n.link_lanes(to).nth(lane).unwrap();
+    Move::into_lane(n, from, to, l)
+}
+
+#[test]
+fn lane_conflicts_are_symmetric() {
+    let n = medium_crossroads();
+    let mut moves = Vec::new();
+    for a in ARMS {
+        for b in ARMS.into_iter().filter(|b| *b != a) {
+            for lane in 0..2 {
+                moves.push(lane_move(&n, a, b, lane));
+            }
+        }
+    }
+    for x in &moves {
+        for y in &moves {
+            assert_eq!(x.conflicts_in(y), y.conflicts_in(x), "{x:?} {y:?}");
+        }
+    }
+}
+
+#[test]
+fn turns_into_separate_lanes_conflict_only_when_their_paths_cross() {
+    let n = medium_crossroads();
+    let (w, e, north, s) = ((-1, 0), (1, 0), (0, -1), (0, 1));
+    // 東から左へ曲がって南へ、西から右へ曲がって南へ。左折が端の車線、右折が中央寄りの車線なら交わらない。
+    assert!(!lane_move(&n, e, s, 0).conflicts_in(&lane_move(&n, w, s, 1)));
+    // 左折が中央寄り、右折が端の車線へ入ると、道筋が交わる。2 車線から 2 車線へ曲がるときに起きうる。
+    assert!(lane_move(&n, e, s, 1).conflicts_in(&lane_move(&n, w, s, 0)));
+    assert!(lane_move(&n, w, s, 0).conflicts_in(&lane_move(&n, e, s, 1)));
+    // 北からの直進と東からの左折も、車線の並びが入口の並びと逆なら交わる。
+    assert!(lane_move(&n, north, s, 0).conflicts_in(&lane_move(&n, e, s, 1)));
+    assert!(!lane_move(&n, north, s, 1).conflicts_in(&lane_move(&n, e, s, 0)));
+    // 同じ車線へ入れば合流する。
+    assert!(lane_move(&n, north, s, 1).conflicts_in(&lane_move(&n, e, s, 1)));
+}
+
+/// 中くらいの道路の十字路で、腕 `from` から腕 `to` の車線 `lane` へ入ろうとする候補。
+fn approach(
+    n: &Network,
+    id: usize,
+    from: (i64, i64),
+    to: (i64, i64),
+    lane: usize,
+    waited: u32,
+) -> junction::Approach {
+    let c = (10, 10);
+    let f = link(n, (c.0 + from.0, c.1 + from.1), c);
+    let t = link(n, c, (c.0 + to.0, c.1 + to.1));
+    junction::Approach {
+        id,
+        node: car::end_node(n, f),
+        from: f,
+        to: t,
+        lane: n.link_lanes(f).next().unwrap(),
+        to_lane: n.link_lanes(t).nth(lane).unwrap(),
+        class: 2,
+        committed: false,
+        room: true,
+        waited,
+    }
+}
+
+#[test]
+fn a_left_turn_waits_for_a_right_turn_that_went_first() {
+    let n = medium_crossroads();
+    let (w, e, s) = ((-1, 0), (1, 0), (0, 1));
+    let held = |cands: Vec<junction::Approach>, inside: Vec<junction::Inside>| {
+        junction::holds(
+            &n,
+            cands,
+            inside,
+            Tick::ZERO,
+            &Default::default(),
+            &Default::default(),
+        )
+        .ids
+    };
+    // 待ちすぎた右折が先に入る。交わる車線へ曲がる左折は止まり、交わらない車線なら一緒に入る。
+    let late = PATIENCE + 1;
+    let none: Vec<usize> = Vec::new();
+    assert_eq!(
+        held(
+            vec![approach(&n, 0, w, s, 0, late), approach(&n, 1, e, s, 1, 0)],
+            vec![]
+        ),
+        [1]
+    );
+    assert_eq!(
+        held(
+            vec![approach(&n, 0, w, s, 1, late), approach(&n, 1, e, s, 0, 0)],
+            vec![]
+        ),
+        none
+    );
+    // 右折の車が交差点の中にいるときも同じである。
+    let inside = |lane: usize| {
+        let a = approach(&n, 9, w, s, lane, 0);
+        junction::Inside {
+            node: a.node,
+            from: a.from,
+            to: a.to,
+            lane: a.to_lane,
+            stopped: false,
+        }
+    };
+    assert_eq!(
+        held(vec![approach(&n, 1, e, s, 1, 0)], vec![inside(0)]),
+        [1]
+    );
+    assert_eq!(
+        held(vec![approach(&n, 1, e, s, 0, 0)], vec![inside(1)]),
+        none
+    );
+}
+
+/// 十字路の中を通る車の道筋を、本体の `Move` とは別に求めて、交わるかを見る。
+/// 腕 `a` から入って腕 `b` の車線 `lane`（2 車線のうち 0 が道路の端）へ出る道筋を、中心から腕の向きへ
+/// 6 進んだ所にある入口と出口を結ぶ線分にする。車は左側通行なので、入口と出口は進む向きの左へずれる。
+/// ずれは、入口が 1、出口が端の車線で 3、中央寄りの車線で 1 である。
+fn chord(a: (i64, i64), b: (i64, i64), lane: usize) -> ((i64, i64), (i64, i64)) {
+    let at = |arm: (i64, i64), toward: (i64, i64), side: i64| {
+        let left = (toward.1, -toward.0);
+        (arm.0 * 6 + left.0 * side, arm.1 * 6 + left.1 * side)
+    };
+    let side_out = if lane == 0 { 3 } else { 1 };
+    (at(a, (-a.0, -a.1), 1), at(b, b, side_out))
+}
+
+/// 2 本の道筋が、真ん中で交わるか、同じ出口の点で合流するか。
+fn chords_meet(x: ((i64, i64), (i64, i64)), y: ((i64, i64), (i64, i64))) -> bool {
+    let side = |p: (i64, i64), q: (i64, i64), r: (i64, i64)| {
+        ((q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)).signum()
+    };
+    let crossing = side(x.0, x.1, y.0) * side(x.0, x.1, y.1) < 0
+        && side(y.0, y.1, x.0) * side(y.0, y.1, x.1) < 0;
+    crossing || x.1 == y.1
+}
+
+#[test]
+fn the_independent_chord_agrees_with_the_lane_conflicts() {
+    // 道筋の求め方が本体と食い違わないことの見張り。入口の腕が違う動きの全部の組で、`conflicts_in` と一致する。
+    let n = medium_crossroads();
+    let mut moves = Vec::new();
+    for a in ARMS {
+        for b in ARMS.into_iter().filter(|b| *b != a) {
+            for lane in 0..2 {
+                moves.push((a, lane_move(&n, a, b, lane), chord(a, b, lane)));
+            }
+        }
+    }
+    for (a, m, x) in &moves {
+        for (b, k, y) in &moves {
+            if a != b {
+                assert_eq!(m.conflicts_in(k), chords_meet(*x, *y), "{m:?} {k:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn turning_cars_never_cross_inside_a_two_lane_crossroads() {
+    // 交差点の中の 2 台が、本体の `conflicts_in` とは別に求めた道筋（`chord`）で交わらないことを見る。
+    // `holds` が `conflicts_in` のとおりに車を止めているかを見るテストで、`conflicts_in` 自体の誤りは
+    // `the_independent_chord_agrees_with_the_lane_conflicts` が見る。
+    let mut c = Cars::new(medium_crossroads());
+    let mut drives = Vec::new();
+    let mut incoming = Vec::new();
+    for a in ARMS {
+        let step = (-a.0 as i8, -a.1 as i8);
+        let from = at(10 + 10 * a.0, 10 + 10 * a.1, step, 0);
+        for b in ARMS.into_iter().filter(|b| *b != a) {
+            let to = at(10 + 9 * b.0, 10 + 9 * b.1, (b.0 as i8, b.1 as i8), 0);
+            drives.extend(std::iter::repeat_n((from, to), 6));
+        }
+        incoming.push((a, link(&c.net, (10 + a.0, 10 + a.1), (10, 10))));
+    }
+    let ids = c
+        .trips
+        .spawn_drives(&c.net, &mut c.router, &drives, Tick::ZERO);
+    assert!(ids.iter().all(Option::is_some));
+    let mut arrived = 0;
+    for _ in 0..2_000 {
+        arrived += c.step().len();
+        let inside: Vec<_> = c
+            .trips
+            .iter()
+            .filter(|(_, t)| car::on_road(t) && t.leg > 0 && t.offset().0 < CAR_LENGTH + MIN_GAP)
+            .filter_map(|(_, t)| {
+                let prev = t.route().links[t.leg as usize - 1];
+                let (arm, _) = incoming.iter().find(|(_, l)| *l == prev)?;
+                let out = ARMS
+                    .into_iter()
+                    .find(|b| link(&c.net, (10, 10), (10 + b.0, 10 + b.1)) == t.link())?;
+                let lane = c.net.link_lanes(t.link()).position(|l| l == t.lane())?;
+                Some((*arm, chord(*arm, out, lane)))
+            })
+            .collect();
+        for (i, (a, x)) in inside.iter().enumerate() {
+            for (b, y) in &inside[i + 1..] {
+                assert!(a == b || !chords_meet(*x, *y), "交差点の中で交わった");
+            }
+        }
+    }
+    // 一度に出した車どうしは、合流を同じリンクで決めても減速の上限を破ることがある。交差点の中の
+    // 交わりとは関わらないので、ここでは数えない。
+    assert_eq!(arrived, drives.len());
+    assert_eq!(c.trips.rescues(), Rescues::default(), "救済が働いた");
 }

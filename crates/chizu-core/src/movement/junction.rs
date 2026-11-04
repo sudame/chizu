@@ -1,8 +1,10 @@
 //! 交差点で、どの車をノードに入れるかを決める。
 //!
 //! 3 本以上の区間が集まるノードを交差点とする。交差点の手前まで来た車線の先頭の車（候補）は、
-//! 入ってくるリンクから出ていくリンクへの「動き」を持つ。入ってくるリンクの違う 2 つの動きは、
-//! 出ていくリンクが同じ（合流）か、交差点の中で道筋が交わるときに衝突する。
+//! 入ってくるリンクから出ていくリンクへの「動き」と、出ていくリンクで入る車線を持つ。入ってくるリンクの
+//! 違う 2 つの動きは、出ていく車線が同じ（合流）か、交差点の中で道筋が交わるときに衝突する。
+//! 同じリンクへ入っても車線が違えば合流しないので、左と右から曲がって入る車は同時に入れる（`car`）。
+//! ただし、出ていく車線の並びが入ってくる向きの並びと逆なら道筋が交わるので、衝突する。
 //!
 //! ノードごとに、交差点の中にいる車（出ていくリンクに入ったばかりの車）の動きを先に置く。
 //! そのあと候補を優先の順に 1 台ずつ見て、置いた動きのどれとも衝突せず、出ていく車線に
@@ -39,8 +41,8 @@
 //!
 //! 道筋が交わるかは、ノードを中心とした円の上に、腕ごとの入口と出口の点を置いて決める。
 //! 左側通行とし、マスの y は画面の下向きなので、腕の向きの角度（x から y へ回る向き）から
-//! 入口は少し進めた所、出口は少し戻した所に置く。2 つの動きの弦の端が円の上で互い違いに
-//! 並べば、道筋が交わる。
+//! 入口は少し進めた所、出口は少し戻した所に置く。出口は車線ごとに分け、道路の端の車線ほど
+//! 大きく戻す。2 つの動きの弦の端が円の上で互い違いに並べば、道筋が交わる。
 //!
 //! 入ってくる腕か出ていく腕の横断歩道を人が渡っているか、長く待った人が渡ろうとしている候補は、
 //! 止まりきれない車を除いて止める（`crossing`）。そのうち、横断歩道の人がいなければ入れた候補は、
@@ -111,9 +113,13 @@ pub(super) struct Move {
     /// ノードから見た、入ってくる腕と出ていく腕の向きの角度。
     arm_in: u8,
     arm_out: u8,
+    /// 出口を、出ていく腕の向きから戻す量。中央寄りの車線が 1 で、道路の端の車線ほど大きい。
+    /// 車線を決めない動きは 1 にする。
+    back: u8,
 }
 
 impl Move {
+    /// 車線を決めない動き。曲がる向きを見るときに使う。
     pub(super) fn new(net: &Network, from: LinkId, to: LinkId) -> Move {
         let step = |l| super::pos::link_geometry(net, l).expect("リンクがない").1;
         let (f, t) = (step(from), step(to));
@@ -122,17 +128,41 @@ impl Move {
             to,
             arm_in: heading((-f.0, -f.1)),
             arm_out: heading(t),
+            back: 1,
         }
     }
 
-    /// 円の上の入口と出口の位置。1 周を 32 に分ける。
+    /// 出ていくリンクの車線 `lane` に入る動き。
+    pub(super) fn into_lane(net: &Network, from: LinkId, to: LinkId, lane: LaneId) -> Move {
+        let lanes: Vec<LaneId> = net.link_lanes(to).collect();
+        let index = lanes.iter().position(|l| *l == lane).unwrap_or(0);
+        // 車線は片側 3 本までなので、戻す量は 1〜3 に収まり、隣の腕の入口や出口とは重ならない。
+        let back =
+            u8::try_from(lanes.len().saturating_sub(index).clamp(1, 3)).expect("車線が多すぎる");
+        Move {
+            back,
+            ..Move::new(net, from, to)
+        }
+    }
+
+    /// 円の上の入口と出口の位置。1 周を 64 に分ける。入口は腕の向きから 2 進めた所に、出口は腕の向きから
+    /// `back` 戻した所に置く。同じリンクの違う車線へ入る 2 つの動きは、出口が別の点になるので、
+    /// 道筋が交わるかを入口と出口の並びだけで対称に決められる。
     fn ends(&self) -> (u8, u8) {
-        (self.arm_in * 4 + 1, (self.arm_out * 4 + 31) % 32)
+        (
+            self.arm_in * 8 + 2,
+            (self.arm_out * 8 + 64 - self.back) % 64,
+        )
+    }
+
+    /// 入ってくる腕から見た、出ていく腕の向き。1〜3 は左折、4 は直進、5〜7 は右折、0 は折り返しである。
+    pub(super) fn bend(&self) -> u8 {
+        (self.arm_out + 8 - self.arm_in) % 8
     }
 
     /// 曲がり方の順位。直進と左折は 0、右折は 1、折り返しは 2 である。
     fn turn(&self) -> u8 {
-        match (self.arm_out + 8 - self.arm_in) % 8 {
+        match self.bend() {
             0 => 2,
             5..=7 => 1,
             _ => 0,
@@ -142,12 +172,23 @@ impl Move {
     fn crosses(&self, other: &Move) -> bool {
         let (p, q) = self.ends();
         let (a, b) = other.ends();
-        let inside = |x: u8| (x + 32 - p) % 32 < (q + 32 - p) % 32;
+        let inside = |x: u8| (x + 64 - p) % 64 < (q + 64 - p) % 64;
         inside(a) != inside(b)
     }
 
+    /// 車線を問わずに見た衝突。同じリンクへ入れば合流とみなす。
+    #[cfg(test)]
     pub(super) fn conflicts(&self, other: &Move) -> bool {
         self.from != other.from && (self.to == other.to || self.crosses(other))
+    }
+
+    /// [`Move::into_lane`] で作った 2 つの動きが衝突するか。同じ車線へ入るか、道筋が交わるときである。
+    /// 同じリンクへ入っても、車線が違えば合流しない。そのときも、出口の車線の並びと入口の向きの並びが
+    /// 逆なら道筋が交わる。入ってくるリンクが違えば 4 つの端はどれも別の点なので、向きを入れ替えても
+    /// 結果は変わらない。
+    pub(super) fn conflicts_in(&self, other: &Move) -> bool {
+        self.from != other.from
+            && ((self.to == other.to && self.back == other.back) || self.crosses(other))
     }
 }
 
@@ -161,6 +202,8 @@ pub(super) struct Approach {
     pub from: LinkId,
     pub to: LinkId,
     pub lane: LaneId,
+    /// 出ていくリンクで入る車線。
+    pub to_lane: LaneId,
     /// 入ってくるリンクの道路の格。
     pub class: u8,
     /// ノードの手前で止めると、減速の上限を破るか。
@@ -178,6 +221,8 @@ pub(super) struct Inside {
     /// 入ってきたリンクと、いまのリンク。
     pub from: LinkId,
     pub to: LinkId,
+    /// いまの車線。
+    pub lane: LaneId,
     /// 止まっているか。
     pub stopped: bool,
 }
@@ -218,7 +263,10 @@ pub(super) fn holds(
         let lo = inside.partition_point(|x| x.node < node);
         let hi = inside.partition_point(|x| x.node <= node);
         group.clear();
-        group.extend(same.iter().map(|c| (*c, Move::new(net, c.from, c.to))));
+        group.extend(
+            same.iter()
+                .map(|c| (*c, Move::into_lane(net, c.from, c.to, c.to_lane))),
+        );
         let mut patience = PATIENCE;
         if let Some(st) = signal::state(net, node, now, signals) {
             patience = patience.saturating_add(st.red_ticks);
@@ -263,14 +311,14 @@ pub(super) fn holds(
         placed.extend(
             inside[lo..hi]
                 .iter()
-                .map(|x| (Move::new(net, x.from, x.to), x.stopped)),
+                .map(|x| (Move::into_lane(net, x.from, x.to, x.lane), x.stopped)),
         );
         for (c, mv) in &group {
             let blocked = |skip_stopped: bool| {
                 placed
                     .iter()
                     .filter(|(_, stopped)| !(skip_stopped && *stopped))
-                    .any(|(m, _)| m.conflicts(mv))
+                    .any(|(m, _)| m.conflicts_in(mv))
             };
             // 待ちすぎた車は、交差点の中で止まった車の脇をすり抜けて入る。
             let clear = c.room && !blocked(c.waited >= GIVE_UP);
