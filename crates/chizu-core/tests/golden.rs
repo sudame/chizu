@@ -1602,12 +1602,20 @@ fn driving_golden() {
 /// 同じ道路の碁盤の目に区画を塗った記録。西の 2 列の区画は住宅、東の 2 列はオフィスと商業にする。
 /// 区画の角から向かいの角へは、費用の同じ経路がたくさんある。道路の種類は `kind` にする。
 fn grid_city(kind: RoadKind) -> CommandLog {
+    mixed_grid_city(kind, kind)
+}
+
+/// [`grid_city`] と同じ街で、東西の道路を `east_west`、南北の道路を `north_south` の種類にする。
+fn mixed_grid_city(east_west: RoadKind, north_south: RoadKind) -> CommandLog {
     let mut log = CommandLog::new();
     let mut rec = |tick: u64, c: Command| {
         log.record(Tick(tick), c).unwrap();
     };
     for i in 0..=4 {
-        for (from, to) in [((0, i * 12), (48, i * 12)), ((i * 12, 0), (i * 12, 48))] {
+        for (from, to, kind) in [
+            ((0, i * 12), (48, i * 12), east_west),
+            ((i * 12, 0), (i * 12, 48), north_south),
+        ] {
             rec(
                 1,
                 Command::BuildRoad {
@@ -1728,6 +1736,28 @@ fn medium_grid_driving_golden() {
     assert!(spawned > 300, "作れた移動が少ない {spawned}");
     assert_eq!(driving_checkpoints_on(&log, SEED, TICKS).0, got);
     compare_golden("medium_grid_driving", &got);
+    assert!(
+        end.trips().len() < 200,
+        "着かずに残った移動が多い {}",
+        end.trips().len()
+    );
+}
+
+/// 東西が小さい道路（片側 1 車線）、南北が中くらいの道路（片側 2 車線）の碁盤の目で車を行き来させる。
+/// 小さい道路から中くらいの道路へ両側から曲がって入る車が、左折は端の車線、右折は中央寄りの車線に入る。
+/// 曲がる向きで車線を決める規則を変えると、ハッシュが変わる。
+#[test]
+fn small_into_medium_grid_driving_golden() {
+    const SEED: u64 = 42;
+    const TICKS: u64 = 2_600;
+    let log = mixed_grid_city(RoadKind::Small, RoadKind::Medium);
+    let mut world = World::new(SEED);
+    let stats = replay(&mut world, &log, 4);
+    assert_eq!(stats.denied, 0);
+    let (got, spawned, end) = driving_checkpoints_on(&log, SEED, TICKS);
+    assert!(spawned > 300, "作れた移動が少ない {spawned}");
+    assert_eq!(driving_checkpoints_on(&log, SEED, TICKS).0, got);
+    compare_golden("small_into_medium_grid_driving", &got);
     assert!(
         end.trips().len() < 200,
         "着かずに残った移動が多い {}",

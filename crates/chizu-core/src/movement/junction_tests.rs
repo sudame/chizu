@@ -560,8 +560,11 @@ fn cars_turning_into_the_same_road_from_both_sides_take_separate_lanes() {
     let [Some((tw, lw)), Some((te, le))] = entered else {
         panic!("南へ入らない {entered:?}");
     };
-    assert!(tw.abs_diff(te) <= 1, "片方が待った {tw} {te}");
-    assert_eq!((le, lw), (lanes[0], lanes[1]));
+    // 1 台ずつ合流するなら tick がずれる。同じ tick に入れるのは、別の車線へ入るときだけである。
+    assert_eq!(tw, te, "片方が待った {tw} {te}");
+    // 左折（東の車）が道路の端の車線、右折（西の車）が中央寄りの車線である。
+    assert_eq!(le, lanes[0], "左折が端の車線でない");
+    assert_eq!(lw, lanes[1], "右折が中央寄りの車線でない");
     assert_eq!(c.trips.rescues(), Rescues::default());
     assert_eq!(c.hard_brakes, 0, "減速の上限を越えた");
 }
@@ -699,8 +702,55 @@ fn a_left_turn_waits_for_a_right_turn_that_went_first() {
     );
 }
 
+/// 十字路の中を通る車の道筋を、本体の `Move` とは別に求めて、交わるかを見る。
+/// 腕 `a` から入って腕 `b` の車線 `lane`（2 車線のうち 0 が道路の端）へ出る道筋を、中心から腕の向きへ
+/// 6 進んだ所にある入口と出口を結ぶ線分にする。車は左側通行なので、入口と出口は進む向きの左へずれる。
+/// ずれは、入口が 1、出口が端の車線で 3、中央寄りの車線で 1 である。
+fn chord(a: (i64, i64), b: (i64, i64), lane: usize) -> ((i64, i64), (i64, i64)) {
+    let at = |arm: (i64, i64), toward: (i64, i64), side: i64| {
+        let left = (toward.1, -toward.0);
+        (arm.0 * 6 + left.0 * side, arm.1 * 6 + left.1 * side)
+    };
+    let side_out = if lane == 0 { 3 } else { 1 };
+    (at(a, (-a.0, -a.1), 1), at(b, b, side_out))
+}
+
+/// 2 本の道筋が、真ん中で交わるか、同じ出口の点で合流するか。
+fn chords_meet(x: ((i64, i64), (i64, i64)), y: ((i64, i64), (i64, i64))) -> bool {
+    let side = |p: (i64, i64), q: (i64, i64), r: (i64, i64)| {
+        ((q.0 - p.0) * (r.1 - p.1) - (q.1 - p.1) * (r.0 - p.0)).signum()
+    };
+    let crossing = side(x.0, x.1, y.0) * side(x.0, x.1, y.1) < 0
+        && side(y.0, y.1, x.0) * side(y.0, y.1, x.1) < 0;
+    crossing || x.1 == y.1
+}
+
+#[test]
+fn the_independent_chord_agrees_with_the_lane_conflicts() {
+    // 道筋の求め方が本体と食い違わないことの見張り。入口の腕が違う動きの全部の組で、`conflicts_in` と一致する。
+    let n = medium_crossroads();
+    let mut moves = Vec::new();
+    for a in ARMS {
+        for b in ARMS.into_iter().filter(|b| *b != a) {
+            for lane in 0..2 {
+                moves.push((a, lane_move(&n, a, b, lane), chord(a, b, lane)));
+            }
+        }
+    }
+    for (a, m, x) in &moves {
+        for (b, k, y) in &moves {
+            if a != b {
+                assert_eq!(m.conflicts_in(k), chords_meet(*x, *y), "{m:?} {k:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn turning_cars_never_cross_inside_a_two_lane_crossroads() {
+    // 交差点の中の 2 台が、本体の `conflicts_in` とは別に求めた道筋（`chord`）で交わらないことを見る。
+    // `holds` が `conflicts_in` のとおりに車を止めているかを見るテストで、`conflicts_in` 自体の誤りは
+    // `the_independent_chord_agrees_with_the_lane_conflicts` が見る。
     let mut c = Cars::new(medium_crossroads());
     let mut drives = Vec::new();
     let mut incoming = Vec::new();
@@ -711,7 +761,7 @@ fn turning_cars_never_cross_inside_a_two_lane_crossroads() {
             let to = at(10 + 9 * b.0, 10 + 9 * b.1, (b.0 as i8, b.1 as i8), 0);
             drives.extend(std::iter::repeat_n((from, to), 6));
         }
-        incoming.push(link(&c.net, (10 + a.0, 10 + a.1), (10, 10)));
+        incoming.push((a, link(&c.net, (10 + a.0, 10 + a.1), (10, 10))));
     }
     let ids = c
         .trips
@@ -720,25 +770,24 @@ fn turning_cars_never_cross_inside_a_two_lane_crossroads() {
     let mut arrived = 0;
     for _ in 0..2_000 {
         arrived += c.step().len();
-        let inside: Vec<Move> = c
+        let inside: Vec<_> = c
             .trips
             .iter()
             .filter(|(_, t)| car::on_road(t) && t.leg > 0 && t.offset().0 < CAR_LENGTH + MIN_GAP)
-            .filter(|(_, t)| incoming.contains(&t.route().links[t.leg as usize - 1]))
-            .map(|(_, t)| {
-                Move::into_lane(
-                    &c.net,
-                    t.route().links[t.leg as usize - 1],
-                    t.link(),
-                    t.lane(),
-                )
+            .filter_map(|(_, t)| {
+                let prev = t.route().links[t.leg as usize - 1];
+                let (arm, _) = incoming.iter().find(|(_, l)| *l == prev)?;
+                let out = ARMS
+                    .into_iter()
+                    .find(|b| link(&c.net, (10, 10), (10 + b.0, 10 + b.1)) == t.link())?;
+                let lane = c.net.link_lanes(t.link()).position(|l| l == t.lane())?;
+                Some((*arm, chord(*arm, out, lane)))
             })
             .collect();
-        for a in &inside {
-            assert!(
-                !inside.iter().any(|b| a.conflicts_in(b)),
-                "交差点の中で交わった"
-            );
+        for (i, (a, x)) in inside.iter().enumerate() {
+            for (b, y) in &inside[i + 1..] {
+                assert!(a == b || !chords_meet(*x, *y), "交差点の中で交わった");
+            }
         }
     }
     // 一度に出した車どうしは、合流を同じリンクで決めても減速の上限を破ることがある。交差点の中の
