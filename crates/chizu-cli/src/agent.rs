@@ -69,6 +69,7 @@ observe の utilities（power と water）:
     each（その網ごとの capacity、demand、headroom、headroomPeople、代表のマス at）。
   headroomPeople の式: headroom × population.housedCitizens ÷ 街の需要の合計（utilities.*.demand）を整数で求め、小数は切り捨てる。
     住民 1 人あたりの需要を、住宅だけでなく商業・工業・オフィスの職場の需要も含めた街全体の「需要の合計 ÷ 家に住んでいる人（housedCitizens）」とみなした人数である。
+    空き家や、外とつながっていない建物の需要も含むので、少なめに出ることがある。
   shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at。at を map で見れば、どの網かが分かる。
   isolatedFacilities 孤立した施設の at の一覧。電気は発電所、水道は浄水場について数える。次のどちらかに当たる施設である。
     入口がない（面した道路が消えた）。

@@ -127,14 +127,15 @@ function mainView(stats: CityStats) {
   };
 }
 
-/** 余りが住民の何人分かの言い方。多いときは 10 人の位に切り捨てて「約」を付け、足りないときは足りない人数で言う。 */
+/** 余りが住民の何人分かの言い方。余りは 10 人の位に切り捨て、足りない人数は 10 人の位に切り上げて「約」を付ける。 */
 export function formatPeople(people: number): string {
   const n = (v: number) => v.toLocaleString("ja-JP");
-  const round = (v: number) => (v >= 100 ? Math.floor(v / 10) * 10 : v);
   if (people < 0) {
-    return `約 ${n(round(-people))} 人分足りない`;
+    // 足りない人数は多めに数える（中核と同じ向き）ので、10 人の位で切り上げる
+    const short = -people;
+    return `約 ${n(short >= 100 ? Math.ceil(short / 10) * 10 : short)} 人分足りない`;
   }
-  return `あと 約 ${n(round(people))} 人分`;
+  return `あと 約 ${n(people >= 100 ? Math.floor(people / 10) * 10 : people)} 人分`;
 }
 
 /** 電気と水道の、主の網の供給量と需要の 1 行。ほかに道路網があれば、その数を添える。 */

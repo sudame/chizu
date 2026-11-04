@@ -1099,6 +1099,17 @@ mod tests {
         let mut sim = Sim::new(0);
         assert!(sim.isolated_facilities().is_empty());
         sim.submit(road((10, 10), (30, 10))).unwrap();
+        // 住民が入るよう、高速道路の端から主の網につなぐ
+        let inner = chizu_core::world::highway_line(0).start;
+        let corner = (inner.x, 10);
+        for (from, to) in [
+            ((inner.x, inner.y), corner),
+            (corner, (inner.x.clamp(10, 30), 10)),
+        ] {
+            if from != to {
+                sim.submit(road(from, to)).unwrap();
+            }
+        }
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
             zone: Some(ZoneKind::Residential),
@@ -1119,7 +1130,10 @@ mod tests {
             rotation: 2,
         })
         .unwrap();
-        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 * 3);
+        sim.advance(
+            chizu_core::TICKS_PER_DAY as u32
+                + chizu_core::world::growth::GROWTH_INTERVAL as u32 * 3,
+        );
         let stats = sim.city_stats();
         assert!(stats[9] > 0.0, "{stats:?}");
         let power = ServiceKind::PowerPlant.capacity() as f64;
@@ -1136,13 +1150,9 @@ mod tests {
             ]
         );
         // 主の網は電気が 0 で足りない。水道は余りがあるので正、電気は負の人数になる。
-        let citizens = sim.world().housed_citizens();
-        if citizens > 0 {
-            assert_eq!(stats[23], 1.0, "{stats:?}");
-            assert!(stats[21] < 0.0 && stats[22] > 0.0, "{stats:?}");
-        } else {
-            assert_eq!(stats[21..24], [0.0, 0.0, 0.0], "{stats:?}");
-        }
+        assert!(sim.world().housed_citizens() > 0, "住民が入っていない");
+        assert_eq!(stats[23], 1.0, "{stats:?}");
+        assert!(stats[21] < 0.0 && stats[22] > 0.0, "{stats:?}");
         let isolated = sim.isolated_facilities();
         assert_eq!(isolated.len(), 3, "{isolated:?}");
         assert_eq!(isolated[2], f64::from(ServiceKind::PowerPlant as u8));

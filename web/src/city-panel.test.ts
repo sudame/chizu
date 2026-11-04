@@ -88,7 +88,7 @@ describe("街の数字", () => {
   });
 
   test("足りないときは、足りない人数で言う", () => {
-    expect(formatPeople(-1234)).toBe("約 1,230 人分足りない");
+    expect(formatPeople(-1234)).toBe("約 1,240 人分足りない");
     expect(formatPeople(0)).toBe("あと 約 0 人分");
     expect(formatPeople(42)).toBe("あと 約 42 人分");
   });
