@@ -3,6 +3,7 @@ use super::*;
 use crate::command::RoadKind;
 use crate::network::Line;
 use crate::tile::TileRect;
+use std::collections::BTreeSet;
 
 fn road(n: &mut Network, from: (i64, i64), to: (i64, i64), kind: RoadKind) {
     let line = Line::between(TilePos::new(from.0, from.1), TilePos::new(to.0, to.1)).unwrap();
@@ -794,4 +795,59 @@ fn turning_cars_never_cross_inside_a_two_lane_crossroads() {
     // 交わりとは関わらないので、ここでは数えない。
     assert_eq!(arrived, drives.len());
     assert_eq!(c.trips.rescues(), Rescues::default(), "救済が働いた");
+}
+
+#[test]
+fn a_car_waiting_for_walkers_does_not_hold_up_the_moves_it_crosses() {
+    // 西から東への直進（0）は、長く待ったので先の順番である。北から南への直進（1）は、その道筋と交わる。
+    let n = medium_crossroads();
+    let (w, e, north, s) = ((-1, 0), (1, 0), (0, -1), (0, 1));
+    let first = || approach(&n, 0, w, e, 0, PATIENCE + 1);
+    let second = || approach(&n, 1, north, s, 0, 0);
+    assert!(lane_move(&n, w, e, 0).conflicts_in(&lane_move(&n, north, s, 0)));
+    let west_arm = first().from.segment;
+    let node = first().node;
+    let peds: BTreeSet<(NodeId, SegmentId)> = [(node, west_arm)].into();
+    let held = |walks: &BTreeSet<(NodeId, SegmentId)>, inside: Vec<junction::Inside>| {
+        junction::holds(
+            &n,
+            vec![first(), second()],
+            inside,
+            Tick::ZERO,
+            walks,
+            &Default::default(),
+        )
+    };
+    // 人がいなければ、先の順番の車が入り、交わる後の車は止まる。
+    assert_eq!(held(&BTreeSet::new(), vec![]).ids, [1]);
+    // 西の腕の横断歩道に人がいると、先の車は人に譲って止まる。手前で止まっていて交差点に入らないので、
+    // 交わる後の車は先に入る。
+    let h = held(&peds, vec![]);
+    assert_eq!((h.ids, h.yielded), (vec![0], vec![0]));
+    // 先の車が交差点の中の車も待つなら、人がいても動きを押さえ、後の車を割り込ませない。
+    let mut blocker = None;
+    for a in ARMS {
+        for b in ARMS.into_iter().filter(|b| *b != a) {
+            for lane in 0..2 {
+                let m = lane_move(&n, a, b, lane);
+                if a != w
+                    && a != north
+                    && m.conflicts_in(&lane_move(&n, w, e, 0))
+                    && !m.conflicts_in(&lane_move(&n, north, s, 0))
+                {
+                    blocker = blocker.or(Some((a, b, lane)));
+                }
+            }
+        }
+    }
+    let (a, b, lane) = blocker.expect("先の車とだけ交わる動きがない");
+    let x = approach(&n, 9, a, b, lane, 0);
+    let inside = junction::Inside {
+        node: x.node,
+        from: x.from,
+        to: x.to,
+        lane: x.to_lane,
+        stopped: false,
+    };
+    assert_eq!(held(&peds, vec![inside]).ids, [0, 1]);
 }
