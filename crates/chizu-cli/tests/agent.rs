@@ -1351,6 +1351,28 @@ fn act_warns_only_about_roads_still_isolated_at_the_end() {
     assert!(results[3].get("warning").is_none(), "{acted}");
 }
 
+/// 同じ act で元の道路を壊し、その端のマスから引いた道路は、元の網に届いたとはみなさない。
+#[test]
+fn act_warns_about_a_road_drawn_from_the_end_of_a_bulldozed_road() {
+    let dir = session("agent-join-bulldoze");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let first = write(
+        &dir.join("a.json"),
+        r#"[{"type":"BuildRoad","from":[30,30],"to":[40,30],"kind":"Small"}]"#,
+    );
+    cli(&["agent", "act", d, &first]);
+    let cmds = write(
+        &dir.join("c.json"),
+        r#"[{"type":"Bulldoze","area":[[30,30],[40,30]]},
+            {"type":"BuildRoad","from":[40,30],"to":[40,40],"kind":"Small"}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let results = acted["results"].as_array().unwrap();
+    assert_eq!(results[1]["outcome"], "Applied", "{acted}");
+    assert!(results[1]["warning"].is_string(), "{acted}");
+}
+
 /// join:false なら隣にあっても延ばさない。join の書き方が違うときや BuildRoad 以外では Invalid になる。
 #[test]
 fn act_does_not_join_when_join_is_false() {

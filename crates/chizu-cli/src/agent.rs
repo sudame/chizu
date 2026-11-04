@@ -24,8 +24,8 @@ use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
     CommuteDistances, DayTraffic, DenyReason, GameTime, Heading, Line, MigrationOutlook,
-    NodeControl, ParkingTally, Rescues, ServiceKind, TilePos, TileRect, Traffic, World, ZoneKind,
-    replay,
+    NodeControl, NodeId, ParkingTally, Rescues, ServiceKind, TilePos, TileRect, Traffic, World,
+    ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -539,11 +539,9 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
     // 引いた時点でどの道路にもつながらなかった道路。配列の最後に、あとのコマンドでつながったかを判定し直す。
     let mut isolated_roads: Vec<(usize, TilePos, TilePos)> = Vec::new();
     // act の前からあった網のノード。最後の判定は、ここへ道路をたどって届くかで決める。
-    let original_nodes: std::collections::HashSet<(i64, i64)> = world
-        .network()
-        .nodes()
-        .map(|(_, n)| (n.tile().x, n.tile().y))
-        .collect();
+    // 世代つきの ID で控えるので、Bulldoze で消えた端に新しく引いたノードは、元のノードとみなさない。
+    let original_nodes: std::collections::BTreeSet<NodeId> =
+        world.network().nodes().map(|(id, _)| id).collect();
     let mut results: Vec<Value> = commands
         .iter()
         .enumerate()
@@ -614,52 +612,56 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
             out
         })
         .collect();
+    let reached = reached_from_original(world, &original_nodes);
     for (i, from, to) in isolated_roads {
-        if !is_joined_after(world, &original_nodes, from, to) {
+        if !is_joined_after(world, &reached, from, to) {
             results[i]["warning"] = json!(ISOLATED_ROAD_WARNING);
         }
     }
     results
 }
 
-/// 引いたあとの網で、道路 `from` → `to` が、act の前からあった網（高速道路を含む）へ道路をたどって届くか。
+/// 引いたあとの網で、act の前からあったノード（まだ残っているもの）から道路をたどって届くノード。
+fn reached_from_original(
+    world: &World,
+    original_nodes: &std::collections::BTreeSet<NodeId>,
+) -> std::collections::BTreeSet<NodeId> {
+    let net = world.network();
+    let mut reached: std::collections::BTreeSet<NodeId> = original_nodes
+        .iter()
+        .copied()
+        .filter(|id| net.node(*id).is_some())
+        .collect();
+    loop {
+        let before = reached.len();
+        for (_, seg) in net.segments() {
+            if reached.contains(&seg.a) || reached.contains(&seg.b) {
+                reached.insert(seg.a);
+                reached.insert(seg.b);
+            }
+        }
+        if reached.len() == before {
+            return reached;
+        }
+    }
+}
+
+/// 道路 `from` → `to` が、`reached`（act の前からあった網、高速道路を含む）へ道路をたどって届くか。
 /// 同じ配列の道路どうしでだけつながる塊は、届かないので真にならない。
 fn is_joined_after(
     world: &World,
-    original_nodes: &std::collections::HashSet<(i64, i64)>,
+    reached: &std::collections::BTreeSet<NodeId>,
     from: TilePos,
     to: TilePos,
 ) -> bool {
-    use std::collections::HashSet;
     let net = world.network();
     let Ok(line) = Line::between(from, to) else {
         return true;
     };
-    let mut reached: HashSet<(i64, i64)> = original_nodes.clone();
-    loop {
-        let before = reached.len();
-        for (_, seg) in net.segments() {
-            let (Some(a), Some(b)) = (net.node(seg.a), net.node(seg.b)) else {
-                continue;
-            };
-            let (a, b) = ((a.tile().x, a.tile().y), (b.tile().x, b.tile().y));
-            if reached.contains(&a) || reached.contains(&b) {
-                reached.insert(a);
-                reached.insert(b);
-            }
-        }
-        if reached.len() == before {
-            break;
-        }
-    }
     line.tiles().any(|t| {
         net.segments_through(t).into_iter().any(|id| {
-            net.segment(id).is_some_and(|seg| {
-                [seg.a, seg.b].into_iter().any(|n| {
-                    net.node(n)
-                        .is_some_and(|n| reached.contains(&(n.tile().x, n.tile().y)))
-                })
-            })
+            net.segment(id)
+                .is_some_and(|seg| reached.contains(&seg.a) || reached.contains(&seg.b))
         })
     })
 }
