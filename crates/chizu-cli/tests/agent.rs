@@ -1311,6 +1311,8 @@ fn act_joins_next_to_a_road_and_warns_about_an_isolated_road() {
     let acted = json(&cli(&["agent", "act", d, &cmds]));
     let results = acted["results"].as_array().unwrap();
     assert!(results.iter().all(|r| r["outcome"] == "Applied"), "{acted}");
+    // 1 本目は、高速道路にも届かないまま互いにだけつながるので、最後でも警告が残る。
+    assert!(results[0]["warning"].is_string(), "{acted}");
     assert_eq!(results[1]["joined"]["from"], serde_json::json!([0, 10]));
     assert!(results[1].get("warning").is_none(), "{acted}");
     // 平行に隣り合う道路は、つながらず、延ばしもしない。
@@ -1318,27 +1320,35 @@ fn act_joins_next_to_a_road_and_warns_about_an_isolated_road() {
     assert!(results[3]["warning"].is_string(), "{acted}");
 }
 
-/// 道路を引く順を入れ替えても、配列の最後につながっていれば warning は出ない。
-/// 最後までつながらない道路には、warning が残る。
+/// 配列の最後に、act の前からあった網へつながっていれば warning は出ない。
+/// 互いにだけつながる塊と、離れた道路には warning が残る。
 #[test]
 fn act_warns_only_about_roads_still_isolated_at_the_end() {
     let dir = session("agent-join-order");
     let d = dir.to_str().unwrap();
     cli(&["agent", "new", d, "42"]);
-    // 先に離れた縦の道路を引き、あとで横の連絡路が両方をつなぐ。孤立した道路も 1 本引く。
+    let first = write(
+        &dir.join("a.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[0,20],"kind":"Small"}]"#,
+    );
+    cli(&["agent", "act", d, &first]);
+    // 先に離れた縦の道路を引き、あとで横の連絡路が元の道路とつなぐ。
+    // 30 番台の 2 本は互いにだけつながり、元の網には届かない。
     let cmds = write(
         &dir.join("c.json"),
-        r#"[{"type":"BuildRoad","from":[0,0],"to":[0,20],"kind":"Small"},
-            {"type":"BuildRoad","from":[10,0],"to":[10,20],"kind":"Small","join":false},
+        r#"[{"type":"BuildRoad","from":[10,0],"to":[10,20],"kind":"Small","join":false},
             {"type":"BuildRoad","from":[0,10],"to":[10,10],"kind":"Small","join":false},
-            {"type":"BuildRoad","from":[30,30],"to":[40,30],"kind":"Small"}]"#,
+            {"type":"BuildRoad","from":[30,30],"to":[40,30],"kind":"Small"},
+            {"type":"BuildRoad","from":[35,25],"to":[35,35],"kind":"Small"}]"#,
     );
     let acted = json(&cli(&["agent", "act", d, &cmds]));
     let results = acted["results"].as_array().unwrap();
     assert!(results.iter().all(|r| r["outcome"] == "Applied"), "{acted}");
+    assert!(results[0].get("warning").is_none(), "{acted}");
     assert!(results[1].get("warning").is_none(), "{acted}");
-    assert!(results[2].get("warning").is_none(), "{acted}");
-    assert!(results[3]["warning"].is_string(), "{acted}");
+    // 30 番台の 1 本目は元の網に届かない。2 本目はそれに交わるので、引いた時点で警告は付かない。
+    assert!(results[2]["warning"].is_string(), "{acted}");
+    assert!(results[3].get("warning").is_none(), "{acted}");
 }
 
 /// join:false なら隣にあっても延ばさない。join の書き方が違うときや BuildRoad 以外では Invalid になる。

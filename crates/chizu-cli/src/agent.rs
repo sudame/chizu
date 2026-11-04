@@ -195,7 +195,7 @@ observe の removedCrosswalks:
       始点か終点が道路のないマスで、引く向きの 1 歩外に道路（高速道路は内側の端だけ）があれば、そのマスまで 1 マス
       延ばして交差点でつなぐ（延ばした 1 マスも費用がかかる）。延ばしたときは結果の joined に実際の from と to が出る。
       平行に隣り合う道路や、1 マス離れた道路にはつながない。所持金が延ばしたぶんに足りないときも延ばさない。
-      "join":false を足すと延ばさない（道路の 1 マス手前で止める行き止まりを引くときに使う。省くと true）。引いた時点でつながらなくても、同じ配列のあとのコマンドでつながれば出ない（配列の最後でどの道路にもつながらない道路にだけ、結果に warning が出る）。
+      "join":false を足すと延ばさない（道路の 1 マス手前で止める行き止まりを引くときに使う。省くと true）。引いた時点でつながらなくても、同じ配列のあとのコマンドで、act の前からあった道路（高速道路を含む）へたどって届けば出ない（配列の最後でも届かない道路にだけ、結果に warning が出る。同じ配列の道路どうしでだけつながる塊にも出る）。
   {"type":"UpgradeRoad","from":[x,y],"to":[x,y],"kind":"Small"|"Medium"|"Large"}
       直線と同じ 1 歩を通る既存の道路の区間を、区間ごと kind に変える（上げるのにも下げるのにも使う）。
       直線の形は BuildRoad と同じ決まりで、直線が区間の一部しか通らなくても、ノードからノードまでの区間全体が変わる。
@@ -538,6 +538,12 @@ fn hash_text(world: &World) -> String {
 fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: bool) -> Vec<Value> {
     // 引いた時点でどの道路にもつながらなかった道路。配列の最後に、あとのコマンドでつながったかを判定し直す。
     let mut isolated_roads: Vec<(usize, TilePos, TilePos)> = Vec::new();
+    // act の前からあった網のノード。最後の判定は、ここへ道路をたどって届くかで決める。
+    let original_nodes: std::collections::HashSet<(i64, i64)> = world
+        .network()
+        .nodes()
+        .map(|(_, n)| (n.tile().x, n.tile().y))
+        .collect();
     let mut results: Vec<Value> = commands
         .iter()
         .enumerate()
@@ -609,27 +615,50 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
         })
         .collect();
     for (i, from, to) in isolated_roads {
-        if !is_joined_after(world, from, to) {
+        if !is_joined_after(world, &original_nodes, from, to) {
             results[i]["warning"] = json!(ISOLATED_ROAD_WARNING);
         }
     }
     results
 }
 
-/// 引いたあとの網で、道路 `from` → `to` が、自分の線の外へ延びる別の区間につながっているか。
-/// 区間の両端が線の上にあれば、その区間は自分の一部である。
-fn is_joined_after(world: &World, from: TilePos, to: TilePos) -> bool {
+/// 引いたあとの網で、道路 `from` → `to` が、act の前からあった網（高速道路を含む）へ道路をたどって届くか。
+/// 同じ配列の道路どうしでだけつながる塊は、届かないので真にならない。
+fn is_joined_after(
+    world: &World,
+    original_nodes: &std::collections::HashSet<(i64, i64)>,
+    from: TilePos,
+    to: TilePos,
+) -> bool {
+    use std::collections::HashSet;
     let net = world.network();
     let Ok(line) = Line::between(from, to) else {
         return true;
     };
-    let on_line = |t: TilePos| line.position_of(t).is_some();
+    let mut reached: HashSet<(i64, i64)> = original_nodes.clone();
+    loop {
+        let before = reached.len();
+        for (_, seg) in net.segments() {
+            let (Some(a), Some(b)) = (net.node(seg.a), net.node(seg.b)) else {
+                continue;
+            };
+            let (a, b) = ((a.tile().x, a.tile().y), (b.tile().x, b.tile().y));
+            if reached.contains(&a) || reached.contains(&b) {
+                reached.insert(a);
+                reached.insert(b);
+            }
+        }
+        if reached.len() == before {
+            break;
+        }
+    }
     line.tiles().any(|t| {
         net.segments_through(t).into_iter().any(|id| {
             net.segment(id).is_some_and(|seg| {
-                [seg.a, seg.b]
-                    .into_iter()
-                    .any(|n| net.node(n).is_some_and(|n| !on_line(n.tile())))
+                [seg.a, seg.b].into_iter().any(|n| {
+                    net.node(n)
+                        .is_some_and(|n| reached.contains(&(n.tile().x, n.tile().y)))
+                })
             })
         })
     })
@@ -649,7 +678,7 @@ fn take_join(value: &Value) -> Result<(Value, bool), String> {
         .ok_or_else(|| "join は true か false で書く".into())
 }
 
-/// 配列の最後になっても、引いた道路がどの道路ともつながらなかったときの知らせ。
+/// 配列の最後になっても、引いた道路が act の前からあった道路につながらなかったときの知らせ。
 const ISOLATED_ROAD_WARNING: &str = "既存の道路につながっていない。電気と水道が届かず、区画が建たない（端を既存の道路や高速道路の端に合わせるとつながる）";
 
 /// 道路 `from` → `to` が、引く前の網のどこかにつながるか。道路が 1 本もない網では比べるものがないので真にする。
