@@ -17,7 +17,7 @@ use cache::Cache;
 use chizu_core::building::{
     Building, CityStats, demand, demand_factors, jobs_kept_permille, residential_tax_pull,
 };
-use chizu_core::service::supply_balance;
+use chizu_core::service::{headroom_people, supply_balance};
 use chizu_core::world::economy::Finances;
 use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
@@ -61,10 +61,15 @@ observe の utilities（power と water）:
   capacity と demand 道路網をまたいだ供給量と需要の合計。この合計から余りは出さない。つながっていない施設の分まで足されて、
   主の網が足りないのに余っているように見えるからである。余りは次の 2 つに分けて読む。
   main 主の網（需要がいちばん大きい網。どの網にも需要がなければ null）の capacity、demand、headroom（その差。負なら足りない）、
-  headroomPermille（供給量に対する余りの千分率。供給量 0 なら null）、lowHeadroom（余りが 0 以上 1 割未満。画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）、
+  headroomPermille（供給量に対する余りの千分率。供給量 0 なら null）、
+  headroomPeople（余りが住民の何人分か。足りないときは足りない人数が負の値で出る。人口か需要の合計が 0 なら null。式は下）、lowHeadroom（余りが 0 以上 1 割未満。画面の前もっての知らせと同じ。足りない、つまり headroom < 0 のときは偽）、
   shortage（headroom < 0。足りなくて新築が止まる）、shortBy（足りない量。足りているときは 0）、
   at（網の中で需要が最も大きい建物の道路に面したマス）。
-  others 主の網以外で、施設か建物のある道路網の networks（数）と capacity、demand、headroom（その差）。
+  others 主の網以外で、施設か建物のある道路網の networks（数）と capacity、demand、headroom（その差）、headroomPeople、
+    each（その網ごとの capacity、demand、headroom、headroomPeople、代表のマス at）。
+  headroomPeople の式: headroom × population.housedCitizens ÷ 街の需要の合計（utilities.*.demand）を整数で求め、小数は切り捨てる。
+    住民 1 人あたりの需要を、住宅だけでなく商業・工業・オフィスの職場の需要も含めた街全体の「需要の合計 ÷ 家に住んでいる人（housedCitizens）」とみなした人数である。
+    空き家や、外とつながっていない建物の需要も含むので、少なめに出ることがある。
   shortNetworks 足りない道路網の数、shortAt 足りない網ごとの capacity、demand と、代表のマス at。at を map で見れば、どの網かが分かる。
   isolatedFacilities 孤立した施設の at の一覧。電気は発電所、水道は浄水場について数える。次のどちらかに当たる施設である。
     入口がない（面した道路が消えた）。
@@ -1064,6 +1069,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
     let count = |f: &dyn Fn(&Building) -> bool| buildings.iter().filter(|(_, b)| f(b)).count();
     let balance = supply_balance(world.network(), world.facilities(), buildings);
     let isolated = world.isolated_facilities();
+    let housed = world.housed_citizens();
     let utility = |slot: usize| {
         let (mut capacity, mut need, mut bare) = (0_u64, 0_u64, 0_u64);
         let mut short = Vec::new();
@@ -1094,6 +1100,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 "demand": b.demand,
                 "headroom": headroom,
                 "headroomPermille": permille,
+                "headroomPeople": headroom_people(headroom, need, housed),
                 "lowHeadroom": b.demand > 0 && headroom >= 0 && permille.is_some_and(|p| p < 100),
                 // 足りない（headroom < 0）。lowHeadroom は足りないと偽になるので、足りないことはこちらで読む。
                 "shortage": headroom < 0,
@@ -1102,11 +1109,20 @@ fn observe(world: &World, before: &CarSample) -> Value {
             })
         });
         let (mut o_networks, mut o_capacity, mut o_demand) = (0_u64, 0_u64, 0_u64);
+        let mut o_each = Vec::new();
         for (i, c) in balance.components.iter().enumerate() {
             if Some(i) != main_idx && (c[slot].capacity > 0 || c[slot].demand > 0) {
                 o_networks += 1;
                 o_capacity += c[slot].capacity;
                 o_demand += c[slot].demand;
+                let headroom = i128::from(c[slot].capacity) - i128::from(c[slot].demand);
+                o_each.push(json!({
+                    "capacity": c[slot].capacity,
+                    "demand": c[slot].demand,
+                    "headroom": headroom,
+                    "headroomPeople": headroom_people(headroom, need, housed),
+                    "at": balance.spots[i].map(|p| json!([p.x, p.y])),
+                }));
             }
         }
         let kind = [ServiceKind::PowerPlant, ServiceKind::WaterPump][slot];
@@ -1124,6 +1140,12 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 "capacity": o_capacity,
                 "demand": o_demand,
                 "headroom": i128::from(o_capacity) - i128::from(o_demand),
+                "headroomPeople": headroom_people(
+                    i128::from(o_capacity) - i128::from(o_demand),
+                    need,
+                    housed,
+                ),
+                "each": o_each,
             },
             "shortNetworks": short.len(),
             "networksWithoutFacility": bare,
@@ -1332,9 +1354,11 @@ const WATCHED: &[&str] = &[
     "/facilities/PowerPlant",
     "/facilities/WaterPump",
     "/utilities/power/main/headroom",
+    "/utilities/power/main/headroomPeople",
     "/utilities/power/others/headroom",
     "/utilities/power/shortNetworks",
     "/utilities/water/main/headroom",
+    "/utilities/water/main/headroomPeople",
     "/utilities/water/others/headroom",
     "/utilities/water/shortNetworks",
     "/land/milestone",

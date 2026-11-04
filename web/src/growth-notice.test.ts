@@ -56,10 +56,10 @@ describe("止まっている網への移動", () => {
 
   test("網の数でボタンの文言が決まり、件数が揺れても key は変わらない", () => {
     const blocks = parseGrowthBlocks(
-      Array.from({ length: 21 }, (_, i) => (i === 9 || i === 10 || i === 11 ? 4 : 0)),
+      Array.from({ length: 24 }, (_, i) => (i === 9 || i === 10 || i === 11 ? 4 : 0)),
     );
     const bigger = parseGrowthBlocks(
-      Array.from({ length: 21 }, (_, i) => (i === 9 || i === 10 || i === 11 ? 9 : 0)),
+      Array.from({ length: 24 }, (_, i) => (i === 9 || i === 10 || i === 11 ? 9 : 0)),
     );
     const [one] = growthNotices(blocks, parseStalls([40, 12, 3]));
     const [same] = growthNotices(bigger, parseStalls([41, 13, 3]));
@@ -75,17 +75,17 @@ describe("止まっている網への移動", () => {
   test("止まっている区画の種類が変わっても key が変わる", () => {
     const at = (zone: number) =>
       parseGrowthBlocks(
-        Array.from({ length: 21 }, (_, i) => (i === 9 + zone * 3 || i === 10 + zone * 3 ? 4 : 0)),
+        Array.from({ length: 24 }, (_, i) => (i === 9 + zone * 3 || i === 10 + zone * 3 ? 4 : 0)),
       );
     expect(growthNotices(at(0), [])[0]?.key).not.toBe(growthNotices(at(1), [])[0]?.key);
   });
 
   test("足りないものが変わると key が変わる", () => {
     const power = parseGrowthBlocks(
-      Array.from({ length: 21 }, (_, i) => (i === 9 || i === 10 ? 4 : 0)),
+      Array.from({ length: 24 }, (_, i) => (i === 9 || i === 10 ? 4 : 0)),
     );
     const both = parseGrowthBlocks(
-      Array.from({ length: 21 }, (_, i) => (i === 9 || i === 10 || i === 11 ? 4 : 0)),
+      Array.from({ length: 24 }, (_, i) => (i === 9 || i === 10 || i === 11 ? 4 : 0)),
     );
     expect(growthNotices(power, [])[0]?.key).not.toBe(growthNotices(both, [])[0]?.key);
   });
@@ -140,7 +140,7 @@ describe("growth notice", () => {
 describe("つながっていない施設の知らせ", () => {
   const isolated = parseIsolated([10, -59, 1, 14, -59, 1, 3, 4, 2]);
   const growing = parseGrowthBlocks(
-    Array.from({ length: 21 }, (_, i) => (i === 9 || i === 10 ? 4 : 0)),
+    Array.from({ length: 24 }, (_, i) => (i === 9 || i === 10 ? 4 : 0)),
   );
 
   test("平らな配列を施設ごとに読む", () => {
