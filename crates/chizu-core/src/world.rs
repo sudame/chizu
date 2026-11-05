@@ -188,7 +188,7 @@ pub mod growth;
 pub mod people;
 mod traffic;
 
-pub use traffic::{CarSample, CitizenPlaces, CommuteDistances, DayTraffic, Traffic};
+pub use traffic::{CarSample, CitizenPlaces, CommuteDistances, CommuteTimes, DayTraffic, Traffic};
 
 /// 網から作り直せる経路探索。状態に入れず、`World` どうしを比べるときも見ない。
 ///

@@ -2,7 +2,7 @@
 //!
 //! 押された 1 つについてだけ集計し、毎 tick 全体を集計することはしない。
 
-use chizu_core::happiness::{commute_seconds, total};
+use chizu_core::happiness::{commute_time, total};
 use chizu_core::{BuildingId, TilePos, TileRect, World, ZoneKind};
 
 /// 住宅の住民の様子。住民が 1 人もいなければ `None` にする項目が多い。
@@ -14,7 +14,8 @@ pub struct Residents {
     pub happiness: u8,
     /// 幸福度の 3 つの要素（通勤、生活サービス、暮らし向き）の平均。
     pub parts: [u8; 3],
-    /// 職場のある住民の通勤の所要時間（秒）の平均。職場のある住民がいなければ `None`。
+    /// 職場のある住民の通勤の所要時間（移動の秒）の平均。幸福度の通勤の点と同じく、測った通勤の時間を均した値で、
+    /// まだ測っていない住民は直線距離からの見積もりを使う（[`commute_time`]）。職場のある住民がいなければ `None`。
     pub commute_seconds: Option<u64>,
 }
 
@@ -166,7 +167,7 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
                 *sum += u64::from(v);
             }
             if let Some(work) = row.workplace.and_then(|w| buildings.get(w)) {
-                commute_total += commute_seconds(b, work);
+                commute_total += commute_time(&row, b, work);
                 commuters += 1;
             }
         }
@@ -403,8 +404,8 @@ mod tests {
         let home = world.buildings().get(id).unwrap();
         let times: Vec<u64> = rows
             .iter()
-            .filter_map(|c| c.workplace)
-            .map(|w| commute_seconds(home, world.buildings().get(w).unwrap()))
+            .filter_map(|c| c.workplace.map(|w| (c, w)))
+            .map(|(c, w)| commute_time(c, home, world.buildings().get(w).unwrap()))
             .collect();
         assert!(!times.is_empty(), "職に就いた住民がいない");
         assert_eq!(

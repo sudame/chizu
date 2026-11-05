@@ -4,6 +4,7 @@
 //! 移動が終わったら居場所を切り替え、次の出発を積む。移動を作れなかった住民は、その場で着いたものとする。
 //! 網が変わって行けなくなり、移動が途中で消えた住民も、行き先に着いたものとする。
 //! 移動のあいだに職場や家が変わって予定が立て直されていたら、着いても予定は変えない。
+//! 家から職場に着いた移動は、かかった時間を住民の通勤の時間に入れ、幸福度の通勤の点に使う。
 
 use super::World;
 use crate::citizens::Activity;
@@ -96,7 +97,8 @@ impl World {
             let Some(c) = self.trips.take_commuter(trip) else {
                 continue;
             };
-            if let Some(f) = self.trips.finished(trip) {
+            let finished = self.trips.finished(trip);
+            if let Some(f) = finished {
                 self.tally_finished(f);
             }
             let Some(row) = self.population.citizen(c.citizen) else {
@@ -107,6 +109,13 @@ impl World {
             }
             self.population.set_trip(c.citizen, None);
             if row.schedule.next == c.to && row.schedule.depart_at.is_none() {
+                // 職場へは家から向かうので、着いた移動の時間が、家を出てから職場に着くまでの時間になる。
+                if c.to == Activity::Work
+                    && let Some(f) = finished.filter(|f| f.reached)
+                {
+                    let took = self.tick.0.saturating_sub(f.departed.0);
+                    self.population.record_commute(c.citizen, took);
+                }
                 arrived.push(c.citizen);
             } else {
                 // 向かっているあいだに職場が変わるかなくなり、着いても予定どおりの居場所にならない。
@@ -177,5 +186,42 @@ mod car_tests {
             percent.abs_diff(CAR_OWNERSHIP_PERCENT) <= 20,
             "車を持つ世帯が {percent}%"
         );
+    }
+}
+
+#[cfg(test)]
+mod commute_time_tests {
+    use crate::command::ZoneKind;
+    use crate::happiness::{self, CitizenContext, commute_score};
+    use crate::world::people::tests::{city, run_days};
+
+    /// 職場に着いた住民は通勤の時間を持ち、通勤の点はその時間から決まる。
+    #[test]
+    fn the_commute_score_follows_the_measured_commute() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 3);
+        let ctx = CitizenContext {
+            seed: w.seed,
+            tick: w.tick,
+            population: &w.population,
+            buildings: &w.buildings,
+            tax_permille: w.tax_permille,
+        };
+        let p = &w.population;
+        let mut measured = 0;
+        for id in p.citizen_ids() {
+            let row = p.citizen(id).unwrap();
+            if row.workplace.is_none() {
+                assert_eq!(row.commute, None, "{id:?}");
+                continue;
+            }
+            if let Some(t) = row.commute {
+                measured += 1;
+                assert!(t > 0, "{id:?}");
+                let parts = happiness::parts_of(&ctx, &row);
+                assert_eq!(parts.commute, commute_score(u64::from(t)), "{id:?}");
+            }
+        }
+        assert!(measured > 20, "通勤の時間を測った住民が少ない: {measured}");
     }
 }

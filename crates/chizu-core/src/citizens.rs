@@ -29,6 +29,10 @@ pub fn draw_household(r: &mut Pcg32, limit: u32) -> (Money, SmallVec<[u8; 4]>) {
     (money, ages)
 }
 
+/// 通勤の時間を均すときの重みの逆数。新しく測った 1 回を、この数で割った重みで混ぜる。
+/// 通勤は 1 日に 1 回なので、4 なら直近の数日の様子になり、1 日の渋滞で幸福度が跳ねない。
+pub const COMMUTE_SMOOTHING: u64 = 4;
+
 /// 幸福度の要素の点数の上限。点数は `0..=HAPPINESS_MAX` である。
 pub const HAPPINESS_MAX: u8 = 100;
 
@@ -77,6 +81,8 @@ pub struct CitizenRow {
     pub schedule: ScheduleState,
     pub happiness: HappinessParts,
     pub trip: Option<TripId>,
+    /// 職場への通勤にかかった時間（移動の秒）を均した値。いまの家と職場でまだ 1 度も着いていなければ `None`。
+    pub commute: Option<u32>,
 }
 
 impl CitizenRow {
@@ -94,6 +100,7 @@ impl CitizenRow {
         },
         happiness: HappinessParts::NEUTRAL,
         trip: None,
+        commute: None,
     };
 }
 
@@ -114,6 +121,7 @@ pub struct Citizens {
     schedule: Vec<ScheduleState>,
     happiness: Vec<HappinessParts>,
     trip: Vec<Option<TripId>>,
+    commute: Vec<Option<u32>>,
 }
 
 impl Citizens {
@@ -125,6 +133,7 @@ impl Citizens {
             schedule: self.schedule[slot],
             happiness: self.happiness[slot],
             trip: self.trip[slot],
+            commute: self.commute[slot],
         }
     }
 
@@ -135,6 +144,7 @@ impl Citizens {
         self.schedule[slot] = row.schedule;
         self.happiness[slot] = row.happiness;
         self.trip[slot] = row.trip;
+        self.commute[slot] = row.commute;
     }
 
     fn insert(&mut self, row: CitizenRow) -> CitizenId {
@@ -146,6 +156,7 @@ impl Citizens {
             self.schedule.push(row.schedule);
             self.happiness.push(row.happiness);
             self.trip.push(row.trip);
+            self.commute.push(row.commute);
         } else {
             self.set_row(index as usize, row);
         }
@@ -219,6 +230,12 @@ impl Population {
     pub(crate) fn set_home(&mut self, id: HouseholdId, home: Option<BuildingId>, now: Tick) {
         if self.contains_household(id) {
             let h = &mut self.households;
+            if h.home[id.slot()] != home {
+                // 家が変われば、測った通勤は前の家からのものになる。
+                for m in &h.members[id.slot()] {
+                    self.citizens.commute[m.slot()] = None;
+                }
+            }
             h.home[id.slot()] = home;
             let since = &mut h.homeless_since[id.slot()];
             *since = if home.is_some() {
@@ -238,8 +255,31 @@ impl Population {
     /// 住民の職場を決める。住民がいなければ何もしない。
     pub(crate) fn set_workplace(&mut self, id: CitizenId, workplace: Option<BuildingId>) {
         if self.contains_citizen(id) {
-            self.citizens.workplace[id.slot()] = workplace;
+            let c = &mut self.citizens;
+            if c.workplace[id.slot()] != workplace {
+                c.commute[id.slot()] = None;
+            }
+            c.workplace[id.slot()] = workplace;
         }
+    }
+
+    /// 住民が家から職場に着くまでにかかった時間（移動の秒）を、通勤の時間の均した値に入れる。
+    /// まだ測っていなければその値にし、測ってあれば [`COMMUTE_SMOOTHING`] 分の 1 だけ近づける。
+    /// 住民がいなければ何もしない。
+    pub(crate) fn record_commute(&mut self, id: CitizenId, seconds: u64) {
+        if !self.contains_citizen(id) {
+            return;
+        }
+        let seconds = u32::try_from(seconds).unwrap_or(u32::MAX);
+        let slot = &mut self.citizens.commute[id.slot()];
+        *slot = Some(match *slot {
+            None => seconds,
+            Some(old) => {
+                let n = COMMUTE_SMOOTHING;
+                let mixed = (u64::from(old) * (n - 1) + u64::from(seconds) + n / 2) / n;
+                u32::try_from(mixed).expect("均した通勤の時間は 2 つの値のあいだにある")
+            }
+        });
     }
 
     /// 住民がいま乗っている移動を決める。住民がいなければ何もしない。
@@ -397,6 +437,7 @@ impl StateHash for Citizens {
         h.write(&self.schedule);
         h.write(&self.happiness);
         h.write(&self.trip);
+        h.write(&self.commute);
     }
 }
 
@@ -528,5 +569,39 @@ mod tests {
         assert_eq!(p.homeless_since(g), Some(None));
         assert_eq!(p.household_money(g), Some(Money(4)));
         assert_eq!(p.members(h), None);
+    }
+
+    #[test]
+    fn commute_is_smoothed_and_forgotten_when_home_or_work_changes() {
+        let mut p = Population::default();
+        let h = p.add_household(Money::ZERO);
+        let a = p.add_citizen(h, 30).unwrap();
+        let b = |index| BuildingId {
+            index,
+            generation: 0,
+        };
+        p.set_home(h, Some(b(1)), Tick(0));
+        p.set_workplace(a, Some(b(2)));
+        let commute = |p: &Population| p.citizen(a).unwrap().commute;
+        assert_eq!(commute(&p), None);
+        p.record_commute(a, 400);
+        assert_eq!(commute(&p), Some(400));
+        // 1/4 ずつ近づくので、1 回の長い通勤では跳ねない。
+        p.record_commute(a, 800);
+        assert_eq!(commute(&p), Some(500));
+        p.record_commute(a, 500);
+        assert_eq!(commute(&p), Some(500));
+        // 同じ職場を決め直しても、測った値は残す。
+        p.set_workplace(a, Some(b(2)));
+        assert_eq!(commute(&p), Some(500));
+        p.set_workplace(a, Some(b(3)));
+        assert_eq!(commute(&p), None);
+        p.record_commute(a, 300);
+        p.set_home(h, Some(b(1)), Tick(1));
+        assert_eq!(commute(&p), Some(300));
+        p.set_home(h, Some(b(4)), Tick(2));
+        assert_eq!(commute(&p), None);
+        p.record_commute(a, u64::MAX);
+        assert_eq!(commute(&p), Some(u32::MAX));
     }
 }
