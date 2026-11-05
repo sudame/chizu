@@ -510,13 +510,21 @@ fn lot_choice(net: &Network, b: &Building) -> Option<(SidewalkPos, Option<LotEnd
     ];
     // 出入りの位置の、端のマスの真ん中からのずれ（mm）。帯の真ん中は、マスの真ん中より内に入りうる。
     let shift = half - inward;
+    let lane = matches!(b.parking_layout().cut, ParkingCut::Lane { .. });
     ends.into_iter()
         .filter_map(|(end, tile, out)| {
             let road = at(tile, (tx, ty), 1);
             let sign = out.0 * i64::from(step.0) + out.1 * i64::from(step.1);
-            let p = [sign * shift, 0]
-                .into_iter()
-                .flat_map(|d| spots_near(road, step, d))
+            // 私道の入口は私道の幅の中に取らなければならないので、マスの真ん中には寄せない。
+            // 取れない端（行き止まりの端など）は選ばず、反対の端に私道を通す。
+            let offsets: &[i64] = if lane {
+                &[sign * shift]
+            } else {
+                &[sign * shift, 0]
+            };
+            let p = offsets
+                .iter()
+                .flat_map(|d| spots_near(road, step, *d))
                 .find(|p| {
                     p.resolve_on(net, LaneMode::Sidewalk)
                         .is_some_and(|(l, _)| joined(net, l.segment, b.entrance.segment))

@@ -971,6 +971,62 @@ mod tests {
         );
     }
 
+    /// 私道の敷地の出入口と駐車場の出入りの位置は、どちらも私道の幅の中に取れる。行き止まりの端に
+    /// 接する敷地も含める（種 10 の `(39,4)〜(40,9)` は、入口が道路の上に取れず私道の外に落ちていた）。
+    #[test]
+    fn lane_lot_spots_sit_within_the_lane_width() {
+        let t = TILE_MM;
+        let mut lanes = 0;
+        for seed in [0, 1, 2, 4, 5, 6, 10] {
+            let mut w = served_street_with(seed);
+            run(&mut w, 30 * 60);
+            let net = w.network();
+            for (_, b) in w.buildings().iter() {
+                if b.lane_plan().is_none() {
+                    continue;
+                }
+                lanes += 1;
+                let (tx, ty) = b.toward_road;
+                let (ax, ay) = (-ty, tx);
+                let span = i64::try_from(if tx == 0 {
+                    b.area.max.x.abs_diff(b.area.min.x)
+                } else {
+                    b.area.max.y.abs_diff(b.area.min.y)
+                })
+                .unwrap();
+                // 私道のある端のマスの真ん中と、そこから外へ向かう向き（間口に沿う向きの符号）
+                let (k, out) = if crate::movement::lot_end(net, b) == crate::movement::LotEnd::Far {
+                    (span, 1)
+                } else {
+                    (0, -1)
+                };
+                let along = |x: i64, y: i64| x * ax + y * ay;
+                let tile_mid = along(
+                    (b.front.x + ax * k) * t + t / 2,
+                    (b.front.y + ay * k) * t + t / 2,
+                );
+                let outer = tile_mid + out * t / 2;
+                let (lo, hi) = if out > 0 {
+                    (outer - 3_000, outer)
+                } else {
+                    (outer, outer + 3_000)
+                };
+                for (name, spot) in [
+                    ("lot_spot", crate::movement::lot_spot(net, b)),
+                    ("building_spot", crate::movement::building_spot(net, b)),
+                ] {
+                    let p = spot.unwrap().world();
+                    let s = along(p.x.0, p.y.0);
+                    assert!(
+                        (lo..=hi).contains(&s),
+                        "{seed} {name} {s} が私道の幅 {lo}〜{hi} の外：{b:?}"
+                    );
+                }
+            }
+        }
+        assert!(lanes > 0, "私道の敷地が建たない");
+    }
+
     #[test]
     fn full_supplied_buildings_level_up_after_a_day() {
         let mut w = served_street();

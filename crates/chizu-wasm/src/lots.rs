@@ -384,6 +384,23 @@ mod tests {
                     near,
                     "{zone:?} 出入りの位置 ({px}, {py}) が切り欠きの道路側の辺の範囲に入らない：{shape:?} {b:?}"
                 );
+                // 私道の敷地は、出入口も出入りの位置も同じ点で、どちらも私道の幅の中に入る（出入口に落とさない）
+                if is_lane {
+                    for (name, s) in [
+                        ("lot_spot", Some(spot)),
+                        ("building_spot", building_spot(net, b).map(|d| d.world())),
+                    ] {
+                        let s = s.expect("私道の入口がない");
+                        let p = along(s.x.0 as f64 / TILE_MM as f64, s.y.0 as f64 / TILE_MM as f64);
+                        assert!(
+                            road_side.iter().any(|f| {
+                                let (lo, hi) = if tx == 0 { (f[0], f[2]) } else { (f[1], f[3]) };
+                                p >= lo - 1e-9 && p <= hi + 1e-9
+                            }),
+                            "{zone:?} {name} が私道の幅の外にある：{p} {shape:?} {b:?}"
+                        );
+                    }
+                }
                 // 出入口に落とさなかったときは、中心の位置が一致する。前面の帯なら帯の真ん中、脇の駐車場なら端の列の真ん中
                 if Some(spot) != building_spot(net, b).map(|d| d.world()) {
                     let (lo, hi) = road_side.iter().fold((f64::MAX, f64::MIN), |(lo, hi), f| {
