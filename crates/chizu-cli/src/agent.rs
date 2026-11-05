@@ -61,8 +61,14 @@ observe の sinceLastObserve（前の observe からの増減）:
   見る数は、お金、収支、人口、就業、幸福度、車、転入、需要、建物の数、電気と水道の余裕、施設の数、買ったチャンクの数である。
   new の直後の observe は、new が見た街との増減になる。前の observe がないとき（フィードバックのディレクトリなど）は null で、何も書かない。
 
-observe の buildings.lanes: 行き止まりの私道の脇に一軒家を並べた住宅（段階 1〜2 の、間口 2 マスで奥行き 4 マス以上の住宅の一部）。
+observe の buildings.lanes: 行き止まりの私道の脇に一軒家を並べた住宅。低密度の住宅の、間口 2 マスで奥行き 3 マス以上の敷地はすべてこれになる。
+  高密度の住宅では、段階 1〜2 の、間口 2 マスで奥行き 4 マス以上の住宅の一部（25%）がこれになる。
   lots その建物の数、houses その家の数（世帯の数と同じ）。私道は map で = になる。住民と車は私道の入口から出入りする。
+observe の buildings.byZone は区画の大きな種類ごとの建物の数で、Residential は低密度と高密度の和である。
+observe の buildings.residentialByDensity: 住宅を密度で分けた数。high は高密度（PaintZone の Residential）、low は低密度（ResidentialLow）。
+  buildings 建物の数、households 住める世帯の数の上限、housedHouseholds 住んでいる世帯の数。
+observe の zoneTiles: 塗る区画（Residential は高密度、ResidentialLow は低密度）ごとの、painted 塗ったマスの数と、
+  empty そのうち建物の建っていないマスの数。低密度は間口 1 の深い敷地を作らないので、塗った間口の端数が 1 マスの列の奥は空きのまま残る。
 observe の shortages: 主の網の余りが負の種類（"power"、"water"）の一覧。足りているときは空。lowHeadroom は足りないと偽になるので、足りないことはここか main.shortage で読む。
 observe の utilities（power と water）:
   capacity と demand 道路網をまたいだ供給量と需要の合計。この合計から余りは出さない。つながっていない施設の分まで足されて、
@@ -277,8 +283,11 @@ observe の removedCrosswalks:
       変える道路がなければ Denied（NoRoadToChange）、どれもすでに kind なら Denied（RoadKindUnchanged）。
   {"type":"Bulldoze","area":[[x,y],[x,y]]}
       範囲の道路、施設、建物を取り壊す。
-  {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"Commercial"|"Industrial"|"Office"|null}
-      区画を塗る。null は消す。塗れるのは、建物が建つマス（道路に面した空きマスと、そこから道路と反対へ
+  {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"ResidentialLow"|"Commercial"|"Industrial"|"Office"|null}
+      区画を塗る。null は消す。Residential は高密度の住宅で、段階 5 まで上がり、集合住宅になる。
+      ResidentialLow は低密度の住宅で、段階 2 で止まり、一軒家だけが建つ（縦横の道路沿いでは、間口 2、奥行き 3〜6 の私道の敷地か、
+      奥行き 1〜2 の通りに面した家）。住宅の需要と税率は、低密度と高密度で 1 つである。
+      低密度と高密度は別の区画で、1 つの建物は両方にまたがらない。建物の建ったマスは塗り替えられないので、密度を変えるには取り壊してから塗る。塗れるのは、建物が建つマス（道路に面した空きマスと、そこから道路と反対へ
       6 マスまで、塗れるマスが途切れず続く空きマス）だけである。道路の脇を空けて奥だけを塗る、道路の端の外や
       空きを挟んだ先を塗る、といった塗れないマスが混ざると、塗れるマスだけを塗って AppliedPartly を返す。
       塗れなかったマスが 1 つでもあれば、理由を問わず AppliedPartly である（奥行き 6 マスを超えた、買っていない、
@@ -320,8 +329,8 @@ observe の removedCrosswalks:
       腕を取り壊すと印も消える。外した腕は observe の removedCrosswalks と、map の Y と s で分かる。
   {"type":"BuyChunk","chunk":[cx,cy]}
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
-  {"type":"SetTaxRate","zone":"Residential"|...,"permille":0..300}
-      税率を千分率で決める。
+  {"type":"SetTaxRate","zone":"Residential"|"Commercial"|"Industrial"|"Office","permille":0..300}
+      税率を千分率で決める。住宅の税率は低密度と高密度で 1 つで、Residential で決める（ResidentialLow は断る）。
   {"type":"SetSimSpeed","speed":1..288}
       画面での速さの倍率。1 倍は実時間の 1 秒に 5 tick で、288 倍は 1 日を 5 秒で回す。advance の進み方は変わらない。
 
