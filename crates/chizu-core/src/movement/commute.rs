@@ -3,7 +3,7 @@
 //! 出発の時刻が来た住民ごとに、出発の建物の出入口から行き先の建物の出入口へ向かう移動を作る。
 //! 手段は、2 つの建物の正面のマスの直線の距離で決める。車を持つ世帯の住民は [`OWNER_DRIVE_MIN_MM`]、
 //! 持たない世帯の住民は [`DRIVE_MIN_MM`] 以上なら歩く → 車 → 歩く で向かい、
-//! それより近いか、車で行けなければ歩く。
+//! それより近いか、車で行けなければ歩く。車を置く枠（[`CarPlace`]）のない世帯は、遠くても歩く。
 //! 移動の主体ごとに、誰がどこへ向かっているかを覚えておき、移動が終わったら返す。
 //!
 //! 車は世帯ごとに 1 台で、世帯の中で同時に車を使えるのは 1 人だけである。世帯の車のいる所
@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 
 use super::{Trips, building_spot};
 use crate::building::Buildings;
+use crate::car_place::CarPlace;
 use crate::citizens::Activity;
 use crate::id::{BuildingId, CitizenId, HouseholdId, TripId};
 use crate::network::{Network, TILE_MM};
@@ -97,6 +98,14 @@ impl Commuters {
         true
     }
 
+    /// 移動 `trip` が世帯の車で向かう通勤で、走っているあいだにその車をなくしたか（[`Trips::forget_car`]）。
+    /// なくした車は、着いても駐車場に停めない。
+    pub(super) fn dropped(&self, trip: TripId) -> bool {
+        self.by_trip
+            .get(&trip)
+            .is_some_and(|c| self.cars.get(&c.household) != Some(&HouseholdCar::InUse(trip)))
+    }
+
     /// 移動 `trip` を覚えていた分を消す。世帯の車を使ったまま停めずに終わったなら、車はどこにもないものとする。
     fn forget_trip(&mut self, trip: TripId) -> Option<Commuter> {
         let c = self.by_trip.remove(&trip)?;
@@ -120,10 +129,22 @@ pub struct CommuteRequest {
     pub who: Commuter,
     pub from: BuildingId,
     pub to: BuildingId,
-    /// 住民の家。住宅の駐車場は、そこに住む住民だけが使える。
+    /// 住民の家。
     pub home: Option<BuildingId>,
+    /// 住民の世帯の、車を置く枠。枠のない世帯は車を持たず、どの移動も歩く。
+    pub place: Option<CarPlace>,
     /// 住民の世帯が車を持つか。
     pub owns_car: bool,
+}
+
+impl CommuteRequest {
+    /// 世帯の枠のある駐車場。住宅の駐車場は、その建物の自宅の枠を持つ世帯の車だけが使える。
+    fn own_lot(&self) -> Option<BuildingId> {
+        match self.place {
+            Some(CarPlace::Home) => self.home,
+            None => None,
+        }
+    }
 }
 
 /// 建物 `a` と `b` の正面のマスが、車で向かうほど離れているか。
@@ -165,6 +186,13 @@ impl Trips {
                 if !far_enough(buildings, r.from, r.to, r.owns_car) {
                     return None;
                 }
+                if r.place.is_none() {
+                    let tally = &mut self.parking_tally;
+                    tally.no_place = tally.no_place.saturating_add(1);
+                    // 枠をなくす前に乗っていて、そのあと停めた車が残っていれば外す。
+                    self.forget_car(r.who.household);
+                    return None;
+                }
                 // 車が停めてあれば、その駐車場から出す。まだどこにもなければ、車は出発の建物から現れる。
                 let take = match self.commuters.cars.get(&r.who.household).copied() {
                     None => None,
@@ -198,7 +226,7 @@ impl Trips {
                     buildings,
                     (r.from, r.to),
                     take,
-                    r.home,
+                    r.own_lot(),
                     now,
                 )?;
                 self.commuters
@@ -242,7 +270,8 @@ impl Trips {
         self.commuters.cars.get(&household).copied()
     }
 
-    /// 街を出る世帯の、停めてある車を駐車場から外す。
+    /// 街を出る世帯や、車を置く枠をなくした世帯の車をなくす。停めてある車は駐車場から外す。
+    /// 乗っている車は、その移動が着いても駐車場に停めずに消える（[`Commuters::dropped`]）。
     pub fn forget_car(&mut self, household: HouseholdId) {
         if let Some(HouseholdCar::Parked { lot, .. }) = self.commuters.cars.remove(&household) {
             self.parking.unpark(lot);
