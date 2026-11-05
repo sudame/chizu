@@ -852,7 +852,9 @@ fn look(
 }
 
 /// 交差点 `node` で `next` のリンクへ入る車 `t` が入る車線と、先の車線に交差点を抜けきるだけの空きが
-/// ありそうか。先の車線の最後尾（停止線を越えてその車線へ向かう車を含む）がこの tick も同じ速さで進むとして決める。
+/// ありそうか。先の車線の最後尾（停止線を越えてその車線へ向かう車を含む）が同じ速さで進むとして、`t` が
+/// 交差点を抜けきる所（[`clear_line`]）に着くまでに空きができるかで決める。`t` が着くまでの tick 数は、
+/// 加速の上限で速さを上げていくとしたいちばん少ない数で、最後尾が進む距離を少なめに見込む。
 /// 空きがなければ、車は停止線で止まる。
 fn exit_lane(
     net: &Network,
@@ -864,13 +866,39 @@ fn exit_lane(
     after: Option<LinkId>,
 ) -> (LaneId, bool) {
     let need = i64::from(room_needed(net, node, next));
+    let ticks = ticks_to(
+        net,
+        t,
+        i64::from(t.link_len.0) - i64::from(t.offset.0) + i64::from(clear_line(net, next).0),
+    );
     let room = |l: &LaneId| {
         st.last(*l)
-            .is_none_or(|(at, v)| at + i64::from(v.0) >= need)
+            .is_none_or(|(at, v)| at + i64::from(v.0) * ticks >= need)
     };
     let to_lane = junction_lane(net, conn, st, t, node, next, after, room);
     (to_lane, room(&to_lane))
 }
+
+/// 車 `t` が、いまの速さから加速の上限で速さを上げていき、いまのリンクの最高速度で `d` だけ進むのに要る
+/// いちばん少ない tick 数。少なくとも 1 で、`EXIT_TICKS` を超えない。
+fn ticks_to(net: &Network, t: &Trip, d: i64) -> i64 {
+    let seg = net.segment(t.link().segment).expect("リンクの区間がない");
+    let vmax = i64::from(speed_limit(seg.kind).0);
+    let (mut v, mut went, mut k) = (i64::from(t.speed.0), 0, 0);
+    while k < EXIT_TICKS {
+        v = (v + i64::from(CAR_ACCEL)).min(vmax);
+        went += v;
+        k += 1;
+        if went >= d {
+            break;
+        }
+    }
+    k
+}
+
+/// 交差点を抜けきる所に着くまでの tick 数として見込む上限。先の車線の最後尾がこれより長く同じ速さで
+/// 進むとは見込まない。
+const EXIT_TICKS: i64 = 3;
 
 /// 停止線までが、最高速度から止まるまでの距離と車間より近いか。
 fn near_end(net: &Network, t: &Trip) -> bool {
@@ -1115,18 +1143,30 @@ pub(super) fn step(
         }
     }
     // 通り抜けの区間に入った車に、次のリンクで入る車線を決める。交差点では、止まりきれる車は、その車線の最後尾
-    // （通り抜けの区間に入ってその車線へ向かう車を含む）までに、交差点を抜けきるだけの空きがなければ停止線で止める。
-    // ここで止めると減速の上限を破る車は、空きを見ずに入れる。同じ空きを何台もが取らないよう、入れた車を
-    // ノードの順にその車線の最後尾に足していく。
-    let mut last = BTreeMap::<LaneId, i64>::new();
+    // （通り抜けの区間に入ってその車線へ向かう車を含む）が同じ速さで進むとして、交差点を抜けきる所に着くまでに
+    // 空きができそうになければ停止線で止める（[`exit_lane`] と同じ見込み）。ここで止めると減速の上限を破る車は、
+    // 空きを見ずに入れる。同じ空きを何台もが取らないよう、入れた車をノードの順にその車線の最後尾に足していく。
+    let mut last = BTreeMap::<LaneId, (i64, i64)>::new();
+    let keep_rear = |last: &mut BTreeMap<LaneId, (i64, i64)>, l: LaneId, at: i64, v: MmPerTick| {
+        let r = last.entry(l).or_insert((at, i64::from(v.0)));
+        if at < r.0 {
+            *r = (at, i64::from(v.0));
+        }
+    };
     for t in rows.iter().flatten().filter(|t| on_road(t)) {
-        let at = i64::from(t.offset.min(t.link_len).0);
-        let r = last.entry(t.lane).or_insert(at);
-        *r = (*r).min(at);
+        keep_rear(
+            &mut last,
+            t.lane,
+            i64::from(t.offset.min(t.link_len).0),
+            t.speed,
+        );
         if let Some(l) = bound_lane(net, t) {
-            let at = i64::from(t.offset.0) - i64::from(t.link_len.0);
-            let r = last.entry(l).or_insert(at);
-            *r = (*r).min(at);
+            keep_rear(
+                &mut last,
+                l,
+                i64::from(t.offset.0) - i64::from(t.link_len.0),
+                t.speed,
+            );
         }
     }
     entering.sort_unstable();
@@ -1135,7 +1175,10 @@ pub(super) fn step(
         let next = t.route.links[t.leg as usize + 1];
         if before.0 <= CAR_DECEL {
             let need = i64::from(room_needed(net, node, next));
-            if last.get(&lane).is_some_and(|r| *r < need) {
+            let left = i64::from(t.link_len.0) - i64::from(t.offset.0)
+                + i64::from(clear_line(net, next).0);
+            let ticks = ticks_to(net, t, left);
+            if last.get(&lane).is_some_and(|(r, v)| r + v * ticks < need) {
                 (t.offset, t.speed) = (LaneOffset(line), MmPerTick::ZERO);
                 continue;
             }
@@ -1146,8 +1189,7 @@ pub(super) fn step(
             .expect("決めた車線が次のリンクにない");
         t.bound = Some(u8::try_from(index).expect("車線の番号が u8 に収まらない"));
         let at = i64::from(t.offset.0) - i64::from(t.link_len.0);
-        let r = last.entry(lane).or_insert(at);
-        *r = (*r).min(at);
+        keep_rear(&mut last, lane, at, t.speed);
         if t.offset >= t.link_len {
             crossing.push((node, i, lane));
         }

@@ -231,7 +231,10 @@ fn crossing_moves_never_share_the_box() {
         busy += usize::from(!inside.is_empty());
         for (i, a) in inside.iter().enumerate() {
             for b in &inside[i + 1..] {
-                assert!(!a.conflicts_in(b), "{tick}: {a:?} と {b:?} が四角の中にいる");
+                assert!(
+                    !a.conflicts_in(b),
+                    "{tick}: {a:?} と {b:?} が四角の中にいる"
+                );
             }
         }
     }

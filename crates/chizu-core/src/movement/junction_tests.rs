@@ -191,7 +191,12 @@ fn heavy_crossroads(arms: &[(i64, i64)], per_arm: usize) -> (usize, usize, usize
     let mut yielded = BTreeSet::new();
     for _ in 0..1_500 {
         arrived += c.step().len();
-        yielded.extend(c.trips.iter().filter(|(_, t)| t.waited > 0).map(|(id, _)| id));
+        yielded.extend(
+            c.trips
+                .iter()
+                .filter(|(_, t)| t.waited > 0)
+                .map(|(id, _)| id),
+        );
         for l in &incoming {
             let stopped = c
                 .trips
