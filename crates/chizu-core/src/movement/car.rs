@@ -293,13 +293,13 @@ impl Tail {
         self.0[0]
     }
 
-    /// 位置 `at` にいる車のすぐ前の車の位置。`at` にいる車のうち 1 台は、その車自身とみなして飛ばす。
-    fn ahead_of(&self, at: i64) -> Option<i64> {
+    /// 位置 `at` にいる車のすぐ前の車の位置と速さ。`at` にいる車のうち 1 台は、その車自身とみなして飛ばす。
+    fn ahead_of(&self, at: i64) -> Option<(i64, i64)> {
         let k = self.0.partition_point(|c| c.0 < at);
         let rest = &self.0[k..];
         match rest.first() {
-            Some(c) if c.0 == at => rest.get(1).map(|c| c.0),
-            c => c.map(|c| c.0),
+            Some(c) if c.0 == at => rest.get(1).copied(),
+            c => c.copied(),
         }
     }
 
@@ -840,8 +840,9 @@ fn keeps_pace(rest: i64, v: i64, run: i64) -> bool {
     run >= rest.saturating_add(v).saturating_add(braking_distance(v))
 }
 
-/// 車 `order[k]` が、いまの位置から先で止まりうるいちばん近い所までの距離。前の車の後ろから車間を空けた所、
-/// 交差点の停止線、着く位置、区間の途中の衝突区間（`zones`）のうち、いちばん近い所である。
+/// 車 `order[k]` が、いまの位置から先で止まりうるいちばん近い所までの距離。前の車がいまから減速の上限で止まった
+/// 所の後ろから車間を空けた所、交差点の停止線、着く位置、区間の途中の衝突区間（`zones`）のうち、いちばん近い所である。
+/// 前の車は、安全速度（[`safe_speed`]）と同じく、減速の上限より速くは止まらないとみなす。
 /// 通り抜けの区間に入った車は、次のリンクの決めた車線の前の車（ほかのリンクからその車線へ向かう車を含む）と、
 /// 次のリンクの停止線か着く位置を見る。先頭の車で、リンクの終わりが交差点でなければ、次のリンクのどの車線の
 /// 最後尾も前の車とみなす。
@@ -870,8 +871,8 @@ fn clear_run(
     if let Some(to_lane) = bound_lane(net, t) {
         let next = t.route.links[t.leg as usize + 1];
         let at = p - base;
-        if let Some(a) = st.tails.get(&to_lane).and_then(|tl| tl.ahead_of(at)) {
-            run = run.min(base + a - spacing - p);
+        if let Some((a, w)) = st.tails.get(&to_lane).and_then(|tl| tl.ahead_of(at)) {
+            run = run.min(base + a + braking_distance(w.max(0)) - spacing - p);
         }
         if t.leg as usize + 2 == t.route.links.len() {
             run = run.min(base + i64::from(t.dest_offset.0) - p);
@@ -887,15 +888,17 @@ fn clear_run(
         .filter(|q| q.0 == lane)
         .and_then(|q| rows[q.2].as_ref())
     {
-        run = run.min(i64::from(a.offset.0) - spacing - p);
+        let stops = braking_distance(i64::from(a.speed.0.max(0)));
+        run = run.min(i64::from(a.offset.0) + stops - spacing - p);
     } else if !t.last_leg() {
         if junction::is_junction(net, end_node(net, t.link())) {
             run = run.min(i64::from(line_of(net, t)) - p);
         } else {
             let next = t.route.links[t.leg as usize + 1];
             for l in net.link_lanes(next) {
-                if let Some((a, _)) = st.last(l) {
-                    run = run.min(base + a - spacing - p);
+                if let Some((a, w)) = st.last(l) {
+                    let stops = braking_distance(i64::from(w.0.max(0)));
+                    run = run.min(base + a + stops - spacing - p);
                 }
             }
         }
