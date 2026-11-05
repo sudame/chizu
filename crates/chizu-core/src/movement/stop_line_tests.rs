@@ -179,3 +179,62 @@ fn cars_stop_behind_the_stop_line_and_not_inside_the_junction() {
     assert!(stopped_at_line > 0);
     assert_eq!(stopped_inside, 0);
 }
+
+/// 十字路を、交わる動きの車が途切れなく通っても、tick の終わりに車道の四角の中に交わる動きの車が 2 台いない。
+/// 交差点の中の車が四角を抜けるのが、候補が四角に入るより先なら、候補はその車を待たずに入る。それでも
+/// 四角の中では重ならないことを確かめる。
+#[test]
+fn crossing_moves_never_share_the_box() {
+    use super::junction::Move;
+    use super::stop_line::box_reach;
+    let mut n = Network::new();
+    road(&mut n, (0, 20), (40, 20), RoadKind::Medium);
+    road(&mut n, (20, 0), (20, 40), RoadKind::Medium);
+    let node = n.node_at(TilePos::new(20, 20)).unwrap();
+    let mut router = AstarRouter::new(&n);
+    let mut trips = Trips::default();
+    let moves = [
+        ((1, 0), (-1, 0)),
+        ((-1, 0), (0, 1)),
+        ((0, 1), (1, 0)),
+        ((0, -1), (-1, 0)),
+        ((1, 0), (0, 1)),
+        ((0, 1), (0, -1)),
+    ];
+    let (mut arrived, mut busy) = (0, 0);
+    for tick in 0..1_500 {
+        if tick < 80 && tick % 2 == 0 {
+            for &((dx, dy), (ex, ey)) in &moves {
+                let from = at(20 + 19 * dx, 20 + 19 * dy, (-dx as i8, -dy as i8), 0);
+                let to = at(20 + 19 * ex, 20 + 19 * ey, (ex as i8, ey as i8), 0);
+                trips.spawn_drives(&n, &mut router, &[(from, to)], Tick::ZERO);
+            }
+        }
+        arrived += trips.step(&n, &mut router, Tick::ZERO).len();
+        let mut inside = Vec::new();
+        for (_, t) in trips.iter().filter(|(_, t)| car::on_road(t)) {
+            if let Some(l) = car::bound_lane(&n, t) {
+                let at = i64::from(t.offset.0) - i64::from(t.link_len.0);
+                if car::end_node(&n, t.link()) == node && at > -box_reach(&n, node, t.link()) {
+                    let next = t.route.links[t.leg as usize + 1];
+                    inside.push(Move::into_lane(&n, t.link(), next, l));
+                }
+            } else if t.leg > 0 {
+                let prev = t.route.links[t.leg as usize - 1];
+                if car::end_node(&n, prev) == node
+                    && i64::from(t.offset.0) < box_reach(&n, node, t.link())
+                {
+                    inside.push(Move::into_lane(&n, prev, t.link(), t.lane));
+                }
+            }
+        }
+        busy += usize::from(!inside.is_empty());
+        for (i, a) in inside.iter().enumerate() {
+            for b in &inside[i + 1..] {
+                assert!(!a.conflicts_in(b), "{tick}: {a:?} と {b:?} が四角の中にいる");
+            }
+        }
+    }
+    assert_eq!(arrived, 40 * moves.len());
+    assert!(busy > 100, "四角を通る車が少ない {busy}");
+}
