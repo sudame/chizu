@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     Ends, SidewalkPos, Trip, Trips, candidates, car, junction, lane_shift, make_trip, plan, pos,
@@ -321,10 +321,15 @@ impl StateHash for Parking {
     }
 }
 
-/// 車線に出るのを待つ車を、出発の建物ごとに数えた 1 行。読み取り用で、状態ハッシュには入れない。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 車線に出るのを待つ車を、待っている点ごとに数えた 1 行。読み取り用で、状態ハッシュには入れない。
+/// 道路をはさんで向かい合う建物は、出入りの位置が道路の中心線の上の同じ点になり、どちらの建物の前で
+/// 待つ車か見分けられない。そこで、点ごとにまとめ、その点を出入口か出入りの位置にする建物を全部並べる。
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CurbWait {
-    pub building: BuildingId,
+    /// 車が待っている点。
+    pub at: WorldPos,
+    /// この点を出入口か出入りの位置にする建物。番号の順。
+    pub buildings: Vec<BuildingId>,
     /// 駐車場の中で、車線に出る順番を待っている車の台数。
     pub waiting: u32,
     /// そのうち、待ち始めてから指定の tick 数以上たった車の台数。
@@ -714,10 +719,9 @@ impl Trips {
         Some(id)
     }
 
-    /// 車線に出る順番を待っている車を、出発の建物ごとに数える。待っている車のいない建物は載せない。
-    /// 建物の番号の順に返す。`long_ticks` 以上待っている車は `long` にも数える。
-    /// 車の位置を建物の駐車場の出入りの位置と照らして建物を決める（見つからなければ出入口と照らす）。
-    /// どちらにも合わない車は載せないので、台数の合計は待っている車の数以下になる。
+    /// 車線に出る順番を待っている車を、待っている点ごとに数える。点の位置の順に返す。
+    /// `long_ticks` 以上待っている車は `long` にも数える。
+    /// 点を出入口か出入りの位置にする建物がない車は載せないので、台数の合計は待っている車の数以下になる。
     /// 読み取り用で、状態は変えず、状態ハッシュにも入れない。
     pub fn curb_waits(
         &self,
@@ -733,31 +737,31 @@ impl Trips {
         if waiting.is_empty() {
             return Vec::new();
         }
-        let mut lots: BTreeMap<WorldPos, BuildingId> = BTreeMap::new();
-        let mut doors: BTreeMap<WorldPos, BuildingId> = BTreeMap::new();
+        let mut spots: BTreeMap<WorldPos, BTreeSet<BuildingId>> = BTreeMap::new();
         for (id, b) in buildings.iter() {
-            if let Some(p) = lot_spot(net, b) {
-                lots.entry(p.world()).or_insert(id);
-            }
-            if let Some(p) = building_spot(net, b) {
-                doors.entry(p.world()).or_insert(id);
+            for p in [lot_spot(net, b), building_spot(net, b)]
+                .into_iter()
+                .flatten()
+            {
+                spots.entry(p.world()).or_default().insert(id);
             }
         }
-        let mut by_building: BTreeMap<BuildingId, CurbWait> = BTreeMap::new();
+        let mut by_point: BTreeMap<WorldPos, CurbWait> = BTreeMap::new();
         for t in waiting {
             let at = t.position().world();
-            let Some(&building) = lots.get(&at).or_else(|| doors.get(&at)) else {
+            let Some(near) = spots.get(&at) else {
                 continue;
             };
-            let row = by_building.entry(building).or_insert(CurbWait {
-                building,
+            let row = by_point.entry(at).or_insert_with(|| CurbWait {
+                at,
+                buildings: near.iter().copied().collect(),
                 waiting: 0,
                 long: 0,
             });
             row.waiting += 1;
             row.long += u32::from(t.curb_wait_ticks() >= long_ticks);
         }
-        by_building.into_values().collect()
+        by_point.into_values().collect()
     }
 
     /// 建物が消えたあとに呼ぶ。表にない建物の駐車場を、停めてあった車ごと捨てる。

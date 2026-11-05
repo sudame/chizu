@@ -37,7 +37,7 @@ pub use movement::{
 };
 pub use network::{
     Dir, KindChange, Lane, LaneId, LaneMode, Line, LinkId, Network, Node, NodeControl, Segment,
-    SegmentId, SegmentKind, road_change_cost,
+    SegmentId, SegmentKind, TILE_MM, road_change_cost,
 };
 pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, SeqGap, replay};
 pub use rng::{Pcg32, RngPurpose, mix_words, rng};

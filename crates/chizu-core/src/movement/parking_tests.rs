@@ -1149,13 +1149,32 @@ fn a_drive_lost_to_a_removed_road_leaves_the_household_without_a_car() {
     assert_eq!(lot(&s, work), (0, 0));
 }
 
-/// 車線に出るのを待つ車は、出発の建物ごとに数える。待ち始めてからの長さで、長く待つ車を分ける。
+/// 道路の南側に、`north` の向かいの建物を建てる。出入口は同じ x で、北側の建物と反対の歩道に付く。
+fn build_opposite(s: &mut Street, north: BuildingId) -> BuildingId {
+    let n = s.buildings.get(north).unwrap().clone();
+    let front = TilePos::new(n.front.x, 1);
+    let segment = n.entrance.segment;
+    let start = s.net.segment_line(segment).unwrap().start.x;
+    s.buildings.insert(Building {
+        area: TileRect::from_corners(front, front),
+        front,
+        toward_road: (0, -1),
+        entrance: LinkId {
+            segment,
+            dir: Dir::Forward,
+            mode: LaneMode::Sidewalk,
+        },
+        entrance_at: LaneOffset(u32::try_from(n.front.x - start).unwrap() * 8_000),
+        ..n
+    })
+}
+
+/// 車線に出るのを待つ車は、待っている点ごとに数える。道路をはさんで向かい合う建物は同じ点になり、
+/// 1 件にまとまって、2 つの建物が並ぶ。
 #[test]
-fn cars_waiting_at_the_curb_are_counted_per_departure_building() {
-    let (mut s, ids) = Street::with_roads(
-        &[14, 16, 40, 42, 44, 46, 48, 50, 52, 54],
-        &[(0, 10), (10, 60)],
-    );
+fn cars_waiting_at_the_curb_are_grouped_by_point_with_the_facing_buildings() {
+    let (mut s, ids) = Street::with_roads(&[14, 40, 42, 44, 46, 48], &[(0, 10), (10, 60)]);
+    let south = build_opposite(&mut s, ids[0]);
     let north = Line::between(TilePos::new(10, 0), TilePos::new(10, 10)).unwrap();
     s.net.build_road(&north, RoadKind::Small).unwrap();
     s.router = AstarRouter::new(&s.net);
@@ -1172,44 +1191,74 @@ fn cars_waiting_at_the_curb_are_counted_per_departure_building() {
         Tick::ZERO,
     )[0]
     .unwrap();
-    let mut cars = Vec::new();
-    for (i, to) in ids[2..].iter().enumerate() {
-        cars.push(s.drive(ids[i % 2], *to).unwrap());
-    }
+    let cars: Vec<TripId> = ids[1..]
+        .iter()
+        .enumerate()
+        .map(|(i, to)| s.drive([ids[0], south][i % 2], *to).unwrap())
+        .collect();
     s.board(&cars);
     let waits = |s: &Street, long| s.trips.curb_waits(&s.net, &s.buildings, long);
     let sample = crate::world::CarSample::of(&s.trips);
     let now = waits(&s, 0);
-    // 待っている車は、どちらかの出発の建物に数えられ、合計は待っている車の数に等しい。
-    assert_eq!(now.len(), 2, "{now:?}");
-    assert!(now.windows(2).all(|w| w[0].building < w[1].building));
-    assert!(now.iter().all(|w| ids[..2].contains(&w.building)));
+    // 向かい合う 2 つの建物は同じ点で、どちらも並ぶ。
+    let here = |b: BuildingId| {
+        lot_spot(&s.net, s.buildings.get(b).unwrap())
+            .unwrap()
+            .world()
+    };
+    assert_eq!(here(ids[0]), here(south));
+    assert_eq!(now.len(), 1, "{now:?}");
+    assert_eq!(now[0].at, here(ids[0]));
+    assert_eq!(now[0].buildings, [ids[0], south]);
+    // 台数の合計は、待っている車の数に等しい。
     let total: usize = now.iter().map(|w| w.waiting as usize).sum();
     assert_eq!(total, sample.waiting_at_curb());
-    // 待ち始めたばかりの車は、長く待つ車には数えない。
-    assert!(waits(&s, 50).iter().all(|w| w.long == 0));
-    // 建物ごとの台数は、その建物の前から出た車の台数と合う。
-    let waiting_cars = |b| {
-        cars.iter()
-            .filter(|id| s.trips.get(**id).is_some_and(|t| t.waiting_to_depart()))
-            .filter(|id| {
-                let at = s.trips.get(**id).unwrap().position().world();
-                lot_spot(&s.net, s.buildings.get(b).unwrap()).map(|p| p.world()) == Some(at)
-            })
-            .count() as u32
+    assert!(total > 0);
+}
+
+/// 長く待つ車は、待ち始めてからの tick 数が閾値に届いたところから `long` に入る。
+#[test]
+fn long_curb_waits_start_exactly_at_the_threshold() {
+    let (mut s, ids) = Street::with_roads(&[14, 40, 42, 44, 46], &[(0, 10), (10, 60)]);
+    let north = Line::between(TilePos::new(10, 0), TilePos::new(10, 10)).unwrap();
+    s.net.build_road(&north, RoadKind::Small).unwrap();
+    s.router = AstarRouter::new(&s.net);
+    // 交差点の手前を通る車を、動かさずに置いて、出発の車を待たせ続ける。
+    let on_street = |x| SidewalkPos {
+        tile: TilePos::new(x, 0),
+        step: (1, 0),
+        along: LaneOffset(0),
     };
-    for w in &now {
-        assert_eq!(w.waiting, waiting_cars(w.building));
-    }
-    // 待ちが続いた車は、待った tick 数が閾値に届くと長く待つ車に入る。
-    let first = now[0].building;
-    let mut ticks = 0;
-    while ticks < 5 && waits(&s, 0).iter().any(|w| w.building == first) {
+    let approach = s.trips.spawn_drives(
+        &s.net,
+        &mut s.router,
+        &[(on_street(6), on_street(59))],
+        Tick::ZERO,
+    )[0]
+    .unwrap();
+    let cars: Vec<TripId> = ids[1..]
+        .iter()
+        .map(|to| s.drive(ids[0], *to).unwrap())
+        .collect();
+    s.board(&cars);
+    let waiting_car = |s: &Street| {
+        cars.iter()
+            .copied()
+            .find(|id| s.trips.get(*id).is_some_and(|t| t.waiting_to_depart()))
+    };
+    let car = waiting_car(&s).expect("待つ車がいない");
+    let _ = approach;
+    // 待ち始めてからの tick 数 `t` のとき、閾値 `t` なら長く待つ車に入り、`t + 1` なら入らない。
+    let t = s.trips.get(car).unwrap().curb_wait_ticks();
+    let waits = |s: &Street, long| s.trips.curb_waits(&s.net, &s.buildings, long);
+    assert_eq!(waits(&s, t)[0].long, 1);
+    assert_eq!(waits(&s, t + 1)[0].long, 0);
+    // 待ち続けて数が増えれば、閾値を同じだけ上げても入る。
+    for _ in 0..3 {
         s.step();
-        ticks += 1;
+        let Some(car) = waiting_car(&s) else { return };
+        let t = s.trips.get(car).unwrap().curb_wait_ticks();
+        assert!(t > 0, "待つ tick 数が増えない");
+        assert!(waits(&s, t)[0].long >= 1);
     }
-    for w in waits(&s, ticks) {
-        assert!(w.long <= w.waiting);
-    }
-    assert!(waits(&s, ticks + 1).iter().all(|w| w.long == 0));
 }
