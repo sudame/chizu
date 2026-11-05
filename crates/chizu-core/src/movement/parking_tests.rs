@@ -1174,3 +1174,117 @@ fn a_drive_lost_to_a_removed_road_leaves_the_household_without_a_car() {
     // 押さえていた職場の空きも返っている。
     assert_eq!(lot(&s, work), (0, 0));
 }
+
+/// 道路の南側に、`north` の向かいの建物を建てる。出入口は同じ x で、北側の建物と反対の歩道に付く。
+fn build_opposite(s: &mut Street, north: BuildingId) -> BuildingId {
+    let n = *s.buildings.get(north).unwrap();
+    let front = TilePos::new(n.front.x, 1);
+    let segment = n.entrance.segment;
+    let start = s.net.segment_line(segment).unwrap().start.x;
+    s.buildings.insert(Building {
+        area: TileRect::from_corners(front, front),
+        front,
+        toward_road: (0, -1),
+        entrance: LinkId {
+            segment,
+            dir: Dir::Forward,
+            mode: LaneMode::Sidewalk,
+        },
+        entrance_at: LaneOffset(u32::try_from(n.front.x - start).unwrap() * 8_000),
+        ..n
+    })
+}
+
+/// 車線に出るのを待つ車は、待っている点ごとに数える。道路をはさんで向かい合う建物は同じ点になり、
+/// 1 件にまとまって、2 つの建物が並ぶ。
+#[test]
+fn cars_waiting_at_the_curb_are_grouped_by_point_with_the_facing_buildings() {
+    let (mut s, ids) = Street::with_roads(&[14, 40, 42, 44, 46, 48], &[(0, 10), (10, 60)]);
+    let south = build_opposite(&mut s, ids[0]);
+    let north = Line::between(TilePos::new(10, 0), TilePos::new(10, 10)).unwrap();
+    s.net.build_road(&north, RoadKind::Small).unwrap();
+    s.router = AstarRouter::new(&s.net);
+    let on_street = |x| SidewalkPos {
+        tile: TilePos::new(x, 0),
+        step: (1, 0),
+        along: LaneOffset(0),
+    };
+    // 西から交差点へ向かう車がいて、出発の車は交差点から入る車の空きを取らずに待つ。
+    s.trips.spawn_drives(
+        &s.net,
+        &mut s.router,
+        &[(on_street(6), on_street(59))],
+        Tick::ZERO,
+    )[0]
+    .unwrap();
+    let cars: Vec<TripId> = ids[1..]
+        .iter()
+        .enumerate()
+        .map(|(i, to)| s.drive([ids[0], south][i % 2], *to).unwrap())
+        .collect();
+    s.board(&cars);
+    let waits = |s: &Street, long| s.trips.curb_waits(&s.net, &s.buildings, long);
+    let sample = crate::world::CarSample::of(&s.trips);
+    let now = waits(&s, 0);
+    // 向かい合う 2 つの建物は同じ点で、どちらも並ぶ。
+    let here = |b: BuildingId| {
+        lot_spot(&s.net, s.buildings.get(b).unwrap())
+            .unwrap()
+            .world()
+    };
+    assert_eq!(here(ids[0]), here(south));
+    assert_eq!(now.len(), 1, "{now:?}");
+    assert_eq!(now[0].at, here(ids[0]));
+    assert_eq!(now[0].buildings, [ids[0], south]);
+    // 台数の合計は、待っている車の数に等しい。
+    let total: usize = now.iter().map(|w| w.waiting as usize).sum();
+    assert_eq!(total, sample.waiting_at_curb());
+    assert!(total > 0);
+}
+
+/// 長く待つ車は、待ち始めてからの tick 数が閾値に届いたところから `long` に入る。
+#[test]
+fn long_curb_waits_start_exactly_at_the_threshold() {
+    let (mut s, ids) = Street::with_roads(&[14, 40, 42, 44, 46], &[(0, 10), (10, 60)]);
+    let north = Line::between(TilePos::new(10, 0), TilePos::new(10, 10)).unwrap();
+    s.net.build_road(&north, RoadKind::Small).unwrap();
+    s.router = AstarRouter::new(&s.net);
+    // 交差点の手前を通る車を、動かさずに置いて、出発の車を待たせ続ける。
+    let on_street = |x| SidewalkPos {
+        tile: TilePos::new(x, 0),
+        step: (1, 0),
+        along: LaneOffset(0),
+    };
+    let approach = s.trips.spawn_drives(
+        &s.net,
+        &mut s.router,
+        &[(on_street(6), on_street(59))],
+        Tick::ZERO,
+    )[0]
+    .unwrap();
+    let cars: Vec<TripId> = ids[1..]
+        .iter()
+        .map(|to| s.drive(ids[0], *to).unwrap())
+        .collect();
+    s.board(&cars);
+    let waiting_car = |s: &Street| {
+        cars.iter()
+            .copied()
+            .find(|id| s.trips.get(*id).is_some_and(|t| t.waiting_to_depart()))
+    };
+    let car = waiting_car(&s).expect("待つ車がいない");
+    let _ = approach;
+    // 待ち始めてからの tick 数 `t` のとき、閾値 `t` なら長く待つ車に入り、`t + 1` なら入らない。
+    let t = s.trips.get(car).unwrap().curb_wait_ticks();
+    let waits = |s: &Street, long| s.trips.curb_waits(&s.net, &s.buildings, long);
+    assert_eq!(waits(&s, t)[0].long, 1);
+    assert_eq!(waits(&s, t + 1)[0].long, 0);
+    // 待ち続けて数が増えれば、閾値を同じだけ上げても入る。
+    for _ in 0..3 {
+        s.step();
+        let Some(car) = waiting_car(&s) else { return };
+        let t = s.trips.get(car).unwrap().curb_wait_ticks();
+        assert!(t > 0, "待つ tick 数が増えない");
+        assert!(waits(&s, t)[0].long >= 1);
+    }
+}

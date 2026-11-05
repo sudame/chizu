@@ -32,12 +32,12 @@ pub use clock::{GameTime, TICKS_PER_DAY};
 pub use command::{Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
 pub use id::{BuildingId, CitizenId, HouseholdId, TripId};
 pub use movement::{
-    CarPath, Congestion, DailyLotMisses, HouseholdCar, LotMisses, Mover, Noted, ParkingTally,
-    Rescues, SHORTAGE_LOTS_FULL, SidewalkPos, Trip, Trips, WalkAhead, WalkPath,
+    CarPath, Congestion, CurbWait, DailyLotMisses, HouseholdCar, LotMisses, Mover, Noted,
+    ParkingTally, Rescues, SHORTAGE_LOTS_FULL, SidewalkPos, Trip, Trips, WalkAhead, WalkPath,
 };
 pub use network::{
     Dir, KindChange, Lane, LaneId, LaneMode, Line, LinkId, Network, Node, NodeControl, Segment,
-    SegmentId, SegmentKind, road_change_cost,
+    SegmentId, SegmentKind, TILE_MM, road_change_cost,
 };
 pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, SeqGap, replay};
 pub use rng::{Pcg32, RngPurpose, mix_words, rng};
