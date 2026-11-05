@@ -7,6 +7,7 @@
 //! 家から職場に着いた移動は、かかった時間を住民の通勤の時間に入れ、幸福度の通勤の点に使う。
 
 use super::World;
+use crate::car_place::CarPlaces;
 use crate::citizens::Activity;
 use crate::id::{CitizenId, HouseholdId, TripId};
 use crate::movement::{CommuteRequest, Commuter};
@@ -47,6 +48,7 @@ impl World {
                     from,
                     to,
                     home,
+                    place: self.car_places.get(row.household),
                     owns_car: self.owns_car(row.household),
                 }),
                 None => stuck.push(id),
@@ -87,7 +89,31 @@ impl World {
             }
         }
         self.trips.forget_car(h);
+        self.car_places.remove(h);
         self.population.remove_household(h);
+    }
+
+    /// 世帯ごとの、車を置く枠。
+    pub fn car_places(&self) -> &CarPlaces {
+        &self.car_places
+    }
+
+    /// 自宅の枠を、いまの家と建物の台数に合わせて配り直す（[`CarPlaces::assign_homes`]）。
+    /// 世帯が越してきたり、家をなくしたり、住宅の段階が上がったりしたあとに呼ぶ。
+    /// 枠をなくした世帯の停めてある車は、駐車場から外す。
+    pub(super) fn assign_car_places(&mut self) {
+        let p = &self.population;
+        let homes: Vec<_> = p
+            .household_ids()
+            .map(|h| (h, p.home(h).flatten()))
+            .collect();
+        let buildings = &self.buildings;
+        let lost = self.car_places.assign_homes(homes, |b| {
+            buildings.get(b).map_or(0, |b| b.parking_spaces())
+        });
+        for h in lost {
+            self.trips.forget_car(h);
+        }
     }
 
     /// 終わった移動 `ended` の住民の居場所を切り替える。
@@ -189,6 +215,114 @@ mod car_tests {
             percent.abs_diff(CAR_OWNERSHIP_PERCENT) <= 20,
             "車を持つ世帯が {percent}%"
         );
+    }
+}
+
+#[cfg(test)]
+mod car_place_tests {
+    use std::collections::BTreeMap;
+
+    use crate::car_place::CarPlace;
+    use crate::clock::TICKS_PER_DAY;
+    use crate::command::{Command, ZoneKind};
+    use crate::id::BuildingId;
+    use crate::movement::HouseholdCar;
+    use crate::world::World;
+    use crate::world::people::tests::city;
+
+    /// 建物ごとの、自宅の枠を持つ世帯の数。
+    fn holders(w: &World) -> BTreeMap<BuildingId, u64> {
+        let mut out = BTreeMap::new();
+        for (h, place) in w.car_places().iter() {
+            assert_eq!(place, CarPlace::Home);
+            let home = w
+                .population()
+                .home(h)
+                .flatten()
+                .expect("家のない世帯が枠を持つ");
+            *out.entry(home).or_insert(0) += 1;
+        }
+        out
+    }
+
+    /// 枠は家のある世帯だけが持ち、建物の台数を超えない。台数が世帯の数に足りる建物では、どの世帯も枠を持つ。
+    /// 住宅の駐車場に停めてある台数と押さえた台数は、枠を持つ世帯の数を超えない。
+    fn check(w: &World) {
+        let held = holders(w);
+        let p = w.population();
+        let mut living: BTreeMap<BuildingId, u64> = BTreeMap::new();
+        for h in p.household_ids() {
+            if let Some(home) = p.home(h).flatten() {
+                *living.entry(home).or_insert(0) += 1;
+            }
+        }
+        for (id, n) in &living {
+            let spaces = w.buildings().get(*id).unwrap().parking_spaces();
+            let got = held.get(id).copied().unwrap_or(0);
+            assert_eq!(got, (*n).min(spaces), "建物 {id:?} の枠の数");
+        }
+        for (id, b) in w.buildings().iter() {
+            if b.zone != ZoneKind::Residential {
+                continue;
+            }
+            let lot = w.trips().lot(id);
+            let used = u64::from(lot.parked) + u64::from(lot.reserved);
+            assert!(
+                used <= held.get(&id).copied().unwrap_or(0),
+                "建物 {id:?} に枠より多く停まっている: {lot:?}"
+            );
+        }
+    }
+
+    /// 越してきた世帯、段階の上がった住宅、取り壊した住宅の、どの場面でも枠を配り直す。
+    #[test]
+    fn home_places_follow_moves_level_ups_and_removals() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        let mut leveled = false;
+        while w.tick.0 < 3 * TICKS_PER_DAY {
+            w.step();
+            if w.tick.0 % 60 == 1 {
+                check(&w);
+                leveled |= w
+                    .buildings()
+                    .iter()
+                    .any(|(_, b)| b.zone == ZoneKind::Residential && b.level > 1);
+            }
+        }
+        assert!(leveled, "段階の上がった住宅がない");
+        assert!(
+            holders(&w).values().sum::<u64>() > 20,
+            "枠を持つ世帯が少ない"
+        );
+        assert_eq!(w.trips().parking_tally().no_place, 0, "枠のない世帯が出た");
+        // 世帯の住む住宅を 1 つ取り壊すと、その世帯は枠をなくし、停めてあった車も消える。
+        let (gone, b) = w
+            .buildings()
+            .iter()
+            .find(|(id, b)| b.zone == ZoneKind::Residential && holders(&w).contains_key(id))
+            .map(|(id, b)| (id, *b))
+            .expect("世帯の住む住宅がない");
+        let lost: Vec<_> = w
+            .car_places()
+            .iter()
+            .map(|(h, _)| h)
+            .filter(|h| w.population().home(*h).flatten() == Some(gone))
+            .collect();
+        assert_eq!(
+            w.apply(&Command::Bulldoze { area: b.area }),
+            crate::world::ApplyOutcome::Applied
+        );
+        for h in lost {
+            assert_eq!(w.car_places().get(h), None);
+            assert!(
+                !matches!(
+                    w.trips().household_car(h),
+                    Some(HouseholdCar::Parked { .. })
+                ),
+                "枠をなくした世帯の車が残っている"
+            );
+        }
+        check(&w);
     }
 }
 

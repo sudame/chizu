@@ -244,6 +244,7 @@ impl World {
         let tick = self.tick.0;
         if tick.is_multiple_of(MIGRATION_INTERVAL) {
             self.migrate();
+            self.assign_car_places();
         }
         if tick.is_multiple_of(JOB_INTERVAL) {
             self.update_jobs();
@@ -421,6 +422,7 @@ impl World {
             self.set_workplace(id, None);
             self.population.set_schedule(id, ScheduleState::default());
         }
+        self.assign_car_places();
     }
 
     /// 家のないまま長くたった世帯を街から出し、空き家に、家なしの世帯と外から来た世帯を入れる。

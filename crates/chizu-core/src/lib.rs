@@ -1,6 +1,7 @@
 //! chizu のシミュレーションの中核。
 
 pub mod building;
+pub mod car_place;
 pub mod chunk;
 pub mod citizens;
 pub mod clock;
@@ -24,6 +25,7 @@ pub mod units;
 pub mod world;
 pub mod zone;
 
+pub use car_place::{CarPlace, CarPlaces};
 pub use chunk::{Chunk, Layer, LayerTiles, TileUse};
 pub use citizens::{
     Activity, CitizenChange, CitizenRow, HappinessParts, Population, ScheduleState,

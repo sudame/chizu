@@ -470,6 +470,7 @@ impl World {
         let ids: Vec<BuildingId> = self.buildings.iter().map(|(id, _)| id).collect();
         // 段階を上げると需要が増えるので、その網の電気と水道に増分の余りがあるときだけ上げる。
         let mut level_room = Headroom::of(&self.network, &self.facilities, &self.buildings);
+        let mut homes_grew = false;
         for id in ids {
             let b = *self.buildings.get(id).expect("建物がない");
             let supplied = b.supply.power && b.supply.water;
@@ -491,7 +492,12 @@ impl World {
                 *self.buildings.get_mut(id).expect("建物がない") = up;
                 // 需要が増えたので、次の tick の頭で供給を判定し直す。
                 self.supply_dirty = true;
+                homes_grew |= b.zone == ZoneKind::Residential;
             }
+        }
+        // 住宅の段階が上がると駐車場の台数が増えるので、増えた枠を配る。
+        if homes_grew {
+            self.assign_car_places();
         }
         // 新しい建物は、その道路網の電気と水道に余りがあるときだけ建つ。施設のない網には数軒しか建たない。
         let mut headroom = Headroom::of(&self.network, &self.facilities, &self.buildings);
