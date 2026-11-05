@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::{
     Ends, SidewalkPos, Trip, Trips, candidates, car, junction, lane_shift, make_trip, plan, pos,
 };
-use crate::building::{Building, Buildings, ParkingCut, SLOT_WIDTH_MM};
+use crate::building::{Building, Buildings, LANE_WIDTH_MM, ParkingCut, SLOT_WIDTH_MM};
 use crate::clock::TICKS_PER_DAY;
 use crate::command::ZoneKind;
 use crate::id::{BuildingId, TripId};
@@ -338,7 +338,18 @@ pub struct CurbWait {
 
 /// 建物の出入口の位置。出入口の歩道の上でもあり、同じ側の車のリンクの上でもある。
 /// 出入口のリンクがなければ `None`。
+///
+/// 私道の敷地（`Building::lane_plan`）の住民は、私道を通って通りに出るので、私道の入口（[`lot_spot`] と同じ点）を
+/// 出入口にする。私道は経路の網に入れず、私道の中の道のりも足さない（`docs/design.md` の 3.7）。
 pub fn building_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
+    if b.lane_plan().is_some() {
+        return lot_choice(net, b).map(|(p, _)| p);
+    }
+    door_spot(net, b)
+}
+
+/// `Building::entrance` の位置。間口の `front` のマスに最も近い歩道の上の点である。
+fn door_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
     SidewalkPos::on_any_link(net, b.entrance, b.entrance_at)
 }
 
@@ -406,7 +417,8 @@ pub fn lot_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
         out
     };
     match b.parking_layout().cut {
-        ParkingCut::None => Vec::new(),
+        // 私道の脇の枠は、私道のマス（[`lane_tiles`]）に含める。
+        ParkingCut::None | ParkingCut::Lane { .. } => Vec::new(),
         ParkingCut::FrontStrip { slots } => {
             rect((slots * SLOT_WIDTH_MM).div_ceil(TILE_MM as u64), 1)
         }
@@ -430,9 +442,35 @@ pub fn lot_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
     }
 }
 
+/// 私道の通るマス。私道は [`lot_end`] の端の列を、道路の側から奥へ延びる。私道の脇の枠もこの列にある。
+/// 私道の敷地でない建物は空。地図に出すためのもので、道路の側から順に並べる。
+pub fn lane_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
+    let Some(plan) = b.lane_plan() else {
+        return Vec::new();
+    };
+    let (tx, ty) = b.toward_road;
+    let (ax, ay) = (-ty, tx);
+    let span = if tx == 0 {
+        b.area.max.x.abs_diff(b.area.min.x)
+    } else {
+        b.area.max.y.abs_diff(b.area.min.y)
+    };
+    let k = if lot_end(net, b) == LotEnd::Far {
+        i64::try_from(span).expect("間口が大きすぎる")
+    } else {
+        0
+    };
+    (0..plan.length.div_ceil(TILE_MM as u64))
+        .map(|j| {
+            let j = i64::try_from(j).expect("奥行きが大きすぎる");
+            TilePos::new(b.front.x + ax * k - tx * j, b.front.y + ay * k - ty * j)
+        })
+        .collect()
+}
+
 /// [`lot_spot`] の本体。出入りの位置と、選んだ端を返す。出入口にしたときの端は `None`。
 fn lot_choice(net: &Network, b: &Building) -> Option<(SidewalkPos, Option<LotEnd>)> {
-    let door = building_spot(net, b)?;
+    let door = door_spot(net, b)?;
     let half = TILE_MM / 2;
     // 端の外側の辺から、出入りの位置まで内へ入る距離（mm）。
     let inward = match b.parking_layout().cut {
@@ -442,6 +480,10 @@ fn lot_choice(net: &Network, b: &Building) -> Option<(SidewalkPos, Option<LotEnd
             .and_then(|w| i64::try_from(w / 2).ok())
             .expect("帯の長さがあふれた"),
         ParkingCut::Side { .. } => half,
+        // 私道の真ん中の線が、私道の入口になる。
+        ParkingCut::Lane { .. } => {
+            i64::try_from(LANE_WIDTH_MM / 2).expect("私道の幅が i64 に収まらない")
+        }
     };
     let (_, step, _) = pos::link_geometry(net, b.entrance)?;
     let (tx, ty) = b.toward_road;

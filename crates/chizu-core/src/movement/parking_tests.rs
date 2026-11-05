@@ -52,6 +52,7 @@ impl Street {
                     entrance_at,
                     leveled_at: Tick::ZERO,
                     supply: Default::default(),
+                    form: Default::default(),
                 })
             })
             .collect();
@@ -680,6 +681,7 @@ fn wide(net: &Network, zone: ZoneKind, front_x: i64, (w, h): (i64, i64), level: 
         level,
         leveled_at: Tick::ZERO,
         supply: Default::default(),
+        form: Default::default(),
     }
 }
 

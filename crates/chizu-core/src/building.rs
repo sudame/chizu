@@ -17,7 +17,10 @@ use crate::units::{LaneOffset, Tick};
 
 mod parking;
 
-pub use parking::{ParkingCut, ParkingLayout, SLOT_WIDTH_MM, SLOTS_PER_TILE};
+pub use parking::{
+    HOUSE_GAP_MM, LANE_FRONTAGE, LANE_MIN_DEPTH, LANE_WIDTH_MM, LanePlan, ParkingCut, ParkingLayout, SLOT_DEPTH_MM, SLOT_WIDTH_MM,
+    SLOTS_PER_TILE,
+};
 
 /// 建物の段階の上限。
 pub const MAX_LEVEL: u8 = 5;
@@ -28,6 +31,17 @@ pub const MAX_LOT_SIDE: u64 = 4;
 /// 斜めの道路に面して建つ建物の 1 辺の上限（マス）。斜めの道路沿いには正方形の小さな建物を
 /// 階段状に並べる。2 マスまでにすると、2×2 と 1×1 が交互に並んで隙間なく埋まる。
 pub const DIAGONAL_LOT_SIDE: u64 = 2;
+
+/// 建物の敷地の形。建物が建つときに決め、あとから変えない。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LotForm {
+    /// 通りに面した 1 つの棟。
+    #[default]
+    Street,
+    /// 行き止まりの私道の脇に、世帯ごとの一軒家を並べた敷地。効くのは [`Building::lane_plan`] の条件を
+    /// 満たすあいだ（段階 1〜2）だけである。
+    Lane,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Building {
@@ -50,6 +64,8 @@ pub struct Building {
     pub leveled_at: Tick,
     /// 電気と水道が届いているか。供給の判定のたびに書き換える。
     pub supply: Supply,
+    /// 敷地の形。
+    pub form: LotForm,
 }
 
 impl Building {
@@ -122,6 +138,7 @@ impl StateHash for Building {
         h.write(&self.level);
         h.write(&self.leveled_at);
         h.write(&self.supply);
+        h.write(&(self.form as u8));
     }
 }
 
@@ -563,6 +580,7 @@ mod tests {
             level: 1,
             leveled_at: Tick(0),
             supply: Supply::default(),
+            form: crate::building::LotForm::Street,
         };
         // 職場が 1 つの建物（1 マス）と 2 つの建物（4 マス）を並べる。
         let shops: Vec<Building> = (0..400)
