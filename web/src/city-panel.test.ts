@@ -10,12 +10,15 @@ import {
   formatPeople,
   formatUtilities,
   parseCityStats,
+  resetUtilityTrends,
   shownZone,
   togglePinned,
+  trackUtilityTrends,
   utilityKey,
   utilityLowHeadroom,
   utilityNotice,
   utilityShortage,
+  utilityTrendHints,
 } from "./city-panel.ts";
 import { CITY_STATS_LENGTH, FACTOR_KIND, validCityStats } from "./protocol/city-stats.ts";
 import { isWorkerToMain } from "./protocol/messages.ts";
@@ -46,6 +49,8 @@ describe("街の数字", () => {
       powerPeople: 0,
       waterPeople: 0,
       peopleKnown: false,
+      powerFacilityPeople: 0,
+      waterFacilityPeople: 0,
       demandFactors: [[], [], [], []],
     });
     expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 0, 1200, 1, 2]))).toBe(
@@ -85,6 +90,43 @@ describe("街の数字", () => {
       5, 0, 0, 0, 0, 0, 0, 3600, 5000, 3500, 0, 0, 0, 0, 0, 0, 3600, 5000, 3500, 0, 0, 0, 0, 0,
     ]);
     expect(formatUtilities(unknown)).toBe("電気 3,600 / 需要 3,500・水道 5,000 / 需要 3,500");
+  });
+
+  test("余りが減っているときだけ、施設 1 基で増える人数と足りなくなるまでの時間を出す", () => {
+    // 電気の余りは 1 日で 1,800 人分から 1,200 人分へ減り、あと 2 日。水道は 3,000 人分のまま。
+    const at = (power: number, water: number) => {
+      const v = new Array(CITY_STATS_LENGTH).fill(0);
+      v.splice(7, 3, 3600, 5000, 3500); // 供給量と需要（合計）
+      v.splice(16, 3, 3600, 5000, 3500); // 主の網
+      v.splice(21, 5, power, water, 1, 1507, 1180); // 余りの人数、決まるか、1 基の人数
+      return parseCityStats(v);
+    };
+    resetUtilityTrends();
+    trackUtilityTrends(at(1800, 3000), 0);
+    const trends = trackUtilityTrends(at(1200, 3000), 7200);
+    expect(utilityTrendHints(at(1200, 3000), trends)).toEqual([
+      "電気：発電所 1 基で 約 1,500 人分。このペースだと 約 2 日で足りなくなる",
+    ]);
+    // 半日で 1,800 人分から 900 人分へ減ると、あと半日（12 時間）
+    resetUtilityTrends();
+    trackUtilityTrends(at(1800, 3000), 0);
+    expect(utilityTrendHints(at(900, 3000), trackUtilityTrends(at(900, 3000), 3600))).toEqual([
+      "電気：発電所 1 基で 約 1,500 人分。このペースだと 約 12 時間で足りなくなる",
+    ]);
+    // 減っていない、足りない、まだ 1 時間たっていないときは出さない
+    resetUtilityTrends();
+    trackUtilityTrends(at(1000, 3000), 0);
+    expect(utilityTrendHints(at(1000, 3000), trackUtilityTrends(at(1000, 3000), 7200))).toEqual([]);
+    resetUtilityTrends();
+    trackUtilityTrends(at(1000, 3000), 0);
+    expect(utilityTrendHints(at(-50, 3000), trackUtilityTrends(at(-50, 3000), 7200))).toEqual([]);
+    resetUtilityTrends();
+    trackUtilityTrends(at(1800, 3000), 0);
+    expect(utilityTrendHints(at(1200, 3000), trackUtilityTrends(at(1200, 3000), 299))).toEqual([]);
+    // 人数が決まらないときは出さず、控えも捨てる
+    resetUtilityTrends();
+    const unknown = parseCityStats([5, 0, 0, 0, 0, 0, 0, 3600, 5000, 3500]);
+    expect(utilityTrendHints(unknown, trackUtilityTrends(unknown, 7200))).toEqual([]);
   });
 
   test("足りないときは、足りない人数で言う", () => {
@@ -168,7 +210,7 @@ describe("街の数字", () => {
 describe("需要の内訳", () => {
   // 住宅 2 件、商業 0 件、工業 0 件、オフィス 3 件の内訳。件数のあとに [kind, value] が続く。
   const tail = [2, 0, 20, 4, -30, 0, 0, 3, 7, 140, 3, -9, 8, -200];
-  const stats = parseCityStats([...new Array(24).fill(0), ...tail]);
+  const stats = parseCityStats([...new Array(CITY_STATS_LENGTH).fill(0), ...tail]);
 
   test("city_stats の末尾から区画の種類ごとの内訳を読む", () => {
     expect(stats.demandFactors).toEqual([
@@ -185,7 +227,12 @@ describe("需要の内訳", () => {
       ],
     ]);
     // 内訳が付いていない並びでも読める。
-    expect(parseCityStats(new Array(24).fill(0)).demandFactors).toEqual([[], [], [], []]);
+    expect(parseCityStats(new Array(CITY_STATS_LENGTH).fill(0)).demandFactors).toEqual([
+      [],
+      [],
+      [],
+      [],
+    ]);
   });
 
   test("寄与の大きい順に並べ、正と負が分かる言葉で出す", () => {
@@ -198,16 +245,26 @@ describe("需要の内訳", () => {
   });
 
   test("寄与が 0 の要因は出さず、同じ大きさなら正が先に来る", () => {
-    const s = parseCityStats([...new Array(24).fill(0), 2, 1, 0, 3, 0, 0, 0, 0]);
+    const s = parseCityStats([...new Array(CITY_STATS_LENGTH).fill(0), 2, 1, 0, 3, 0, 0, 0, 0]);
     expect(demandFactorLines(s, 0)).toEqual([]);
-    const tie = parseCityStats([...new Array(24).fill(0), 2, 3, -5, 1, 5, 0, 0, 0]);
+    const tie = parseCityStats([...new Array(CITY_STATS_LENGTH).fill(0), 2, 3, -5, 1, 5, 0, 0, 0]);
     expect(demandFactorLines(tie, 0).map((l) => l.value)).toEqual([5, -5]);
   });
 
   test("幸福度と税は、符号で言い方が変わる", () => {
-    const s = parseCityStats([...new Array(24).fill(0), 2, 2, 10, 3, 12, 0, 0, 0]);
+    const s = parseCityStats([...new Array(CITY_STATS_LENGTH).fill(0), 2, 2, 10, 3, 12, 0, 0, 0]);
     expect(demandFactorLines(s, 0).map((l) => l.label)).toEqual(["税が低い", "幸福度が高い"]);
-    const bad = parseCityStats([...new Array(24).fill(0), 2, 2, -10, 3, -12, 0, 0, 0]);
+    const bad = parseCityStats([
+      ...new Array(CITY_STATS_LENGTH).fill(0),
+      2,
+      2,
+      -10,
+      3,
+      -12,
+      0,
+      0,
+      0,
+    ]);
     expect(demandFactorLines(bad, 0).map((l) => l.label)).toEqual(["税が高い", "幸福度が低い"]);
   });
 
@@ -272,9 +329,11 @@ describe("city_stats の並びの形", () => {
   });
 
   test("Worker から来る cityStats は、形が合うものだけ受け取る", () => {
-    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 0, 0, 0, 0] })).toBe(true);
-    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 2, 0, 5] })).toBe(false);
-    expect(isWorkerToMain({ kind: "cityStats", stats: fixed })).toBe(false);
+    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 0, 0, 0, 0], tick: 0 })).toBe(
+      true,
+    );
+    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 2, 0, 5], tick: 0 })).toBe(false);
+    expect(isWorkerToMain({ kind: "cityStats", stats: fixed, tick: 0 })).toBe(false);
   });
 
   test("形の合わない並びでも、内訳は空になるだけで読める", () => {

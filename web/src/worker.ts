@@ -134,7 +134,7 @@ function sendBuildings(sim: Simulation): void {
   const lots = sim.lots();
   const stats = [...sim.city_stats()];
   sentStats = stats.join(",");
-  reply({ kind: "buildings", buildings, facilities, lots, stats }, [
+  reply({ kind: "buildings", buildings, facilities, lots, stats, tick: sim.current_tick() }, [
     buildings.buffer,
     facilities.buffer,
     lots.buffer,
@@ -174,7 +174,7 @@ function sendCityStats(sim: Simulation, now: number, force = false): void {
   const key = stats.join(",");
   if (key !== sentStats) {
     sentStats = key;
-    reply({ kind: "cityStats", stats });
+    reply({ kind: "cityStats", stats, tick: sim.current_tick() });
   }
 }
 
