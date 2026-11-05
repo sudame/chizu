@@ -23,9 +23,6 @@ use crate::units::Money;
 /// 自宅の枠のない世帯が共同の駐車場を探す範囲。家の出入口のマスから、駐車場の正面のマスまでの直線の距離（マス）である。
 pub const SHARED_LOT_RADIUS: u64 = 32;
 
-/// 共同の駐車場の、借りた枠 1 つあたりの 1 日の料金。料金を決めるコマンドを足すまでは 0 である。
-pub const SHARED_LOT_FEE: i64 = 0;
-
 /// 払える上限の基準にする料金（1 日）。
 pub const BASE_SHARED_LOT_FEE: i64 = 10;
 
@@ -301,6 +298,7 @@ mod tests {
         assert_eq!(fee_cap(Money(full.0 / 2)), 15);
         assert_eq!(fee_cap(full), 20);
         assert_eq!(fee_cap(Money(full.0 * 3)), 20);
-        assert!(SHARED_LOT_FEE <= fee_cap(Money(0)));
+        // 始めたときの料金なら、蓄えのない世帯も払える。
+        assert!(i64::from(crate::world::INITIAL_PARKING_FEE) <= fee_cap(Money(0)));
     }
 }

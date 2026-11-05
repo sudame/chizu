@@ -275,6 +275,9 @@ impl Default for SimSpeed {
 /// 税率の上限（‰）。
 pub const MAX_TAX_PERMILLE: u16 = 300;
 
+/// 共同の駐車場の料金の上限（借りた枠 1 つあたりの 1 日の額）。
+pub const MAX_PARKING_FEE: u16 = 50;
+
 /// プレイヤーの操作。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -319,6 +322,10 @@ pub enum Command {
     SetSimSpeed {
         speed: SimSpeed,
     },
+    /// 共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額）を、街で 1 つ決める。`0..=MAX_PARKING_FEE` の外は受け付けない。
+    SetParkingFee {
+        fee: u16,
+    },
     /// `from` から `to` への直線と同じ 1 歩を通る道路の区間を、区間ごと `kind` の種類に変える。
     /// 上げるのにも下げるのにも使う。形とノードは変えない。高速道路は変えない。
     UpgradeRoad {
@@ -339,6 +346,8 @@ pub enum InvalidCommand {
     UnorderedRect(TileRect),
     /// 税率が `MAX_TAX_PERMILLE` を超えている。
     TaxRateTooHigh(u16),
+    /// 駐車場の料金が `MAX_PARKING_FEE` を超えている。
+    ParkingFeeTooHigh(u16),
     /// 区画を塗る長方形の辺が `MAX_ZONE_SIDE` マスより長い。
     ZoneAreaTooLarge(TileRect),
     /// 道路の始点と終点が同じマスである。
@@ -359,6 +368,12 @@ impl fmt::Display for InvalidCommand {
             ),
             InvalidCommand::TaxRateTooHigh(p) => {
                 write!(f, "税率 {p}‰ は上限の {MAX_TAX_PERMILLE}‰ を超えている")
+            }
+            InvalidCommand::ParkingFeeTooHigh(fee) => {
+                write!(
+                    f,
+                    "駐車場の料金 {fee} は上限の {MAX_PARKING_FEE} を超えている"
+                )
             }
             InvalidCommand::BadRotation(r) => write!(f, "建物の向き {r} は 0 から 3 の外にある"),
             InvalidCommand::OutOfWorld => {
@@ -401,6 +416,7 @@ impl Command {
             Command::SetSignal { .. }
             | Command::SetCrosswalk { .. }
             | Command::SetTaxRate { .. }
+            | Command::SetParkingFee { .. }
             | Command::SetSimSpeed { .. } => true,
         }
     }
@@ -432,6 +448,13 @@ impl Command {
                     Ok(())
                 } else {
                     Err(InvalidCommand::TaxRateTooHigh(permille))
+                }
+            }
+            Command::SetParkingFee { fee } => {
+                if fee <= MAX_PARKING_FEE {
+                    Ok(())
+                } else {
+                    Err(InvalidCommand::ParkingFeeTooHigh(fee))
                 }
             }
             Command::BuildRoad { from, to, .. } | Command::UpgradeRoad { from, to, .. } => {
@@ -528,6 +551,13 @@ mod tests {
         assert_eq!(
             tax(MAX_TAX_PERMILLE + 1),
             Err(InvalidCommand::TaxRateTooHigh(MAX_TAX_PERMILLE + 1))
+        );
+        let fee = |fee| Command::SetParkingFee { fee }.validate();
+        assert_eq!(fee(0), Ok(()));
+        assert_eq!(fee(MAX_PARKING_FEE), Ok(()));
+        assert_eq!(
+            fee(MAX_PARKING_FEE + 1),
+            Err(InvalidCommand::ParkingFeeTooHigh(MAX_PARKING_FEE + 1))
         );
     }
 

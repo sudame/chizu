@@ -1168,6 +1168,7 @@ const DONE: Record<CommandMessage["kind"], string> = {
   SetCrosswalk: "横断歩道を切り替えた",
   SetSimSpeed: "速度を変えた",
   SetTaxRate: "税率を変えた",
+  SetParkingFee: "駐車場の料金を変えた",
 };
 function showOutcome(command: CommandMessage["kind"], outcome: Outcome, reason?: string): void {
   const text: Record<Outcome, string> = {
@@ -1337,7 +1338,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     if (tool.kind === "service") {
       updatePreview();
     }
-    if (command === "SetTaxRate" && message.outcome !== "Applied") {
+    if (
+      (command === "SetTaxRate" || command === "SetParkingFee") &&
+      message.outcome !== "Applied"
+    ) {
       financePanel.rejected();
     }
     if (command !== undefined && command !== "SetSimSpeed") {

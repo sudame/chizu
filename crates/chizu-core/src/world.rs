@@ -29,6 +29,9 @@ pub const INITIAL_MONEY: Money = Money(500_000);
 /// 始めたときの税率（‰）。
 pub const INITIAL_TAX_PERMILLE: u16 = 100;
 
+/// 始めたときの共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額）。
+pub const INITIAL_PARKING_FEE: u16 = 10;
+
 /// 始めたときに買ってあるチャンクの範囲。原点を中心とする 3×3 である。
 pub const START_CHUNK_RADIUS: i32 = 1;
 
@@ -153,6 +156,8 @@ pub struct World {
     speed: SimSpeed,
     money: Money,
     tax_permille: [u16; 4],
+    /// 共同の駐車場の、借りた枠 1 つあたりの 1 日の料金。街で 1 つである。
+    parking_fee: u16,
     /// メモリに置いているチャンク。いまは買った土地だけを置く。
     chunks: BTreeMap<ChunkCoord, Chunk>,
     /// 始めてから買ったチャンクの数。最初から買ってあるチャンクは数えない。
@@ -289,6 +294,7 @@ impl World {
             speed: SimSpeed::NORMAL,
             money: INITIAL_MONEY,
             tax_permille: [INITIAL_TAX_PERMILLE; 4],
+            parking_fee: INITIAL_PARKING_FEE,
             chunks,
             chunks_bought: 0,
             milestone: 0,
@@ -638,6 +644,11 @@ impl World {
         self.tax_permille[zone.index()]
     }
 
+    /// 共同の駐車場の、借りた枠 1 つあたりの 1 日の料金。
+    pub fn parking_fee(&self) -> u16 {
+        self.parking_fee
+    }
+
     pub fn chunk(&self, coord: ChunkCoord) -> Option<&Chunk> {
         self.chunks.get(&coord)
     }
@@ -803,6 +814,11 @@ impl World {
                 self.tax_permille[zone.index()] = permille;
                 ApplyOutcome::Applied
             }
+            // 上限を超えた世帯が枠を返すのは、1 日 1 回の見直しのときである。
+            Command::SetParkingFee { fee } => {
+                self.parking_fee = fee;
+                ApplyOutcome::Applied
+            }
             Command::BuyChunk { coord } => self.buy_chunk(coord),
             Command::BuildRoad { from, to, kind } => self.build_road(from, to, kind),
             Command::UpgradeRoad { from, to, kind } => self.upgrade_road(from, to, kind),
@@ -889,6 +905,7 @@ impl StateHash for World {
         h.write(&self.speed.multiplier());
         h.write(&self.money);
         h.write(&self.tax_permille);
+        h.write(&self.parking_fee);
         h.write(&self.chunks);
         h.write(&self.chunks_bought);
         h.write(&self.milestone);
@@ -975,6 +992,23 @@ mod tests {
         assert_eq!(w.tax_permille(ZoneKind::Office), 150);
         assert_eq!(w.tax_permille(ZoneKind::Residential), INITIAL_TAX_PERMILLE);
         assert_ne!(w.state_hash(), before);
+    }
+
+    #[test]
+    fn set_parking_fee() {
+        let mut w = World::new(0);
+        assert_eq!(w.parking_fee(), INITIAL_PARKING_FEE);
+        let before = w.state_hash();
+        let cmd = Command::SetParkingFee { fee: 30 };
+        assert_eq!(w.apply(&cmd), ApplyOutcome::Applied);
+        assert_eq!(w.parking_fee(), 30);
+        assert_ne!(w.state_hash(), before);
+        let before = w.clone();
+        let over = Command::SetParkingFee {
+            fee: crate::command::MAX_PARKING_FEE + 1,
+        };
+        assert_eq!(w.apply(&over), ApplyOutcome::Rejected);
+        assert_eq!(w, before);
     }
 
     #[test]

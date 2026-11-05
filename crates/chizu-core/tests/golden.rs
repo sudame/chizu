@@ -1028,7 +1028,7 @@ fn land_purchase() -> CommandLog {
     log
 }
 
-/// 速度と税率を何度か変え、中身のまだないコマンドも混ぜた 2 日ぶんの記録。
+/// 速度と税率と駐車場の料金を何度か変え、中身のまだないコマンドも混ぜた 2 日ぶんの記録。
 /// 終わりの直前にもコマンドを置き、速度は等速に戻さずに終える。
 fn clock_and_commands() -> CommandLog {
     let mut log = CommandLog::new();
@@ -1060,6 +1060,7 @@ fn clock_and_commands() -> CommandLog {
     rec(600, speed(3));
     rec(2_400, speed(8));
     rec(2_400, tax(ZoneKind::Industrial, 150));
+    rec(2_400, Command::SetParkingFee { fee: 30 });
     rec(
         5_000,
         Command::BuyChunk {

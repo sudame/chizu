@@ -137,6 +137,9 @@ enum CommandJson {
     SetSimSpeed {
         speed: u16,
     },
+    SetParkingFee {
+        fee: u16,
+    },
     UpgradeRoad {
         from: [i64; 2],
         to: [i64; 2],
@@ -235,6 +238,7 @@ impl From<Command> for CommandJson {
             Command::SetSimSpeed { speed } => CommandJson::SetSimSpeed {
                 speed: speed.multiplier(),
             },
+            Command::SetParkingFee { fee } => CommandJson::SetParkingFee { fee },
             Command::UpgradeRoad { from, to, kind } => CommandJson::UpgradeRoad {
                 from: tile_json(from),
                 to: tile_json(to),
@@ -295,6 +299,7 @@ impl CommandJson {
                     )
                 })?,
             },
+            CommandJson::SetParkingFee { fee } => Command::SetParkingFee { fee },
             CommandJson::UpgradeRoad { from, to, kind } => Command::UpgradeRoad {
                 from: tile(from),
                 to: tile(to),
@@ -335,6 +340,7 @@ mod tests {
             json!({"type":"BuyChunk","chunk":[2,-1]}),
             json!({"type":"SetTaxRate","zone":"Commercial","permille":120}),
             json!({"type":"SetSimSpeed","speed":4}),
+            json!({"type":"SetParkingFee","fee":30}),
             json!({"type":"UpgradeRoad","from":[0,1],"to":[5,1],"kind":"Large"}),
             json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"SW","on":false}),
         ];
@@ -439,6 +445,7 @@ mod tests {
                 arm: Heading::NW,
                 on: false,
             },
+            Command::SetParkingFee { fee: 50 },
         ];
         // 種類ごとに 1 つはあることを、ワイルドカードなしの match で確かめる。
         #[deny(clippy::wildcard_enum_match_arm)]
@@ -454,9 +461,10 @@ mod tests {
                 Command::SetSimSpeed { .. } => 7,
                 Command::UpgradeRoad { .. } => 8,
                 Command::SetCrosswalk { .. } => 9,
+                Command::SetParkingFee { .. } => 10,
             }
         }
-        let mut seen = [false; 10];
+        let mut seen = [false; 11];
         for c in commands {
             seen[kind(&c)] = true;
             let json = to_json(c);
@@ -490,6 +498,8 @@ mod tests {
             json!({"type":"SetSimSpeed","speed":0}),
             json!({"type":"SetTaxRate","zone":"Commercial","permille":-1}),
             json!({"type":"SetTaxRate","zone":"ResidentialLow","permille":100}),
+            json!({"type":"SetParkingFee","fee":-1}),
+            json!({"type":"SetParkingFee"}),
             json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"Up","on":false}),
         ];
         for c in &cases {

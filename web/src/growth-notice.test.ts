@@ -313,6 +313,9 @@ describe("車を持てない世帯の知らせ", () => {
     expect(carlessNotice(parseCarless([3, 0, 0, 0, 3, 0]))?.action).not.toContain("・");
     expect(notice?.action).toContain("直線で 32 マス");
     expect(notice?.action).not.toContain("道路を引く");
+    // 料金が上限を超える世帯がいるときは、料金を下げるよう促す
+    expect(notice?.action).toContain("駐車場の料金を下げる");
+    expect(carlessNotice(parseCarless([30, 30, 0, 0, 0, 0]))?.action).not.toContain("料金を下げる");
     // 範囲の駐車場が道路に面していない世帯がいるときは、駐車場の前に道路を引くよう促す
     const cut = carlessNotice(parseCarless([40, 0, 0, 0, 0, 40]));
     expect(cut?.action).toContain("駐車場が道路に面していない 40");
