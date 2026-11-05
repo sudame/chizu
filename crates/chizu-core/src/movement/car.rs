@@ -873,18 +873,18 @@ fn exit_lane(
     let clear = i64::from(clear_line(net, next).0);
     let room = |l: &LaneId| {
         st.last(*l)
-            .is_none_or(|(at, v)| roomy(at, i64::from(v.0), 1, ticks, clear, need))
+            .is_none_or(|(at, v)| roomy(at, i64::from(v.0), 1, ticks, at < clear, need))
     };
     let to_lane = junction_lane(net, conn, st, t, node, next, after, room);
     (to_lane, room(&to_lane))
 }
 
-/// 先の車線の最後尾（位置 `at`、速さ `v`）が `need` より先まで進んでいそうか。最後尾が交差点を抜けきる所
-/// `clear` より手前にいれば、交差点を抜けていく車なので、入る車が抜けきる所に着くまでの `ticks` tick のあいだ
-/// 同じ速さで進むとみなす。そうでなければ `base` tick のあいだ進むとみなす。交差点を抜けていく車の後ろに続く車を、
-/// 前の車が交差点を抜けきるまで待たせないためである。
-fn roomy(at: i64, v: i64, base: i64, ticks: i64, clear: i64, need: i64) -> bool {
-    let k = if at < clear { ticks } else { base };
+/// 先の車線の最後尾（位置 `at`、速さ `v`）が `need` より先まで進んでいそうか。最後尾が交差点を抜けていく
+/// 車（`leaving`）なら、入る車が抜けきる所に着くまでの `ticks` tick のあいだ同じ速さで進むとみなす。そうでなければ
+/// `base` tick のあいだ進むとみなす。交差点を抜けていく車の後ろに続く車を、前の車が交差点を抜けきるまで
+/// 待たせないためである。
+fn roomy(at: i64, v: i64, base: i64, ticks: i64, leaving: bool, need: i64) -> bool {
+    let k = if leaving { ticks } else { base };
     at + v * k >= need
 }
 
@@ -1188,9 +1188,10 @@ pub(super) fn step(
                 + i64::from(clear_line(net, next).0);
             let ticks = ticks_to(net, t, left);
             let clear = i64::from(clear_line(net, next).0);
+            // 最後尾が交差点を抜けていく車かは、この tick に動く前の位置で決め、`exit_lane` と同じ見込みにする。
             if last
                 .get(&lane)
-                .is_some_and(|(r, v)| !roomy(*r, *v, 0, ticks, clear, need))
+                .is_some_and(|(r, v)| !roomy(*r, *v, 0, ticks, *r - *v < clear, need))
             {
                 (t.offset, t.speed) = (LaneOffset(line), MmPerTick::ZERO);
                 continue;
