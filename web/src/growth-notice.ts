@@ -235,11 +235,12 @@ export function carlessNotice(carless: Carless): GrowthNotice | null {
     noRoad > 0
       ? "駐車場の前に道路を引く。世帯の多い所の近くには、共同の駐車場も置く。"
       : "世帯の多い所の近くに、共同の駐車場を置く。";
+  const feeHint = fee > 0 ? "料金が高い世帯は、収支の欄で駐車場の料金を下げると借りる。" : "";
   return {
     headline: `車を持てない世帯がある（${n(carless.total)} 世帯）`,
     action:
       (parts.length > 0 ? `${parts.join("・")}。` : "") +
-      `${hint}直線で 32 マス（256m）の中の駐車場だけを借りる`,
+      `${hint}${feeHint}直線で 32 マス（256m）の中の駐車場だけを借りる`,
   };
 }
 

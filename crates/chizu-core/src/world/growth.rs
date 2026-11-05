@@ -1323,35 +1323,47 @@ mod tests {
         assert_eq!(seen, [true, true], "どちらかの密度の住宅が建たない");
     }
 
-    /// 古い保存データにある高密度の私道の敷地は、私道の形を持たず、ふつうの住宅と同じく段階 5 まで上がれる。
+    /// 古い保存データにある高密度の私道の敷地は、私道の形を持たず、段階 2 からでも、ふつうの住宅と同じく上がれる。
+    /// 私道の敷地にできる大きさ（縦横の道路に面し、間口 2、奥行き 4 以上）の段階 2 の建物を `Lane` にして、
+    /// その建物自身が段階 3 以上に上がることを確かめる。
     #[test]
     fn legacy_high_density_lane_lots_act_as_street_homes_and_keep_growing() {
+        let lane_sized = |b: &Building| {
+            let x = b.area.max.x.abs_diff(b.area.min.x) + 1;
+            let y = b.area.max.y.abs_diff(b.area.min.y) + 1;
+            let (frontage, depth) = if b.toward_road.0 == 0 { (x, y) } else { (y, x) };
+            b.zone == Zone::Residential
+                && b.level == LOW_DENSITY_MAX_LEVEL
+                && !is_diagonal(b.toward_road)
+                && frontage == LANE_FRONTAGE
+                && depth >= LANE_MIN_DEPTH + 1
+        };
         let mut w = served_street_with(0);
-        run(&mut w, 4 * TICKS_PER_DAY);
-        let before: Vec<(BuildingId, u8)> = w
-            .buildings()
-            .iter()
-            .filter(|(_, b)| {
-                b.zone == Zone::Residential
-                    && b.form == LotForm::Street
-                    && (LOW_DENSITY_MAX_LEVEL..MAX_LEVEL).contains(&b.level)
-            })
-            .map(|(id, b)| (id, b.level))
-            .collect();
+        let mut legacy: Vec<BuildingId> = Vec::new();
+        while legacy.is_empty() && w.tick.0 < 10 * TICKS_PER_DAY {
+            run(&mut w, GROWTH_INTERVAL);
+            legacy = w
+                .buildings()
+                .iter()
+                .filter(|(_, b)| lane_sized(b))
+                .map(|(id, _)| id)
+                .collect();
+        }
         assert!(
-            !before.is_empty(),
-            "段階 2 以上で上がれる高密度の住宅がない"
+            !legacy.is_empty(),
+            "段階 2 で私道の敷地にできる大きさの高密度の住宅がない"
         );
-        for (id, _) in &before {
+        for id in &legacy {
             w.buildings.get_mut(*id).unwrap().form = LotForm::Lane;
             assert!(w.buildings().get(*id).unwrap().lane_plan().is_none());
         }
         run(&mut w, 4 * TICKS_PER_DAY);
         assert!(
-            before
-                .iter()
-                .any(|(id, level)| w.buildings().get(*id).unwrap().level > *level),
-            "古い高密度の私道の敷地が上がらない"
+            legacy.iter().any(|id| w
+                .buildings()
+                .get(*id)
+                .is_some_and(|b| b.level > LOW_DENSITY_MAX_LEVEL)),
+            "段階 2 の古い高密度の私道の敷地が上がらない"
         );
     }
 

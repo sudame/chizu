@@ -703,8 +703,8 @@ impl Sim {
     }
 
     /// 収支の見込みを次の数で返す。税率の上限（‰）、区画の種類ごとの税率（‰）、区画の種類ごとの税収、
-    /// 道路の維持費、発電所と浄水場の維持費、共同の駐車場の維持費。区画の種類の順は住宅、商業、工業、オフィス。
-    /// 金額はどれも 1 日あたりである。
+    /// 道路の維持費、発電所と浄水場の維持費、共同の駐車場の維持費、共同の駐車場の料金、料金の上限、料金の収入。
+    /// 区画の種類の順は住宅、商業、工業、オフィス。金額はどれも 1 日あたりである。
     pub fn finance(&self) -> Vec<f64> {
         let f = self.world.finances();
         let mut out = vec![f64::from(chizu_core::command::MAX_TAX_PERMILLE)];
@@ -713,6 +713,9 @@ impl Sim {
         out.push(f.road_upkeep.0 as f64);
         out.extend(f.facility_upkeep.map(|m| m.0 as f64));
         out.push(f.parking_upkeep.0 as f64);
+        out.push(f64::from(self.world.parking_fee()));
+        out.push(f64::from(chizu_core::command::MAX_PARKING_FEE));
+        out.push(f.parking_fees.0 as f64);
         out
     }
 
@@ -1563,7 +1566,7 @@ mod tests {
     fn finance_follows_tax_rate_commands_and_the_log() {
         let mut sim = Sim::new(0);
         let before = sim.finance();
-        assert_eq!(before.len(), 13);
+        assert_eq!(before.len(), 16);
         assert_eq!(before[0], f64::from(MAX_TAX_PERMILLE));
         // 住宅、商業、工業、オフィスの順の税率
         assert_eq!(&before[1..5], &[100.0; 4]);
@@ -1927,5 +1930,29 @@ mod tests {
         assert_eq!(f[11], ServiceKind::WaterPump.upkeep_per_day().0 as f64);
         let core = sim.world().finances();
         assert_eq!(core.parking_upkeep.0, upkeep);
+    }
+
+    #[test]
+    fn finance_includes_the_parking_fee_and_its_income() {
+        let (mut sim, _guard) = crate::test_town::carless_town(1);
+        let f = sim.finance();
+        assert_eq!(f.len(), 16);
+        assert_eq!(f[13], f64::from(chizu_core::world::INITIAL_PARKING_FEE));
+        assert_eq!(f[14], f64::from(chizu_core::command::MAX_PARKING_FEE));
+        assert_eq!(f[15], 0.0);
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
+        sim.advance(120);
+        let rented: u64 = sim
+            .world()
+            .car_places()
+            .rented_counts()
+            .values()
+            .map(|n| u64::from(*n))
+            .sum();
+        assert!(rented > 0, "借りた世帯がいない");
+        assert_eq!(sim.finance()[15], (rented * 10) as f64);
+        sim.submit(Command::SetParkingFee { fee: 30 }).unwrap();
+        sim.advance(1);
+        assert_eq!(sim.finance()[13], 30.0);
     }
 }

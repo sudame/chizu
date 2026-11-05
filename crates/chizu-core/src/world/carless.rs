@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use super::World;
 use super::commute::lots_in_range;
-use crate::car_place::{SHARED_LOT_FEE, fee_cap};
+use crate::car_place::fee_cap;
 use crate::id::{BuildingId, HouseholdId};
 use crate::tile::TilePos;
 use crate::units::Money;
@@ -112,6 +112,7 @@ impl World {
         let lots = self.shared_lot_sites();
         let unconnected = self.unconnected_lot_sites();
         let rented = self.car_places.rented_counts();
+        let fee = i64::from(self.parking_fee);
         let mut out = Vec::new();
         for h in p.household_ids() {
             if self.car_places.get(h).is_some() {
@@ -132,7 +133,7 @@ impl World {
                 } else {
                     CarlessReason::LotNotOnRoad
                 }
-            } else if SHARED_LOT_FEE > fee_cap(savings) {
+            } else if fee > fee_cap(savings) {
                 CarlessReason::FeeTooHigh
             } else {
                 let has_room = near.iter().any(|(_, c, spaces)| {
@@ -276,6 +277,103 @@ mod tests {
         run(&mut w, TICKS_PER_DAY);
         assert_eq!(renters(&w), 12);
         assert_eq!(count(&w.carless_households(), CarlessReason::Waiting), 0);
+        set_home_spaces_limit(None);
+    }
+
+    /// 料金の収入は、借りられた枠の数 × 料金である。料金を上限より高くすると、すぐには枠を返さないが、
+    /// 範囲の中の車を持てない世帯の理由は「料金が上限を超える」になる。1 日 1 回の見直しで、借りていた世帯も枠を返す。
+    /// 料金を下げれば、次の見直しでまた借りる。
+    #[test]
+    fn a_fee_over_the_cap_makes_households_give_up_their_places() {
+        set_home_spaces_limit(Some(0));
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run(&mut w, TICKS_PER_DAY);
+        let command = Command::PlaceBuilding {
+            kind: ServiceKind::ParkingLot,
+            at: TilePos::new(-20, 9),
+            rotation: 2,
+        };
+        assert_eq!(w.apply(&command), ApplyOutcome::Applied);
+        let lot = *w.facilities().last().unwrap();
+        let within = |c: &Carless| {
+            let (dx, dy) = (c.front.x - lot.front.x, c.front.y - lot.front.y);
+            dx * dx + dy * dy <= 32 * 32
+        };
+        assert_eq!(renters(&w), 12);
+        let fee = i64::from(crate::world::INITIAL_PARKING_FEE);
+        assert_eq!(w.finances().parking_fees, Money(12 * fee));
+        assert_eq!(count(&w.carless_households(), CarlessReason::FeeTooHigh), 0);
+
+        let max = crate::command::MAX_PARKING_FEE;
+        assert_eq!(
+            w.apply(&Command::SetParkingFee { fee: max }),
+            ApplyOutcome::Applied
+        );
+        assert!(i64::from(max) > fee_cap(crate::happiness::SAVINGS_FOR_FULL_BONUS));
+        assert_eq!(renters(&w), 12, "見直しを待たずに枠を返した");
+        // 上限を超えた世帯は、枠を返すまでも料金を払わない
+        assert_eq!(w.finances().parking_fees, Money::ZERO);
+        let over = w.carless_households();
+        assert!(over.iter().any(within));
+        for c in over.iter().filter(|c| within(c)) {
+            assert_eq!(c.reason, CarlessReason::FeeTooHigh, "{c:?}");
+        }
+        run(&mut w, TICKS_PER_DAY);
+        assert_eq!(renters(&w), 0, "見直しで枠を返していない");
+        assert_eq!(w.finances().parking_fees, Money::ZERO);
+        let gave_up = w.carless_households();
+        assert!(count(&gave_up, CarlessReason::FeeTooHigh) > 12);
+
+        assert_eq!(
+            w.apply(&Command::SetParkingFee { fee: 0 }),
+            ApplyOutcome::Applied
+        );
+        run(&mut w, TICKS_PER_DAY);
+        assert_eq!(renters(&w), 12);
+        assert_eq!(w.finances().parking_fees, Money::ZERO);
+        assert_eq!(count(&w.carless_households(), CarlessReason::FeeTooHigh), 0);
+        set_home_spaces_limit(None);
+    }
+
+    /// 見直しの直後に料金を上限より上げ、次の見直しの直前に戻しても、そのあいだは枠を返していない世帯の分の
+    /// 料金が収入に入らない。料金を戻した時点で、借りている世帯の分がまた入る。
+    #[test]
+    fn households_over_the_cap_pay_no_fee_until_they_give_up_their_places() {
+        use crate::world::people::SHARED_LOT_REVIEW_TICK;
+        set_home_spaces_limit(Some(0));
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run(&mut w, TICKS_PER_DAY);
+        let command = Command::PlaceBuilding {
+            kind: ServiceKind::ParkingLot,
+            at: TilePos::new(-20, 9),
+            rotation: 2,
+        };
+        assert_eq!(w.apply(&command), ApplyOutcome::Applied);
+        while w.tick().0 % TICKS_PER_DAY != SHARED_LOT_REVIEW_TICK + 5 {
+            w.step();
+        }
+        let rented = renters(&w);
+        assert_eq!(rented, 12);
+        let fee = i64::from(crate::world::INITIAL_PARKING_FEE);
+        assert_eq!(w.finances().parking_fees, Money(12 * fee));
+
+        let max = crate::command::MAX_PARKING_FEE;
+        assert_eq!(
+            w.apply(&Command::SetParkingFee { fee: max }),
+            ApplyOutcome::Applied
+        );
+        while w.tick().0 % TICKS_PER_DAY != SHARED_LOT_REVIEW_TICK - 5 {
+            w.step();
+            assert_eq!(w.finances().parking_fees, Money::ZERO);
+        }
+        assert_eq!(renters(&w), rented, "見直しの前に枠を返した");
+        assert_eq!(
+            w.apply(&Command::SetParkingFee {
+                fee: crate::world::INITIAL_PARKING_FEE
+            }),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(w.finances().parking_fees, Money(12 * fee));
         set_home_spaces_limit(None);
     }
 

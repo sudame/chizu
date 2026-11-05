@@ -1,4 +1,5 @@
-// 収支のパネル。区画の種類ごとの税収、道路と施設の維持費、1 日あたりの差し引きを出し、税率を上げ下げできる。
+// 収支のパネル。区画の種類ごとの税収、共同の駐車場の料金の収入、道路と施設の維持費、1 日あたりの差し引きを出し、
+// 税率と駐車場の料金を上げ下げできる。
 // DOM に触るのは setupFinance だけで、数の読み方と文言は Vitest で確かめられる。
 
 import { FINANCE_LENGTH, type ZoneName } from "./protocol/messages.ts";
@@ -17,6 +18,9 @@ export const TAX_ZONES: { zone: TaxZone; label: string }[] = [
 /** ボタン 1 回で動かす税率（‰）。1% である。 */
 export const RATE_STEP_PERMILLE = 10;
 
+/** ボタン 1 回で動かす駐車場の料金。 */
+export const FEE_STEP = 1;
+
 /** 維持費の行の数。道路、発電所、浄水場、駐車場。 */
 const EXPENSE_ROWS = 4;
 
@@ -33,6 +37,12 @@ export type Finance = {
   waterUpkeep: number;
   /** 共同の駐車場の維持費。 */
   parkingUpkeep: number;
+  /** 共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額）。 */
+  parkingFee: number;
+  /** 料金の上限。 */
+  maxParkingFee: number;
+  /** 料金の収入。 */
+  parkingFees: number;
   income: number;
   expenses: number;
   /** 収入から支出を引いた額。負なら赤字。 */
@@ -45,7 +55,7 @@ export function parseFinance(values: ArrayLike<number>): Finance | null {
   }
   const at = (i: number) => values[i] ?? 0;
   const taxes = [at(5), at(6), at(7), at(8)];
-  const income = taxes.reduce((a, b) => a + b, 0);
+  const income = taxes.reduce((a, b) => a + b, 0) + at(15);
   const expenses = at(9) + at(10) + at(11) + at(12);
   return {
     maxPermille: at(0),
@@ -55,6 +65,9 @@ export function parseFinance(values: ArrayLike<number>): Finance | null {
     powerUpkeep: at(10),
     waterUpkeep: at(11),
     parkingUpkeep: at(12),
+    parkingFee: at(13),
+    maxParkingFee: at(14),
+    parkingFees: at(15),
     income,
     expenses,
     net: income - expenses,
@@ -108,6 +121,20 @@ export function steppedRate(current: number, direction: 1 | -1, max: number): nu
   return Math.max(0, Math.min(max, current + direction * RATE_STEP_PERMILLE));
 }
 
+/** 駐車場の料金を 1 刻み動かした値。0 と上限のあいだに収める。 */
+export function steppedFee(current: number, direction: 1 | -1, max: number): number {
+  return Math.max(0, Math.min(max, current + direction * FEE_STEP));
+}
+
+/** 料金を出す文。 */
+export function formatFee(fee: number): string {
+  return `${fee} / 台`;
+}
+
+export function parkingFeeCommand(fee: number): { kind: "SetParkingFee"; fee: number } {
+  return { kind: "SetParkingFee", fee };
+}
+
 export function taxCommand(
   zone: TaxZone,
   permille: number,
@@ -117,9 +144,10 @@ export function taxCommand(
 
 export type FinanceRow = { label: string; value: string };
 
-/** 税収、維持費、差し引きの行。税率の欄は含めない。 */
+/** 税収、駐車場の料金の収入、維持費、差し引きの行。税率と料金の欄は含めない。 */
 export function financeRows(finance: Finance): {
   taxes: FinanceRow[];
+  parkingFees: FinanceRow;
   expenses: FinanceRow[];
   net: FinanceRow;
 } {
@@ -128,6 +156,7 @@ export function financeRows(finance: Finance): {
       label,
       value: formatSigned(finance.taxes[i] ?? 0),
     })),
+    parkingFees: { label: "駐車場の料金", value: formatSigned(finance.parkingFees) },
     expenses: [
       { label: "道路の維持費", value: formatSigned(-finance.roadUpkeep) },
       { label: "発電所の維持費", value: formatSigned(-finance.powerUpkeep) },
@@ -176,9 +205,41 @@ export class PendingRates {
   }
 }
 
+/** 押した先の駐車場の料金を、中核が反映するまで覚えておく。考え方は PendingRates と同じ。 */
+export class PendingFee {
+  private wanted: number | null = null;
+
+  shown(received: number): number {
+    return this.wanted ?? received;
+  }
+
+  /** 1 刻み動かした先を覚えて返す。動かせない（端）ときは null。 */
+  press(direction: 1 | -1, received: number, max: number): number | null {
+    const current = this.shown(received);
+    const next = steppedFee(current, direction, max);
+    if (next === current) {
+      return null;
+    }
+    this.wanted = next;
+    return next;
+  }
+
+  receive(fee: number): void {
+    if (this.wanted === fee) {
+      this.wanted = null;
+    }
+  }
+
+  reject(): void {
+    this.wanted = null;
+  }
+}
+
+export type FinanceCommand = ReturnType<typeof taxCommand> | ReturnType<typeof parkingFeeCommand>;
+
 export type FinancePanel = {
   update(finance: Finance): void;
-  /** SetTaxRate が断られたときに呼ぶ。 */
+  /** SetTaxRate か SetParkingFee が断られたときに呼ぶ。 */
   rejected(): void;
 };
 
@@ -196,12 +257,12 @@ function make<K extends keyof HTMLElementTagNameMap>(
 }
 
 /**
- * 開け閉めするパネルを組む。税率のボタンは SetTaxRate を send に渡す。
- * 返事が届くまでに続けて押しても 1 つ飛ばさないよう、押した先の税率を覚えておき、次の finance が届いたら捨てる。
+ * 開け閉めするパネルを組む。税率のボタンは SetTaxRate を、駐車場の料金のボタンは SetParkingFee を send に渡す。
+ * 返事が届くまでに続けて押しても 1 つ飛ばさないよう、押した先の値を覚えておき、次の finance が届いたら捨てる。
  */
 export function setupFinance(
   root: HTMLElement,
-  send: (command: ReturnType<typeof taxCommand>) => void,
+  send: (command: FinanceCommand) => void,
 ): FinancePanel {
   const summary = root.querySelector<HTMLElement>("[data-finance-summary]");
   const body = root.querySelector<HTMLElement>("[data-finance-body]");
@@ -210,6 +271,7 @@ export function setupFinance(
   }
   let latest: Finance | null = null;
   const pending = new PendingRates();
+  const pendingFee = new PendingFee();
 
   const taxList = make("div", "", "finance-list");
   const expenseList = make("div", "", "finance-list");
@@ -251,6 +313,35 @@ export function setupFinance(
     rateLabels.push(rate);
     amounts.push(amount);
   });
+  // 欄の高さを抑えるため、料金は税率と同じ並びの最後の行に置く
+  const feeRow = make("div", "", "finance-row");
+  feeRow.dataset.parkingFee = "";
+  feeRow.title =
+    "共同の駐車場の、借りた枠 1 台あたりの 1 日の料金。世帯は蓄えに応じて 10〜20 まで払い、超えると借りない。借りている世帯も 1 日 1 回の見直しで返す。";
+  const feeMinus = make("button", "−");
+  const feePlus = make("button", "＋");
+  feeMinus.type = "button";
+  feePlus.type = "button";
+  feeMinus.setAttribute("aria-label", "駐車場の料金を下げる");
+  feePlus.setAttribute("aria-label", "駐車場の料金を上げる");
+  const feeLabel = make("span", "", "finance-rate");
+  const feeAmount = make("span", "", "finance-amount");
+  const changeFee = (direction: 1 | -1) => {
+    if (latest === null) {
+      return;
+    }
+    const next = pendingFee.press(direction, latest.parkingFee, latest.maxParkingFee);
+    if (next === null) {
+      return;
+    }
+    feeLabel.textContent = formatFee(next);
+    send(parkingFeeCommand(next));
+  };
+  feeMinus.addEventListener("click", () => changeFee(-1));
+  feePlus.addEventListener("click", () => changeFee(1));
+  feeRow.append(make("span", "駐車場"), feeMinus, feeLabel, feePlus, feeAmount);
+  taxList.append(feeRow);
+
   for (let i = 0; i < EXPENSE_ROWS; i++) {
     const row = make("div", "", "finance-row");
     const label = make("span");
@@ -260,12 +351,12 @@ export function setupFinance(
     expenseValues.push(value);
   }
   body.append(
-    make("h3", "税収（税率）"),
+    make("h3", "収入（税率と駐車場の料金）"),
     taxList,
     make("h3", "維持費"),
     expenseList,
     netRow,
-    make("p", "金額は 1 日あたりの見込み。", "finance-note"),
+    make("p", "金額は 1 日あたりの見込み。駐車場の料金は 1 台 1 日の額。", "finance-note"),
   );
 
   const render = (finance: Finance) => {
@@ -291,6 +382,10 @@ export function setupFinance(
         row.dataset.tax = String(finance.taxes[i] ?? 0);
       }
     });
+    feeLabel.textContent = formatFee(pendingFee.shown(finance.parkingFee));
+    feeAmount.textContent = rows.parkingFees.value;
+    feeRow.dataset.parkingFee = String(finance.parkingFee);
+    feeRow.dataset.income = String(finance.parkingFees);
     rows.expenses.forEach((r, i) => {
       const value = expenseValues[i];
       const label = value?.previousElementSibling;
@@ -307,10 +402,12 @@ export function setupFinance(
     update(finance) {
       latest = finance;
       pending.receive(finance.permille);
+      pendingFee.receive(finance.parkingFee);
       render(finance);
     },
     rejected() {
       pending.reject();
+      pendingFee.reject();
       if (latest !== null) {
         render(latest);
       }
