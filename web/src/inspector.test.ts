@@ -91,7 +91,7 @@ describe("describeInspect", () => {
       { label: "通勤の所要時間", value: "約 66 分" },
       { label: "自宅の駐車場", value: "4 台" },
       { label: "　自宅の枠の世帯", value: "1 世帯" },
-      { label: "　共同の駐車場を借りた世帯", value: "0 世帯" },
+      { label: "　借りている世帯", value: "0 世帯" },
       { label: "　車を持てない世帯", value: "2 世帯" },
     ]);
   });

@@ -1748,6 +1748,10 @@ try {
     homeRows.includes("世帯") && homeRows.includes("電気") && homeRows.includes("水道"),
     `住宅を押すと、世帯と電気と水道が出る（${homeRows}）`,
   );
+  // 住宅の欄は行が多く、地図の左側に重なって次に押すマスを隠すので、先に閉じる
+  await page.locator("[data-inspector-close]").click();
+  await inspector.waitFor({ state: "hidden", timeout: TIMEOUT_MS });
+  await page.waitForTimeout(800);
   const plantTile = tilePoint(54, 34);
   await page.mouse.click(plantTile.x, plantTile.y);
   await page.waitForFunction(
@@ -1759,7 +1763,7 @@ try {
   check(await inspector.isHidden(), "閉じるボタンでパネルが閉じる");
   await page.mouse.click(building.x, building.y);
   await inspector.waitFor({ state: "visible", timeout: TIMEOUT_MS });
-  const empty = tilePoint(45, 45);
+  const empty = tilePoint(60, 50);
   await page.mouse.click(empty.x, empty.y);
   await inspector.waitFor({ state: "hidden", timeout: TIMEOUT_MS });
   check(true, "何もないところを押すとパネルが閉じる");

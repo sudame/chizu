@@ -226,7 +226,7 @@ export function describeInspect(view: InspectView): InspectText {
     rows.push(
       { label: "自宅の駐車場", value: `${n(c.homeSpaces)} 台` },
       { label: "　自宅の枠の世帯", value: `${n(c.home)} 世帯` },
-      { label: "　共同の駐車場を借りた世帯", value: `${n(c.shared)} 世帯` },
+      { label: "　借りている世帯", value: `${n(c.shared)} 世帯` },
       { label: "　車を持てない世帯", value: `${n(c.none)} 世帯` },
     );
   }
