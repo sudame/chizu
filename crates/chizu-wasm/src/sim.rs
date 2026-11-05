@@ -773,7 +773,7 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::AlreadyOwned => "もう買ってある",
         DenyReason::NoZonableTile => "道路に面した所から続く、区画を塗れるマスがない",
         DenyReason::ZoneUnchanged => "変わるマスがない",
-        DenyReason::Occupied => "ほかの施設か道路がある",
+        DenyReason::Occupied => "ほかの施設、道路、建物がある",
         DenyReason::NoRoadAccess => "道路に面していない",
         DenyReason::NoChunkSlot => "買える土地の枠がない。人口が増えると枠が増える",
         DenyReason::NotJunction => "3 本以上の道路が集まる交差点でない",

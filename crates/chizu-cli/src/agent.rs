@@ -223,7 +223,12 @@ observe の removedCrosswalks:
       区画を塗る。null は消す。塗れるのは、建物が建つマス（道路に面した空きマスと、そこから道路と反対へ
       6 マスまで、塗れるマスが途切れず続く空きマス）だけである。道路の脇を空けて奥だけを塗る、道路の端の外や
       空きを挟んだ先を塗る、といった塗れないマスが混ざると、塗れるマスだけを塗って AppliedPartly を返す。
-      塗れるマスが 1 つもなければ Denied（NoZonableTile）である。1 辺は 256 マスまで。
+      塗れなかったマスが 1 つでもあれば、理由を問わず AppliedPartly である（奥行き 6 マスを超えた、買っていない、
+      道路に面していない、建物のマス、水辺のマスなど）。道路のマスは数えない。
+      塗れるマスが 1 つもなければ Denied で、塗れなかったマスの理由が建物か施設のマスのほうが多ければ Occupied、
+      そうでなければ NoZonableTile である。すでに同じ区画が載っているマスは、空きでも建物が建っていても、塗れたものとして数える。
+      新しく塗れたマスがなく、塗れなかったマス（道路を除く）もないときは Denied（ZoneUnchanged）である。
+      AppliedPartly と、この 2 つの理由と ZoneUnchanged の Denied には、結果に paint が付く（下の「act の結果」）。1 辺は 256 マスまで。
   {"type":"PlaceBuilding","kind":"PowerPlant"|"WaterPump","at":[x,y],"rotation":0..3}
       施設を置く。発電所は 4×4 で 60000、浄水場は 2×2 で 25000。at は間口の角のマスで、
       rotation 0、1、2、3 のとき、at から y-1、x+1、y+1、x-1 の向きに 1 歩のマスが道路でなければならない。
@@ -262,11 +267,18 @@ observe の removedCrosswalks:
 act の結果:
   results に、コマンドごとに outcome を返す。
     Applied        受け付けた
-    AppliedPartly  一部だけ受け付けた。PaintZone で、道路に面した所から続かないマスを塗らなかった。reason は NoZonableTile
+    AppliedPartly  一部だけ受け付けた。PaintZone で、塗れないマスを塗らなかった。reason は NoZonableTile
     Denied         いまの状態では受け付けなかった。reason に理由（NotOwned、NotEnoughMoney など）がある
     NotImplemented 中核にまだ中身がない
     Invalid        形か値が正しくない。message に理由がある。記録には足さない
   Applied、AppliedPartly、Denied、NotImplemented は記録に足す。画面で遊んだときと同じ扱いである。
+  PaintZone の AppliedPartly と、reason が NoZonableTile、Occupied、ZoneUnchanged の Denied には paint が付く。
+    painted その区画が載っているマスの数（もとから載っていたマスを含む）、
+    unpainted 載っていないマスの数 total と、その理由ごとの内訳（道路のマスは、塗る所ではないので数えない）。
+      理由は次の順に当てはめ、最初に当たったものに数える。
+      notOwned 買っていない土地、water 水辺、building 建物か施設のマス、
+      beyondDepth 道路から 6 マスを超えた奥（道路のない所を含む）、notFronted 道路から 6 マス以内だが、間口から続かない空き
+      （道路の端の外、間口との間に塗れないマスを挟んだ、別の種類の区画の奥など）。
   reason が NotOwned のときは notOwned も付き、買っていない土地のマスを示す。
     count 買っていないマスの数、tiles そのマス（先頭の 16 個まで）、
     chunks そのマスを含むチャンクのうち、いま BuyChunk で買えるもの（買った土地と辺で接する。先頭の 16 個まで）、
@@ -613,6 +625,9 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                 ApplyOutcome::Applied => "Applied",
                 ApplyOutcome::AppliedPartly(reason) => {
                     out["reason"] = json!(format!("{reason:?}"));
+                    if let Some(paint) = paint_breakdown(world, &command) {
+                        out["paint"] = paint;
+                    }
                     "AppliedPartly"
                 }
                 ApplyOutcome::NotImplemented => "NotImplemented",
@@ -621,6 +636,14 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                     out["reason"] = json!(format!("{reason:?}"));
                     if reason == DenyReason::NotOwned {
                         out["notOwned"] = not_owned(world, &command);
+                    }
+                    if matches!(
+                        reason,
+                        DenyReason::NoZonableTile | DenyReason::Occupied | DenyReason::ZoneUnchanged
+                    )
+                        && let Some(paint) = paint_breakdown(world, &command)
+                    {
+                        out["paint"] = paint;
                     }
                     "Denied"
                 }
@@ -771,6 +794,67 @@ fn not_owned(world: &World, command: &Command) -> Value {
         "chunks": list(buyable),
         "chunksNotAdjacent": list(later),
     })
+}
+
+/// `PaintZone` で区画を塗ったあとの、長方形のマスの内訳。塗ったあとの街で調べる。
+/// 塗る種類が `null`（消す）のコマンドと、`PaintZone` 以外は `None` を返す。
+///
+/// `painted` はその区画が載っているマスの数（もとから載っていたマスを含む）で、`unpainted` は載っていないマスを理由ごとに数える。
+/// 道路のマスは、どちらにも数えない。
+/// 理由は上から順に当てはめ、最初に当たったものに数える。中核の `DenyReason` は増やさず、買った土地や道路、建物と照らして求める。
+fn paint_breakdown(world: &World, command: &Command) -> Option<Value> {
+    let Command::PaintZone {
+        area,
+        zone: Some(zone),
+    } = command
+    else {
+        return None;
+    };
+    let near = chizu_core::zone::near_road(world.network(), *area);
+    let mut painted = 0_u64;
+    let (mut not_owned, mut water, mut building, mut beyond_depth, mut not_fronted) =
+        (0_u64, 0_u64, 0_u64, 0_u64, 0_u64);
+    for (i, t) in chizu_core::zone::tiles_of(*area).enumerate() {
+        if world.zone_at(t) == Some(*zone) {
+            painted += 1;
+            continue;
+        }
+        let chunk = t.chunk().and_then(|c| world.chunk(c)).filter(|c| c.owned());
+        let Some(chunk) = chunk else {
+            not_owned += 1;
+            continue;
+        };
+        let (lx, ly) = t.local();
+        let use_ = chunk
+            .layer(chizu_core::Layer::Ground)
+            .map(|l| l.occupancy[chizu_core::tile::local_index(lx, ly)]);
+        if chunk.terrain().is_water(lx, ly) {
+            water += 1;
+        } else if use_ == Some(chizu_core::TileUse::Road) {
+            // 道路のマスは区画を載せる所ではないので、塗れなかったマスに数えない。
+        } else if matches!(
+            use_,
+            Some(chizu_core::TileUse::Building | chizu_core::TileUse::Facility)
+        ) {
+            building += 1;
+        } else if !near[i] {
+            beyond_depth += 1;
+        } else {
+            not_fronted += 1;
+        }
+    }
+    let total = not_owned + water + building + beyond_depth + not_fronted;
+    Some(json!({
+        "painted": painted,
+        "unpainted": {
+            "total": total,
+            "beyondDepth": beyond_depth,
+            "notOwned": not_owned,
+            "water": water,
+            "building": building,
+            "notFronted": not_fronted,
+        },
+    }))
 }
 
 fn read_commands(path: &str) -> Result<Vec<Value>, String> {

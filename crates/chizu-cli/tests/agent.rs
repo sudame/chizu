@@ -1470,3 +1470,97 @@ fn paint_zone_skips_tiles_cut_off_from_the_road_and_says_so() {
     assert_eq!(r["outcome"], "AppliedPartly", "{acted}");
     assert_eq!(r["reason"], "NoZonableTile", "{acted}");
 }
+
+/// PaintZone の結果に、塗れたマスの数と、塗れなかったマスの数が理由ごとに付く。
+#[test]
+fn paint_zone_counts_the_tiles_it_left_out_by_reason() {
+    let dir = session("agent-paint-breakdown");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let setup = write(
+        &dir.join("setup.json"),
+        r#"[{"type":"BuildRoad","from":[0,0],"to":[20,0],"kind":"Medium"},
+            {"type":"BuildRoad","from":[100,0],"to":[127,0],"kind":"Medium"},
+            {"type":"PlaceBuilding","kind":"PowerPlant","at":[5,1],"rotation":0}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &setup]));
+    for r in acted["results"].as_array().unwrap() {
+        assert_eq!(r["outcome"], "Applied", "{acted}");
+    }
+    let paint = |name: &str, area: &str, zone: &str| {
+        let file = write(
+            &dir.join(format!("{name}.json")),
+            &format!(r#"[{{"type":"PaintZone","area":{area},"zone":"{zone}"}}]"#),
+        );
+        let acted = json(&cli(&["agent", "act", d, &file]));
+        acted["results"][0].clone()
+    };
+    // 道路の端の外は、道路から 6 マス以内でも間口がない。
+    let r = paint("end", "[[10,1],[24,6]]", "Residential");
+    assert_eq!(r["outcome"], "AppliedPartly", "{r}");
+    assert_eq!(r["paint"]["painted"], 11 * 6, "{r}");
+    assert_eq!(r["paint"]["unpainted"]["notFronted"], 4 * 6, "{r}");
+    assert_eq!(r["paint"]["unpainted"]["total"], 4 * 6, "{r}");
+    // 道路から 6 マスを超えた奥。
+    let r = paint("deep", "[[12,-8],[14,-1]]", "Residential");
+    assert_eq!(r["outcome"], "AppliedPartly", "{r}");
+    assert_eq!(r["paint"]["unpainted"]["beyondDepth"], 2 * 3, "{r}");
+    assert_eq!(r["paint"]["unpainted"]["total"], 2 * 3, "{r}");
+    // 買っていない土地。
+    let r = paint("unowned", "[[120,1],[135,3]]", "Residential");
+    assert_eq!(r["outcome"], "AppliedPartly", "{r}");
+    assert_eq!(r["paint"]["unpainted"]["notOwned"], 8 * 3, "{r}");
+    // 施設のあるマスに別の区画を塗ると、そのマスは塗れない。
+    let r = paint("mixed", "[[3,1],[10,4]]", "Commercial");
+    assert_eq!(r["outcome"], "AppliedPartly", "{r}");
+    assert_eq!(r["paint"]["unpainted"]["building"], 16, "{r}");
+    // 塗れるマスが 1 つもなく、理由が建物なら Occupied。
+    let r = paint("occupied", "[[5,1],[8,4]]", "Industrial");
+    assert_eq!(r["outcome"], "Denied", "{r}");
+    assert_eq!(r["reason"], "Occupied", "{r}");
+    assert_eq!(r["paint"]["painted"], 0, "{r}");
+    assert_eq!(r["paint"]["unpainted"]["building"], 16, "{r}");
+    // 全部塗れたときは Applied で、paint は付かない。
+    let r = paint("whole", "[[16,-6],[18,-1]]", "Residential");
+    assert_eq!(r["outcome"], "Applied", "{r}");
+    assert!(r.get("paint").is_none(), "{r}");
+}
+
+/// 同じ区画が載ったマスは、空きでも建物が建っていても、塗れたものとして同じに数える。
+#[test]
+fn paint_zone_counts_same_zone_tiles_alike_whether_empty_or_built() {
+    let dir = session("agent-paint-same-zone");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let setup = write(
+        &dir.join("setup.json"),
+        r#"[{"type":"BuildRoad","from":[-63,25],"to":[-20,25],"kind":"Medium"},
+            {"type":"PaintZone","area":[[-60,26],[-25,31]],"zone":"Residential"}]"#,
+    );
+    cli(&["agent", "act", d, &setup]);
+    cli(&["agent", "advance", d, "3000"]);
+    let paint = |name: &str, area: &str| {
+        let file = write(
+            &dir.join(format!("{name}.json")),
+            &format!(r#"[{{"type":"PaintZone","area":{area},"zone":"Residential"}}]"#),
+        );
+        json(&cli(&["agent", "act", d, &file]))["results"][0].clone()
+    };
+    // 奥行きの外 (y=32〜36) は塗れない。x=-33 の列を足しても、塗れたマスが増えるだけで理由は同じである。
+    let a = paint("a", "[[-32,26],[-29,36]]");
+    let b = paint("b", "[[-33,26],[-29,36]]");
+    for r in [&a, &b] {
+        assert_eq!(r["outcome"], "Denied", "{r}");
+        assert_eq!(r["reason"], "NoZonableTile", "{r}");
+    }
+    assert_eq!(a["paint"]["unpainted"]["beyondDepth"], 5 * 4, "{a}");
+    assert_eq!(b["paint"]["unpainted"]["beyondDepth"], 5 * 5, "{b}");
+    assert_eq!(a["paint"]["painted"], 6 * 4, "{a}");
+    assert_eq!(b["paint"]["painted"], 6 * 5, "{b}");
+    // 塗れなかったマスがなければ ZoneUnchanged で、paint は付く。
+    let r = paint("c", "[[-32,26],[-29,31]]");
+    assert_eq!(r["outcome"], "Denied", "{r}");
+    assert_eq!(r["reason"], "ZoneUnchanged", "{r}");
+    assert_eq!(r["paint"]["unpainted"]["total"], 0, "{r}");
+    assert_eq!(r["paint"]["painted"], 4 * 6, "{r}");
+}
