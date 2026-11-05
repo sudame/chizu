@@ -37,6 +37,9 @@ pub const LANE_FRONTAGE: u64 = 2;
 /// 私道の敷地にできる奥行きの下限（マス）。
 pub const LANE_MIN_DEPTH: u64 = 4;
 
+/// 私道の敷地が上がれる段階の上限。戸建ての段階（1〜2）で止め、集合住宅には上がらない。
+pub const LANE_MAX_LEVEL: u8 = 2;
+
 /// 平面の駐車場に使えるのは、建物のマスのこの数分の 1（切り捨て）までである。建物の本体を、
 /// 敷地の 2/3 より小さくしない。
 const SURFACE_SHARE: u64 = 3;
@@ -180,8 +183,9 @@ impl Building {
     }
 
     /// 私道の敷地の形。`form` が [`LotForm::Lane`] で、縦か横の道路に面した、間口 [`LANE_FRONTAGE`] マス、
-    /// 奥行き [`LANE_MIN_DEPTH`] マス以上の、段階 1〜2 の住宅のときだけ `Some` になる。段階 3 以上は
-    /// 集合住宅に建て替えたと見なす。
+    /// 奥行き [`LANE_MIN_DEPTH`] マス以上の、段階 1〜2 の住宅のときだけ `Some` になる。私道の敷地は
+    /// [`LANE_MAX_LEVEL`] より上に上がらないので、段階 3 以上は読み込んだ古い状態にしかない。
+    /// その敷地は集合住宅と同じ扱いで、ふつうの住宅と同じく段階 5 まで上がれる。
     pub fn lane_plan(&self) -> Option<LanePlan> {
         let (dx, dy) = self.toward_road;
         let w = self.area.max.x.abs_diff(self.area.min.x) + 1;
@@ -189,7 +193,7 @@ impl Building {
         let (frontage, depth) = if dx == 0 { (w, h) } else { (h, w) };
         let fits = self.form == LotForm::Lane
             && self.zone == ZoneKind::Residential
-            && self.level <= 2
+            && self.level <= LANE_MAX_LEVEL
             && (dx == 0 || dy == 0)
             && frontage == LANE_FRONTAGE
             && depth >= LANE_MIN_DEPTH;

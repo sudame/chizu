@@ -18,8 +18,8 @@ use crate::units::{LaneOffset, Tick};
 mod parking;
 
 pub use parking::{
-    HOUSE_GAP_MM, LANE_FRONTAGE, LANE_MIN_DEPTH, LANE_WIDTH_MM, LanePlan, ParkingCut,
-    ParkingLayout, SLOT_DEPTH_MM, SLOT_WIDTH_MM, SLOTS_PER_TILE,
+    HOUSE_GAP_MM, LANE_FRONTAGE, LANE_MAX_LEVEL, LANE_MIN_DEPTH, LANE_WIDTH_MM, LanePlan,
+    ParkingCut, ParkingLayout, SLOT_DEPTH_MM, SLOT_WIDTH_MM, SLOTS_PER_TILE,
 };
 
 /// 建物の段階の上限。
