@@ -246,7 +246,7 @@ export type WorkerToMain =
       facilities: Float64Array;
       lots: Float64Array;
       stats: number[];
-      /** stats を求めた時点の Worker の tick。余りの減り方の控えに使う。 */
+      /** stats を求めた時点の Worker の tick。需要の控えに使う。 */
       tick: number;
     }
   /**

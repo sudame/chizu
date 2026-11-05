@@ -281,12 +281,18 @@ pub fn utility_gaps(world: &World) -> [u64; 4] {
 
 /// [`utility_totals`]、[`utility_main`]、[`utility_gaps`] を、供給の釣り合いを 1 回だけ作って求める。
 /// 釣り合いは全道路と全建物をたどるので、3 つ続けて求めるときはこちらを使う。
-pub fn utility_summary(world: &World) -> ([u64; 4], [u64; 5], [u64; 4]) {
+/// 4 つ目は、主の網（電気の側）を見分ける印（[`SupplyBalance::network_mark`]）。主の網がないときは 0。
+pub fn utility_summary(world: &World) -> ([u64; 4], [u64; 5], [u64; 4], u64) {
     let balance = supply_balance(world.network(), world.facilities(), world.buildings());
+    let mark = balance
+        .main_network(0)
+        .and_then(|i| balance.network_mark(i))
+        .unwrap_or(0);
     (
         totals_of(&balance),
         main_of(&balance),
         gaps_of(&balance.components),
+        mark,
     )
 }
 

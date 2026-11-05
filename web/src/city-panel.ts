@@ -8,11 +8,11 @@ import {
   ZONE_COUNT,
 } from "./protocol/city-stats.ts";
 import {
+  type DemandSample,
+  demandTrend,
   formatTimeUntilOut,
-  type HeadroomSample,
   type HeadroomTrend,
-  headroomTrend,
-  pushHeadroomSample,
+  pushDemandSample,
 } from "./utility-trend.ts";
 
 /** chizu-wasm の city_stats を読んだもの。 */
@@ -50,6 +50,8 @@ export type CityStats = {
   /** 発電所 1 基と浄水場 1 基で増える住民の数。peopleKnown が偽のときは使わない。 */
   powerFacilityPeople: number;
   waterFacilityPeople: number;
+  /** 主の網を見分ける印。主の網が別の網に替わったかを見る。主の網がなければ 0。 */
+  mainNetwork: number;
   /** 住宅・商業・工業・オフィスの順の、需要の内訳。寄与の合計がその区画の需要である。 */
   demandFactors: DemandFactor[][];
 };
@@ -105,6 +107,7 @@ export function parseCityStats(stats: number[]): CityStats {
     peopleKnown: at(23) === 1,
     powerFacilityPeople: at(24),
     waterFacilityPeople: at(25),
+    mainNetwork: at(26),
   };
 }
 
@@ -159,11 +162,11 @@ export function formatUtilities(stats: CityStats): string {
   return `電気 ${n(m.power)} / 需要 ${n(m.demand)}${people(stats.powerPeople)}${others(m.powerOthers)}・水道 ${n(m.water)} / 需要 ${n(m.demand)}${people(stats.waterPeople)}${others(m.waterOthers)}`;
 }
 
-/** 電気と水道の、いまの余りの減り方。 */
+/** 電気と水道の、需要の伸びから見積もった、余りが尽きるまで。 */
 export type UtilityTrends = { power: HeadroomTrend | null; water: HeadroomTrend | null };
 
 /**
- * 電気と水道の、余りの減り方の手がかり。余りが減っているときだけ、
+ * 電気と水道の、余りが尽きるまでの手がかり。需要が伸びて余りが減っているときだけ、
  * 施設 1 基で増える人数と、このペースで足りなくなるまでの時間（時計の時間）を、種類ごとに 1 行返す。減っていないときは空。
  */
 export function utilityTrendHints(stats: CityStats, trends: UtilityTrends): string[] {
@@ -188,30 +191,25 @@ export function utilityTrendHints(stats: CityStats, trends: UtilityTrends): stri
   return hints;
 }
 
-/** 電気と水道の余りの人数の控え。renderCityStats が足していく。 */
-let powerSeries: HeadroomSample[] = [];
-let waterSeries: HeadroomSample[] = [];
+/** 主の網の需要の控え。renderCityStats が足していく。電気と水道で同じ値である。 */
+let demandSeries: DemandSample[] = [];
 
 /** 控えを捨てる。 */
 export function resetUtilityTrends(): void {
-  powerSeries = [];
-  waterSeries = [];
+  demandSeries = [];
 }
 
 /**
- * 控えに足して、いまの減り方を返す。人数が決まらないときは控えを捨てる。
+ * 控えに足して、いまの減り方を返す。1 日前の同じ時刻からの需要の伸びで見積もるので、
+ * 街が 1 日たつまでと、読み込みなどで控えを捨てた直後の 1 日は null である。
  * tick は Worker の tick である。
  */
 export function trackUtilityTrends(stats: CityStats, tick: number): UtilityTrends {
-  if (!stats.peopleKnown) {
-    resetUtilityTrends();
-    return { power: null, water: null };
-  }
-  powerSeries = pushHeadroomSample(powerSeries, tick, stats.powerPeople);
-  waterSeries = pushHeadroomSample(waterSeries, tick, stats.waterPeople);
+  const m = mainView(stats);
+  demandSeries = pushDemandSample(demandSeries, tick, m.demand, stats.mainNetwork);
   return {
-    power: headroomTrend(powerSeries, tick, stats.powerPeople),
-    water: headroomTrend(waterSeries, tick, stats.waterPeople),
+    power: demandTrend(demandSeries, tick, m.demand, m.power - m.demand, stats.mainNetwork),
+    water: demandTrend(demandSeries, tick, m.demand, m.water - m.demand, stats.mainNetwork),
   };
 }
 

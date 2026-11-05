@@ -608,7 +608,7 @@ fn observe_gives_people_and_traffic_counts() {
     let mut again = json(&cli(&["agent", "observe", d]));
     assert_eq!(again["sinceLastObserve"]["changes"], serde_json::json!({}));
     again["sinceLastObserve"] = o["sinceLastObserve"].clone();
-    // 余りの減り方（trend）も前の observe との差なので、同じく除く。
+    // 余りの減り方（trend）も observe の積み重ねで決まるので、同じく除く。
     for kind in ["power", "water"] {
         again["utilities"][kind]["main"]["trend"] = o["utilities"][kind]["main"]["trend"].clone();
     }
@@ -749,7 +749,7 @@ fn observe_shows_a_shortage_when_supply_is_positive() {
         i128::from(main["perFacilityCapacity"].as_i64().unwrap()),
     );
     assert!(main["perFacilityPeople"].as_i64().unwrap() > 0);
-    // 前の observe（施設を置く前の fresh）には余りの人数がなかったので、減り方は見積もれない。理由が付く。
+    // 1 日前をはさむ需要の控えがまだないので、減り方は見積もれない。理由が付く。
     let trend = &main["trend"];
     assert_eq!(trend["state"], "unknown", "{trend}");
     assert!(trend["basis"].is_null() && trend["reason"].as_str().unwrap().len() > 5);
@@ -758,8 +758,8 @@ fn observe_shows_a_shortage_when_supply_is_positive() {
     let next = json(&cli(&["agent", "observe", d]));
     let trend = &next["utilities"]["water"]["main"]["trend"];
     assert_eq!(trend["state"], "short", "{trend}");
-    assert_eq!(trend["basis"], "sinceLastObserve");
-    assert_eq!(trend["elapsedTicks"], 7200);
+    assert_eq!(trend["basis"], "demandSameTimeYesterday");
+    assert_eq!(trend["targetTick"], 20 * 7200);
     assert!(trend["ticksUntilOut"].is_null() && trend["hoursUntilOut"].is_null());
 }
 
@@ -1136,47 +1136,71 @@ fn supplied_town(name: &str) -> (PathBuf, i64, i64) {
     (dir, x, y)
 }
 
-/// 町が育って電気の余りが減っているとき、trend は前の observe からの減りと、尽きるまでの時間を出す。
-/// 数は、前の observe と今回の headroomPeople から式どおりに求めた値と一致する。
+/// 町が育って需要が伸びているとき、trend は 1 日前の同じ時刻からの需要の伸びと、尽きるまでの時間を出す。
+/// 数は、前の observe の需要と今回の余りから式どおりに求めた値と一致する。
 #[test]
-fn observe_gives_the_trend_of_a_shrinking_headroom() {
+fn observe_gives_the_trend_of_growing_demand() {
     let (dir, _, _) = supplied_town("agent-trend-shrinking");
     let d = dir.to_str().unwrap();
     let first = json(&cli(&["agent", "observe", d]));
-    let before = first["utilities"]["power"]["main"]["headroomPeople"]
+    let before = first["utilities"]["power"]["main"]["demand"]
         .as_i64()
         .unwrap();
-    cli(&["agent", "advance", d, &(7200 / 2).to_string()]);
+    cli(&["agent", "advance", d, "7200"]);
     let o = json(&cli(&["agent", "observe", d]));
-    let main = &o["utilities"]["power"]["main"];
-    let now = main["headroomPeople"].as_i64().unwrap();
+    let power = &o["utilities"]["power"];
+    let main = &power["main"];
+    let demand = main["demand"].as_i64().unwrap();
+    let headroom = i128::from(main["headroom"].as_i64().unwrap());
     assert!(
-        now < before,
-        "余りが減る街にならなかった: {before} -> {now}"
+        demand > before,
+        "需要が伸びる街にならなかった: {before} -> {demand}"
     );
-    assert!(now > 0, "足りなくなった: {now}");
+    assert!(headroom > 0, "足りなくなった: {headroom}");
     let trend = &main["trend"];
     assert_eq!(trend["state"], "shrinking", "{trend}");
-    assert_eq!(trend["basis"], "sinceLastObserve");
-    assert_eq!(trend["elapsedTicks"], 3600);
-    assert_eq!(trend["headroomPeopleBefore"], before);
-    let drop = i128::from(before - now);
+    assert_eq!(trend["basis"], "demandSameTimeYesterday");
+    assert_eq!(trend["targetTick"], 7200 * 2);
+    assert_eq!(trend["demandBefore"], before);
+    assert_eq!(trend["demandNow"], demand);
+    let growth = i128::from(demand - before);
+    assert_eq!(
+        i128::from(trend["demandGrowthPerDay"].as_i64().unwrap()),
+        growth
+    );
+    let need = i128::from(power["demand"].as_u64().unwrap());
+    let housed = i128::from(o["population"]["housedCitizens"].as_u64().unwrap());
     assert_eq!(
         i128::from(trend["changePerDay"].as_i64().unwrap()),
-        -(drop * 7200 / 3600)
+        (-growth * housed).div_euclid(need)
     );
-    let ticks = i128::from(now) * 3600 / drop;
+    let ticks = headroom * 7200 / growth;
     assert_eq!(i128::from(trend["ticksUntilOut"].as_i64().unwrap()), ticks);
     let hours = trend["hoursUntilOut"].as_f64().unwrap();
     assert!((hours - ticks as f64 / 300.0).abs() < 0.06, "{trend}");
 }
 
-/// 前の observe から発電所を足していると、余りの差に施設の増減が入るので、減り方は見積もらず理由を出す。
+/// 60 tick 以内にもう一度 observe しても、ちょうど 1 日前の控えは消えず、1 日後の trend が見積もれる。
 #[test]
-fn observe_trend_is_not_estimated_across_a_new_facility() {
-    let (dir, x, y) = supplied_town("agent-trend-facility");
+fn observe_trend_survives_a_second_observe_just_after() {
+    let (dir, _, _) = supplied_town("agent-trend-close");
     let d = dir.to_str().unwrap();
     cli(&["agent", "observe", d]);
+    cli(&["agent", "advance", d, "30"]);
+    cli(&["agent", "observe", d]);
+    cli(&["agent", "advance", d, "7170"]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let trend = &o["utilities"]["power"]["main"]["trend"];
+    assert_eq!(trend["basis"], "demandSameTimeYesterday", "{trend}");
+    assert_eq!(trend["targetTick"], 7200 * 2);
+}
+
+/// 前の observe から発電所を足していても、供給量は需要の伸びに入らないので、減り方を見積もれる。
+#[test]
+fn observe_trend_is_estimated_across_a_new_facility() {
+    let (dir, x, y) = supplied_town("agent-trend-facility");
+    let d = dir.to_str().unwrap();
+    let first = json(&cli(&["agent", "observe", d]));
     let more = write(
         &dir.join("more.json"),
         &serde_json::json!([
@@ -1186,27 +1210,34 @@ fn observe_trend_is_not_estimated_across_a_new_facility() {
     );
     let acted = json(&cli(&["agent", "act", d, &more]));
     assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
-    cli(&["agent", "advance", d, "600"]);
+    cli(&["agent", "advance", d, "7200"]);
     let o = json(&cli(&["agent", "observe", d]));
-    let trend = &o["utilities"]["power"]["main"]["trend"];
-    assert_eq!(trend["state"], "unknown", "{trend}");
-    assert!(trend["basis"].is_null());
+    let main = &o["utilities"]["power"]["main"];
     assert!(
-        trend["reason"].as_str().unwrap().contains("施設"),
-        "{trend}"
+        main["capacity"].as_u64().unwrap()
+            > first["utilities"]["power"]["main"]["capacity"]
+                .as_u64()
+                .unwrap(),
+        "供給量が増えていない: {main}"
     );
-    // 施設の数が前と同じなら、次の observe は見積もれる
-    cli(&["agent", "advance", d, "600"]);
-    let next = json(&cli(&["agent", "observe", d]));
+    let trend = &main["trend"];
+    assert_eq!(trend["basis"], "demandSameTimeYesterday", "{trend}");
+    assert_eq!(trend["state"], "shrinking", "{trend}");
+    let growth = main["demand"].as_i64().unwrap()
+        - first["utilities"]["power"]["main"]["demand"]
+            .as_i64()
+            .unwrap();
+    assert_eq!(trend["demandGrowthPerDay"], growth);
+    // 余りは増えた供給量の分も含むが、伸びは需要だけで決まる。
     assert_eq!(
-        next["utilities"]["power"]["main"]["trend"]["basis"],
-        "sinceLastObserve"
+        i128::from(trend["ticksUntilOut"].as_i64().unwrap()),
+        i128::from(main["headroom"].as_i64().unwrap()) * 7200 / i128::from(growth)
     );
 }
 
-/// 前の observe から 1 日を超えてあいていると、見積もらず理由を出す。
+/// 1 日前の tick をはさむ控えがないと、前の observe との差には戻らず、見積もらずに理由を出す。
 #[test]
-fn observe_trend_is_not_estimated_after_more_than_a_day() {
+fn observe_trend_is_not_estimated_without_samples_around_yesterday() {
     let (dir, _, _) = supplied_town("agent-trend-long");
     let d = dir.to_str().unwrap();
     cli(&["agent", "observe", d]);
@@ -1214,8 +1245,12 @@ fn observe_trend_is_not_estimated_after_more_than_a_day() {
     let o = json(&cli(&["agent", "observe", d]));
     let trend = &o["utilities"]["power"]["main"]["trend"];
     assert_eq!(trend["state"], "unknown", "{trend}");
+    assert!(trend["basis"].is_null());
     assert!(
-        trend["reason"].as_str().unwrap().contains("1 日超"),
+        trend["reason"]
+            .as_str()
+            .unwrap()
+            .contains("はさむ需要の控え"),
         "{trend}"
     );
 }

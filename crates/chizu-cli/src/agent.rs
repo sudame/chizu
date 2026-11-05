@@ -18,8 +18,8 @@ use chizu_core::building::{
     Building, CityStats, demand, demand_factors, jobs_kept_permille, residential_tax_pull,
 };
 use chizu_core::service::{
-    HeadroomTrend, MIN_TREND_TICKS, facility_people, headroom_people, headroom_trend,
-    supply_balance,
+    HeadroomTrend, MIN_TREND_TICKS, demand_trend, facility_people, headroom_people,
+    interpolate_demand, supply_balance,
 };
 use chizu_core::world::economy::Finances;
 use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
@@ -74,15 +74,22 @@ observe の utilities（power と water）:
   at（網の中で需要が最も大きい建物の道路に面したマス）。
   others 主の網以外で、施設か建物のある道路網の networks（数）と capacity、demand、headroom（その差）、headroomPeople、
     each（その網ごとの capacity、demand、headroom、headroomPeople、代表のマス at）。
-  trend の見方: 前の日の同じ時刻の値は持たないので、前の observe（sinceLastObserve と同じ last-observe.json）の headroomPeople との差を、
-    経過した tick で 1 日（7200 tick）あたりに引き伸ばして見積もる。basis は "sinceLastObserve"、見積もれないときは null で、reason に理由を書く。
-    見積もれないのは、前の observe がない（フィードバックのディレクトリなど）、前の observe から 300 tick（ゲーム内の 1 時間）未満、
-    前の observe から 7200 tick（ゲーム内の 1 日）を超えている（間の人口の伸びの変化を均してしまうので）、
-    前の observe から発電所か浄水場の数が変わった（余りの差に施設の増減が入るので）、headroomPeople が決まらない、のとき。
-    state は "shrinking"（減っている）、"notShrinking"（増えたか同じ）、"short"（すでに足りない）、"unknown"（見積もれない）。
-    changePerDay は 1 日あたりの headroomPeople の増減（負なら減っている）。式は (now - before) × 7200 ÷ elapsedTicks を 0 向きに丸めた整数。
-    ticksUntilOut は state が "shrinking" のときだけ、同じ減り方が続くとして余りが 0 を割るまでの tick（now × elapsedTicks ÷ (before - now) を切り捨て）。
-    hoursUntilOut はそれを 300 tick = 1 時間で割った、時計の時間（ゲーム内）。小数 1 桁。elapsedTicks が短いほど、また人口の増え方が揺れるほど当てにならない。
+  trend の見方: 需要の伸びから、余りが尽きるまでを見積もる。余り（供給量 − 需要）の差ではなく、1 日前の同じ時刻からの主の網の需要の伸びを使うので、
+    施設を足した直後でも見積もれ、朝の建設の波を 1 日の伸びと取り違えない。
+    1 日前の需要は、セッションの last-observe.json に observe のたびに足す控え（約 1 日分）から、1 日前の tick をはさむ 2 つの控えを直線でつないで求める。
+    basis は "demandSameTimeYesterday"、見積もれないときは null で、reason に理由を書く（state は "unknown"）。
+    1 日前の控えがないときは、前の observe との差には戻らず、unknown を出す。差だと朝の伸びを 1 日の伸びと取り違えるからである。
+    見積もれないのは、控えがない（フィードバックのディレクトリなど、セッションではない）、街がまだ 1 日たっていない、1 日前をはさむ控えがない、
+    はさむ 2 つの控えが 1800 tick（ゲーム内の 6 時間）より離れている、1 日前から主の網が替わった、headroomPeople が決まらない、のとき。
+    主の網が替わったかは main.networkMark（網のいちばん小さい区間の ID から作った印）で見分け、控えの印と違えば unknown にする（網が替わると需要が飛ぶので、伸びとして使えない）。
+    近すぎる observe（前の控えから 60 tick 未満）の控えは足さず、古いほうを残す。同じ tick の observe だけ置き換える。
+    1 日に数回 observe しておく（たとえば 6 時間ごと、または advance 7200 のたびに 1 回）と、2 日目から見積もれる。
+    state は "shrinking"（需要が伸びて、余りが減っている）、"notShrinking"（需要が伸びていない）、"short"（すでに足りない）、"unknown"（見積もれない）。
+    targetTick は 1 日前の tick、demandBefore はその tick の主の網の需要（控えを直線でつないだ値）、demandNow はいまの需要、
+    demandGrowthPerDay は 1 日の需要の伸び（demandNow − demandBefore）。changePerDay は 1 日あたりの headroomPeople の増減（負なら減っている）で、
+    -demandGrowthPerDay を headroomPeople と同じ式で人数にしたもの（小数は負の向きに切り捨てる）。
+    ticksUntilOut は state が "shrinking" のときだけ、同じ伸びが続くとして余りが 0 を割るまでの tick（headroom × 7200 ÷ demandGrowthPerDay を切り捨て）。
+    hoursUntilOut はそれを 300 tick = 1 時間で割った、時計の時間（ゲーム内）。小数 1 桁。先で伸びが変われば当たらない。
   headroomPeople の式: headroom × population.housedCitizens ÷ 街の需要の合計（utilities.*.demand）を整数で求め、小数は切り捨てる。
     住民 1 人あたりの需要を、住宅だけでなく商業・工業・オフィスの職場の需要も含めた街全体の「需要の合計 ÷ 家に住んでいる人（housedCitizens）」とみなした人数である。
     空き家や、外とつながっていない建物の需要も含むので、少なめに出ることがある。
@@ -1411,6 +1418,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 "shortage": headroom < 0,
                 "shortBy": (-headroom).max(0),
                 "at": balance.spots[i].map(|p| json!([p.x, p.y])),
+                "networkMark": balance.network_mark(i),
             })
         });
         let (mut o_networks, mut o_capacity, mut o_demand) = (0_u64, 0_u64, 0_u64);
@@ -1748,6 +1756,7 @@ fn since_last_observe(
     seen: &Value,
     last: Option<Value>,
     is_session: bool,
+    history: &[DemandSample],
 ) -> Result<Value, String> {
     if !is_session {
         return Ok(Value::Null);
@@ -1755,105 +1764,257 @@ fn since_last_observe(
     let now = watched_values(seen);
     let tick = seen.get("tick").cloned().unwrap_or(Value::Null);
     let diff = last.map(|last| changes_since(&last, &now, &tick));
-    write_last_observe(dir, &tick, now)?;
+    write_last_observe(dir, &tick, now, history)?;
     Ok(diff.unwrap_or(Value::Null))
 }
 
-/// 主の網の余りの人数が、前の observe からどう動いたかを、`utilities.*.main.trend` に足す。
-/// 前の日の同じ時刻の値は持たないので、前の observe（`last`）の値との差で見積もる。
-/// 経過が [`MIN_TREND_TICKS`] に満たないときと、前の observe がないときは、見積もらずに理由を書く。
-fn attach_utility_trends(seen: &mut Value, last: Option<&Value>) {
+/// 需要の控えの 1 つ。`tick` の時点の、主の網の電気と水道の需要。主の網がないときは `None`。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DemandSample {
+    tick: u64,
+    power: Option<NetDemand>,
+    water: Option<NetDemand>,
+}
+
+/// 主の網の需要と、その網を見分ける印（[`chizu_core::service::SupplyBalance::network_mark`]）。
+/// 主の網が別の網に替わると需要が飛ぶので、印が違う控えは比べない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NetDemand {
+    demand: u64,
+    net: u64,
+}
+
+impl DemandSample {
+    fn of(self, kind: &str) -> Option<Past> {
+        let d = if kind == "power" {
+            self.power
+        } else {
+            self.water
+        };
+        d.map(|d| Past {
+            tick: self.tick,
+            demand: d.demand,
+            net: d.net,
+        })
+    }
+
+    /// observe の出力から、いまの控えを取る。
+    fn seen(seen: &Value) -> Self {
+        let main_demand = |kind: &str| {
+            let main = seen.pointer(&format!("/utilities/{kind}/main"))?;
+            Some(NetDemand {
+                demand: main.get("demand")?.as_u64()?,
+                net: main.get("networkMark")?.as_u64()?,
+            })
+        };
+        Self {
+            tick: seen.get("tick").and_then(Value::as_u64).unwrap_or(0),
+            power: main_demand("power"),
+            water: main_demand("water"),
+        }
+    }
+
+    fn to_json(self) -> Value {
+        let part = |d: Option<NetDemand>| d.map(|d| json!({"demand": d.demand, "net": d.net}));
+        json!({"tick": self.tick, "power": part(self.power), "water": part(self.water)})
+    }
+
+    fn from_json(v: &Value) -> Option<Self> {
+        // 印のない古い形の控えは、どの網のものか分からないので読み飛ばす。
+        let part = |k: &str| {
+            let d = v.get(k)?;
+            Some(NetDemand {
+                demand: d.get("demand")?.as_u64()?,
+                net: d.get("net")?.as_u64()?,
+            })
+        };
+        Some(Self {
+            tick: v.get("tick")?.as_u64()?,
+            power: part("power"),
+            water: part("water"),
+        })
+    }
+}
+
+/// 1 日前の需要を、その tick をはさむ 2 つの控えから求めるとき、はさむ 2 つの控えの最大の間隔（tick）。ゲーム内の 6 時間。
+/// これより離れていると、間の建設の波を直線でならしてしまう。
+const MAX_BRACKET_TICKS: u64 = TICKS_PER_DAY / 4;
+
+/// 控えを足す最短の間隔。これより近い observe の控えは足さず、古いほうを残す
+/// （1 日後の observe が、ちょうど 1 日前の控えを見つけられるように）。同じ tick のときだけ置き換える。
+const MIN_SAMPLE_GAP_TICKS: u64 = 60;
+
+/// last-observe.json の控えの列。形が違う行は読み飛ばす。
+fn read_demand_history(last: Option<&Value>) -> Vec<DemandSample> {
+    let mut out: Vec<DemandSample> = last
+        .and_then(|l| l.get("demandHistory"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(DemandSample::from_json).collect())
+        .unwrap_or_default();
+    out.sort_by_key(|s| s.tick);
+    out
+}
+
+/// いまの控えを足した列を返す。1 日前をはさむのに要る分（はさむ間隔を含めて 1 日強）だけ残し、いまより先の控えは捨てる。
+fn push_demand_sample(mut history: Vec<DemandSample>, now: DemandSample) -> Vec<DemandSample> {
+    history.retain(|s| s.tick <= now.tick);
+    match history.last() {
+        Some(prev) if prev.tick == now.tick => {
+            history.pop();
+            history.push(now);
+        }
+        Some(prev) if now.tick - prev.tick < MIN_SAMPLE_GAP_TICKS => {}
+        _ => history.push(now),
+    }
+    let keep_from = now.tick.saturating_sub(TICKS_PER_DAY + MAX_BRACKET_TICKS);
+    history.retain(|s| s.tick >= keep_from);
+    history
+}
+
+/// 主の網の需要の伸びから、余りが尽きるまでを `utilities.*.main.trend` に足す。
+/// 1 日前の需要は、セッションの控え（`last` の `demandHistory`）から求める。
+/// 次の observe のために、いまの控えを足した列を返す。
+fn attach_utility_trends(seen: &mut Value, last: Option<&Value>) -> Vec<DemandSample> {
     let tick = seen.get("tick").and_then(Value::as_u64);
-    let seen_facilities = seen.get("facilities").cloned().unwrap_or(Value::Null);
+    let housed = seen
+        .pointer("/population/housedCitizens")
+        .and_then(Value::as_u64);
+    let sample = DemandSample::seen(seen);
+    let history = read_demand_history(last);
     for kind in ["power", "water"] {
+        let need = seen
+            .pointer(&format!("/utilities/{kind}/demand"))
+            .and_then(Value::as_u64);
         let Some(main) = seen.pointer_mut(&format!("/utilities/{kind}/main")) else {
             continue;
         };
         if !main.is_object() {
             continue;
         }
-        let now = main.get("headroomPeople").and_then(Value::as_i64);
-        let before = last.and_then(|l| {
-            l.pointer(&format!("/values/utilities.{kind}.main.headroomPeople"))
-                .and_then(Value::as_i64)
-        });
-        let from_tick = last.and_then(|l| l.get("tick").and_then(Value::as_u64));
-        let facilities_changed = ["PowerPlant", "WaterPump"].iter().any(|k| {
-            let was = last.and_then(|l| l.pointer(&format!("/values/facilities.{k}")));
-            // 前の observe に施設の数がなければ、増えていないとは言えないので、変わったものとして扱う
-            was.is_none_or(|w| Some(w) != seen_facilities.get(*k))
-        });
-        main["trend"] = utility_trend(now, before, from_tick, tick, facilities_changed);
+        let now = main
+            .get("demand")
+            .and_then(Value::as_u64)
+            .zip(main.get("headroom").and_then(Value::as_i64).map(i128::from))
+            .zip(main.get("networkMark").and_then(Value::as_u64))
+            .map(|((demand, headroom), net)| (demand, headroom, net));
+        let has_people = main.get("headroomPeople").is_some_and(Value::is_i64);
+        let people = need.zip(housed).filter(|_| has_people);
+        let past: Vec<Past> = history.iter().filter_map(|s| s.of(kind)).collect();
+        main["trend"] = utility_trend(tick.zip(now), people, &past, last.is_some());
+    }
+    if tick.is_some() {
+        push_demand_sample(history, sample)
+    } else {
+        history
     }
 }
 
-/// 減り方を見積もる最長の間隔（tick）。ゲーム内の 1 日。これを超えると、間の人口の伸びの変化を均してしまい、当てにならない。
-const MAX_TREND_TICKS: u64 = TICKS_PER_DAY;
+/// 控え 1 つ。ある種類の、主の網の需要と、その網の印。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Past {
+    tick: u64,
+    demand: u64,
+    net: u64,
+}
 
+/// `tick` の 1 日前の需要を、控え `past`（tick の昇順）から求める。戻り値は `(1 日前の tick, 需要)`。
+/// 1 日前をはさむ 2 つの控え（ちょうど同じ tick の控えがあればそれ）を直線でつなぐ。はさめなければ理由を返す。
+/// はさむ控えの網の印が `net`（いまの主の網）と違えば、主の網が替わって需要が飛んでいるので求めない。
+fn demand_a_day_ago(past: &[Past], tick: u64, net: u64) -> Result<(u64, u64), String> {
+    let Some(target) = tick.checked_sub(TICKS_PER_DAY) else {
+        return Err(format!(
+            "街がまだ 1 日たっていない（{tick} tick < {TICKS_PER_DAY} tick）ので、1 日前の需要がない"
+        ));
+    };
+    let lo = past.iter().rev().find(|p| p.tick <= target);
+    let hi = past.iter().find(|p| p.tick >= target);
+    let (Some(&lo), Some(&hi)) = (lo, hi) else {
+        return Err(format!(
+            "1 日前（tick {target}）をはさむ需要の控えがない。セッションで 1 日に数回 observe すると控えが貯まる"
+        ));
+    };
+    if lo.net != net || hi.net != net {
+        return Err(format!(
+            "1 日前（tick {target}）から主の網が替わった（networkMark が違う）ので、需要の伸びを比べられない"
+        ));
+    }
+    if hi.tick - lo.tick > MAX_BRACKET_TICKS {
+        return Err(format!(
+            "1 日前（tick {target}）をはさむ控え（tick {} と {}）が {MAX_BRACKET_TICKS} tick（ゲーム内の 6 時間）より離れていて、間の建設の波をならしてしまう。もっと短い間隔で observe する",
+            lo.tick, hi.tick
+        ));
+    }
+    let before = interpolate_demand((lo.tick, lo.demand), (hi.tick, hi.demand), target)
+        .ok_or_else(|| {
+            format!(
+                "1 日前（tick {target}）の需要を、控え（tick {} と {}）から決められない",
+                lo.tick, hi.tick
+            )
+        })?;
+    Ok((target, before))
+}
+
+/// `now` は `(tick, (主の網の需要, 余り, 主の網の印))`。`people` は `(街の需要の合計, 家に住む人)` で、人数にできないときは `None`。
+/// `has_last` は、セッションで前の observe があるか（理由の言い分けに使う）。
 fn utility_trend(
-    now: Option<i64>,
-    before: Option<i64>,
-    from_tick: Option<u64>,
-    tick: Option<u64>,
-    facilities_changed: bool,
+    now: Option<(u64, (u64, i128, u64))>,
+    people: Option<(u64, u64)>,
+    past: &[Past],
+    has_last: bool,
 ) -> Value {
     let none = |reason: String| {
         json!({
-            "basis": null, "reason": reason, "state": "unknown", "fromTick": from_tick,
-            "elapsedTicks": null, "headroomPeopleBefore": before, "changePerDay": null,
-            "ticksUntilOut": null, "hoursUntilOut": null,
+            "basis": null, "reason": reason, "state": "unknown", "targetTick": null,
+            "demandBefore": null, "demandNow": null, "demandGrowthPerDay": null,
+            "changePerDay": null, "ticksUntilOut": null, "hoursUntilOut": null,
         })
     };
-    let (Some(from_tick), Some(tick)) = (from_tick, tick) else {
-        return none("前の observe がない（セッションではないか、new の直後でない最初の observe）ので、減り方は見積もれない".into());
+    let Some((tick, (demand, headroom, net))) = now else {
+        return none("主の網がない、または tick が決まらないので、減り方は見積もれない".into());
     };
-    let Some(now) = now else {
+    let Some((need, housed)) = people else {
         return none(
             "headroomPeople が null（人口か需要の合計が 0）なので、減り方は見積もれない".into(),
         );
     };
-    let Some(before) = before else {
-        return none(
-            "前の observe では headroomPeople が決まっていなかったので、減り方は見積もれない"
-                .into(),
-        );
-    };
-    let elapsed = tick.saturating_sub(from_tick);
-    if facilities_changed {
-        return none("前の observe から発電所か浄水場の数が変わったので、余りの差は施設の増減を含み、減り方として使えない".into());
+    if !has_last {
+        return none("需要の控えがない（セッションではないか、new の直後でない最初の observe）ので、減り方は見積もれない。控えは agent new で作ったセッションで observe するたびに貯まる".into());
     }
-    if elapsed > MAX_TREND_TICKS {
-        return none(format!(
-            "前の observe から {elapsed} tick（{MAX_TREND_TICKS} tick = ゲーム内の 1 日超）あいていて、人口の伸びが変わるので当てにならない。1 日以内にあけて observe する"
-        ));
-    }
-    let Some(trend) = headroom_trend(i128::from(before), i128::from(now), elapsed) else {
-        return none(format!(
-            "前の observe から {elapsed} tick しかたっておらず、短すぎて見積もれない（{MIN_TREND_TICKS} tick = ゲーム内の 1 時間以上あけて observe する）"
-        ));
+    let (target, before) = match demand_a_day_ago(past, tick, net) {
+        Ok(v) => v,
+        Err(reason) => return none(reason),
     };
-    let reason = "前の日の同じ時刻の値は持たないので、前の observe の headroomPeople との差を、経過した tick で 1 日あたりに引き伸ばして見積もった";
-    let (state, per_day, until) = match trend {
-        HeadroomTrend::Short => ("short", None, None),
-        HeadroomTrend::NotShrinking { per_day } => ("notShrinking", Some(per_day), None),
+    let growth = i128::from(demand) - i128::from(before);
+    let (state, until) = match demand_trend(headroom, growth) {
+        HeadroomTrend::Short => ("short", None),
+        HeadroomTrend::NotShrinking { .. } => ("notShrinking", None),
         HeadroomTrend::Shrinking {
-            drop_per_day,
-            ticks_until_out,
-        } => ("shrinking", Some(-drop_per_day), Some(ticks_until_out)),
+            ticks_until_out, ..
+        } => ("shrinking", Some(ticks_until_out)),
     };
+    // 余りの人数と同じ式で人数にする。減る向き（負）は、足りない人数と同じく多めに数える。
+    let per_day = headroom_people(-growth, need, housed);
     // 時計の時間（ゲーム内の時間）。1 時間は TICKS_PER_DAY ÷ 24 tick で、小数 1 桁に丸める。
     let hours = until.map(|t| (t as f64 / MIN_TREND_TICKS as f64 * 10.0).round() / 10.0);
     json!({
-        "basis": "sinceLastObserve", "reason": reason, "state": state, "fromTick": from_tick,
-        "elapsedTicks": elapsed, "headroomPeopleBefore": before, "changePerDay": per_day,
-        "ticksUntilOut": until, "hoursUntilOut": hours,
+        "basis": "demandSameTimeYesterday",
+        "reason": "1 日前の同じ時刻の主の網の需要（控えを直線でつないだ値）からの伸びで、余りが尽きるまでを見積もった",
+        "state": state, "targetTick": target,
+        "demandBefore": before, "demandNow": demand, "demandGrowthPerDay": growth,
+        "changePerDay": per_day, "ticksUntilOut": until, "hoursUntilOut": hours,
     })
 }
 
-fn write_last_observe(dir: &Path, tick: &Value, values: Map<String, Value>) -> Result<(), String> {
+fn write_last_observe(
+    dir: &Path,
+    tick: &Value,
+    values: Map<String, Value>,
+    history: &[DemandSample],
+) -> Result<(), String> {
     let path = dir.join(LAST_OBSERVE_FILE);
     let tmp = tmp_path(&path);
-    let text = print(&json!({"tick": tick, "values": values}));
+    let history: Vec<Value> = history.iter().map(|s| s.to_json()).collect();
+    let text = print(&json!({"tick": tick, "values": values, "demandHistory": history}));
     std::fs::write(&tmp, text).map_err(|e| format!("{} に書けない: {e}", tmp.display()))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("{} に書けない: {e}", path.display()))
 }
@@ -1903,7 +2064,8 @@ fn new_session(dir: &str, from: Saved, from_dir: Option<&str>) -> Result<Value, 
     s.save(&world)?;
     let mut out = observe(&world, &before);
     // new が見せた街を、次の observe の増減の起点にする。
-    write_last_observe(Path::new(dir), &out["tick"], watched_values(&out))?;
+    let first = [DemandSample::seen(&out)];
+    write_last_observe(Path::new(dir), &out["tick"], watched_values(&out), &first)?;
     if let Some(c) = copied {
         out["copiedFrom"] = c;
     }
@@ -2037,8 +2199,9 @@ pub fn run(args: &[String]) -> Result<String, String> {
             let (_lock, world, before, is_session) = open_for_read(Path::new(dir), true)?;
             let mut seen = observe(&world, &before);
             let last = read_last_observe(Path::new(dir), is_session);
-            attach_utility_trends(&mut seen, last.as_ref());
-            seen["sinceLastObserve"] = since_last_observe(Path::new(dir), &seen, last, is_session)?;
+            let history = attach_utility_trends(&mut seen, last.as_ref());
+            seen["sinceLastObserve"] =
+                since_last_observe(Path::new(dir), &seen, last, is_session, &history)?;
             Ok(print(&seen))
         }
         ["export", dir] => export_markdown(Path::new(dir)),
@@ -2071,36 +2234,83 @@ mod tests {
 
     const TICKS_PER_DAY_FOR_TEST: u64 = chizu_core::TICKS_PER_DAY;
 
-    #[test]
-    fn trend_of_a_shrinking_headroom_gives_time_until_out() {
-        // 1 日で 1,800 人分から 1,200 人分へ。1 日あたり -600 で、あと 2 日 = 48 時間。
-        let t = utility_trend(Some(1200), Some(1800), Some(0), Some(7200), false);
-        assert_eq!(t["state"], "shrinking");
-        assert_eq!(t["basis"], "sinceLastObserve");
-        assert_eq!(t["changePerDay"], -600);
-        assert_eq!(t["ticksUntilOut"], 14_400);
-        assert_eq!(t["hoursUntilOut"], 48.0);
-        // 半日で同じだけ減ったなら、速さは倍で、あと 1 日 = 24 時間。
-        let t = utility_trend(Some(1200), Some(1800), Some(1000), Some(4600), false);
-        assert_eq!(t["changePerDay"], -1200);
-        assert_eq!(t["hoursUntilOut"], 24.0);
-        // 800 tick で 1,500 から 700 へ減ると、あと 700 tick。時計の時間は小数 1 桁で 2.3 時間。
-        let t = utility_trend(Some(700), Some(1500), Some(0), Some(800), false);
-        assert_eq!(t["ticksUntilOut"], 700);
-        assert_eq!(t["hoursUntilOut"], 2.3);
+    const DAY: u64 = TICKS_PER_DAY_FOR_TEST;
+
+    /// 1 日前（tick 0）の需要が 1,000 の控えで、いま tick 7200 の主の網を見る。
+    fn trend_at(demand: u64, headroom: i128, past: &[(u64, u64)], tick: u64) -> Value {
+        utility_trend(
+            Some((tick, (demand, headroom, NET))),
+            Some((2300, 1000)),
+            &pasts(past, NET),
+            true,
+        )
+    }
+
+    /// 主の網の印。
+    const NET: u64 = 7;
+
+    fn pasts(past: &[(u64, u64)], net: u64) -> Vec<Past> {
+        past.iter()
+            .map(|&(tick, demand)| Past { tick, demand, net })
+            .collect()
     }
 
     #[test]
-    fn trend_of_a_growing_headroom_does_not_run_out() {
-        let t = utility_trend(Some(1800), Some(1200), Some(0), Some(7200), false);
+    fn trend_of_growing_demand_gives_time_until_out() {
+        // 1 日で需要が 1,000 から 1,500 へ。余りが 1,000 なら、あと 2 日 = 48 時間。
+        let t = trend_at(1500, 1000, &[(0, 1000)], DAY);
+        assert_eq!(t["state"], "shrinking");
+        assert_eq!(t["basis"], "demandSameTimeYesterday");
+        assert_eq!(t["demandBefore"], 1000);
+        assert_eq!(t["demandGrowthPerDay"], 500);
+        assert_eq!(t["ticksUntilOut"], 14_400);
+        assert_eq!(t["hoursUntilOut"], 48.0);
+        // 伸び 500 を人数にすると 500 × 1000 ÷ 2300 = 217.4 で、減る向きは切り下げて -218。
+        assert_eq!(t["changePerDay"], -218);
+    }
+
+    #[test]
+    fn trend_does_not_depend_on_supply_added_in_between() {
+        // 余りは施設を足すと増えるが、見積もりに使うのは需要の伸びだけ。尽きるまでは余りに比例して延びる。
+        let before = trend_at(1500, 1000, &[(0, 1000)], DAY);
+        let after = trend_at(1500, 1000 + 3600, &[(0, 1000)], DAY);
+        assert_eq!(before["demandGrowthPerDay"], after["demandGrowthPerDay"]);
+        assert_eq!(after["state"], "shrinking");
+        assert_eq!(after["ticksUntilOut"], 4600 * DAY / 500);
+    }
+
+    #[test]
+    fn trend_ignores_a_short_burst_in_the_morning() {
+        // 1 日前の同じ時刻と比べるので、直前 1 時間に需要が急に伸びても、1 日の伸びは小さいまま。
+        // 直前の控え（朝 1 時間前の需要 900 → いま 1,010）を使うと、1 日に引き伸ばして 2,640 の伸びに見えてしまう。
+        let past = [(0, 1000), (DAY - 300, 900)];
+        let t = trend_at(1010, 5000, &past, DAY);
+        assert_eq!(t["demandGrowthPerDay"], 10);
+        assert_eq!(t["ticksUntilOut"], 5000 * DAY / 10);
+    }
+
+    #[test]
+    fn trend_interpolates_between_samples_around_the_same_time_yesterday() {
+        // 1 日前（tick 600）は、tick 0 の 1,000 と tick 1200 の 1,200 のあいだで、1,100。
+        let t = trend_at(1600, 800, &[(0, 1000), (1200, 1200)], DAY + 600);
+        assert_eq!(t["targetTick"], 600);
+        assert_eq!(t["demandBefore"], 1100);
+        assert_eq!(t["demandGrowthPerDay"], 500);
+    }
+
+    #[test]
+    fn trend_of_flat_demand_does_not_run_out() {
+        let t = trend_at(1000, 800, &[(0, 1000)], DAY);
         assert_eq!(t["state"], "notShrinking");
-        assert_eq!(t["changePerDay"], 600);
         assert!(t["ticksUntilOut"].is_null() && t["hoursUntilOut"].is_null());
+        let t = trend_at(900, 800, &[(0, 1000)], DAY);
+        assert_eq!(t["state"], "notShrinking");
+        assert_eq!(t["demandGrowthPerDay"], -100);
     }
 
     #[test]
     fn trend_of_a_shortage_is_short() {
-        let t = utility_trend(Some(-40), Some(300), Some(0), Some(7200), false);
+        let t = trend_at(1500, -40, &[(0, 1000)], DAY);
         assert_eq!(t["state"], "short");
         assert!(t["ticksUntilOut"].is_null());
     }
@@ -2112,43 +2322,120 @@ mod tests {
             assert!(t["basis"].is_null() && t["changePerDay"].is_null());
             t["reason"].as_str().unwrap().to_string()
         };
-        // 前の observe がない
-        assert!(
-            reason(utility_trend(Some(10), None, None, Some(7200), false))
-                .contains("前の observe がない")
-        );
-        // 短すぎる
+        // 控えを持たない（セッションではない）
         assert!(
             reason(utility_trend(
-                Some(10),
-                Some(20),
-                Some(100),
-                Some(200),
+                Some((DAY, (1500, 1000, NET))),
+                Some((2300, 1000)),
+                &[],
                 false
             ))
-            .contains("短すぎて")
+            .contains("控えがない")
         );
-        // 施設の数が変わった、間があきすぎた
+        // 街がまだ 1 日たっていない
         assert!(
-            reason(utility_trend(Some(10), Some(20), Some(0), Some(7200), true))
-                .contains("施設の増減")
+            reason(trend_at(1500, 1000, &[(0, 1000)], DAY - 1)).contains("まだ 1 日たっていない")
         );
+        // 1 日前をはさむ控えがない（いちばん古い控えが 1 日前より新しい、いちばん新しい控えが 1 日前より古い）
+        assert!(
+            reason(trend_at(1500, 1000, &[(100, 1000)], DAY)).contains("はさむ需要の控えがない")
+        );
+        assert!(
+            reason(trend_at(1500, 1000, &[(0, 1000)], DAY + 5)).contains("はさむ需要の控えがない")
+        );
+        // はさむ控えが離れすぎている
+        assert!(
+            reason(trend_at(
+                1500,
+                1000,
+                &[(0, 1000), (DAY / 2, 1100)],
+                DAY / 4 + DAY
+            ))
+            .contains("離れていて")
+        );
+        // 1 日前の控えが別の網のもの（主の網が替わって、需要が飛んでいる）
         assert!(
             reason(utility_trend(
-                Some(10),
-                Some(20),
-                Some(0),
-                Some(7201),
-                false
+                Some((DAY, (1500, 1000, NET))),
+                Some((2300, 1000)),
+                &pasts(&[(0, 100)], NET + 1),
+                true
             ))
-            .contains("1 日超")
+            .contains("主の網が替わった")
         );
         // 人数が決まらない
-        assert!(reason(utility_trend(None, Some(20), Some(0), Some(7200), false)).contains("null"));
         assert!(
-            reason(utility_trend(Some(10), None, Some(0), Some(7200), false))
-                .contains("決まっていなかった")
+            reason(utility_trend(
+                Some((DAY, (1500, 1000, NET))),
+                None,
+                &pasts(&[(0, 1000)], NET),
+                true
+            ))
+            .contains("headroomPeople が null")
         );
+        // 主の網がない
+        assert!(
+            reason(utility_trend(
+                None,
+                Some((2300, 1000)),
+                &pasts(&[(0, 1000)], NET),
+                true
+            ))
+            .contains("主の網")
+        );
+    }
+
+    #[test]
+    fn demand_history_keeps_a_day_and_drops_the_future() {
+        let s = |tick| DemandSample {
+            tick,
+            power: Some(NetDemand {
+                demand: tick,
+                net: NET,
+            }),
+            water: None,
+        };
+        let h = push_demand_sample(vec![s(0), s(1000), s(10_000)], s(9000));
+        // 先の控え（tick 10,000）は捨てる。tick 0 は 9000 - 9000 = 0 で、まだ残る
+        assert_eq!(h, vec![s(0), s(1000), s(9000)]);
+        let h = push_demand_sample(h, s(9010));
+        // 60 tick より近い控えは足さず、古いほうを残す（窓は 9010 まで進むので、tick 0 は捨てる）
+        assert_eq!(h, vec![s(1000), s(9000)]);
+        let h = push_demand_sample(h, s(9400));
+        // 9400 - 9000 = 400 より古い控えは捨てる
+        assert_eq!(h, vec![s(1000), s(9000), s(9400)]);
+        // 同じ tick の控えは置き換える
+        let mut again = s(9400);
+        again.power = Some(NetDemand {
+            demand: 1,
+            net: NET,
+        });
+        let h = push_demand_sample(h, again);
+        assert_eq!(h, vec![s(1000), s(9000), again]);
+    }
+
+    #[test]
+    fn a_close_second_observe_keeps_the_sample_a_day_back() {
+        // tick 14400 の 30 tick 後にもう一度 observe しても、14400 の控えは残り、
+        // ちょうど 1 日後の tick 21600 で 1 日前（14400）の需要を見つけられる。
+        let s = |tick, demand| DemandSample {
+            tick,
+            power: Some(NetDemand { demand, net: NET }),
+            water: None,
+        };
+        let h = push_demand_sample(vec![], s(14_400, 1000));
+        let h = push_demand_sample(h, s(14_430, 1001));
+        let h = push_demand_sample(h, s(21_600, 1500));
+        let past: Vec<Past> = h.iter().filter_map(|x| x.of("power")).collect();
+        let t = utility_trend(
+            Some((21_600, (1500, 1000, NET))),
+            Some((2300, 1000)),
+            &past,
+            true,
+        );
+        assert_eq!(t["state"], "shrinking", "{t}");
+        assert_eq!(t["targetTick"], 14_400);
+        assert_eq!(t["demandBefore"], 1000);
     }
 
     fn shortage(at: (i64, i64), today: u32, yesterday: u32) -> ShortageRow {
