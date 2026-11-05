@@ -241,6 +241,10 @@ mod tests {
 
     /// 道路を引き、区画を塗って、建物が建つまで進めた街。
     fn town(zone: ZoneKind, road: (TilePos, TilePos), paint: TileRect) -> Sim {
+        town_of(Zone::from(zone), road, paint)
+    }
+
+    fn town_of(zone: Zone, road: (TilePos, TilePos), paint: TileRect) -> Sim {
         let mut sim = Sim::new(0);
         sim.submit(Command::BuildRoad {
             from: road.0,
@@ -250,7 +254,7 @@ mod tests {
         .unwrap();
         sim.submit(Command::PaintZone {
             area: paint,
-            zone: Some(Zone::from(zone)),
+            zone: Some(zone),
         })
         .unwrap();
         for _ in 0..30 {
@@ -283,13 +287,13 @@ mod tests {
 
     #[test]
     fn the_lot_follows_the_core_layout_and_entrance() {
-        let kinds = [ZoneKind::Residential, ZoneKind::Industrial];
+        let kinds = [Zone::Residential, Zone::ResidentialLow, Zone::Industrial];
         let mut checked = 0;
         let mut centered = 0;
         let mut lanes = 0;
         for zone in kinds {
             // 道路が南北のどちらの側にあっても確かめるため、道路の両側に区画を塗る
-            let sim = town(
+            let sim = town_of(
                 zone,
                 (TilePos::new(10, 20), TilePos::new(50, 20)),
                 TileRect::from_corners(TilePos::new(10, 12), TilePos::new(50, 28)),

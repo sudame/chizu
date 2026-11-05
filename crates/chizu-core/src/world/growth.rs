@@ -14,8 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
 use crate::building::{
-    Building, DIAGONAL_LOT_SIDE, LANE_FRONTAGE, LANE_MIN_DEPTH, LotForm,
-    MAX_LOT_SIDE, demand,
+    Building, DIAGONAL_LOT_SIDE, LANE_FRONTAGE, LANE_MIN_DEPTH, LotForm, MAX_LOT_SIDE, demand,
 };
 use crate::chunk::{Layer, TileUse};
 use crate::clock::TICKS_PER_DAY;
@@ -593,7 +592,8 @@ impl World {
                 };
                 assert!(headroom.take(&self.network, link, w * k));
                 // 私道の敷地は低密度にだけ建つ。私道の敷地にできる大きさなら必ず私道にする。
-                let lane = low && !is_diagonal(toward_road) && w == LANE_FRONTAGE && k >= LANE_MIN_DEPTH;
+                let lane =
+                    low && !is_diagonal(toward_road) && w == LANE_FRONTAGE && k >= LANE_MIN_DEPTH;
                 let form = if lane { LotForm::Lane } else { LotForm::Street };
                 let id = self.place_building(lot_zone, front, toward_road, w, k, form);
                 stats = stats.with(self.buildings.get(id).expect("建てた建物がない"));
@@ -1101,7 +1101,10 @@ mod tests {
                 }
             }
         }
-        assert!(top > LOW_DENSITY_MAX_LEVEL, "高密度の住宅が段階 3 に上がらない");
+        assert!(
+            top > LOW_DENSITY_MAX_LEVEL,
+            "高密度の住宅が段階 3 に上がらない"
+        );
     }
 
     /// 低密度の住宅は、一軒家の並ぶ形だけが建つ。縦横の道路沿いでは、間口 2、奥行き 3 以上はいつも私道の敷地で、
@@ -1335,7 +1338,10 @@ mod tests {
             })
             .map(|(id, b)| (id, b.level))
             .collect();
-        assert!(!before.is_empty(), "段階 2 以上で上がれる高密度の住宅がない");
+        assert!(
+            !before.is_empty(),
+            "段階 2 以上で上がれる高密度の住宅がない"
+        );
         for (id, _) in &before {
             w.buildings.get_mut(*id).unwrap().form = LotForm::Lane;
             assert!(w.buildings().get(*id).unwrap().lane_plan().is_none());
