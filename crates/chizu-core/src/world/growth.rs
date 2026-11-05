@@ -1173,36 +1173,125 @@ mod tests {
         );
     }
 
-    /// 低密度を一面に塗った通りで、建物のあいだに 1 マスの隙間ができず、空きは端数の列だけになる。
-    #[test]
-    fn low_density_lots_pack_from_the_row_end_without_gaps() {
-        for seed in [0, 1, 2] {
-            let mut w = served_street_of(seed, Zone::ResidentialLow);
-            run(&mut w, 40 * TICKS_PER_DAY);
-            check_buildings(&w);
-            let state = |x: i64, y: i64| w.tile_state(TilePos::new(x, y));
-            let built = |x: i64| matches!(state(x, 9), Some((_, TileUse::Building)));
-            let empty = |x: i64, y: i64| {
-                matches!(
-                    state(x, y),
-                    Some((Some(Zone::ResidentialLow), TileUse::Empty))
-                )
+    /// 低密度を塗った並び 1 本。範囲、建物が道路へ向く向き（角の並びは複数）、並びの長さ。
+    struct Strip {
+        area: TileRect,
+        toward: &'static [(i64, i64)],
+        /// 端数の列に建ちうる、間口 1 の家の数の上限。
+        narrow: u64,
+    }
+
+    /// 横の道路の北と南、縦の道路の西と東、縦の道路の角の 5 本の並びを、低密度で塗った街。
+    /// 北と西の並びの長さは奇数、南と東は偶数で、角の並びは横の道路にも縦の道路にも面する。
+    fn low_density_strips() -> (World, Vec<Strip>) {
+        let mut w = World::new(0);
+        let build = |w: &mut World, from: (i64, i64), to: (i64, i64)| {
+            let road = Command::BuildRoad {
+                from: TilePos::new(from.0, from.1),
+                to: TilePos::new(to.0, to.1),
+                kind: RoadKind::Small,
             };
-            for x in 1..40 {
+            assert_eq!(w.apply(&road), ApplyOutcome::Applied, "{from:?} → {to:?}");
+        };
+        build(&mut w, (0, 10), (40, 10));
+        connect_to_outside(&mut w);
+        build(&mut w, (41, 10), (80, 10));
+        build(&mut w, (50, 10), (50, 50));
+        build(&mut w, (70, 10), (70, 50));
+        let strips = vec![
+            Strip {
+                area: rect((12, 4), (40, 9)),
+                toward: &[(0, 1)],
+                narrow: 1,
+            },
+            Strip {
+                area: rect((12, 11), (39, 16)),
+                toward: &[(0, -1)],
+                narrow: 0,
+            },
+            Strip {
+                area: rect((44, 12), (49, 48)),
+                toward: &[(1, 0)],
+                narrow: 1,
+            },
+            Strip {
+                area: rect((51, 12), (56, 47)),
+                toward: &[(-1, 0)],
+                narrow: 0,
+            },
+            Strip {
+                area: rect((64, 11), (69, 48)),
+                toward: &[(0, -1), (1, 0)],
+                narrow: 2,
+            },
+        ];
+        let mut areas: Vec<(TileRect, Zone)> = strips
+            .iter()
+            .map(|s| (s.area, Zone::ResidentialLow))
+            .collect();
+        areas.push((rect((42, 4), (80, 9)), Zone::Industrial));
+        for (area, zone) in areas {
+            let paint = Command::PaintZone {
+                area,
+                zone: Some(zone),
+            };
+            assert_eq!(w.apply(&paint), ApplyOutcome::Applied, "{area:?}");
+        }
+        for (kind, at) in [
+            (ServiceKind::PowerPlant, (3, 9)),
+            (ServiceKind::WaterPump, (7, 9)),
+            (ServiceKind::WaterPump, (9, 9)),
+        ] {
+            assert_eq!(place(&mut w, kind, at, 2), ApplyOutcome::Applied);
+        }
+        (w, strips)
+    }
+
+    /// 低密度を塗った並びは、道路が北、南、東、西のどちらにあっても、角で切れていても、端から 2 マスずつ詰まる。
+    /// 間口 1 の家は並びの端数の列にしか建たず、奥のマスが空く列も端数の 1 列までになる。
+    #[test]
+    fn low_density_lots_pack_from_the_row_end_on_every_side() {
+        let (mut w, strips) = low_density_strips();
+        run(&mut w, 60 * TICKS_PER_DAY);
+        check_buildings(&w);
+        for (i, strip) in strips.iter().enumerate() {
+            let inside = |t: TilePos| {
+                (strip.area.min.x..=strip.area.max.x).contains(&t.x)
+                    && (strip.area.min.y..=strip.area.max.y).contains(&t.y)
+            };
+            let mut narrow = 0;
+            let mut built = 0;
+            for (_, b) in w.buildings().iter() {
+                if b.zone != Zone::ResidentialLow || !inside(b.front) {
+                    continue;
+                }
+                built += 1;
                 assert!(
-                    !(empty(x, 9) && built(x - 1) && built(x + 1)),
-                    "{seed}: 建物のあいだに 1 マスの隙間がある x = {x}"
+                    strip.toward.contains(&b.toward_road),
+                    "並び {i}: 道路の向きが違う {b:?}"
                 );
+                let x = b.area.max.x.abs_diff(b.area.min.x) + 1;
+                let y = b.area.max.y.abs_diff(b.area.min.y) + 1;
+                let frontage = if b.toward_road.0 == 0 { x } else { y };
+                narrow += u64::from(frontage < LANE_FRONTAGE);
             }
-            // 施設の右 x = 10..=40 は 1 本の並びで、空きは端数の 1 列（深さ 6 マス）までである。
-            // 施設の裏は道路に面さず、建たない。
-            let empties = (10..=40)
-                .flat_map(|x| (4..=9).map(move |y| (x, y)))
-                .filter(|&(x, y)| empty(x, y))
-                .count();
+            let empty: u64 = crate::zone::tiles_of(strip.area)
+                .filter(|&t| {
+                    matches!(
+                        w.tile_state(t),
+                        Some((Some(Zone::ResidentialLow), TileUse::Empty))
+                    )
+                })
+                .count() as u64;
+            assert!(built > 0, "並び {i}: 建物が建たない");
             assert!(
-                empties <= 6,
-                "{seed}: 端数より多くのマスが空いている：{empties}"
+                narrow <= strip.narrow,
+                "並び {i}: 端数の列のほかに間口 1 の家がある：{narrow}"
+            );
+            let runs = strip.toward.len() as u64;
+            assert!(
+                empty <= ZONE_DEPTH as u64 * runs,
+                "並び {i}: 端数の列より多く空いている：{empty}"
             );
         }
     }
