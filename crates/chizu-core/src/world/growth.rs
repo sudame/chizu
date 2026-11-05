@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
 use crate::building::{
-    Building, DIAGONAL_LOT_SIDE, LANE_FRONTAGE, LANE_MAX_LEVEL, LANE_MIN_DEPTH, LotForm,
+    Building, DIAGONAL_LOT_SIDE, LANE_FRONTAGE, LANE_MIN_DEPTH, LotForm,
     MAX_LOT_SIDE, demand,
 };
 use crate::chunk::{Layer, TileUse};
@@ -66,13 +66,6 @@ pub const SPAWN_PER_DEMAND: i64 = 8;
 
 /// 1 回に、区画の種類ごとに建てる建物の数の上限。
 pub const MAX_SPAWN_PER_ZONE: u32 = 16;
-
-/// 高密度の住宅で、私道の敷地にできる大きさの住宅のうち、私道の敷地にする割合（%）。形は `docs/design.md` の 3.8 にある。
-pub const LANE_PERCENT: u32 = 25;
-
-/// 高密度の住宅を、[`LANE_PERCENT`] の割合で私道の敷地にするときの、奥行きの下限（マス）。
-/// 低密度の下限（[`LANE_MIN_DEPTH`]）を下げても、高密度の育ち方は変えない。
-pub const LANE_PERCENT_MIN_DEPTH: u64 = 4;
 
 /// 低密度の住宅の、縦か横の道路沿いで試す大きさ（間口、奥行き）。この順に試し、収まる中で最初のものに建てる。
 /// 間口 2、奥行き [`LANE_MIN_DEPTH`] 以上は私道の敷地に、奥行き 1〜2 は通りに面した家になる。
@@ -523,7 +516,6 @@ impl World {
                 && full
                 && wanted
                 && b.level < b.zone.max_level()
-                && !(b.form == LotForm::Lane && b.level == LANE_MAX_LEVEL)
                 && tick.since(b.leveled_at) >= LEVEL_UP_TICKS
                 && level_room.take(&self.network, b.entrance, b.tile_count())
             {
@@ -600,17 +592,8 @@ impl World {
                     continue;
                 };
                 assert!(headroom.take(&self.network, link, w * k));
-                // 低密度では、私道の敷地にできる大きさなら必ず私道にする。高密度では、大きさを決めたあとに
-                // 引くので、ほかの建物の位置と大きさは私道の有無に左右されない。
-                let lane_size = !is_diagonal(toward_road) && w == LANE_FRONTAGE;
-                let lane = if low {
-                    lane_size && k >= LANE_MIN_DEPTH
-                } else {
-                    lot_zone == Zone::Residential
-                        && lane_size
-                        && k >= LANE_PERCENT_MIN_DEPTH
-                        && r.below(100) < LANE_PERCENT
-                };
+                // 私道の敷地は低密度にだけ建つ。私道の敷地にできる大きさなら必ず私道にする。
+                let lane = low && !is_diagonal(toward_road) && w == LANE_FRONTAGE && k >= LANE_MIN_DEPTH;
                 let form = if lane { LotForm::Lane } else { LotForm::Street };
                 let id = self.place_building(lot_zone, front, toward_road, w, k, form);
                 stats = stats.with(self.buildings.get(id).expect("建てた建物がない"));
@@ -1016,34 +999,35 @@ mod tests {
         assert_eq!(again, w);
     }
 
-    /// 私道の敷地は、間口 2 マスで奥行き 4 マス以上の住宅だけに選ばれ、その一部になる。
+    /// 私道の敷地は低密度にだけ建つ。低密度では、間口 2 マスで奥行き 3 マス以上の住宅がすべて私道の敷地になり、
+    /// 高密度には建たない。
     #[test]
-    fn lane_lots_are_chosen_among_houses_of_the_right_size() {
-        let (mut lanes, mut eligible) = (0, 0);
+    fn lane_lots_are_built_only_in_low_density() {
+        let (mut lanes, mut high) = (0, 0);
         // 種 3 は、高速道路が通りの区画にかかって道路を引けない
         for seed in [0, 1, 2, 4, 5, 6] {
-            let mut w = served_street_with(seed);
-            run(&mut w, 30 * 60);
-            for (_, b) in w.buildings().iter() {
-                let x = b.area.max.x.abs_diff(b.area.min.x) + 1;
-                let y = b.area.max.y.abs_diff(b.area.min.y) + 1;
-                let (frontage, depth) = if b.toward_road.0 == 0 { (x, y) } else { (y, x) };
-                let fits = b.zone == Zone::Residential
-                    && !is_diagonal(b.toward_road)
-                    && frontage == LANE_FRONTAGE
-                    && depth >= LANE_PERCENT_MIN_DEPTH;
-                eligible += u32::from(fits);
-                if b.form == LotForm::Lane {
-                    assert!(fits, "{b:?}");
-                    lanes += 1;
+            for home in [Zone::ResidentialLow, Zone::Residential] {
+                let mut w = served_street_of(seed, home);
+                run(&mut w, 30 * 60);
+                for (_, b) in w.buildings().iter() {
+                    let x = b.area.max.x.abs_diff(b.area.min.x) + 1;
+                    let y = b.area.max.y.abs_diff(b.area.min.y) + 1;
+                    let (frontage, depth) = if b.toward_road.0 == 0 { (x, y) } else { (y, x) };
+                    let fits = !is_diagonal(b.toward_road)
+                        && frontage == LANE_FRONTAGE
+                        && depth >= LANE_MIN_DEPTH;
+                    if b.zone == Zone::ResidentialLow {
+                        assert_eq!(b.form == LotForm::Lane, fits, "{b:?}");
+                        lanes += u32::from(fits);
+                    } else if b.zone == Zone::Residential {
+                        assert_eq!(b.form, LotForm::Street, "{b:?}");
+                        high += 1;
+                    }
                 }
             }
         }
         assert!(lanes > 0, "私道の敷地が建たない");
-        assert!(
-            lanes < eligible,
-            "私道の敷地にしない建物がない：{lanes}/{eligible}"
-        );
+        assert!(high > 0, "高密度の住宅が建たない");
     }
 
     /// 私道の敷地の出入口と駐車場の出入りの位置は、どちらも私道の幅の中に取れる。行き止まりの端に
@@ -1053,7 +1037,7 @@ mod tests {
         let t = TILE_MM;
         let mut lanes = 0;
         for seed in [0, 1, 2, 4, 5, 6, 10] {
-            let mut w = served_street_with(seed);
+            let mut w = served_street_of(seed, Zone::ResidentialLow);
             run(&mut w, 30 * 60);
             let net = w.network();
             for (_, b) in w.buildings().iter() {
@@ -1103,33 +1087,21 @@ mod tests {
         assert!(lanes > 0, "私道の敷地が建たない");
     }
 
-    /// 私道の敷地は段階 2 で止まり、集合住宅に上がらない。ふつうの住宅は、これまでどおり段階 3 以上に上がる。
+    /// 高密度の住宅は、私道の敷地にならず、これまでどおり段階 3 以上に上がる。
     #[test]
-    fn lane_lots_stay_at_low_levels_while_street_homes_grow() {
-        let (mut lane_top, mut street_top, mut lanes) = (0, 0, 0);
+    fn high_density_homes_grow_past_level_two() {
+        let mut top = 0;
         for seed in [0, 1, 2] {
             let mut w = served_street_with(seed);
             run(&mut w, 10 * TICKS_PER_DAY);
             for (_, b) in w.buildings().iter() {
-                if b.zone.kind() != ZoneKind::Residential {
-                    continue;
-                }
-                if b.form == LotForm::Lane {
-                    lanes += 1;
-                    lane_top = lane_top.max(b.level);
-                    assert!(b.level <= LANE_MAX_LEVEL, "{seed} {b:?}");
-                    assert!(b.lane_plan().is_some(), "{seed} {b:?}");
-                } else {
-                    street_top = street_top.max(b.level);
+                if b.zone == Zone::Residential {
+                    assert_eq!(b.form, LotForm::Street, "{seed} {b:?}");
+                    top = top.max(b.level);
                 }
             }
         }
-        assert!(lanes > 0, "私道の敷地が建たない");
-        assert_eq!(lane_top, LANE_MAX_LEVEL, "私道の敷地が段階 2 まで育たない");
-        assert!(
-            street_top > LANE_MAX_LEVEL,
-            "ふつうの住宅が段階 3 に上がらない"
-        );
+        assert!(top > LOW_DENSITY_MAX_LEVEL, "高密度の住宅が段階 3 に上がらない");
     }
 
     /// 低密度の住宅は、一軒家の並ぶ形だけが建つ。縦横の道路沿いでは、間口 2、奥行き 3 以上はいつも私道の敷地で、
@@ -1348,31 +1320,32 @@ mod tests {
         assert_eq!(seen, [true, true], "どちらかの密度の住宅が建たない");
     }
 
-    /// 古い保存データにある段階 3 以上の私道の敷地は、ふつうの住宅と同じく上がれる。
+    /// 古い保存データにある高密度の私道の敷地は、私道の形を持たず、ふつうの住宅と同じく段階 5 まで上がれる。
     #[test]
-    fn legacy_lane_lots_above_the_cap_keep_growing() {
+    fn legacy_high_density_lane_lots_act_as_street_homes_and_keep_growing() {
         let mut w = served_street_with(0);
         run(&mut w, 4 * TICKS_PER_DAY);
         let before: Vec<(BuildingId, u8)> = w
             .buildings()
             .iter()
             .filter(|(_, b)| {
-                b.zone.kind() == ZoneKind::Residential
+                b.zone == Zone::Residential
                     && b.form == LotForm::Street
-                    && (LANE_MAX_LEVEL + 1..MAX_LEVEL).contains(&b.level)
+                    && (LOW_DENSITY_MAX_LEVEL..MAX_LEVEL).contains(&b.level)
             })
             .map(|(id, b)| (id, b.level))
             .collect();
-        assert!(!before.is_empty(), "段階 3 以上で上がれる住宅がない");
+        assert!(!before.is_empty(), "段階 2 以上で上がれる高密度の住宅がない");
         for (id, _) in &before {
             w.buildings.get_mut(*id).unwrap().form = LotForm::Lane;
+            assert!(w.buildings().get(*id).unwrap().lane_plan().is_none());
         }
         run(&mut w, 4 * TICKS_PER_DAY);
         assert!(
             before
                 .iter()
                 .any(|(id, level)| w.buildings().get(*id).unwrap().level > *level),
-            "段階 3 以上の私道の敷地が上がらない"
+            "古い高密度の私道の敷地が上がらない"
         );
     }
 

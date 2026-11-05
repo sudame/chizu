@@ -18,7 +18,7 @@ use crate::units::{LaneOffset, Tick};
 mod parking;
 
 pub use parking::{
-    APARTMENT_HOME_LOTS, HOUSE_GAP_MM, LANE_FRONTAGE, LANE_MAX_LEVEL, LANE_MIN_DEPTH,
+    APARTMENT_HOME_LOTS, HOUSE_GAP_MM, LANE_FRONTAGE, LANE_MIN_DEPTH,
     LANE_WIDTH_MM, LanePlan, NO_HOME_LOT_ONE_IN, ParkingCut, ParkingLayout, SLOT_DEPTH_MM,
     SLOT_WIDTH_MM, SLOTS_PER_TILE,
 };
