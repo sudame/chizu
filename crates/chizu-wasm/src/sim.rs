@@ -477,14 +477,14 @@ impl Sim {
     }
 
     /// 建物を、1 つにつき `[min の x, min の y, max の x, max の y, 区画の種類, 段階, 供給]` の 7 つの数で返す。
-    /// 区画の種類は `ZoneKind` の値（低密度の住宅も住宅の値）、供給は電気が届いていれば 1、水道が届いていれば 2 を足した値である。
+    /// 区画の種類は `Zone` の番号（高密度の住宅は 1、低密度の住宅は 5）、供給は電気が届いていれば 1、水道が届いていれば 2 を足した値である。
     pub fn buildings(&self) -> Vec<f64> {
         let mut out = Vec::new();
         for (_, b) in self.world.buildings().iter() {
             let a = b.area;
             out.extend([a.min.x, a.min.y, a.max.x, a.max.y].map(|v| v as f64));
             let supply = u8::from(b.supply.power) + 2 * u8::from(b.supply.water);
-            out.extend([b.zone.kind() as u8, b.level, supply].map(f64::from));
+            out.extend([b.zone as u8, b.level, supply].map(f64::from));
         }
         out
     }
@@ -1027,6 +1027,25 @@ mod tests {
         );
         assert!(sim.chunk_tiles_version(next) > v_next);
         assert_eq!(sim.chunk_tiles_version(far), v_far);
+    }
+
+    #[test]
+    fn buildings_send_the_zone_code_of_each_density() {
+        for (zone, code) in [(Zone::Residential, 1.0), (Zone::ResidentialLow, 5.0)] {
+            let mut sim = Sim::new(0);
+            sim.submit(road((10, 10), (30, 10))).unwrap();
+            sim.submit(Command::PaintZone {
+                area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+                zone: Some(zone),
+            })
+            .unwrap();
+            sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+            let buildings = sim.buildings();
+            assert!(!buildings.is_empty(), "{zone:?} の家が建たない");
+            for b in buildings.chunks(7) {
+                assert_eq!(b[4], code, "{zone:?}");
+            }
+        }
     }
 
     #[test]

@@ -15,6 +15,7 @@ import {
 } from "../protocol/messages.ts";
 import { hex } from "./palette.ts";
 import type { Geometry } from "./roads.ts";
+import { ZONE_RESIDENTIAL_LOW } from "./zones.ts";
 
 /** 駐車場の面の色（docs/map-style.md の色の表の「駐車場」）。 */
 export const LOT_FACE_COLOR = hex("#e3e1dc");
@@ -164,31 +165,73 @@ export const MIN_BODY = 0.3;
 
 const shortSide = (r: Rect) => Math.min(r.x1 - r.x0, r.y1 - r.y0);
 
+/** 通りに面した低密度の家で、棟と棟のあいだの最小の隙間（マス）。 */
+export const HOME_GAP_MIN = 0.1;
+
+/**
+ * 通りに面した低密度の家（奥行き 1〜2 の敷地）の棟の数。世帯の数（`Building::households` と同じ、
+ * 4 マスあたり段階ぶんの切り上げ）で、1 世帯を 1 棟にする。私道の敷地（家の長方形が届いているもの）と、
+ * 低密度でない建物は 1 である。棟は敷地の長い辺を割って並べるので、長い辺のマスの数を超えない。
+ */
+export function homeCount(zone: number, level: number, site: Rect, lot: Lot | undefined): number {
+  if (zone !== ZONE_RESIDENTIAL_LOW || (lot !== undefined && lot.houses.length > 0)) {
+    return 1;
+  }
+  const w = Math.round(site.x1 - site.x0);
+  const h = Math.round(site.y1 - site.y0);
+  const households = Math.ceil((w * h * level) / 4);
+  return Math.max(1, Math.min(households, Math.max(w, h)));
+}
+
+/** 長方形を長い辺（同じなら x）の向きに n 個へ割る。棟のあいだは `gap` だけ空ける。 */
+function splitHomes(r: Rect, n: number, gap: number): Rect[] {
+  if (n <= 1) {
+    return [r];
+  }
+  const alongX = r.x1 - r.x0 >= r.y1 - r.y0 - EPS;
+  const [a0, a1] = alongX ? [r.x0, r.x1] : [r.y0, r.y1];
+  const each = (a1 - a0 - gap * (n - 1)) / n;
+  return Array.from({ length: n }, (_, k) => {
+    const s = a0 + (each + gap) * k;
+    return alongX ? { ...r, x0: s, x1: s + each } : { ...r, y0: s, y1: s + each };
+  });
+}
+
 /**
  * 建物の本体の形。`site` を `inset` だけ縮めた長方形から、駐車場の切り欠きを除く。
  * `edge` は縁の幅で、縁の内側の本体は、切り欠きの側も縁の幅だけ内へ縮める。
  * 切り欠きを除いた本体のいちばん広い長方形が `MIN_BODY` を下回るときは、敷地を縮めずに（`inset` を 0 にして）作り直す。
+ * `homes` が 2 以上のときは、縮めた長方形を `homes` 個の棟に割ってから切り欠きを除く（通りに面した低密度の家）。
+ * 棟のあいだは `inset` の 2 倍（`HOME_GAP_MIN` を下回らない）だけ空けるので、標準の段でも棟が分かれて見える。
+ * 戻り値の `inner` は棟ごとの長方形の並びで、`parts` は棟ごとに分けた `inner` である。
  */
 export function bodyShape(
   site: Rect,
   inset: number,
   edge: number,
   lot: Lot | undefined,
-): { outer: Rect[]; inner: Rect[] } {
+  homes = 1,
+): { outer: Rect[]; inner: Rect[]; parts: Rect[][] } {
   // 私道の敷地は、中核の決めた家の長方形を、縮めずにそのまま本体にする
   if (lot !== undefined && lot.houses.length > 0) {
-    return { outer: lot.houses, inner: lot.houses.map((h) => grow(h, -edge)) };
+    const inner = lot.houses.map((h) => grow(h, -edge));
+    return { outer: lot.houses, inner, parts: inner.map((r) => [r]) };
   }
   const faces = lot?.faces ?? [];
   const build = (d: number) => {
-    const outer = grow(site, -d);
-    return {
-      outer: carve(outer, faces),
-      inner: carve(
-        grow(outer, -edge),
-        faces.map((f) => grow(f, edge)),
-      ),
-    };
+    const gap = Math.max(2 * d, HOME_GAP_MIN);
+    const outer: Rect[] = [];
+    const parts: Rect[][] = [];
+    for (const home of splitHomes(grow(site, -d), homes, gap)) {
+      outer.push(...carve(home, faces));
+      parts.push(
+        carve(
+          grow(home, -edge),
+          faces.map((f) => grow(f, edge)),
+        ),
+      );
+    }
+    return { outer, inner: parts.flat(), parts };
   };
   const shape = build(inset);
   const widest = largestPiece(shape.outer);

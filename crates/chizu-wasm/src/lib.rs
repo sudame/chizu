@@ -157,7 +157,7 @@ impl Simulation {
         self.0.buildings_version()
     }
 
-    /// 建物ごとに `[min の x, min の y, max の x, max の y, 区画の種類, 段階, 供給]`。
+    /// 建物ごとに `[min の x, min の y, max の x, max の y, 区画の種類, 段階, 供給]`。区画の種類は `Zone` の番号（高密度の住宅は 1、低密度の住宅は 5）。
     pub fn buildings(&self) -> Vec<f64> {
         self.0.buildings()
     }
