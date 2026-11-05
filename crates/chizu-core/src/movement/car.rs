@@ -276,47 +276,41 @@ pub(super) fn keep_lane(rows: &mut [Option<Trip>], net: &Network, i: usize, inde
     }
 }
 
-/// 車線の後ろの 2 台の、車線のリンクの始まりからの位置（mm）と速さ（mm/tick）。通り抜けの区間に入って
-/// この車線へ向かう車も含め、その位置はノードの手前にいるので 0 か負になる。
-#[derive(Clone, Copy)]
-pub(super) struct Tail {
-    last: (i64, i64),
-    next: Option<(i64, i64)>,
-}
+/// 車線の上の車の、車線のリンクの始まりからの位置（mm）と速さ（mm/tick）。後ろから順に並ぶ。通り抜けの区間に
+/// 入ってこの車線へ向かう車も含め、その位置はノードの手前にいるので 0 か負になる。
+#[derive(Clone, Default)]
+pub(super) struct Tail(Vec<(i64, i64)>);
 
 impl Tail {
     fn add(tails: &mut BTreeMap<LaneId, Tail>, lane: LaneId, at: i64, v: MmPerTick) {
-        let car = (at, i64::from(v.0));
-        let Some(t) = tails.get_mut(&lane) else {
-            tails.insert(
-                lane,
-                Tail {
-                    last: car,
-                    next: None,
-                },
-            );
-            return;
-        };
-        if car.0 < t.last.0 {
-            t.next = Some(t.last);
-            t.last = car;
-        } else if t.next.is_none_or(|n| car.0 < n.0) {
-            t.next = Some(car);
-        }
+        let cars = &mut tails.entry(lane).or_default().0;
+        let k = cars.partition_point(|c| c.0 <= at);
+        cars.insert(k, (at, i64::from(v.0)));
+    }
+
+    /// 最後尾。
+    fn last(&self) -> (i64, i64) {
+        self.0[0]
     }
 
     /// 最後尾が `need` より先まで進んでいそうか。最後尾が交差点を抜けていく車（`leaving`）なら、入る車が抜けきる所に
-    /// 着くまでの `ticks` tick のあいだ同じ速さで進むとみなす。ただし、その前の車が同じ速さで進んだ所から車間を
-    /// 空けた所と、その車線の停止線 `stop` までしか進まない。そうでなければ `base` tick のあいだ進むとみなす。交差点を抜けていく車の後ろに
-    /// 続く車を、前の車が交差点を抜けきるまで待たせないためである。
+    /// 着くまでの `ticks` tick のあいだ、車線の車がそれぞれ同じ速さで進むとみなす。ただし、どの車も前の車から車間を
+    /// 空けた所までしか進まず、先頭の車はその車線の停止線 `stop` までしか進まない。そうでなければ、最後尾が `base`
+    /// tick のあいだ進むとみなす。交差点を抜けていく車の後ろに続く車を、前の車が交差点を抜けきるまで待たせない
+    /// ためである。
     fn roomy(&self, base: i64, ticks: i64, leaving: bool, stop: i64, need: i64) -> bool {
-        let (at, v) = self.last;
+        let (at, v) = self.last();
         if !leaving {
             return at + v * base >= need;
         }
-        let mut reach = (at + v * ticks).min(stop);
-        if let Some((a, w)) = self.next {
-            reach = reach.min(a + w * ticks - i64::from(SPACING));
+        let mut reach = i64::MAX;
+        for (k, &(a, w)) in self.0.iter().enumerate().rev() {
+            let free = if k + 1 == self.0.len() {
+                (a + w * ticks).min(stop.max(a))
+            } else {
+                a + w * ticks
+            };
+            reach = free.min(reach.saturating_sub(i64::from(SPACING)));
         }
         reach >= need
     }
@@ -327,7 +321,7 @@ impl Tail {
 pub(super) struct LaneState {
     count: BTreeMap<LaneId, u32>,
     rear: BTreeMap<LaneId, (LaneOffset, MmPerTick)>,
-    /// 車線ごとの後ろの 2 台。通り抜けの区間に入ってこの車線へ向かう車も含める。
+    /// 車線ごとの車。通り抜けの区間に入ってこの車線へ向かう車も含める。
     tails: BTreeMap<LaneId, Tail>,
 }
 
@@ -355,8 +349,8 @@ impl LaneState {
     fn last(&self, lane: LaneId) -> Option<(i64, MmPerTick)> {
         self.tails.get(&lane).map(|t| {
             (
-                t.last.0,
-                MmPerTick(i32::try_from(t.last.1).expect("速さが i32 に収まらない")),
+                t.last().0,
+                MmPerTick(i32::try_from(t.last().1).expect("速さが i32 に収まらない")),
             )
         })
     }
@@ -1213,7 +1207,7 @@ pub(super) fn step(
             let stop = i64::from(stop_line(net, next).0);
             // 最後尾が交差点を抜けていく車かは、この tick に動く前の位置で決め、`exit_lane` と同じ見込みにする。
             if last.get(&lane).is_some_and(|tail| {
-                let (r, v) = tail.last;
+                let (r, v) = tail.last();
                 !tail.roomy(0, ticks, r - v < clear, stop, need)
             }) {
                 (t.offset, t.speed) = (LaneOffset(line), MmPerTick::ZERO);
