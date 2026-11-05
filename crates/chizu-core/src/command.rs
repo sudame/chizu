@@ -370,7 +370,10 @@ impl fmt::Display for InvalidCommand {
                 write!(f, "税率 {p}‰ は上限の {MAX_TAX_PERMILLE}‰ を超えている")
             }
             InvalidCommand::ParkingFeeTooHigh(fee) => {
-                write!(f, "駐車場の料金 {fee} は上限の {MAX_PARKING_FEE} を超えている")
+                write!(
+                    f,
+                    "駐車場の料金 {fee} は上限の {MAX_PARKING_FEE} を超えている"
+                )
             }
             InvalidCommand::BadRotation(r) => write!(f, "建物の向き {r} は 0 から 3 の外にある"),
             InvalidCommand::OutOfWorld => {

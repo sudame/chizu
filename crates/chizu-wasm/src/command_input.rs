@@ -541,7 +541,8 @@ mod tests {
 
     #[test]
     fn accepts_set_parking_fee() {
-        let fee = |fee: Field| object(&[("kind", Field::Text("SetParkingFee".into())), ("fee", fee)]);
+        let fee =
+            |fee: Field| object(&[("kind", Field::Text("SetParkingFee".into())), ("fee", fee)]);
         assert_eq!(
             fee(Field::Number(30.0)),
             Ok(Command::SetParkingFee { fee: 30 })
