@@ -279,6 +279,81 @@ mod tests {
         set_home_spaces_limit(None);
     }
 
+    /// 前の道路が消えて道路に面さなくなった駐車場は、貸さないので世帯は車を持てないが、
+    /// 範囲の中にあるので理由は「範囲に駐車場がない」ではなく「道路に面していない」になる。範囲の外の世帯は今までどおりである。
+    /// 道路を引き直すと、駐車場を借りる世帯が出て、理由は満車か待ちに戻る。
+    #[test]
+    fn a_lot_cut_off_from_the_road_is_told_apart_from_no_lot() {
+        set_home_spaces_limit(Some(0));
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run(&mut w, TICKS_PER_DAY);
+        let place = Command::PlaceBuilding {
+            kind: ServiceKind::ParkingLot,
+            at: TilePos::new(-20, 9),
+            rotation: 2,
+        };
+        assert_eq!(w.apply(&place), ApplyOutcome::Applied);
+        let corner = w.facilities().last().unwrap().area.min;
+        let lot_of = |w: &World| {
+            *w.facilities()
+                .iter()
+                .find(|f| f.area.min == corner)
+                .unwrap()
+        };
+        assert!(lot_of(&w).entrance.is_some());
+        let (a, b) = (TilePos::new(-30, 10), TilePos::new(-10, 10));
+        let cut = Command::Bulldoze {
+            area: crate::tile::TileRect::from_corners(a, b),
+        };
+        assert_eq!(w.apply(&cut), ApplyOutcome::Applied);
+        let lot = lot_of(&w);
+        assert!(lot.entrance.is_none(), "駐車場の入口が残っている");
+        // 取り壊しと違い、道路が消えても借りていた世帯の枠は残る。新しく借りる世帯は出ない
+        let kept = renters(&w);
+        run(&mut w, TICKS_PER_DAY);
+        assert_eq!(renters(&w), kept, "道路に面さない駐車場を新しく借りた");
+        let hash = w.state_hash();
+        let carless = w.carless_households();
+        assert_eq!(w.state_hash(), hash, "読み取りが状態を変えた");
+        assert_eq!(carless.len() + renters(&w), housed(&w));
+        let within = |c: &Carless| {
+            let (dx, dy) = (c.front.x - lot.front.x, c.front.y - lot.front.y);
+            dx * dx + dy * dy <= 32 * 32
+        };
+        assert!(
+            carless.iter().any(within) && carless.iter().any(|c| !within(c)),
+            "範囲の内と外の世帯がそろっていない"
+        );
+        for c in &carless {
+            let want = if within(c) {
+                CarlessReason::LotNotOnRoad
+            } else {
+                CarlessReason::NoLotInRange
+            };
+            assert_eq!(c.reason, want, "{c:?}");
+        }
+
+        // 道路を引き直すと入口が戻り、範囲の中の世帯は借りるか、満車か待ちになる
+        let road = Command::BuildRoad {
+            from: a,
+            to: b,
+            kind: crate::command::RoadKind::Small,
+        };
+        assert_eq!(w.apply(&road), ApplyOutcome::Applied);
+        assert!(lot_of(&w).entrance.is_some(), "入口が戻らない");
+        run(&mut w, TICKS_PER_DAY);
+        assert!(renters(&w) > kept, "引き直しても借りる世帯が増えない");
+        let back = w.carless_households();
+        assert_eq!(count(&back, CarlessReason::LotNotOnRoad), 0);
+        assert!(
+            back.iter()
+                .filter(|c| within(c))
+                .all(|c| matches!(c.reason, CarlessReason::Full | CarlessReason::Waiting)),
+            "範囲の中の理由が満車か待ちに戻っていない"
+        );
+        set_home_spaces_limit(None);
+    }
+
     fn at(x: i64, y: i64, reason: CarlessReason) -> Carless {
         Carless {
             household: crate::id::HouseholdId {

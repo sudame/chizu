@@ -340,7 +340,7 @@ describe("車を持てない世帯の知らせ", () => {
     const none = parseGrowthBlocks([]);
     const key = (carless: number[]) =>
       growthNotices(none, [], [], [], [], parseCarless(carless))[0]?.key;
-    expect(key(flat)).toBe(key([121, 80, 31, 10, 0, 44, 12, 51]));
+    expect(key(flat)).toBe(key([121, 80, 31, 10, 0, 0, 44, 12, 51]));
     expect(growthNotices(none, [], [], [], [], parseCarless([0, 0, 0, 0, 0, 0]))).toEqual([]);
     const shown = growthNotices(none, [], [], [], [], parseCarless(flat));
     const first = reconcile(emptyMemory(), shown, 100);
