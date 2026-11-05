@@ -13,9 +13,9 @@ import {
 describe("凡例", () => {
   test("区画・建物・印・施設・道路・移動体の順に並ぶ。交通は主題図の凡例に出す", () => {
     const sections = legendSections();
-    expect(sections.map((s) => s.items.length)).toEqual([4, 4, 2, 2, 4, 2]);
+    expect(sections.map((s) => s.items.length)).toEqual([4, 4, 2, 4, 4, 2]);
     expect(sections[0]?.items.map((i) => i.label)).toEqual(["住宅", "商業", "工業", "オフィス"]);
-    expect(sections[3]?.items.map((i) => i.label)).toEqual(["発電所", "浄水場"]);
+    expect(sections[3]?.items.map((i) => i.label)).toEqual(["発電所", "浄水場", "平面の駐車場", "駐車場ビル"]);
     expect(sections[4]?.items.map((i) => i.label)).toEqual([
       "小さい道路",
       "中くらいの道路",
