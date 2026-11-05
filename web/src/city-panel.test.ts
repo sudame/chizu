@@ -92,41 +92,71 @@ describe("街の数字", () => {
     expect(formatUtilities(unknown)).toBe("電気 3,600 / 需要 3,500・水道 5,000 / 需要 3,500");
   });
 
-  test("余りが減っているときだけ、施設 1 基で増える人数と足りなくなるまでの時間を出す", () => {
-    // 電気の余りは 1 日で 1,800 人分から 1,200 人分へ減り、あと 2 日。水道は 3,000 人分のまま。
-    const at = (power: number, water: number) => {
+  test("需要が伸びているときだけ、施設 1 基で増える人数と足りなくなるまでの時間を出す", () => {
+    // 主の網の需要が 1 日で 2,500 から 3,000 へ伸びた。電気の余りは 600、水道の余りは 2,000。
+    const at = (demand: number, power = 3600) => {
       const v = new Array(CITY_STATS_LENGTH).fill(0);
-      v.splice(7, 3, 3600, 5000, 3500); // 供給量と需要（合計）
-      v.splice(16, 3, 3600, 5000, 3500); // 主の網
-      v.splice(21, 5, power, water, 1, 1507, 1180); // 余りの人数、決まるか、1 基の人数
+      v.splice(7, 3, power, 5000, demand); // 供給量と需要（合計）
+      v.splice(16, 3, power, 5000, demand); // 主の網
+      v.splice(21, 5, 0, 0, 1, 1507, 1180); // 余りの人数（ここでは使わない）、決まるか、1 基の人数
       return parseCityStats(v);
     };
+    const hintsAt = (stats: ReturnType<typeof at>, tick: number) =>
+      utilityTrendHints(stats, trackUtilityTrends(stats, tick));
     resetUtilityTrends();
-    trackUtilityTrends(at(1800, 3000), 0);
-    const trends = trackUtilityTrends(at(1200, 3000), 7200);
-    expect(utilityTrendHints(at(1200, 3000), trends)).toEqual([
-      "電気：発電所 1 基で 約 1,500 人分。このペースだと 約 2 日で足りなくなる",
+    hintsAt(at(2500), 0);
+    // 電気は 600 ÷ 500 日 = 28.8 時間、水道は 2,000 ÷ 500 日 = 4 日
+    expect(hintsAt(at(3000), 7200)).toEqual([
+      "電気：発電所 1 基で 約 1,500 人分。このペースだと 約 28 時間で足りなくなる",
+      "水道：浄水場 1 基で 約 1,180 人分。このペースだと 約 4 日で足りなくなる",
     ]);
-    // 半日で 1,800 人分から 900 人分へ減ると、あと半日（12 時間）
+    // 朝に短い間隔で見ても、1 日前の同じ時刻との差で決まるので、直前の控えとの差には引きずられない
     resetUtilityTrends();
-    trackUtilityTrends(at(1800, 3000), 0);
-    expect(utilityTrendHints(at(900, 3000), trackUtilityTrends(at(900, 3000), 3600))).toEqual([
-      "電気：発電所 1 基で 約 1,500 人分。このペースだと 約 12 時間で足りなくなる",
+    hintsAt(at(2500), 0);
+    hintsAt(at(2900), 6900);
+    expect(hintsAt(at(3000), 7200)).toEqual([
+      "電気：発電所 1 基で 約 1,500 人分。このペースだと 約 28 時間で足りなくなる",
+      "水道：浄水場 1 基で 約 1,180 人分。このペースだと 約 4 日で足りなくなる",
     ]);
-    // 減っていない、足りない、まだ 1 時間たっていないときは出さない
+    // 施設を足すと余りは増えるが、需要の伸びは変わらないので、見積もれて、尽きるまでが延びるだけ
     resetUtilityTrends();
-    trackUtilityTrends(at(1000, 3000), 0);
-    expect(utilityTrendHints(at(1000, 3000), trackUtilityTrends(at(1000, 3000), 7200))).toEqual([]);
+    hintsAt(at(2500), 0);
+    hintsAt(at(2500, 7200), 3600);
+    expect(hintsAt(at(3000, 7200), 7200)[0]).toBe(
+      "電気：発電所 1 基で 約 1,500 人分。このペースだと 約 8 日で足りなくなる",
+    );
+  });
+
+  test("伸びていない、足りない、1 日前の控えがないときは足りなくなるまでを出さない", () => {
+    const at = (demand: number, power = 3600, known = 1) => {
+      const v = new Array(CITY_STATS_LENGTH).fill(0);
+      v.splice(7, 3, power, 5000, demand);
+      v.splice(16, 3, power, 5000, demand);
+      v.splice(21, 5, 0, 0, known, 1507, 1180);
+      return parseCityStats(v);
+    };
+    const hintsAt = (stats: ReturnType<typeof at>, tick: number) =>
+      utilityTrendHints(stats, trackUtilityTrends(stats, tick));
+    // 需要が伸びていない
     resetUtilityTrends();
-    trackUtilityTrends(at(1000, 3000), 0);
-    expect(utilityTrendHints(at(-50, 3000), trackUtilityTrends(at(-50, 3000), 7200))).toEqual([]);
+    hintsAt(at(3000), 0);
+    expect(hintsAt(at(3000), 7200)).toEqual([]);
+    // 電気がすでに足りない（水道はまだ余りがあるので、水道だけ出る）
     resetUtilityTrends();
-    trackUtilityTrends(at(1800, 3000), 0);
-    expect(utilityTrendHints(at(1200, 3000), trackUtilityTrends(at(1200, 3000), 299))).toEqual([]);
-    // 人数が決まらないときは出さず、控えも捨てる
+    hintsAt(at(2500), 0);
+    expect(hintsAt(at(3700), 7200).map((h) => h.slice(0, 2))).toEqual(["水道"]);
+    // まだ 1 日たっていない
     resetUtilityTrends();
-    const unknown = parseCityStats([5, 0, 0, 0, 0, 0, 0, 3600, 5000, 3500]);
-    expect(utilityTrendHints(unknown, trackUtilityTrends(unknown, 7200))).toEqual([]);
+    hintsAt(at(2500), 0);
+    expect(hintsAt(at(3000), 7199)).toEqual([]);
+    // 1 日前をはさむ控えがない（控えを捨てた直後。前の控えは 1 時間前だけ）
+    resetUtilityTrends();
+    hintsAt(at(2900), 3600);
+    expect(hintsAt(at(3000), 7200)).toEqual([]);
+    // 人数が決まらないときは出さない
+    resetUtilityTrends();
+    hintsAt(at(2500, 3600, 0), 0);
+    expect(hintsAt(at(3000, 3600, 0), 7200)).toEqual([]);
   });
 
   test("足りないときは、足りない人数で言う", () => {

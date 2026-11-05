@@ -1,73 +1,107 @@
-// 電気と水道の余り（住民の何人分か）の減り方。画面だけの見積もりで、状態には入れない。
-// 式は chizu-core の service::headroom_trend と同じで、整数で切り捨てる。
+// 電気と水道の余りが尽きるまでの見積もり。画面だけの値で、状態には入れない。
+// 式は chizu-core の service::demand_trend と同じで、整数で切り捨てる。
+// 余りの差ではなく、1 日前の同じ時刻からの需要の伸びを使う。施設を足しても需要は変わらないので、足した直後でも見積もれ、
+// 朝の建設の波を 1 日の伸びと取り違えない。
 
 /** 1 日の tick の数。chizu-core の TICKS_PER_DAY と同じ。 */
 export const TICKS_PER_DAY = 7200;
 
-/** 減り方を求めるのに要る最短の間隔（tick）。ゲーム内の 1 時間。chizu-core の MIN_TREND_TICKS と同じ。 */
+/** 時計の 1 時間の tick の数。chizu-core の MIN_TREND_TICKS と同じ。 */
 export const MIN_TREND_TICKS = TICKS_PER_DAY / 24;
 
-/** 余りの控えを足す間隔（tick）。これより短いあいだは足さない。 */
+/** 需要の控えを足す間隔（tick）。これより短いあいだは足さない。 */
 const SAMPLE_GAP_TICKS = 60;
 
 /**
- * 余りがこれ（人数）より増えたら、施設を足したなどで流れが変わったとみなし、前の控えを捨てる。
- * 人口の端数の揺れでは捨てない大きさにする。
+ * 1 日前をはさむ 2 つの控えの最大の間隔（tick）。ゲーム内の 6 時間。
+ * 画面は数十 tick ごとに控えを足すので、ふつうは超えない。超えるのは、タブを閉じていたあとなど。
  */
-const RESET_RISE_PEOPLE = 50;
+const MAX_BRACKET_TICKS = TICKS_PER_DAY / 4;
 
-/** ある時点の、余りの人数。 */
-export type HeadroomSample = { tick: number; people: number };
+/** ある時点の、主の網の需要。 */
+export type DemandSample = { tick: number; demand: number };
 
 /**
- * 控えを足す。控えは直近 1 日分だけ持つ。
- * tick が戻ったとき（読み込みや新しい街）と、余りが大きく増えたとき（施設を足したとき）は、そこから数え直す。
+ * 控えを足す。控えは、1 日前をはさむのに要る分（はさむ間隔を含めて 1 日強）だけ持つ。
+ * tick が戻ったとき（読み込みや新しい街）は、そこから数え直す。
  */
-export function pushHeadroomSample(
-  series: readonly HeadroomSample[],
+export function pushDemandSample(
+  series: readonly DemandSample[],
   tick: number,
-  people: number,
-): HeadroomSample[] {
+  demand: number,
+): DemandSample[] {
   const last = series[series.length - 1];
-  if (last === undefined || tick < last.tick || people > last.people + RESET_RISE_PEOPLE) {
-    return [{ tick, people }];
+  if (last === undefined || tick < last.tick) {
+    return [{ tick, demand }];
   }
   if (tick - last.tick < SAMPLE_GAP_TICKS) {
     return [...series];
   }
-  return [...series, { tick, people }].filter((s) => s.tick >= tick - TICKS_PER_DAY);
+  const keepFrom = tick - TICKS_PER_DAY - MAX_BRACKET_TICKS;
+  return [...series, { tick, demand }].filter((s) => s.tick >= keepFrom);
+}
+
+/**
+ * tick の 1 日前の需要を、その tick をはさむ 2 つの控えを直線でつないで求める。
+ * chizu-core の interpolate_demand と同じく、増減の小数は 0 向きに切り捨てる。
+ * 街がまだ 1 日たっていないとき、はさむ控えがないとき、離れすぎているときは null。
+ */
+export function demandADayAgo(series: readonly DemandSample[], tick: number): number | null {
+  const target = tick - TICKS_PER_DAY;
+  if (target < 0) {
+    return null;
+  }
+  let lo: DemandSample | undefined;
+  let hi: DemandSample | undefined;
+  for (const s of series) {
+    if (s.tick <= target) {
+      lo = s;
+    }
+    if (s.tick >= target && hi === undefined) {
+      hi = s;
+    }
+  }
+  if (lo === undefined || hi === undefined || hi.tick - lo.tick > MAX_BRACKET_TICKS) {
+    return null;
+  }
+  if (hi.tick === lo.tick) {
+    return lo.demand === hi.demand ? lo.demand : null;
+  }
+  return (
+    lo.demand + Math.trunc(((hi.demand - lo.demand) * (target - lo.tick)) / (hi.tick - lo.tick))
+  );
 }
 
 export type HeadroomTrend =
   | { kind: "short" }
   | { kind: "notShrinking" }
-  | { kind: "shrinking"; dropPerDay: number; ticksUntilOut: number };
+  | { kind: "shrinking"; growthPerDay: number; ticksUntilOut: number };
 
 /**
- * 控えのいちばん古い値といまの値から、このペースの先を見積もる。
- * 控えが 1 時間分に満たないとき、控えがないときは null。
+ * 余り（供給量 − 需要。人数ではなく、供給量と同じ単位）と、1 日前の同じ時刻からの需要の伸びから、このペースの先を見積もる。
+ * 1 日前の需要が決まらないときは null。
  */
-export function headroomTrend(
-  series: readonly HeadroomSample[],
+export function demandTrend(
+  series: readonly DemandSample[],
   tick: number,
-  people: number,
+  demand: number,
+  headroom: number,
 ): HeadroomTrend | null {
-  const first = series[0];
-  if (first === undefined || tick - first.tick < MIN_TREND_TICKS) {
+  const before = demandADayAgo(series, tick);
+  if (before === null) {
     return null;
   }
-  if (people < 0) {
+  if (headroom < 0) {
     return { kind: "short" };
   }
-  const elapsed = tick - first.tick;
-  const drop = first.people - people;
-  if (drop <= 0) {
+  const growth = demand - before;
+  if (growth <= 0) {
     return { kind: "notShrinking" };
   }
   return {
     kind: "shrinking",
-    dropPerDay: Math.floor((drop * TICKS_PER_DAY) / elapsed),
-    ticksUntilOut: Math.floor((people * elapsed) / drop),
+    growthPerDay: growth,
+    ticksUntilOut: Math.floor((headroom * TICKS_PER_DAY) / growth),
   };
 }
 

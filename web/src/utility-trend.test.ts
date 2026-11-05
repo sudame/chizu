@@ -1,65 +1,109 @@
 import { describe, expect, test } from "vitest";
 import {
+  demandADayAgo,
+  demandTrend,
   formatTimeUntilOut,
-  headroomTrend,
   MIN_TREND_TICKS,
-  pushHeadroomSample,
+  pushDemandSample,
   TICKS_PER_DAY,
 } from "./utility-trend.ts";
 
-describe("余りの減り方", () => {
-  test("減っているなら、1 日あたりの減りと尽きるまでの tick を整数で求める", () => {
-    // chizu-core の headroom_trend のテストと同じ数
-    const series = [{ tick: 0, people: 1500 }];
-    expect(headroomTrend(series, TICKS_PER_DAY, 1000)).toEqual({
+describe("需要の伸びからの見積もり", () => {
+  test("伸びているなら、尽きるまでの tick を整数で求める", () => {
+    // chizu-core の demand_trend のテストと同じ数。余り 1,000 で、需要が 1 日に 500 伸びる。
+    const series = [{ tick: 0, demand: 1000 }];
+    expect(demandTrend(series, TICKS_PER_DAY, 1500, 1000)).toEqual({
       kind: "shrinking",
-      dropPerDay: 500,
+      growthPerDay: 500,
       ticksUntilOut: 2 * TICKS_PER_DAY,
     });
-    expect(headroomTrend(series, TICKS_PER_DAY / 2, 1000)).toEqual({
+    // 伸びが倍なら、尽きるのは半分の時間
+    expect(demandTrend(series, TICKS_PER_DAY, 2000, 1000)).toEqual({
       kind: "shrinking",
-      dropPerDay: 1000,
+      growthPerDay: 1000,
       ticksUntilOut: TICKS_PER_DAY,
     });
   });
 
-  test("増えたか同じなら減っていない、負なら足りない", () => {
-    const series = [{ tick: 0, people: 1000 }];
-    expect(headroomTrend(series, TICKS_PER_DAY, 1500)).toEqual({ kind: "notShrinking" });
-    expect(headroomTrend(series, TICKS_PER_DAY, 1000)).toEqual({ kind: "notShrinking" });
-    expect(headroomTrend(series, TICKS_PER_DAY, -1)).toEqual({ kind: "short" });
+  test("伸びていなければ減っていない、余りが負なら足りない", () => {
+    const series = [{ tick: 0, demand: 1000 }];
+    expect(demandTrend(series, TICKS_PER_DAY, 1000, 500)).toEqual({ kind: "notShrinking" });
+    expect(demandTrend(series, TICKS_PER_DAY, 900, 500)).toEqual({ kind: "notShrinking" });
+    expect(demandTrend(series, TICKS_PER_DAY, 1500, -1)).toEqual({ kind: "short" });
   });
 
-  test("1 時間に満たないあいだと、控えがないあいだは見積もらない", () => {
-    const series = [{ tick: 0, people: 1500 }];
-    expect(headroomTrend(series, MIN_TREND_TICKS - 1, 1000)).toBeNull();
-    expect(headroomTrend(series, MIN_TREND_TICKS, 1000)?.kind).toBe("shrinking");
-    expect(headroomTrend([], 100, 1000)).toBeNull();
+  test("余りが増えても（施設を足しても）、伸びは変わらない", () => {
+    const series = [{ tick: 0, demand: 1000 }];
+    const a = demandTrend(series, TICKS_PER_DAY, 1300, 300);
+    const b = demandTrend(series, TICKS_PER_DAY, 1300, 3900);
+    expect(a?.kind === "shrinking" && b?.kind === "shrinking" && a.growthPerDay).toBe(300);
+    expect(b).toEqual({ kind: "shrinking", growthPerDay: 300, ticksUntilOut: 13 * TICKS_PER_DAY });
+  });
+
+  test("1 日前の控えがないあいだは見積もらない", () => {
+    expect(demandTrend([], TICKS_PER_DAY, 1500, 1000)).toBeNull();
+    const series = [{ tick: 0, demand: 1000 }];
+    expect(demandTrend(series, TICKS_PER_DAY - 1, 1500, 1000)).toBeNull();
+    expect(demandTrend(series, TICKS_PER_DAY, 1500, 1000)?.kind).toBe("shrinking");
+  });
+});
+
+describe("1 日前の需要", () => {
+  test("その tick をはさむ 2 つの控えを直線でつなぐ（小数は 0 向きに切り捨て）", () => {
+    const series = [
+      { tick: 0, demand: 1000 },
+      { tick: 1200, demand: 1200 },
+    ];
+    expect(demandADayAgo(series, TICKS_PER_DAY + 600)).toBe(1100);
+    expect(demandADayAgo(series, TICKS_PER_DAY)).toBe(1000);
+    // chizu-core の interpolate_demand と同じ向き
+    expect(
+      demandADayAgo(
+        [
+          { tick: 100, demand: 1000 },
+          { tick: 400, demand: 995 },
+        ],
+        TICKS_PER_DAY + 200,
+      ),
+    ).toBe(999);
+  });
+
+  test("はさむ控えがないとき、離れすぎているときは求めない", () => {
+    expect(demandADayAgo([{ tick: 100, demand: 1000 }], TICKS_PER_DAY)).toBeNull();
+    expect(demandADayAgo([{ tick: 0, demand: 1000 }], TICKS_PER_DAY + 5)).toBeNull();
+    const far = [
+      { tick: 0, demand: 1000 },
+      { tick: TICKS_PER_DAY / 2, demand: 1100 },
+    ];
+    expect(demandADayAgo(far, TICKS_PER_DAY + 1800)).toBeNull();
   });
 });
 
 describe("控え", () => {
-  test("間隔が短いあいだは足さず、1 日より古い控えは捨てる", () => {
-    let s = pushHeadroomSample([], 0, 1000);
-    s = pushHeadroomSample(s, 10, 990);
-    expect(s).toEqual([{ tick: 0, people: 1000 }]);
-    s = pushHeadroomSample(s, 100, 990);
-    s = pushHeadroomSample(s, TICKS_PER_DAY + 50, 900);
+  test("間隔が短いあいだは足さず、1 日とはさむ間隔より古い控えは捨てる", () => {
+    let s = pushDemandSample([], 0, 1000);
+    s = pushDemandSample(s, 10, 990);
+    expect(s).toEqual([{ tick: 0, demand: 1000 }]);
+    s = pushDemandSample(s, 100, 990);
+    s = pushDemandSample(s, TICKS_PER_DAY + 1800 + 50, 900);
     expect(s).toEqual([
-      { tick: 100, people: 990 },
-      { tick: TICKS_PER_DAY + 50, people: 900 },
+      { tick: 100, demand: 990 },
+      { tick: TICKS_PER_DAY + 1800 + 50, demand: 900 },
     ]);
   });
 
-  test("tick が戻ったときと、余りが大きく増えたとき（施設を足したとき）は数え直す", () => {
+  test("tick が戻ったとき（読み込みや新しい街）は数え直す", () => {
     const s = [
-      { tick: 1000, people: 800 },
-      { tick: 2000, people: 700 },
+      { tick: 1000, demand: 800 },
+      { tick: 2000, demand: 700 },
     ];
-    expect(pushHeadroomSample(s, 500, 650)).toEqual([{ tick: 500, people: 650 }]);
-    expect(pushHeadroomSample(s, 3000, 2200)).toEqual([{ tick: 3000, people: 2200 }]);
-    // 端数の揺れでは数え直さない
-    expect(pushHeadroomSample(s, 3000, 720)).toHaveLength(3);
+    expect(pushDemandSample(s, 500, 650)).toEqual([{ tick: 500, demand: 650 }]);
+  });
+
+  test("施設を足したなどで余りが変わっても、控えは捨てない", () => {
+    // 控えは需要だけを持つので、供給量の変化は関わらない
+    const s = pushDemandSample(pushDemandSample([], 0, 1000), 3000, 1200);
+    expect(s).toHaveLength(2);
   });
 });
 

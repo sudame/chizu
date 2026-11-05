@@ -193,49 +193,60 @@ pub fn facility_people(kind: ServiceKind, total_demand: u64, citizens: u64) -> O
     Some(u64::try_from(people).expect("供給量は正なので人数は負にならない"))
 }
 
-/// 余りの人数（[`headroom_people`]）が、このペースでどう動くか。
+/// 余りが、このペースでどう動くか。量の単位は呼び出し側が決める（供給量と同じ単位でも、人数でもよい）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeadroomTrend {
     /// すでに足りない（余りが負）。
     Short,
-    /// 余りが減っていない（増えたか、同じ）。`per_day` は 1 日あたりの増え（0 以上）。
+    /// 需要が増えていない（減ったか、同じ）。`per_day` は 1 日あたりの余りの増え（0 以上）。
     NotShrinking { per_day: i128 },
-    /// 余りが減っている。`drop_per_day` は 1 日あたりの減り（正）、
-    /// `ticks_until_out` は同じ減り方が続くとして、余りが 0 を割るまでの tick の数。
+    /// 需要が増えて、余りが減っている。`drop_per_day` は 1 日あたりの余りの減り（正）、
+    /// `ticks_until_out` は同じ伸びが続くとして、余りが 0 を割るまでの tick の数。
     Shrinking {
         drop_per_day: i128,
         ticks_until_out: u64,
     },
 }
 
-/// 減り方を求めるのに要る最短の間隔（tick）。ゲーム内の 1 時間である。これより短いと、人口の端数の揺れが減りに見えてしまう。
+/// 減り方を求めるのに要る最短の間隔（tick）。ゲーム内の 1 時間である。画面が見積もりを出し始める最短の控えにも使う。
 pub const MIN_TREND_TICKS: u64 = crate::clock::TICKS_PER_DAY / 24;
 
-/// `elapsed_ticks` 前の余りの人数 `before` と、いまの `now` から、このペースの先を見積もる。読み取り用で、状態には入れない。
+/// 需要の伸びから、余りの先を見積もる。読み取り用で、状態には入れない。
 ///
-/// 経過が [`MIN_TREND_TICKS`] に満たないときは `None`。
-/// 減りは `(before - now) × TICKS_PER_DAY ÷ elapsed_ticks`（1 日あたり、小数は切り捨て）、
-/// 尽きるまでは `now × elapsed_ticks ÷ (before - now)`（tick、小数は切り捨て）で、どちらも整数で求める。
-pub fn headroom_trend(before: i128, now: i128, elapsed_ticks: u64) -> Option<HeadroomTrend> {
-    if elapsed_ticks < MIN_TREND_TICKS {
+/// `headroom` はいまの余り（供給量 − 需要）、`demand_growth_per_day` は 1 日前の同じ時刻からの需要の伸びである。
+/// 同じ時刻どうしで比べるので、朝の建設の波を 1 日の伸びと取り違えない。供給量の変化は伸びに入らないので、施設を足した直後でも見積もれる。
+/// 余りが負なら [`HeadroomTrend::Short`]、伸びが 0 以下なら [`HeadroomTrend::NotShrinking`]、
+/// 正なら尽きるまでを `headroom × TICKS_PER_DAY ÷ 伸び`（tick、小数は切り捨て）で求める。どれも整数で求める。
+pub fn demand_trend(headroom: i128, demand_growth_per_day: i128) -> HeadroomTrend {
+    if headroom < 0 {
+        return HeadroomTrend::Short;
+    }
+    if demand_growth_per_day <= 0 {
+        return HeadroomTrend::NotShrinking {
+            per_day: -demand_growth_per_day,
+        };
+    }
+    let day = i128::from(crate::clock::TICKS_PER_DAY);
+    let ticks = headroom * day / demand_growth_per_day;
+    HeadroomTrend::Shrinking {
+        drop_per_day: demand_growth_per_day,
+        ticks_until_out: u64::try_from(ticks).unwrap_or(u64::MAX),
+    }
+}
+
+/// 2 つの控え `(tick, 需要)` のあいだの `at` の需要を、直線でつないで求める。`lo` からの増減の小数は 0 向きに切り捨てる。
+/// `lo.0 <= at <= hi.0` でないとき、`lo.0 >= hi.0` で間が決まらないときは、`lo.0 == hi.0 == at` を除いて `None`。
+pub fn interpolate_demand(lo: (u64, u64), hi: (u64, u64), at: u64) -> Option<u64> {
+    if at < lo.0 || at > hi.0 {
         return None;
     }
-    if now < 0 {
-        return Some(HeadroomTrend::Short);
+    if lo.0 == hi.0 {
+        return (lo.1 == hi.1).then_some(lo.1);
     }
-    let elapsed = i128::from(elapsed_ticks);
-    let day = i128::from(crate::clock::TICKS_PER_DAY);
-    let drop = before - now;
-    if drop <= 0 {
-        return Some(HeadroomTrend::NotShrinking {
-            per_day: -drop * day / elapsed,
-        });
-    }
-    let ticks = now * elapsed / drop;
-    Some(HeadroomTrend::Shrinking {
-        drop_per_day: drop * day / elapsed,
-        ticks_until_out: u64::try_from(ticks).unwrap_or(u64::MAX),
-    })
+    let span = i128::from(hi.0 - lo.0);
+    let off = i128::from(at - lo.0);
+    let v = i128::from(lo.1) + (i128::from(hi.1) - i128::from(lo.1)) * off / span;
+    u64::try_from(v).ok()
 }
 
 /// 道路網の連結成分ごとの、電気と水道の釣り合い。
@@ -626,7 +637,9 @@ pub fn supply_balance(
 
 #[cfg(test)]
 mod tests {
-    use super::{HeadroomTrend, MIN_TREND_TICKS, facility_people, headroom_people, headroom_trend};
+    use super::{
+        HeadroomTrend, demand_trend, facility_people, headroom_people, interpolate_demand,
+    };
     use crate::clock::TICKS_PER_DAY;
     use crate::command::ServiceKind;
 
@@ -652,62 +665,97 @@ mod tests {
     }
 
     #[test]
-    fn shrinking_headroom_gives_time_until_out() {
-        // 1 日（7,200 tick）で 1,500 人分から 1,000 人分へ減った。1 日あたり 500 人分の減りで、あと 2 日で尽きる。
+    fn growing_demand_gives_time_until_out() {
+        // 余り 1,000 で、需要が 1 日に 500 伸びる。あと 2 日で尽きる。
         assert_eq!(
-            headroom_trend(1500, 1000, TICKS_PER_DAY),
-            Some(HeadroomTrend::Shrinking {
+            demand_trend(1000, 500),
+            HeadroomTrend::Shrinking {
                 drop_per_day: 500,
                 ticks_until_out: 2 * TICKS_PER_DAY,
-            })
+            }
         );
-        // 半日で同じだけ減ったなら、1 日あたりは 1,000 人分で、あと 1 日で尽きる
+        // 余りが同じでも、伸びが倍なら尽きるのは半分の時間
         assert_eq!(
-            headroom_trend(1500, 1000, TICKS_PER_DAY / 2),
-            Some(HeadroomTrend::Shrinking {
+            demand_trend(1000, 1000),
+            HeadroomTrend::Shrinking {
                 drop_per_day: 1000,
                 ticks_until_out: TICKS_PER_DAY,
-            })
+            }
         );
-    }
-
-    #[test]
-    fn growing_or_flat_headroom_does_not_run_out() {
+        // 余りが 0 ちょうどで伸びていれば、すぐ尽きる
         assert_eq!(
-            headroom_trend(1000, 1500, TICKS_PER_DAY),
-            Some(HeadroomTrend::NotShrinking { per_day: 500 })
-        );
-        assert_eq!(
-            headroom_trend(1000, 1000, TICKS_PER_DAY),
-            Some(HeadroomTrend::NotShrinking { per_day: 0 })
-        );
-    }
-
-    #[test]
-    fn a_shortage_is_short_whatever_the_slope() {
-        assert_eq!(
-            headroom_trend(500, -10, TICKS_PER_DAY),
-            Some(HeadroomTrend::Short)
-        );
-        assert_eq!(
-            headroom_trend(-500, -10, TICKS_PER_DAY),
-            Some(HeadroomTrend::Short)
-        );
-        // 0 ちょうどは、まだ足りなくはない。減っていれば、すぐ尽きる
-        assert_eq!(
-            headroom_trend(100, 0, TICKS_PER_DAY),
-            Some(HeadroomTrend::Shrinking {
-                drop_per_day: 100,
+            demand_trend(0, 10),
+            HeadroomTrend::Shrinking {
+                drop_per_day: 10,
                 ticks_until_out: 0,
-            })
+            }
         );
     }
 
     #[test]
-    fn too_short_a_span_has_no_trend() {
-        assert_eq!(headroom_trend(1500, 1000, MIN_TREND_TICKS - 1), None);
-        assert_eq!(headroom_trend(1500, 1000, 0), None);
-        assert!(headroom_trend(1500, 1000, MIN_TREND_TICKS).is_some());
+    fn flat_or_falling_demand_does_not_run_out() {
+        assert_eq!(
+            demand_trend(1000, 0),
+            HeadroomTrend::NotShrinking { per_day: 0 }
+        );
+        assert_eq!(
+            demand_trend(1000, -300),
+            HeadroomTrend::NotShrinking { per_day: 300 }
+        );
+    }
+
+    #[test]
+    fn a_shortage_is_short_whatever_the_growth() {
+        assert_eq!(demand_trend(-1, 500), HeadroomTrend::Short);
+        assert_eq!(demand_trend(-1, -500), HeadroomTrend::Short);
+    }
+
+    #[test]
+    fn the_estimate_does_not_depend_on_how_much_supply_was_added() {
+        // 施設を足すと余りは増えるが、需要の伸びは変わらない。尽きるまでは余りに比例して延びるだけ。
+        let before = demand_trend(300, 600);
+        let after = demand_trend(300 + 3600, 600);
+        let (
+            HeadroomTrend::Shrinking {
+                drop_per_day: a, ..
+            },
+            HeadroomTrend::Shrinking {
+                drop_per_day: b, ..
+            },
+        ) = (before, after)
+        else {
+            panic!("どちらも減っている");
+        };
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn demand_is_interpolated_between_two_samples() {
+        assert_eq!(
+            interpolate_demand((100, 1000), (300, 1200), 200),
+            Some(1100)
+        );
+        // 端はその値、切り捨ては 0 向き
+        assert_eq!(
+            interpolate_demand((100, 1000), (300, 1200), 100),
+            Some(1000)
+        );
+        assert_eq!(
+            interpolate_demand((100, 1000), (400, 1001), 200),
+            Some(1000)
+        );
+        assert_eq!(interpolate_demand((100, 1000), (400, 998), 200), Some(1000));
+        assert_eq!(interpolate_demand((100, 1000), (400, 995), 200), Some(999));
+        // 減る向きでもよい
+        assert_eq!(interpolate_demand((0, 100), (10, 0), 5), Some(50));
+        // 外は求めない。同じ tick は、値が同じときだけ
+        assert_eq!(interpolate_demand((100, 1000), (300, 1200), 99), None);
+        assert_eq!(interpolate_demand((100, 1000), (300, 1200), 301), None);
+        assert_eq!(
+            interpolate_demand((100, 1000), (100, 1000), 100),
+            Some(1000)
+        );
+        assert_eq!(interpolate_demand((100, 1000), (100, 1001), 100), None);
     }
 
     #[test]
