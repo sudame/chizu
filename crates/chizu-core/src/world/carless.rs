@@ -311,7 +311,8 @@ mod tests {
         );
         assert!(i64::from(max) > fee_cap(crate::happiness::SAVINGS_FOR_FULL_BONUS));
         assert_eq!(renters(&w), 12, "見直しを待たずに枠を返した");
-        assert_eq!(w.finances().parking_fees, Money(12 * i64::from(max)));
+        // 上限を超えた世帯は、枠を返すまでも料金を払わない
+        assert_eq!(w.finances().parking_fees, Money::ZERO);
         let over = w.carless_households();
         assert!(over.iter().any(within));
         for c in over.iter().filter(|c| within(c)) {
@@ -331,6 +332,48 @@ mod tests {
         assert_eq!(renters(&w), 12);
         assert_eq!(w.finances().parking_fees, Money::ZERO);
         assert_eq!(count(&w.carless_households(), CarlessReason::FeeTooHigh), 0);
+        set_home_spaces_limit(None);
+    }
+
+    /// 見直しの直後に料金を上限より上げ、次の見直しの直前に戻しても、そのあいだは枠を返していない世帯の分の
+    /// 料金が収入に入らない。料金を戻した時点で、借りている世帯の分がまた入る。
+    #[test]
+    fn households_over_the_cap_pay_no_fee_until_they_give_up_their_places() {
+        use crate::world::people::SHARED_LOT_REVIEW_TICK;
+        set_home_spaces_limit(Some(0));
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run(&mut w, TICKS_PER_DAY);
+        let command = Command::PlaceBuilding {
+            kind: ServiceKind::ParkingLot,
+            at: TilePos::new(-20, 9),
+            rotation: 2,
+        };
+        assert_eq!(w.apply(&command), ApplyOutcome::Applied);
+        while w.tick().0 % TICKS_PER_DAY != SHARED_LOT_REVIEW_TICK + 5 {
+            w.step();
+        }
+        let rented = renters(&w);
+        assert_eq!(rented, 12);
+        let fee = i64::from(crate::world::INITIAL_PARKING_FEE);
+        assert_eq!(w.finances().parking_fees, Money(12 * fee));
+
+        let max = crate::command::MAX_PARKING_FEE;
+        assert_eq!(
+            w.apply(&Command::SetParkingFee { fee: max }),
+            ApplyOutcome::Applied
+        );
+        while w.tick().0 % TICKS_PER_DAY != SHARED_LOT_REVIEW_TICK - 5 {
+            w.step();
+            assert_eq!(w.finances().parking_fees, Money::ZERO);
+        }
+        assert_eq!(renters(&w), rented, "見直しの前に枠を返した");
+        assert_eq!(
+            w.apply(&Command::SetParkingFee {
+                fee: crate::world::INITIAL_PARKING_FEE
+            }),
+            ApplyOutcome::Applied
+        );
+        assert_eq!(w.finances().parking_fees, Money(12 * fee));
         set_home_spaces_limit(None);
     }
 

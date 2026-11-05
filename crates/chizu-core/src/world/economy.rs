@@ -8,7 +8,7 @@
 //! - マイルストーン：家のある住民の数が段階に届くと、買えるチャンクの枠が増える。一度届いた段階は人口が減っても戻らない。
 
 use super::World;
-use crate::car_place::CarPlace;
+use crate::car_place::{CarPlace, fee_cap};
 use crate::clock::TICKS_PER_DAY;
 use crate::command::ZoneKind;
 use crate::network::{SegmentKind, TILE_MM, road_cost_per_tile};
@@ -153,10 +153,15 @@ impl World {
             let taxed = mul(base[i], i64::from(self.tax_permille[i]));
             f.taxes[i] = Money(round::div_floor(taxed, 1_000));
         }
+        // 料金が払える上限を超えた世帯は、次の見直しで枠を返すまで料金を払わない。
+        let fee = i64::from(self.parking_fee);
         let rented = self
             .car_places
             .iter()
-            .filter(|(_, place)| matches!(place, CarPlace::Shared(_)))
+            .filter(|(h, place)| {
+                matches!(place, CarPlace::Shared(_))
+                    && fee <= fee_cap(p.household_money(*h).unwrap_or(Money::ZERO))
+            })
             .count();
         let rented = i64::try_from(rented).expect("借りられた枠の数があふれた");
         f.parking_fees = Money(mul(rented, i64::from(self.parking_fee)));
