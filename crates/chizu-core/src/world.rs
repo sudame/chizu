@@ -46,7 +46,8 @@ pub enum ApplyOutcome {
     /// 状態に反映した。
     Applied,
     /// 一部だけ状態に反映した。理由は、反映できなかったマスがある理由である。
-    /// 区画を塗るとき、道路の間口から切れたマスを塗らなかった場合に返す。
+    /// 区画を塗るとき、塗れないマスが混ざっていて、塗れるマスだけを塗った場合に返す。塗れなかった理由は問わない
+    /// （奥行きの外、買っていない土地、道路に面していない、建物があるなど）。
     AppliedPartly(DenyReason),
     /// 中核にまだ中身がない種類なので、何もしなかった。
     NotImplemented,
@@ -85,6 +86,7 @@ pub enum DenyReason {
     /// 区画を塗っても消しても、変わるマスがない。
     ZoneUnchanged = 10,
     /// 施設か道路を置くマスを、ほかの施設か道路が使っている。
+    /// 区画を塗るときは、塗れなかったマスの理由が、建物か施設のあるマスのほうが多いことを示す。
     Occupied = 11,
     /// 施設の間口が、歩道のある縦か横の道路に面していない。
     NoRoadAccess = 12,
@@ -364,16 +366,32 @@ impl World {
     }
 
     /// 長方形の中の、区画を塗れるマスに `zone` を塗る。`None` なら区画を消す。
+    ///
+    /// 塗るとき、塗れなかったマス（`zone` が載っていない、塗れないマス）が 1 つでもあれば、理由を問わず
+    /// [`ApplyOutcome::AppliedPartly`] を返す。道路のマスは、区画を載せる所ではないので、塗れなかったマスに数えない。
+    /// 1 マスも新しく塗れなければ断る。塗れなかったマスがあるときの理由は、建物か施設のマスのほうが、
+    /// それ以外（道路を除く）のマスより多ければ [`DenyReason::Occupied`]、そうでなければ [`DenyReason::NoZonableTile`] である。
+    /// 塗れるマスがあって、すべてすでに塗ってあるとき（と、塗れなかったマスがないとき）は [`DenyReason::ZoneUnchanged`] である。
+    /// すでに同じ区画が載っているマスは、塗れたものとして数える。
     fn paint_zone(&mut self, area: TileRect, zone: Option<ZoneKind>) -> ApplyOutcome {
         // 塗れるのは、建物の建ちうるマス（道路に面した間口から奥へ途切れずに続くマス）だけである。
         // 道路から奥行きの範囲にあっても、間口との間に塗れないマスを挟んで切れたマスは塗らない。
         let near = zone.map(|z| self.buildable_mask(area, Some(z)));
-        let within_depth = zone.map(|_| near_road(&self.network, area));
         let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
+        // 塗れなかったマスのうち、建物か施設のマスと、道路でも建物でもないマスの数。
         let mut zonable = false;
-        let mut skipped = false;
+        let mut unpainted = false;
+        let mut partly = false;
+        let mut blocked_by_building = 0_u64;
+        let mut blocked_otherwise = 0_u64;
         for (i, t) in tiles_of(area).enumerate() {
             let Some((coord, chunk)) = t.chunk().and_then(|c| self.chunks.get_key_value(&c)) else {
+                // メモリにないチャンクは、買っていない土地である。
+                if zone.is_some() {
+                    unpainted = true;
+                    partly = true;
+                    blocked_otherwise += 1;
+                }
                 continue;
             };
             let tiles = chunk.layer(Layer::Ground).expect("地上の層がない");
@@ -384,10 +402,21 @@ impl World {
                     && tiles.occupancy[idx] == TileUse::Empty
                     && self.check_buildable(t).is_ok();
                 if !can {
-                    // 道路から奥行きの範囲にあって塗れるはずの空きマスが、間口から切れて塗れなかった。
-                    skipped |= within_depth.as_ref().is_some_and(|w| w[i])
-                        && tiles.occupancy[idx] == TileUse::Empty
-                        && self.check_buildable(t).is_ok();
+                    // すでに同じ区画が載っているマスは、塗り直す必要がないので、塗れたものとして数える。
+                    if tiles.zone[idx] != zone {
+                        unpainted = true;
+                        match tiles.occupancy[idx] {
+                            TileUse::Building | TileUse::Facility => {
+                                partly = true;
+                                blocked_by_building += 1;
+                            }
+                            TileUse::Road => {}
+                            TileUse::Empty => {
+                                partly = true;
+                                blocked_otherwise += 1;
+                            }
+                        }
+                    }
                     continue;
                 }
                 zonable = true;
@@ -397,16 +426,18 @@ impl World {
             }
         }
         if edits.is_empty() {
-            let reason = if zone.is_some() && !zonable {
-                DenyReason::NoZonableTile
-            } else {
+            let reason = if zone.is_none() || zonable || !unpainted {
                 DenyReason::ZoneUnchanged
+            } else if blocked_by_building > blocked_otherwise {
+                DenyReason::Occupied
+            } else {
+                DenyReason::NoZonableTile
             };
             return ApplyOutcome::Denied(reason);
         }
         self.write_zones(edits);
         self.refresh_buildings();
-        if skipped {
+        if partly {
             ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile)
         } else {
             ApplyOutcome::Applied
@@ -1332,7 +1363,8 @@ mod tests {
         let v = w.chunk(origin).unwrap().version();
         assert_eq!(
             paint(&mut w, (0, -10), (10, 10), res),
-            ApplyOutcome::Applied
+            ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile),
+            "道路から 6 マスを超えた奥は塗れない"
         );
         assert_eq!(w.chunk(origin).unwrap().version(), v + 1);
         assert_eq!(w.zone_at(TilePos::new(5, 6)), res);
@@ -1366,7 +1398,8 @@ mod tests {
         road(&mut w, (120, 0), (127, 0), RoadKind::Small);
         assert_eq!(
             paint(&mut w, (120, 1), (133, 1), Some(ZoneKind::Office)),
-            ApplyOutcome::Applied
+            ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile),
+            "買っていない土地や水辺は塗れない"
         );
         assert_eq!(w.zone_at(TilePos::new(127, 1)), Some(ZoneKind::Office));
         assert_eq!(w.zone_at(TilePos::new(128, 1)), None);

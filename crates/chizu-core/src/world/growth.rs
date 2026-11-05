@@ -1962,6 +1962,82 @@ mod tests {
         assert!(zoned(&w, 40, 9) && !zoned(&w, 41, 9));
     }
 
+    /// 塗れなかったマスが 1 つでもあれば、理由を問わず一部だけ塗ったことを返す。
+    #[test]
+    fn painting_reports_partly_for_every_reason_a_tile_is_left_out() {
+        let mut w = World::new(0);
+        street(&mut w, 0, 40);
+        // 奥行きを超えた（y=3 は道路 y=10 から 7 マス）。
+        assert_eq!(
+            paint_outcome(&mut w, (4, 3), (10, 9)),
+            ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile)
+        );
+        assert!(zoned(&w, 4, 4) && !zoned(&w, 4, 3));
+        // 道路の端の外は、間口がなく塗れない。
+        assert_eq!(
+            paint_outcome(&mut w, (38, 11), (43, 11)),
+            ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile)
+        );
+        assert!(zoned(&w, 40, 11) && !zoned(&w, 41, 11));
+        // 買っていない土地。
+        street(&mut w, 100, 127);
+        assert_eq!(
+            paint_outcome(&mut w, (120, 5), (135, 9)),
+            ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile)
+        );
+        assert!(zoned(&w, 127, 9) && !zoned(&w, 128, 9));
+        // 建物のあるマス（別の種類を塗るので、塗れない）が混ざる。
+        w.write_occupancy((20..=22).map(|x| (TilePos::new(x, 5), TileUse::Building)));
+        assert_eq!(
+            w.apply(&Command::PaintZone {
+                area: rect((18, 5), (24, 9)),
+                zone: Some(ZoneKind::Commercial),
+            }),
+            ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile)
+        );
+        assert!(!zoned(&w, 21, 5));
+        // 道路のマスは、塗れなかったマスに数えない。
+        assert_eq!(
+            paint_outcome(&mut w, (0, 10), (10, 10)),
+            ApplyOutcome::Denied(DenyReason::NoZonableTile)
+        );
+        assert_eq!(
+            paint_outcome(&mut w, (4, 9), (10, 11)),
+            ApplyOutcome::Applied
+        );
+    }
+
+    /// 1 マスも塗れなければ断る。理由が建物のマスなら Occupied、そうでなければ NoZonableTile である。
+    #[test]
+    fn painting_is_denied_as_occupied_only_when_buildings_are_why() {
+        let mut w = World::new(0);
+        street(&mut w, 0, 40);
+        let commercial = |w: &mut World, a, b| {
+            w.apply(&Command::PaintZone {
+                area: rect(a, b),
+                zone: Some(ZoneKind::Commercial),
+            })
+        };
+        w.write_occupancy((4..=8).map(|x| (TilePos::new(x, 9), TileUse::Building)));
+        w.write_occupancy((4..=8).map(|x| (TilePos::new(x, 8), TileUse::Facility)));
+        assert_eq!(
+            commercial(&mut w, (4, 8), (8, 9)),
+            ApplyOutcome::Denied(DenyReason::Occupied)
+        );
+        // 建物のマスの外に、塗れない空きマス（奥行きの外）がもっと多いと、Occupied ではない。
+        assert_eq!(
+            commercial(&mut w, (4, -10), (8, 9)),
+            ApplyOutcome::Denied(DenyReason::NoZonableTile)
+        );
+        // 建物がなく、塗れる所もない。
+        assert_eq!(
+            commercial(&mut w, (4, 0), (8, 2)),
+            ApplyOutcome::Denied(DenyReason::NoZonableTile)
+        );
+        // 区画が何も載らなかったので、状態は変わらない。
+        assert!(!zoned(&w, 4, 9) && !zoned(&w, 4, 0));
+    }
+
     #[test]
     fn zone_is_not_paintable_behind_another_kind_of_zone() {
         let mut w = World::new(0);
