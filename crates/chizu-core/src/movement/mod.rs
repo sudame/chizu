@@ -45,8 +45,9 @@ pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, HouseholdCar, OWNER_DR
 pub use congestion::{Congestion, classify as classify_congestion};
 pub use junction::Rescues;
 pub use parking::{
-    CurbWait, DailyLotMisses, Lot, LotEnd, LotMisses, PARK_RADIUS, ParkingTally,
-    SHORTAGE_LOTS_FULL, building_spot, lane_tiles, lot_end, lot_spot, lot_tiles,
+    CurbWait, DailyLotMisses, Lot, LotEnd, LotId, LotMisses, PARK_RADIUS, ParkingTally,
+    SHORTAGE_LOTS_FULL, SharedLot, building_spot, facility_spot, lane_tiles, lot_end, lot_spot,
+    lot_tiles, shared_facility,
 };
 pub use pos::SidewalkPos;
 
@@ -192,10 +193,16 @@ impl Trip {
         }) else {
             return false;
         };
-        // 駐車場の建物が取り壊されていれば、もう向かう先の駐車場はないので数えない。
-        buildings
-            .get(lot)
-            .is_some_and(|b| building_spot(net, b) != Some(to))
+        match lot {
+            // 駐車場の建物が取り壊されていれば、もう向かう先の駐車場はないので数えない。
+            parking::LotId::Building(lot) => buildings
+                .get(lot)
+                .is_some_and(|b| building_spot(net, b) != Some(to)),
+            // 共同の駐車場の外来の枠は、建物の駐車場ではない所である。
+            parking::LotId::Shared(_) => true,
+            // 借りた枠に停めるのは、ふつう家に帰る車である。
+            parking::LotId::Rented(_) => false,
+        }
     }
 
     pub fn speed(&self) -> MmPerTick {

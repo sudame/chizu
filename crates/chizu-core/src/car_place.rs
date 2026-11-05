@@ -7,24 +7,64 @@
 //! 自宅の枠は、住宅の駐車場の台数（`Building::parking_spaces`）だけある。建物に住む世帯を ID の順に並べ、
 //! 空いている枠を、枠を持たない世帯に順に配る。すでに枠を持つ世帯からは取り上げない。枠を取り上げると、
 //! その世帯の停めてある車が、停めてよい台数を超えて残るためである。
+//!
+//! 自宅の枠のない世帯は、家から [`SHARED_LOT_RADIUS`] マスの中の共同の駐車場の枠を借りる（[`CarPlace::Shared`]）。
+//! 借りる駐車場を探すのは `World` で、ここは結果を持つだけである。
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::id::{BuildingId, HouseholdId};
+use crate::movement::LotId;
 use crate::state_hash::{StateHash, StateHasher};
+use crate::tile::TilePos;
+use crate::units::Money;
+
+/// 自宅の枠のない世帯が共同の駐車場を探す範囲。家の出入口のマスから、駐車場の正面のマスまでの直線の距離（マス）である。
+pub const SHARED_LOT_RADIUS: u64 = 32;
+
+/// 共同の駐車場の、借りた枠 1 つあたりの 1 日の料金。料金を決めるコマンドを足すまでは 0 である。
+pub const SHARED_LOT_FEE: i64 = 0;
+
+/// 払える上限の基準にする料金（1 日）。
+pub const BASE_SHARED_LOT_FEE: i64 = 10;
+
+/// 蓄え `savings` の世帯が払える、借りた枠 1 つの 1 日の料金の上限。
+/// 基準の料金 ×（100 ＋ 蓄えの割合）÷ 100 で、蓄えの割合は蓄えを `SAVINGS_FOR_FULL_BONUS` で割った百分率（0〜100）である。
+pub fn fee_cap(savings: Money) -> i64 {
+    let full = crate::happiness::SAVINGS_FOR_FULL_BONUS.0;
+    let percent = savings.0.clamp(0, full) * 100 / full;
+    BASE_SHARED_LOT_FEE * (100 + percent) / 100
+}
 
 /// 世帯の車を置く枠。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CarPlace {
     /// 住んでいる建物の駐車場の枠。
     Home,
+    /// 共同の駐車場の枠。駐車場の占める範囲の最小の角のマスで指す。
+    Shared(TilePos),
+}
+
+impl CarPlace {
+    /// 枠 `place` のある駐車場。家が `home` の世帯の自宅の枠は、その建物の駐車場である。
+    pub fn lot(place: Option<CarPlace>, home: Option<BuildingId>) -> Option<LotId> {
+        match place? {
+            CarPlace::Home => home.map(LotId::Building),
+            CarPlace::Shared(c) => Some(LotId::Rented(c)),
+        }
+    }
 }
 
 impl StateHash for CarPlace {
     fn write_state(&self, h: &mut StateHasher) {
         match self {
             CarPlace::Home => h.write(&0_u8),
+            CarPlace::Shared(c) => {
+                h.write(&1_u8);
+                h.write(&c.x);
+                h.write(&c.y);
+            }
         }
     }
 }
@@ -46,16 +86,35 @@ impl CarPlaces {
         self.by_household.iter().map(|(h, p)| (*h, *p))
     }
 
-    /// 世帯 `h` の枠を返させる。枠を持っていたら `true`。
-    pub(crate) fn remove(&mut self, h: HouseholdId) -> bool {
-        self.by_household.remove(&h).is_some()
+    /// 世帯 `h` の枠を返させ、持っていた枠を返す。
+    pub(crate) fn remove(&mut self, h: HouseholdId) -> Option<CarPlace> {
+        self.by_household.remove(&h)
     }
 
-    /// 自宅の枠を配り直し、枠をなくした世帯を ID の順に返す。
+    /// 世帯 `h` に共同の駐車場 `corner` の枠を貸す。
+    pub(crate) fn rent(&mut self, h: HouseholdId, corner: TilePos) {
+        self.by_household.insert(h, CarPlace::Shared(corner));
+    }
+
+    /// 共同の駐車場ごとの、貸した枠の数。角のマスの順に並ぶ。
+    pub fn rented_counts(&self) -> BTreeMap<TilePos, u32> {
+        let mut out: BTreeMap<TilePos, u32> = BTreeMap::new();
+        for place in self.by_household.values() {
+            if let CarPlace::Shared(c) = place {
+                let n = out.entry(*c).or_insert(0);
+                *n = n.checked_add(1).expect("貸した枠の数があふれた");
+            }
+        }
+        out
+    }
+
+    /// 自宅の枠を配り直し、枠をなくした世帯と、共同の駐車場の枠から自宅の枠に移った世帯を ID の順に返す。
     ///
     /// `homes` は、いる世帯と住んでいる建物の組で、`spaces` は建物の自宅の枠の数である。
-    /// 枠を持つ世帯は、同じ建物に住み続けるかぎり枠を持ち続ける。ただし、建物の枠の数より多くの世帯が
-    /// 枠を持っていれば、ID の大きい世帯から返させる。空いた枠は、枠を持たない世帯に ID の順に配る。
+    /// 自宅の枠を持つ世帯は、同じ建物に住み続けるかぎり枠を持ち続ける。ただし、建物の枠の数より多くの世帯が
+    /// 枠を持っていれば、ID の大きい世帯から返させる。空いた枠は、枠を持たない世帯に ID の順に配り、
+    /// まだ余れば、共同の駐車場の枠を借りている世帯に ID の順に配る。借りていた枠は返す。
+    /// 自宅の枠をもらえなかった借りている世帯は、家があるかぎり借りた枠を持ち続ける。
     /// 家のない世帯と、いなくなった世帯は枠をなくす。
     pub(crate) fn assign_homes(
         &mut self,
@@ -72,23 +131,27 @@ impl CarPlaces {
         for (b, mut households) in by_building {
             households.sort_unstable();
             let mut room = spaces(b);
-            // 枠を持つ世帯を先に、そのあと持たない世帯を、それぞれ ID の順に並べる。
-            let (holders, others): (Vec<HouseholdId>, Vec<HouseholdId>) = households
-                .into_iter()
-                .partition(|h| self.by_household.get(h) == Some(&CarPlace::Home));
-            for h in holders.into_iter().chain(others) {
-                if room == 0 {
-                    break;
+            // 自宅の枠を持つ世帯、枠を持たない世帯、共同の駐車場の枠を借りている世帯の順に、それぞれ ID の順に並べる。
+            let rank = |h: &HouseholdId| match self.by_household.get(h) {
+                Some(CarPlace::Home) => 0,
+                None => 1,
+                Some(CarPlace::Shared(_)) => 2,
+            };
+            households.sort_by_key(|h| (rank(h), *h));
+            for h in households {
+                if room > 0 {
+                    room -= 1;
+                    next.insert(h, CarPlace::Home);
+                } else if let Some(shared @ CarPlace::Shared(_)) = self.by_household.get(&h) {
+                    next.insert(h, *shared);
                 }
-                room -= 1;
-                next.insert(h, CarPlace::Home);
             }
         }
         let lost = self
             .by_household
-            .keys()
-            .filter(|h| !next.contains_key(h))
-            .copied()
+            .iter()
+            .filter(|(h, place)| next.get(h) != Some(place))
+            .map(|(h, _)| *h)
             .collect();
         self.by_household = next;
         lost
@@ -173,5 +236,44 @@ mod tests {
         let lost = p.assign_homes(all, |_| 1);
         assert_eq!(lost, vec![h(2), h(3)]);
         assert_eq!(homes(&p), vec![1]);
+    }
+
+    /// 借りている世帯は、家があるかぎり借りた枠を持ち続ける。空いた自宅の枠は、枠のない世帯に先に配り、
+    /// 余れば借りている世帯に配る。自宅の枠に移った世帯は、借りた枠を返す。
+    #[test]
+    fn renters_keep_their_space_and_get_a_home_place_after_those_without() {
+        let mut p = CarPlaces::default();
+        let corner = TilePos::new(4, 5);
+        let all = [(h(1), Some(b(1))), (h(2), Some(b(1))), (h(3), Some(b(1)))];
+        p.rent(h(1), corner);
+        assert!(p.assign_homes(all, |_| 0).is_empty());
+        assert_eq!(p.get(h(1)), Some(CarPlace::Shared(corner)));
+        assert_eq!(p.rented_counts(), BTreeMap::from([(corner, 1)]));
+        let lost = p.assign_homes(all, |_| 2);
+        assert!(lost.is_empty());
+        assert_eq!(p.get(h(1)), Some(CarPlace::Shared(corner)));
+        assert_eq!(
+            (p.get(h(2)), p.get(h(3))),
+            (Some(CarPlace::Home), Some(CarPlace::Home))
+        );
+        let lost = p.assign_homes(all, |_| 3);
+        assert_eq!(lost, vec![h(1)]);
+        assert_eq!(p.get(h(1)), Some(CarPlace::Home));
+        assert!(p.rented_counts().is_empty());
+        // 家をなくした世帯は、借りた枠もなくす。
+        p.rent(h(4), corner);
+        let lost = p.assign_homes([(h(4), None)], |_| 3);
+        assert_eq!(lost, vec![h(1), h(2), h(3), h(4)]);
+        assert!(p.iter().next().is_none());
+    }
+
+    #[test]
+    fn the_fee_cap_rises_with_savings() {
+        let full = crate::happiness::SAVINGS_FOR_FULL_BONUS;
+        assert_eq!(fee_cap(Money(0)), BASE_SHARED_LOT_FEE);
+        assert_eq!(fee_cap(Money(full.0 / 2)), 15);
+        assert_eq!(fee_cap(full), 20);
+        assert_eq!(fee_cap(Money(full.0 * 3)), 20);
+        assert!(SHARED_LOT_FEE <= fee_cap(Money(0)));
     }
 }

@@ -67,6 +67,7 @@ fn add_facility(w: &mut World, kind: ServiceKind) {
     let (at, rotation) = match kind {
         ServiceKind::PowerPlant => (TilePos::new(-56 + 4 * i, -41), 2),
         ServiceKind::WaterPump => (TilePos::new(-55 + 2 * i, -39), 0),
+        ServiceKind::ParkingLot | ServiceKind::ParkingGarage => unreachable!("駐車場は置かない"),
     };
     apply(w, Command::PlaceBuilding { kind, at, rotation });
 }
@@ -77,7 +78,7 @@ fn demand(w: &World) -> u64 {
 
 /// 供給量の合計が、需要に新しく建つ分の 1/4 を足した量に届くまで、施設を足す。
 fn add_facilities_for_demand(w: &mut World) {
-    for kind in ServiceKind::ALL {
+    for kind in ServiceKind::UTILITIES {
         while (count(w, kind) as u64) * kind.capacity() * 4 < demand(w) * 5 {
             add_facility(w, kind);
         }

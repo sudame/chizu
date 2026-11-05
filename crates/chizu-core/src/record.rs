@@ -996,7 +996,7 @@ mod tests {
             rect.clone().prop_map(|area| Command::Bulldoze { area }),
             (small_rect, proptest::option::of(zone.clone()))
                 .prop_map(|(area, zone)| Command::PaintZone { area, zone }),
-            (1_u8..=2, tile, any::<u8>()).prop_map(|(k, at, rotation)| Command::PlaceBuilding {
+            (1_u8..=4, tile, any::<u8>()).prop_map(|(k, at, rotation)| Command::PlaceBuilding {
                 kind: ServiceKind::from_code(k).unwrap(),
                 at,
                 rotation,

@@ -23,7 +23,7 @@ const HIGHWAY: u8 = 4;
 
 pub const LEGEND: &str = "\
 凡例（重なったときは上のものを出す）
-  P W      公共施設（P 発電所、W 浄水場）
+  P W L G  公共施設（P 発電所、W 浄水場、L 平面の共同の駐車場、G 駐車場ビル）
   S s      信号のある交差点（s は横断歩道を外した腕がある。--layer traffic では混み具合の文字を先に出す）
   Z Y      信号のない交差点。Z は高速道路でないどの腕にも横断歩道があり、Y は横断歩道を外した腕がある
            （--layer traffic では混み具合の文字を先に出す）
@@ -73,7 +73,7 @@ fn congestion_glyph(level: Congestion) -> char {
 struct Cell {
     /// 通る区間の混み具合の最大。交通の層でだけ入れる。
     congestion: Option<Congestion>,
-    facility: [u32; 2],
+    facility: [u32; ServiceKind::ALL.len()],
     /// 信号のある交差点があるか。
     signal: bool,
     /// 横断歩道のある交差点（3 本以上の区間が集まるノード）があるか。
@@ -123,6 +123,8 @@ fn facility_letter(k: ServiceKind) -> char {
     match k {
         ServiceKind::PowerPlant => 'P',
         ServiceKind::WaterPump => 'W',
+        ServiceKind::ParkingLot => 'L',
+        ServiceKind::ParkingGarage => 'G',
     }
 }
 

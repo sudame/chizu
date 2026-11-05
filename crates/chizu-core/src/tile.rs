@@ -31,6 +31,13 @@ pub struct TilePos {
     pub y: i64,
 }
 
+impl crate::state_hash::StateHash for TilePos {
+    fn write_state(&self, h: &mut crate::state_hash::StateHasher) {
+        h.write(&self.x);
+        h.write(&self.y);
+    }
+}
+
 impl TilePos {
     pub fn new(x: i64, y: i64) -> TilePos {
         TilePos { x, y }
