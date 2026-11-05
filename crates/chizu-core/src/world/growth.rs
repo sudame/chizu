@@ -298,6 +298,26 @@ impl World {
         })
     }
 
+    /// 低密度の縦横の道路沿いで、間口 `front` を含む並びを、建てる向き（`lot_tiles` の `along`）の反対へたどった端から
+    /// 数え、`LANE_FRONTAGE` マスずつの組の頭を返す。並びは、同じ区画で同じ向きの道路に面した、空きの間口が
+    /// 途切れずに続くマスである。建物で途切れた並びは、そこから数え直す。
+    /// 並びの長さが `LANE_FRONTAGE` で割り切れないときの端数は、並びの建てる向きの端に残る。
+    fn low_density_anchor(&self, front: TilePos, zone: Zone, d: u8) -> TilePos {
+        let toward_road = FRONT_DIRS[usize::from(d)];
+        let back = (toward_road.1, -toward_road.0);
+        let mut offset = 0u64;
+        let mut at = front;
+        loop {
+            let prev = step(at, back, 1);
+            if self.lots.fronts.get(&prev) != Some(&(zone, d)) {
+                break;
+            }
+            at = prev;
+            offset += 1;
+        }
+        step(front, back, (offset % LANE_FRONTAGE) as i64)
+    }
+
     /// 敷地に `zone` の建物を建てられるか。
     fn lot_fits(
         &self,
@@ -544,6 +564,12 @@ impl World {
                 let (lot_zone, d) = self.lots.fronts[&front];
                 let toward_road = FRONT_DIRS[usize::from(d)];
                 let low = lot_zone.density() == Density::Low;
+                // 低密度は、引いた間口を乱数で使わず、並びの端から 2 マスずつの組の頭にそろえる。
+                let front = if low && !is_diagonal(toward_road) {
+                    self.low_density_anchor(front, lot_zone, d)
+                } else {
+                    front
+                };
                 let sizes: Vec<(u64, u64)> = if is_diagonal(toward_road) {
                     // 斜めの道路沿いは、引いた 1 辺の正方形から、収まるまで小さくする。
                     let side = 1 + u64::from(r.below(DIAGONAL_LOT_SIDE as u32));
@@ -1145,6 +1171,40 @@ mod tests {
             top, LOW_DENSITY_MAX_LEVEL,
             "低密度の住宅が段階 2 まで育たない"
         );
+    }
+
+    /// 低密度を一面に塗った通りで、建物のあいだに 1 マスの隙間ができず、空きは端数の列だけになる。
+    #[test]
+    fn low_density_lots_pack_from_the_row_end_without_gaps() {
+        for seed in [0, 1, 2] {
+            let mut w = served_street_of(seed, Zone::ResidentialLow);
+            run(&mut w, 40 * TICKS_PER_DAY);
+            check_buildings(&w);
+            let state = |x: i64, y: i64| w.tile_state(TilePos::new(x, y));
+            let built = |x: i64| matches!(state(x, 9), Some((_, TileUse::Building)));
+            let empty = |x: i64, y: i64| {
+                matches!(
+                    state(x, y),
+                    Some((Some(Zone::ResidentialLow), TileUse::Empty))
+                )
+            };
+            for x in 1..40 {
+                assert!(
+                    !(empty(x, 9) && built(x - 1) && built(x + 1)),
+                    "{seed}: 建物のあいだに 1 マスの隙間がある x = {x}"
+                );
+            }
+            // 施設の右 x = 10..=40 は 1 本の並びで、空きは端数の 1 列（深さ 6 マス）までである。
+            // 施設の裏は道路に面さず、建たない。
+            let empties = (10..=40)
+                .flat_map(|x| (4..=9).map(move |y| (x, y)))
+                .filter(|&(x, y)| empty(x, y))
+                .count();
+            assert!(
+                empties <= 6,
+                "{seed}: 端数より多くのマスが空いている：{empties}"
+            );
+        }
     }
 
     /// 低密度の街も、同じ種と操作から同じ状態になり、書き出して読み戻しても状態ハッシュとバイト列が変わらない。
