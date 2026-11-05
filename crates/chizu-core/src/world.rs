@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::building::Buildings;
+use crate::car_place::CarPlaces;
 use crate::service::Facility;
 
 use crate::chunk::{Chunk, Layer, TileUse};
@@ -164,6 +165,8 @@ pub struct World {
     ledger_carry: i64,
     network: Network,
     population: Population,
+    /// 世帯ごとの、車を置く枠。
+    car_places: CarPlaces,
     buildings: Buildings,
     /// プレイヤーが置いた公共の施設。置いた順に並ぶ。
     facilities: Vec<Facility>,
@@ -292,6 +295,7 @@ impl World {
             ledger_carry: 0,
             network,
             population: Population::default(),
+            car_places: CarPlaces::default(),
             buildings: Buildings::default(),
             facilities: Vec::new(),
             supply_dirty: false,
@@ -886,6 +890,7 @@ impl StateHash for World {
         h.write(&self.ledger_carry);
         h.write(&self.network);
         h.write(&self.population);
+        h.write(&self.car_places);
         h.write(&self.trips);
         h.write(&self.delays);
         h.write(&self.errands);

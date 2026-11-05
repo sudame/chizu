@@ -25,7 +25,7 @@ use chizu_core::world::economy::Finances;
 use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
 use chizu_core::{
-    ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
+    ApplyOutcome, CHUNK_SIDE, CarPlace, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
     CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic, DenyReason, GameTime,
     HappinessParts, Heading, Line, LotMisses, MigrationOutlook, NodeControl, NodeId, ParkingTally,
     Rescues, ServiceKind, TICKS_PER_DAY, TILE_MM, TilePos, TileRect, Traffic, World, ZoneKind,
@@ -146,7 +146,7 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  fullLots 満車の駐車場の数。
                  台数は建物の種類、大きさ、段階から決まる。住宅は世帯の数（段階 3〜5 は平面が世帯の数の 0.7 倍までで、
                  残りは建物の中）、商業と工業は職場の数、オフィスは職場の数の 0.5 倍（端数は切り上げ）。
-                 住宅の駐車場は、その建物の住民だけが使う。
+                 住宅の駐車場は、その建物の自宅の枠を持つ世帯の車だけが使う。
                  redirectedCars いま移動中の車のうち、16 マスの中のほかの建物の駐車場へ停めに向かっている車。行き先の建物の
                  駐車場が満車のときのほか、そこへ車か歩きで届かないときも、近くのほかの駐車場に回る。
                  次の 4 つは始まりからの積み上げで、日ごとの数は 2 つの observe の差で求める。
@@ -159,6 +159,11 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  parkedAway 家族が家でない所（職場など）に停めている（停めた車が本人のいる建物にあっても、
                  同じ職場で働く家族が停めた車なら、ここに入る）、carAtHome 車は家にあるが、出発する本人が家にいない、
                  other そのほか（家のない住民の通勤で、車が停めてあった場合）。
+                 noPlace 世帯が車を置く枠を持たず、車で向かわなかった移動の数。車で向かうほど遠い移動だけを数える
+                 （始まりからの積み上げ。noCar とは別に数える）。
+                 households 家のある世帯を、車を置く枠で分けた数。home 自宅の枠（住んでいる建物の駐車場）を持つ世帯、
+                 none 枠を持たない世帯。枠のない世帯は車を持たず、どの移動も歩く。自宅の枠は住宅の駐車場の台数だけあり、
+                 建物に住む世帯に ID の順に配る（枠を持つ世帯からは取り上げない）。
                  fullLots、redirectedCars、lotsFull が多いのは、駐車場が足りないということである。
                  shortages 行き先にした車が満車で車をやめた建物の上位 10 件。満車で車をやめた数（今日と前の日の和）の多い順で、
                  同じなら位置（x、y の順）。at 建物が占めるマスの最小の座標、zone 区画の種類、level 段階、spaces 台数、
@@ -1236,7 +1241,18 @@ fn parking(world: &World) -> Value {
         no_car_parked_away: _,
         no_car_at_home: _,
         no_car_other: _,
+        no_place: _,
     } = world.trips().parking_tally();
+    let p = world.population();
+    let housed = p
+        .household_ids()
+        .filter(|h| p.home(*h).flatten().is_some())
+        .count();
+    let with_home_place = world
+        .car_places()
+        .iter()
+        .filter(|(_, place)| *place == CarPlace::Home)
+        .count();
     let redirected = world
         .trips()
         .iter()
@@ -1267,6 +1283,11 @@ fn parking(world: &World) -> Value {
             "parkedAway": tally.no_car_parked_away,
             "carAtHome": tally.no_car_at_home,
             "other": tally.no_car_other,
+        },
+        "noPlace": tally.no_place,
+        "households": {
+            "home": with_home_place,
+            "none": housed.saturating_sub(with_home_place),
         },
     })
 }
@@ -1661,6 +1682,8 @@ const WATCHED: &[&str] = &[
     "/traffic/cars/queued",
     "/traffic/cars/waitingAtCurb",
     "/parking/redirectedCars",
+    "/parking/households/home",
+    "/parking/households/none",
     "/migration/wantingHouseholds",
     "/migration/vacantHomes",
     "/migration/homelessHouseholds",
