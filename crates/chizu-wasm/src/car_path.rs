@@ -1,24 +1,21 @@
 //! 車を、ノードの前後で曲線につないだ道筋の上に描く。
 //!
 //! 中核は、車の位置をリンクの上の距離で持ち、リンクはノードの中心からノードの中心までである。
-//! 交差点の手前で待つ車はノードの中心に止まり、ノードを越えると次のリンクの向きへ一度に変わる。
-//! そのまま描くと、待つ車が交差点の真ん中に重なり、曲がる車が直角に向きを変える。
+//! 交差点の手前で待つ車は停止線で止まり、停止線からノードの中心を通って、出ていく腕の横断歩道を抜けるまでを
+//! 通り抜けの区間として進む（`chizu_core::movement::stop_line`）。角も、道路の端から端までを通り抜けの区間にする。
+//! そのまま描くと、曲がる車がノードの中心で直角に向きを変える。
 //!
-//! 画面では、車の位置を、リンクごとの道筋（[`Path`]）の上に写す。道筋は、入ってきた車線の停止線の
-//! 手前から、ノードを曲がり、いまのリンクの車線を、終わりのノードの停止線の手前まで進む折れ線である。
-//! 状態は変えない。
+//! 画面では、車の位置を、リンクごとの道筋（[`Path`]）の上に写す。道筋は、入ってきたリンクの停止線から、
+//! ノードを曲がり、いまのリンクの車線を、終わりのノードの停止線まで進む折れ線である。状態は変えない。
 //!
-//! - 始まりの窓（`TURN_MM`）：入ってきた車線の停止線の手前から、窓の終わりの出ていく車線までの
-//!   曲線（[`Turn`]）に写す。入る車線をまっすぐ進み、2 本の車線の交わる所を制御点にした曲線で
-//!   向きを変え、出ていく車線をまっすぐ進む。曲線の両端の離し方と車の向きの決め方は、描く車の絵が
-//!   画面の車道（ノードの車道の四角と腕の帯、[`Carriageway`]）からはみ出さないものを選ぶ。
-//!   まっすぐ進んで車線を移る車は、両端で車線に沿う S 字を通る。
-//! - 窓の外は、中核の位置のまま描く。区間の途中を横切る人や、乗り降りする建物の前と位置がそろう。
-//! - 終わりの窓（`QUEUE_MM`）：ノードの中心（距離がリンクの長さ）を、車の前の端が停止線に
-//!   かかる所に写し、窓の中を一様に縮める。止まった列は、停止線の手前に詰めて並ぶ。
-//! - 窓が重なる短いリンクでは、停止線の位置を保ったまま、あいだを一様に縮める。
-//!
-//! 2 本だけがつながるノードで向きが変わる角も、同じ道筋でつなぐ。
+//! - 通り抜けの区間：入ってきたリンクの停止線から、いまのリンクの通り抜けの区間を抜ける所までを、曲線
+//!   （[`Turn`]）に写す。入る車線をまっすぐ進み、2 本の車線の交わる所を制御点にした曲線で向きを変え、
+//!   出ていく車線をまっすぐ進む。曲線の両端の離し方と車の向きの決め方は、描く車の絵が画面の車道
+//!   （ノードの車道の四角と腕の帯、[`Carriageway`]）からはみ出さないものを選ぶ。まっすぐ進んで車線を移る車は、
+//!   両端で車線に沿う S 字を通る。区間の中では、中核の道のりを曲線の長さに一様に写す。
+//!   停止線を越えてまだノードの手前にいる車は、中核では入ってきたリンクにいるが、次のリンクの道筋の上に描く。
+//! - 区間の外は、中核の位置のまま描く。待つ車は停止線の手前に並び、区間の途中を横切る人や、乗り降りする
+//!   建物の前とも位置がそろう。
 //!
 //! 道筋は、入ってきた車線と、いまのリンクの車線の組ごとに 1 回だけ求めて [`Paths`] に覚える。網が
 //! 変わったら、形が変わるリンクの道筋だけを求め直す。画面には、道筋の形を新しく求めたときだけ送り、
@@ -28,29 +25,15 @@
 //! 経路を探し直すと、中核は抜けてきたリンクを忘れる。曲線の途中の車が飛ばないよう、
 //! 描いた曲線の始まりを [`Entry`] として呼ぶ側に覚えさせ、次の回に渡してもらう。
 
-use chizu_core::movement::{CAR_LENGTH, MIN_GAP};
+use chizu_core::movement::stop_line::{self, DRAWN_CAR_HALF_MM, ZEBRA_MM};
 use chizu_core::network::TILE_MM;
-use chizu_core::{CarPath, Dir, Heading, LinkId, Mm, Network, NodeId};
+use chizu_core::{CarPath, Dir, LinkId, Mm, Network, NodeId};
 use std::collections::{BTreeMap, HashMap};
 
-/// ノードを越えてから曲線の上に描く距離（mm）。中核が交差点の中にいるとみなす距離（`JUNCTION_CLEAR`、
-/// 車の長さと車間）と同じにする。
-const TURN_MM: f64 = (CAR_LENGTH + MIN_GAP) as f64;
-
-/// リンクの終わりで、停止線の手前に列を詰める窓の長さ（mm）。車間 3 台ぶんにする。いちばん奥の停止線
-/// （大きい道路の斜めの腕で 9.3m）まで寄せても、縮めた車間が描く車の長さより長く残る。
-const QUEUE_MM: f64 = 3.0 * (CAR_LENGTH + MIN_GAP) as f64;
-
-/// 窓が重なる短いリンクで、始まりの窓のあとを縮める割合の下限。列の車が重ならないようにする。
-const MIN_SCALE: f64 = 0.55;
-
-// 画面の停止線の位置。web/src/map/roads.ts の ZEBRA_LENGTH と、detail.ts の STOP_LINE_GAP、
-// STOP_LINE_WIDTH（マス）と同じにする。
-pub(crate) const ZEBRA_LENGTH: f64 = 0.16 * TILE_MM as f64;
-const STOP_LINE_GAP: f64 = 0.05 * TILE_MM as f64;
-const STOP_LINE_WIDTH: f64 = 0.04 * TILE_MM as f64;
+/// 画面の横断歩道の縞の長さ。web/src/map/roads.ts の ZEBRA_LENGTH と同じにする。
+pub(crate) const ZEBRA_LENGTH: f64 = ZEBRA_MM as f64;
 /// 描く車の長さの半分。web/src/map/movers.ts の車の半分の大きさ（0.2 マス）と同じにする。
-const CAR_HALF: f64 = 0.2 * TILE_MM as f64;
+const CAR_HALF: f64 = DRAWN_CAR_HALF_MM as f64;
 /// 描く車の幅の半分。web/src/map/movers.ts の車の半分の大きさ（0.065 マス）と同じにする。
 const CAR_SIDE: f64 = 0.065 * TILE_MM as f64;
 /// 高速道路の車道の半分の幅。web/src/map/roads.ts の HIGHWAY_ASPHALT_HALF と同じにする。
@@ -70,13 +53,15 @@ pub struct Drawn {
 }
 
 /// ノードを越えた車の曲線の始まり。`node` と `dir` は、いまのリンクの始まりのノードの中心と向き、
-/// `p0` と `d0` は、入ってきた車線の停止線の手前の点と、そこでの向きである。
+/// `p0` と `d0` は、入ってきた車線の停止線の点と、そこでの向きである。`lead` は、入ってきたリンクの
+/// 停止線からノードの中心までの、中核の道のり（mm）である。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Entry {
     node: V,
     dir: V,
     p0: V,
     d0: V,
+    lead: f64,
 }
 
 pub(crate) type V = (f64, f64);
@@ -149,10 +134,6 @@ pub(crate) fn center(net: &Network, n: NodeId) -> Option<V> {
     Some((p.x.0 as f64, p.y.0 as f64))
 }
 
-fn heading_of(step: (i64, i64)) -> Option<Heading> {
-    Heading::ALL.into_iter().find(|h| h.step() == step)
-}
-
 /// ノード `n` につながる区間の、道路の端（歩道を含む）までのいちばん広い半分の幅（mm）。
 /// web/src/map/roads.ts の RoadNode の half と同じ。
 pub(crate) fn node_half(net: &Network, n: NodeId) -> f64 {
@@ -197,96 +178,21 @@ pub(crate) fn is_junction(net: &Network, n: NodeId) -> bool {
     net.node(n).is_some_and(|x| x.segments.len() >= 3)
 }
 
-/// ノード `n` から腕の向き `arm`（ノードから出ていく 1 歩）へ、道路の端までの距離（mm）。
-pub(crate) fn edge(net: &Network, n: NodeId, arm: (i64, i64)) -> f64 {
-    let half = node_half(net, n);
-    if arm.0 != 0 && arm.1 != 0 {
-        half * core::f64::consts::SQRT_2
-    } else {
-        half
-    }
-}
-
-/// リンクの上の距離を描く位置へ写すための、リンク 1 本の寸法（mm）。
+/// リンクの上の距離を描く位置へ写すための、リンク 1 本の寸法（mm）。どれも中核と同じ位置である。
 #[derive(Clone, Copy, Debug)]
 struct Layout {
     len: f64,
-    /// 始まりの窓の長さ。始まりのノードで曲がらなければ 0。
-    turn: f64,
-    /// 始まりの窓の終わりを写す、始まりのノードからの距離。窓が重ならなければ `turn` と同じ。
-    settle: f64,
-    /// 終わりのノードの手前で待つ車の中心までの、終わりのノードからの距離。
+    /// 始まりのノードの通り抜けの区間を抜ける所の、始まりからの距離。区間がなければ 0。
+    clear: f64,
+    /// 終わりのノードの通り抜けの区間に入る所（停止線）の、始まりからの距離。区間がなければリンクの長さ。
     stop: f64,
 }
 
 impl Layout {
-    fn of(net: &Network, link: LinkId, g: &LinkGeom, len: f64) -> Layout {
-        let exit = if is_junction(net, g.from) || is_bend(net, g.from) {
-            edge(net, g.from, g.step)
-        } else {
-            0.0
-        };
-        let back = (-g.step.0, -g.step.1);
-        let stop = if is_junction(net, g.to) {
-            let kind = net.segment(link.segment).map(|s| s.kind);
-            let walks = kind.is_some_and(|k| k.has_sidewalks());
-            let zebra = walks
-                && heading_of(back)
-                    .and_then(|h| net.node(g.to).map(|n| !n.crosswalk_removed(h)))
-                    .unwrap_or(false);
-            edge(net, g.to, back)
-                + if zebra { ZEBRA_LENGTH } else { 0.0 }
-                + STOP_LINE_GAP
-                + STOP_LINE_WIDTH
-                + CAR_HALF
-        } else if is_bend(net, g.to) {
-            edge(net, g.to, back)
-        } else {
-            0.0
-        };
-        let stop = stop.min(len);
-        let turn = if exit > 0.0 {
-            TURN_MM.min(len / 2.0)
-        } else {
-            0.0
-        };
-        // 窓が重ならなければ、始まりの窓の終わりは中核の位置のまま。重なれば、停止線の位置を保ち、
-        // あいだを縮める割合が下限を下回らない所まで、始まりの窓の終わりを手前に寄せる。
-        let settle = if len - QUEUE_MM > turn {
-            turn
-        } else {
-            (len - stop - MIN_SCALE * (len - turn)).clamp(0.0, turn)
-        };
-        Layout {
-            len,
-            turn,
-            settle,
-            stop,
-        }
-    }
-
-    /// 始まりの窓のあとの距離 `o` を描く、始まりのノードからの距離。
-    fn along(&self, o: f64) -> f64 {
-        let queue = self.len - QUEUE_MM;
-        if queue > self.turn {
-            if o <= queue {
-                o
-            } else {
-                queue + (o - queue) * (QUEUE_MM - self.stop) / QUEUE_MM
-            }
-        } else {
-            let span = (self.len - self.turn).max(1.0);
-            self.settle + (o - self.turn) * (self.len - self.stop - self.settle) / span
-        }
-    }
-
-    /// 曲線の上にいない車の、リンクの上の距離 `o` を描く、始まりのノードからの距離。
-    fn straight(&self, o: f64) -> f64 {
-        if o >= self.turn {
-            self.along(o)
-        } else {
-            self.settle * o / self.turn
-        }
+    fn of(net: &Network, link: LinkId, len: f64) -> Layout {
+        let clear = f64::from(stop_line::clear_line(net, link).0).min(len);
+        let stop = f64::from(stop_line::stop_line(net, link).0).clamp(clear, len);
+        Layout { len, clear, stop }
     }
 }
 
@@ -787,13 +693,15 @@ struct Point {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Path {
     points: Vec<Point>,
-    /// 始まりの窓の終わり（[`Layout::settle`] の所）までの長さ。
+    /// 通り抜けの区間の曲線の終わり（[`Layout::clear`] の所）までの、描く長さ。曲線がなければ 0。
     settled: f64,
+    /// 曲線の始まり（入ってきたリンクの停止線）からノードの中心までの、中核の道のり。曲線がなければ 0。
+    lead: f64,
 }
 
 impl Path {
     /// 位置と向きを順に並べた点から作る。長さは点のあいだの距離を足していく。
-    fn from_points(at: impl IntoIterator<Item = (V, f64)>, settle_index: usize) -> Path {
+    fn from_points(at: impl IntoIterator<Item = (V, f64)>, settle_index: usize, lead: f64) -> Path {
         let mut points: Vec<Point> = Vec::new();
         let mut settled = 0.0;
         for (k, (p, angle)) in at.into_iter().enumerate() {
@@ -809,7 +717,11 @@ impl Path {
                 settled = points.last().map_or(0.0, |l| l.s);
             }
         }
-        Path { points, settled }
+        Path {
+            points,
+            settled,
+            lead,
+        }
     }
 
     /// 道筋の長さ。
@@ -969,11 +881,9 @@ struct Stored {
 fn link_sig(net: &Network, link: LinkId) -> Option<Vec<u64>> {
     let g = geom(net, link)?;
     let len = link_len(net, link);
-    let lay = Layout::of(net, link, &g, len);
+    let lay = Layout::of(net, link, len);
     let start = center(net, g.from)?;
-    let mut sig: Vec<u64> = [
-        g.dir.0, g.dir.1, len, lay.turn, lay.settle, lay.stop, start.0, start.1,
-    ]
+    let mut sig: Vec<u64> = [g.dir.0, g.dir.1, len, lay.clear, lay.stop, start.0, start.1]
     .iter()
     .map(|v| v.to_bits())
     .collect();
@@ -1164,16 +1074,16 @@ impl Paths {
         if len <= 0.0 {
             return None;
         }
-        let lay = Layout::of(net, key.link, &g, len);
+        let lay = Layout::of(net, key.link, len);
         let start = center(net, g.from)?;
         let lane = (key.lane.0 as f64, key.lane.1 as f64);
         let angle = g.dir.1.atan2(g.dir.0);
         let on_lane = |along: f64| add(add(start, scale(g.dir, along)), lane);
-        let end = (on_lane(len - lay.stop), angle);
-        let Some(e) = entry.filter(|_| lay.turn > 0.0) else {
-            return Some(Path::from_points([(on_lane(0.0), angle), end], 0));
+        let end = (on_lane(lay.stop), angle);
+        let Some(e) = entry.filter(|_| lay.clear > 0.0) else {
+            return Some(Path::from_points([(on_lane(0.0), angle), end], 0, 0.0));
         };
-        let q = on_lane(lay.settle);
+        let q = on_lane(lay.clear);
         let cw = Carriageway::of(net, g.from)?;
         let shape = self.fitted(&cw, e.p0, e.d0, q, g.dir)?;
         let t = Turn::new(e.p0, e.d0, q, g.dir, shape)?;
@@ -1190,7 +1100,7 @@ impl Paths {
         put(t.length());
         let settle_index = at.len() - 1;
         at.push(end);
-        Some(Path::from_points(at, settle_index))
+        Some(Path::from_points(at, settle_index, e.lead))
     }
 
     /// [`Turn::fit`] の結果を、同じ車道と同じ車線の組について覚えておいて使う。
@@ -1294,10 +1204,10 @@ pub fn draw(
     if len <= 0.0 || f64::from(path.len.0) <= 0.0 {
         return None;
     }
-    let o = f64::from(path.offset.0).min(len);
-    let lay = Layout::of(net, path.link, &g, len);
+    let o = (path.along as f64).min(len);
+    let lay = Layout::of(net, path.link, len);
     let start = center(net, g.from)?;
-    let on_arc = o < lay.turn;
+    let on_arc = o < lay.clear;
     // 曲線の始まりは、曲線の上にいる車か、道筋を初めて求める車のときだけ求める。
     let mut entry_cache: Option<Option<Entry>> = None;
     let mut entry = || {
@@ -1308,7 +1218,7 @@ pub fn draw(
             let same_place = |e: &&Entry| dist(e.node, start) < 1.0 && dist(e.dir, g.dir) < 1e-6;
             fresh
                 .or_else(|| remembered.filter(same_place).copied())
-                .filter(|_| lay.turn > 0.0)
+                .filter(|_| lay.clear > 0.0)
         })
     };
     let kept = if on_arc { entry() } else { None };
@@ -1331,7 +1241,7 @@ pub fn draw(
                 let from_prev = path
                     .prev
                     .and_then(|(prev, shown)| entry_from(net, prev, shown, start, &g))
-                    .filter(|_| lay.turn > 0.0);
+                    .filter(|_| lay.clear > 0.0);
                 let cacheable = from_prev.is_some() == e.is_some();
                 if cacheable {
                     // 網が変わったときに、どちらかのリンクの形が変わったら忘れられるようにする。
@@ -1354,8 +1264,12 @@ pub fn draw(
             });
         }
     }
+    // 停止線を越えてまだノードの手前にいる車は、道筋の上に描けなければ、呼ぶ側が中核の位置に描く。
+    if o < 0.0 {
+        return None;
+    }
     let side = mm(shift);
-    let along = lay.straight(o);
+    let along = o;
     Some(Placed {
         drawn: Drawn {
             x: start.0 + g.dir.0 * along + side.0,
@@ -1389,12 +1303,14 @@ fn entry_from(
 ) -> Option<Entry> {
     let pg = geom(net, prev)?;
     (pg.to == g.from).then_some(())?;
-    let pstop = Layout::of(net, prev, &pg, link_len(net, prev)).stop;
+    let plen = link_len(net, prev);
+    let lead = plen - Layout::of(net, prev, plen).stop;
     Some(Entry {
         node: start,
         dir: g.dir,
-        p0: add(sub(start, scale(pg.dir, pstop)), mm(shown)),
+        p0: add(sub(start, scale(pg.dir, lead)), mm(shown)),
         d0: pg.dir,
+        lead,
     })
 }
 
@@ -1408,14 +1324,15 @@ fn on_path(
     curved: bool,
     before: Option<&Last>,
 ) -> Option<Placed> {
-    let o = f64::from(path.offset.0).min(lay.len);
+    let o = (path.along as f64).min(lay.len);
     let p = paths.get(id)?;
+    // 通り抜けの区間の中は、中核の道のりを曲線の長さに一様に写す。区間の外は中核の道のりのまま進む。
     let s = if !curved {
-        lay.straight(o)
-    } else if o < lay.turn {
-        p.settled * o / lay.turn
+        o
+    } else if o < lay.clear {
+        (o + p.lead) * p.settled / (p.lead + lay.clear).max(1.0)
     } else {
-        p.settled + lay.along(o) - lay.settle
+        p.settled + o - lay.clear
     };
     let s = s.clamp(0.0, p.length());
     let ((x, y), angle) = p.at(s);
@@ -1461,7 +1378,7 @@ fn passed(net: &Network, paths: &mut Paths, before: &Last, path: &CarPath) -> Op
     let lane = (Mm(before.lane.0), Mm(before.lane.1));
     let len = link_len(net, mid);
     let entry = entry_from(net, before.link, lane, start, &mg)
-        .filter(|_| Layout::of(net, mid, &mg, len).turn > 0.0);
+        .filter(|_| Layout::of(net, mid, len).clear > 0.0);
     let key = Key::of(mid, shown, entry.as_ref());
     paths.id(net, &key, entry.as_ref())
 }

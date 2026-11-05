@@ -1171,14 +1171,15 @@ pub(super) fn step(
             Some(Some(room)) => place = place.min(LaneOffset(room)),
             None => {}
         }
-        // 描くずれは、通り抜けの区間に入った所のずれから移る。通り抜けの区間の曲線の始まりのずれを、
-        // ノードを越える前にも同じに求められるようにするためである（`Trip::car_path`）。
+        // 描くずれは、通り抜けの区間に入った所のずれから、リンクの始まりで移り始める。通り抜けの区間の曲線の
+        // 始まりのずれを、ノードを越える前にも同じに求められるようにするためである（`Trip::car_path`）。
+        // リンクの始まりから移り始めれば、次の停止線までに移り終えるので、次の曲線の始まりはこのリンクの車線の上にある。
         let shown = t.shift_at(net, stop_line(net, t.link()));
         t.leg += 1;
         (t.waited, t.yielded, t.bound) = (0, 0, None);
         t.enter(net, place, Some(lane));
         if let Some(b) = t.blend.as_mut() {
-            b.from = shown;
+            (b.from, b.start) = (shown, 0);
         }
         let r = rear.entry(lane).or_insert(place);
         *r = (*r).min(place);
