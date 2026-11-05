@@ -1117,6 +1117,39 @@ try {
     near(commercial, mixHex("#eaf0f8", "#dde6f3", blocks), 4),
     `塗ったマスが商業の淡い青の地面で描かれる（${commercial.join(", ")}）`,
   );
+  // 低密度の住宅は、区画の番号 5 で送られ、高密度の住宅と違う黄緑の地面で描かれる。確かめたら消す
+  {
+    await pickTool(page, "zone-ResidentialLow");
+    const beforeLow = await outcomeCount();
+    const l0 = tilePoint(14, 29);
+    const l1 = tilePoint(18, 31);
+    await page.mouse.move(l0.x, l0.y);
+    await page.mouse.down();
+    await page.mouse.move(l1.x, l1.y, { steps: 4 });
+    await page.mouse.up();
+    const lowZoned = await nextOutcome(beforeLow);
+    // カーソルの下の仮の表示が地面にかからないよう、離しておく
+    const awayLow = tilePoint(45, 45);
+    await page.mouse.move(awayLow.x, awayLow.y);
+    const wantLow = mixHex("#f0f5d6", "#e7efc3", blocks);
+    let low = await colorOfTile(16, 30);
+    for (let i = 0; i < 50 && !near(low, wantLow, 4); i++) {
+      await page.waitForTimeout(100);
+      low = await colorOfTile(16, 30);
+    }
+    check(
+      lowZoned.command === "PaintZone" && lowZoned.outcome === "Applied" && near(low, wantLow, 4),
+      `低密度の住宅を塗ると、黄緑の地面（#f0f5d6）で描かれる（${low.join(", ")}、${lowZoned.text}）`,
+    );
+    await pickTool(page, "zone-Clear");
+    const beforeClear = await outcomeCount();
+    await page.mouse.move(l0.x, l0.y);
+    await page.mouse.down();
+    await page.mouse.move(l1.x, l1.y, { steps: 4 });
+    await page.mouse.up();
+    await nextOutcome(beforeClear);
+    await pickTool(page, "zone-Commercial");
+  }
   // 需要の主題図では、建物のない区画を、その種類の需要の高さで、白から区画の縁の色へ寄せて濃く塗る
   {
     const away = tilePoint(45, 45);

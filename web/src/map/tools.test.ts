@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { Camera } from "./camera.ts";
 import {
@@ -159,6 +160,34 @@ describe("コマンドの組み立て", () => {
       maxX: 3,
       maxY: 9,
     });
+  });
+
+  test("低密度の住宅は、高密度の住宅と別の区画の名前で塗る", () => {
+    expect(paintZoneCommand("ResidentialLow", { x: 1, y: 2 }, { x: 3, y: 4 })).toMatchObject({
+      kind: "PaintZone",
+      zone: "ResidentialLow",
+    });
+    expect(paintZoneCommand("Residential", { x: 1, y: 2 }, { x: 3, y: 4 })).toMatchObject({
+      zone: "Residential",
+    });
+  });
+
+  test("区画の道具のボタンは、住宅（低密度）、住宅（高密度）の順に並ぶ", () => {
+    const html = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
+    const start = html.indexOf('id="menu-zone"');
+    const buttons = [
+      ...html
+        .slice(start, html.indexOf("</div>", html.indexOf("</div>", start) + 1))
+        .matchAll(/data-tool="zone-(\w+)"[^>]*>(?:<span[^>]*><\/span>)?([^<]*)</g),
+    ].map((m) => [m[1], m[2]]);
+    expect(buttons).toEqual([
+      ["ResidentialLow", "住宅（低密度）"],
+      ["Residential", "住宅（高密度）"],
+      ["Commercial", "商業"],
+      ["Industrial", "工業"],
+      ["Office", "オフィス"],
+      ["Clear", "区画を消す"],
+    ]);
   });
 
   test("区画の長方形は 1 辺が上限を超えないところで止める", () => {

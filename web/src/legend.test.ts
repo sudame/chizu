@@ -13,8 +13,14 @@ import {
 describe("凡例", () => {
   test("区画・建物・印・施設・道路・移動体の順に並ぶ。交通は主題図の凡例に出す", () => {
     const sections = legendSections();
-    expect(sections.map((s) => s.items.length)).toEqual([4, 4, 2, 4, 4, 2]);
-    expect(sections[0]?.items.map((i) => i.label)).toEqual(["住宅", "商業", "工業", "オフィス"]);
+    expect(sections.map((s) => s.items.length)).toEqual([5, 4, 2, 4, 4, 2]);
+    expect(sections[0]?.items.map((i) => i.label)).toEqual([
+      "住宅（低密度）",
+      "住宅（高密度）",
+      "商業",
+      "工業",
+      "オフィス",
+    ]);
     expect(sections[3]?.items.map((i) => i.label)).toEqual([
       "発電所",
       "浄水場",
@@ -60,8 +66,15 @@ describe("凡例", () => {
 
   test("区画は地面の色に、建物の縁の色を添える", () => {
     const zones = legendSections()[0]?.items ?? [];
-    expect(zones[0]?.color).toBe(cssColor(zoneGroundColor(1)));
-    expect(zones[0]?.border).toBe(cssColor(buildingEdgeColor(1)));
+    expect(zones[1]?.color).toBe(cssColor(zoneGroundColor(1)));
+    expect(zones[1]?.border).toBe(cssColor(buildingEdgeColor(1)));
+    expect(zones[0]?.color).toBe(cssColor(zoneGroundColor(5)));
+    expect(zones[0]?.border).toBe(cssColor(buildingEdgeColor(5)));
+  });
+
+  test("低密度の住宅の地面は、ほかのどの区画とも違う色で示す", () => {
+    const colors = (legendSections()[0]?.items ?? []).map((i) => i.color);
+    expect(new Set(colors).size).toBe(colors.length);
   });
 
   test("色の変換は 0〜255 に収める", () => {

@@ -54,10 +54,27 @@ describe("建物", () => {
     expect(g4).toBeGreaterThan(r4);
     expect(b4).toBeGreaterThan(r4);
     // どの区画も、建物は地面より濃く、縁は建物より濃い
-    for (const zone of [1, 2, 3, 4]) {
+    for (const zone of [1, 2, 3, 4, 5]) {
       const colors = ZONE_COLORS[zone];
       expect(brightness(buildingColor(zone))).toBeLessThan(brightness(colors?.ground ?? []));
       expect(brightness(buildingEdgeColor(zone))).toBeLessThan(brightness(buildingColor(zone)));
+    }
+  });
+
+  test("低密度の住宅（5）は緑の系統のまま、高密度の住宅とも、ほかの区画とも、どの面でも見分けられる", () => {
+    const low = ZONE_COLORS[5];
+    expect(low).toBeDefined();
+    // 緑の系統：緑が最も強く、赤が青より強い（工業の黄、商業とオフィスの青系とは別）
+    const [r, g, b] = low?.edge ?? [0, 0, 0];
+    expect(g).toBeGreaterThan(r);
+    expect(r).toBeGreaterThan(b);
+    const dist = (a: readonly number[], c: readonly number[]) =>
+      Math.hypot((a[0] ?? 0) - (c[0] ?? 0), (a[1] ?? 0) - (c[1] ?? 0), (a[2] ?? 0) - (c[2] ?? 0));
+    for (const other of [1, 2, 3, 4]) {
+      for (const face of ["ground", "blockEmpty", "block", "building", "edge"] as const) {
+        const d = dist(low?.[face] ?? [], ZONE_COLORS[other]?.[face] ?? []);
+        expect(d, `区画 ${other} の ${face}`).toBeGreaterThan(0.04);
+      }
     }
   });
 

@@ -78,7 +78,7 @@ describe("describeInspect", () => {
     const view = parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 5, 2]);
     expect(view).not.toBeNull();
     const text = describeInspect(view as NonNullable<typeof view>);
-    expect(text.title).toBe("住宅（段階 2）");
+    expect(text.title).toBe("住宅（高密度、段階 2）");
     expect(text.rows).toEqual([
       { label: "世帯", value: "3 / 8" },
       { label: "住民", value: "9 人" },
@@ -119,6 +119,16 @@ describe("describeInspect", () => {
     // 供給量の行は、発電所と浄水場だけに出す
     const labels = describeInspect(garage as NonNullable<typeof garage>).rows.map((r) => r.label);
     expect(labels).not.toContain("供給量");
+  });
+
+  it("低密度の住宅（区画の番号 5）は高密度と分けて読み、住宅の欄を出す", () => {
+    const view = parseInspect([1, 5, 2, 1, 1, 3, 1, 3, 62, 80, 50, 55, 3960, 3, 1, 0, 0, 5, 2]);
+    expect(view).toMatchObject({ kind: "building", zone: "ResidentialLow" });
+    const text = describeInspect(view as NonNullable<typeof view>);
+    expect(text.title).toBe("住宅（低密度、段階 2）");
+    expect(text.rows.map((r) => r.label)).toContain("幸福度");
+    expect(text.rows.map((r) => r.label)).toContain("自宅の駐車場");
+    expect(text.rows[0]).toEqual({ label: "世帯", value: "1 / 3" });
   });
 
   it("住民のいない住宅は幸福度と通勤を出さない", () => {

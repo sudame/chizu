@@ -198,9 +198,8 @@ impl Sim {
             if layer.occupancy[i] == TileUse::Building {
                 *tile |= TILE_BUILDING;
             }
-            // 画面はまだ低密度の住宅を見分けないので、`ZoneKind` の値で送り、高密度の住宅と同じに描かせる。
             if let Some(zone) = layer.zone[i] {
-                *tile |= (zone.kind() as u8) << TILE_ZONE_SHIFT;
+                *tile |= (zone as u8) << TILE_ZONE_SHIFT;
             }
             let zonable = near.as_ref().is_some_and(|n| n[i]) && !road && *tile & TILE_WATER == 0;
             if zonable {
@@ -856,7 +855,7 @@ pub const TILE_WATER: u8 = 1;
 pub const TILE_ROAD: u8 = 1 << 1;
 /// 区画を塗れる（道路から奥行きの範囲にある、買った陸の空き）マスのビット。
 pub const TILE_ZONABLE: u8 = 1 << 2;
-/// 区画の種類（`ZoneKind` の値、なければ 0）を置くビットの位置。3 ビットを使う。
+/// 区画の種類（`Zone` の値。低密度の住宅は 5。なければ 0）を置くビットの位置。3 ビットを使う。
 pub const TILE_ZONE_SHIFT: u8 = 3;
 /// 区画の種類を取り出すマスク（`TILE_ZONE_SHIFT` だけずらしたあとに掛ける）。
 pub const TILE_ZONE_MASK: u8 = 0b111;
@@ -1436,9 +1435,9 @@ mod tests {
         assert_ne!(sim.chunk_tiles(east)[30 * CHUNK_SIDE] & TILE_ZONABLE, 0);
     }
 
-    /// 画面はまだ低密度の住宅を見分けないので、低密度のマスは住宅の値で送り、高密度と同じに描かせる。
+    /// 低密度の住宅のマスは `Zone` の値 5 で送り、高密度の住宅（1）と画面で見分けられる。
     #[test]
-    fn low_density_tiles_go_to_the_screen_as_residential() {
+    fn low_density_tiles_go_to_the_screen_as_their_own_zone() {
         let mut sim = Sim::new(0);
         let origin = ChunkCoord::new(0, 0);
         sim.submit(road((10, 10), (20, 10))).unwrap();
@@ -1447,11 +1446,15 @@ mod tests {
             zone: Some(Zone::ResidentialLow),
         })
         .unwrap();
-        let tile = sim.chunk_tiles(origin)[12 * CHUNK_SIDE + 13];
-        assert_eq!(
-            (tile >> TILE_ZONE_SHIFT) & TILE_ZONE_MASK,
-            ZoneKind::Residential as u8
-        );
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(16, 11), TilePos::new(18, 12)),
+            zone: Some(Zone::Residential),
+        })
+        .unwrap();
+        let tiles = sim.chunk_tiles(origin);
+        let code = |x: usize| (tiles[12 * CHUNK_SIDE + x] >> TILE_ZONE_SHIFT) & TILE_ZONE_MASK;
+        assert_eq!(code(13), 5);
+        assert_eq!(code(17), 1);
     }
 
     #[test]

@@ -30,11 +30,11 @@ import { demandColor, demandShare } from "./themes.ts";
 
 const vec3 = ([r, g, b]: readonly number[]) => `vec3(${r}, ${g}, ${b})`;
 
-// 区画ごとの色を、区画 1〜4 の順に 4 つずつ並べる。地面（roads.ts と共有する）、引きの段の街区の面の
+// 区画ごとの色を、区画 1〜5 の順に 4 つずつ並べる。地面（roads.ts と共有する）、引きの段の街区の面の
 // 建物のないマスと建物のあるマス（濃い）、寄りの段の空き地の模様（建物の縁の色）の順である。
 // シェーダーの定数の配列にすると、ソフトウェアの描画ではマスの画素ごとに配列を作り直して重くなるので、uniform で渡す
 const ZONE_PALETTE = new Float32Array(
-  [1, 2, 3, 4].flatMap((zone) =>
+  [1, 2, 3, 4, 5].flatMap((zone) =>
     [
       zoneGroundColor(zone),
       ZONE_COLORS[zone]?.blockEmpty ?? [0, 0, 0],
@@ -78,9 +78,10 @@ uniform float u_block;
 uniform float u_pattern;
 in highp vec2 v_uv;
 out vec4 color;
-// 区画の色（ZONE_PALETTE）。区画の地面は淡い色で塗る。色は CS2 にならう（住宅は緑、商業は青、工業は黄、オフィスは水色）
-uniform vec3 u_zone[16];
-// 空き地の模様（住宅は無地、商業は点、工業は斜線、オフィスは横線）が、この画素にかかるか。
+// 区画の色（ZONE_PALETTE）。区画の地面は淡い色で塗る。色は CS2 にならう（住宅は緑、商業は青、工業は黄、オフィスは水色）。
+// 低密度の住宅は、高密度より黄に寄せた緑にする
+uniform vec3 u_zone[20];
+// 空き地の模様（高密度の住宅は無地、低密度の住宅は縦線、商業は点、工業は斜線、オフィスは横線）が、この画素にかかるか。
 // 線と点の太さは画面で 1px ほどにする。ソフトウェアの描画では分岐の両方を計算するので、安い計算にとどめる
 bool pattern(uint zone) {
   highp vec2 cell = fract(v_uv * ${PATTERN_CELLS}.0);
@@ -92,6 +93,9 @@ bool pattern(uint zone) {
   }
   if (zone == 3u) {
     return fract((v_uv.x + v_uv.y) * ${CHUNK_SIDE}.0) * cellPx * 2.0 < 1.4;
+  }
+  if (zone == 5u) {
+    return cell.x * cellPx < 1.0;
   }
   return cell.y * cellPx < 1.0;
 }
@@ -137,7 +141,7 @@ void main() {
   } else {
     c = ${vec3(GROUND_COLOR)};
     uint zone = (tile >> ${TILE_ZONE_SHIFT}u) & 7u;
-    if (zone >= 1u && zone <= 4u) {
+    if (zone >= 1u && zone <= 5u) {
       int i = int(zone - 1u) * 4;
       bool built = (tile & ${TILE_BUILDING}u) != 0u;
       c = u_zone[i];
@@ -145,7 +149,7 @@ void main() {
       if (u_block > 0.0) {
         c = mix(c, u_zone[i + (built ? 2 : 1)], u_block);
       }
-      // 寄りでは、建物のない区画に模様を付ける。住宅は無地
+      // 寄りでは、建物のない区画に模様を付ける。高密度の住宅は無地
       if (u_pattern > 0.0 && !built && zone != 1u) {
         if (pattern(zone)) {
           c = mix(c, u_zone[i + 3], ${PATTERN_MIX} * u_pattern);
@@ -181,8 +185,9 @@ void main() {
   uint tile = texelFetch(u_tiles, t, 0).r;
   uint zone = (tile >> ${TILE_ZONE_SHIFT}u) & 7u;
   bool empty = (tile & (${TILE_BUILDING}u | ${TILE_WATER}u)) == 0u;
-  if (u_owned && empty && zone >= 1u && zone <= 4u) {
-    int i = int(zone - 1u);
+  if (u_owned && empty && zone >= 1u && zone <= 5u) {
+    // 低密度の住宅の需要は、住宅の需要（高密度と同じ 1 つ）で見る
+    int i = zone == 5u ? 0 : int(zone - 1u);
     color = vec4(mix(vec3(1.0), u_deep[i], u_share[i]), 1.0);
   } else {
     color = vec4(1.0, 1.0, 1.0, u_wash);

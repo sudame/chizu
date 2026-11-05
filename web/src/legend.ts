@@ -43,6 +43,13 @@ const ZONES: [number, string][] = [
   [4, "オフィス"],
 ];
 
+// 区画の地面の色の凡例。住宅は密度で 2 つに分かれる（建物は、低密度の描き分けを入れるまで住宅 1 つ）
+const GROUND_ZONES: [number, string][] = [
+  [5, "住宅（低密度）"],
+  [1, "住宅（高密度）"],
+  ...ZONES.slice(1),
+];
+
 // 施設の種類（ServiceKind の値）と凡例の名前
 const FACILITIES: [number, string][] = [
   [1, "発電所"],
@@ -62,7 +69,7 @@ export function legendSections(): LegendSection[] {
   return [
     {
       title: "区画（地面の色）",
-      items: ZONES.map(([zone, label]) => ({
+      items: GROUND_ZONES.map(([zone, label]) => ({
         label,
         color: cssColor(zoneGroundColor(zone)),
         border: cssColor(buildingEdgeColor(zone)),

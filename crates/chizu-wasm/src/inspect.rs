@@ -4,7 +4,7 @@
 
 use chizu_core::clock::GAME_SECONDS_PER_TICK;
 use chizu_core::happiness::{commute_time, total};
-use chizu_core::{BuildingId, CarPlace, TilePos, TileRect, World, ZoneKind};
+use chizu_core::{BuildingId, CarPlace, TilePos, TileRect, World, Zone, ZoneKind};
 
 /// 住宅の住民の様子。住民が 1 人もいなければ `None` にする項目が多い。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,7 +25,8 @@ pub struct Residents {
 /// 押された建物の様子。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildingInfo {
-    pub zone: ZoneKind,
+    /// 区画の種類。低密度の住宅は高密度の住宅と別の値になる。
+    pub zone: Zone,
     pub level: u8,
     pub power: bool,
     pub water: bool,
@@ -172,7 +173,7 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
     let pop = world.population();
     let b = buildings.get(id)?;
     let mut info = BuildingInfo {
-        zone: b.zone.kind(),
+        zone: b.zone,
         level: b.level,
         power: b.supply.power,
         water: b.supply.water,
@@ -298,7 +299,7 @@ pub fn encode(found: Option<Found>) -> Vec<f64> {
                 if let Some(s) = r.commute_seconds {
                     out[12] = s as f64;
                 }
-            } else if b.zone == ZoneKind::Residential {
+            } else if b.zone.kind() == ZoneKind::Residential {
                 out[7] = 0.0;
             }
             if let Some(c) = b.car_places {
@@ -339,6 +340,11 @@ mod tests {
 
     /// 外の世界とつながった道路の南側に住宅を塗り、発電所と浄水場を置いた街。商業を塗るかは選べる。
     fn new_town(commercial: bool) -> Sim {
+        new_town_with(Zone::Residential, commercial)
+    }
+
+    /// [`new_town`] の、住宅の区画を選べる版。
+    fn new_town_with(home: Zone, commercial: bool) -> Sim {
         let mut sim = Sim::new(0);
         sim.submit(road((10, 10), (30, 10))).unwrap();
         let inner = chizu_core::world::highway_line(0).start;
@@ -359,7 +365,11 @@ mod tests {
             })
             .unwrap();
         }
-        paint(&mut sim, (10, 20), ZoneKind::Residential);
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(20, 15)),
+            zone: Some(home),
+        })
+        .unwrap();
         if commercial {
             paint(&mut sim, (21, 30), ZoneKind::Commercial);
         }
@@ -408,6 +418,27 @@ mod tests {
         pop.household_ids()
             .filter(|h| pop.home(*h).flatten() == Some(id))
             .count() as u64
+    }
+
+    /// 検査の答えの区画は `Zone` の値で送り、低密度の住宅（5）を高密度の住宅（1）と見分けさせる。
+    #[test]
+    fn a_home_reports_its_density_in_the_zone_code() {
+        for (zone, code) in [(Zone::ResidentialLow, 5.0), (Zone::Residential, 1.0)] {
+            let mut sim = new_town_with(zone, false);
+            sim.advance((TICKS_PER_DAY * 3) as u32);
+            let world = sim.world();
+            let (id, _) = world
+                .buildings()
+                .iter()
+                .find(|(_, b)| b.zone == zone)
+                .expect("住宅が建たない");
+            let (_, info) = building(world, area_min(world, id));
+            assert_eq!(info.zone, zone);
+            let encoded = encode(inspect(world, area_min(world, id)));
+            assert_eq!(encoded[1], code);
+            // 低密度でも住宅なので、世帯の欄が出る
+            assert!(info.capacity > 0);
+        }
     }
 
     #[test]
