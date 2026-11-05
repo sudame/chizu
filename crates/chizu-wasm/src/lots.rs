@@ -658,6 +658,7 @@ mod tests {
                     };
                     let mut b = variant(template, ZoneKind::Residential, size, toward, level);
                     b.form = chizu_core::building::LotForm::Lane;
+                    b.zone = Zone::ResidentialLow;
                     let at = format!("2×{depth} {toward:?} 段階 {level}");
                     let shape =
                         lot_shape(net, &b, sim.world().seed()).expect("私道の敷地に形がない");

@@ -581,7 +581,17 @@ mod car_place_tests {
             })
         };
         let mut found = None;
-        while w.tick.0 < 6 * TICKS_PER_DAY && found.is_none() {
+        while w.tick.0 < 14 * TICKS_PER_DAY && found.is_none() {
+            // 戸建てが段階 3 に上がる前に、車が家へ向かう場面を作るため、段階 2 の戸建てを段階 2 に留める。
+            let hold: Vec<BuildingId> = w
+                .buildings()
+                .iter()
+                .filter(|(_, b)| b.zone == crate::command::Zone::Residential && b.level == 2)
+                .map(|(id, _)| id)
+                .collect();
+            for id in hold {
+                w.buildings.get_mut(id).unwrap().leveled_at = w.tick;
+            }
             w.step();
             found = pick(&w);
         }
