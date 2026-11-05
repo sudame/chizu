@@ -231,7 +231,7 @@ mod tests {
     use crate::sim::Sim;
     use chizu_core::movement::{building_spot, lot_spot};
     use chizu_core::world::growth::GROWTH_INTERVAL;
-    use chizu_core::{Command, RoadKind, TilePos, TileRect, ZoneKind};
+    use chizu_core::{Command, RoadKind, TilePos, TileRect, Zone, ZoneKind};
 
     /// 道路を引き、区画を塗って、建物が建つまで進めた街。
     fn town(zone: ZoneKind, road: (TilePos, TilePos), paint: TileRect) -> Sim {
@@ -244,7 +244,7 @@ mod tests {
         .unwrap();
         sim.submit(Command::PaintZone {
             area: paint,
-            zone: Some(zone),
+            zone: Some(Zone::from(zone)),
         })
         .unwrap();
         for _ in 0..30 {
@@ -517,7 +517,7 @@ mod tests {
     ) -> Building {
         let mut b = *template;
         b.form = chizu_core::building::LotForm::Street;
-        b.zone = zone;
+        b.zone = Zone::from(zone);
         b.level = level;
         b.toward_road = toward;
         // 道路の向きに合わせて、`front` が `along` の小さい側の端になるように敷地を置く

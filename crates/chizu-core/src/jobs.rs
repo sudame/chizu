@@ -234,7 +234,7 @@ pub fn assign_jobs(
 ) -> Vec<(CitizenId, Option<BuildingId>)> {
     let mut vacancy: BTreeMap<BuildingId, u64> = buildings
         .iter()
-        .map(|(id, b)| (id, b.workplaces_at(tax_permille[b.zone.index()])))
+        .map(|(id, b)| (id, b.workplaces_at(tax_permille[b.zone.kind().index()])))
         .filter(|(_, n)| *n > 0)
         .collect();
     let mut changes = BTreeMap::new();

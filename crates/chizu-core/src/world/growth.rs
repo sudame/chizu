@@ -14,13 +14,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
 use crate::building::{
-    Building, DIAGONAL_LOT_SIDE, LANE_FRONTAGE, LANE_MAX_LEVEL, LANE_MIN_DEPTH, LotForm, MAX_LEVEL,
+    Building, DIAGONAL_LOT_SIDE, LANE_FRONTAGE, LANE_MAX_LEVEL, LANE_MIN_DEPTH, LotForm,
     MAX_LOT_SIDE, demand,
 };
 use crate::chunk::{Layer, TileUse};
 use crate::clock::TICKS_PER_DAY;
 use crate::command::ServiceKind;
-use crate::command::ZoneKind;
+use crate::command::{Density, Zone, ZoneKind};
 use crate::id::BuildingId;
 use crate::network::{DIAGONAL_TILE_MM, Dir, LaneMode, LinkId, TILE_MM};
 use crate::rng::{RngPurpose, rng};
@@ -46,7 +46,7 @@ pub const MAX_LOT_DEPTH: u64 = ZONE_DEPTH as u64;
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct LotFronts {
     /// 間口のマスと、その区画の種類と、道路へ向かう向き（`FRONT_DIRS` の添え字）。
-    fronts: BTreeMap<TilePos, (ZoneKind, u8)>,
+    fronts: BTreeMap<TilePos, (Zone, u8)>,
     /// 区画の種類ごとの間口のマス。添え字は [`ZoneKind::index`]。
     by_zone: [BTreeSet<TilePos>; 4],
 }
@@ -67,8 +67,25 @@ pub const SPAWN_PER_DEMAND: i64 = 8;
 /// 1 回に、区画の種類ごとに建てる建物の数の上限。
 pub const MAX_SPAWN_PER_ZONE: u32 = 16;
 
-/// 私道の敷地にできる大きさの住宅のうち、私道の敷地にする割合（%）。形は `docs/design.md` の 3.8 にある。
+/// 高密度の住宅で、私道の敷地にできる大きさの住宅のうち、私道の敷地にする割合（%）。形は `docs/design.md` の 3.8 にある。
 pub const LANE_PERCENT: u32 = 25;
+
+/// 高密度の住宅を、[`LANE_PERCENT`] の割合で私道の敷地にするときの、奥行きの下限（マス）。
+/// 低密度の下限（[`LANE_MIN_DEPTH`]）を下げても、高密度の育ち方は変えない。
+pub const LANE_PERCENT_MIN_DEPTH: u64 = 4;
+
+/// 低密度の住宅の、縦か横の道路沿いで試す大きさ（間口、奥行き）。この順に試し、収まる中で最初のものに建てる。
+/// 間口 2、奥行き [`LANE_MIN_DEPTH`] 以上は私道の敷地に、奥行き 1〜2 は通りに面した家になる。
+const LOW_DENSITY_SIZES: [(u64, u64); 8] = [
+    (2, 6),
+    (2, 5),
+    (2, 4),
+    (2, 3),
+    (2, 2),
+    (2, 1),
+    (1, 2),
+    (1, 1),
+];
 
 /// 段階が 1 つ上がるまでの時間（tick）。
 pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;
@@ -177,7 +194,7 @@ impl World {
         let demand = demand(&stats);
         let mut has_front = [false; 4];
         for (zone, _) in self.lots.fronts.values() {
-            has_front[zone.index()] = true;
+            has_front[zone.kind().index()] = true;
         }
         std::array::from_fn(|z| demand[z] > 0 && stats.zoned[z] && !has_front[z])
     }
@@ -190,10 +207,10 @@ impl World {
         let mut nets = BTreeMap::<usize, StalledNetwork>::new();
         let demand = demand(&self.city_stats());
         for (front, (zone, d)) in &self.lots.fronts {
-            let slot = &mut out[zone.index()];
+            let slot = &mut out[zone.kind().index()];
             slot.fronts += 1;
             // 新築は需要が正の区画にしか建たない。需要のない区画は、施設を置いても建たない。
-            if demand[zone.index()] <= 0 {
+            if demand[zone.kind().index()] <= 0 {
                 continue;
             }
             // 新築と同じく、1 マスの建物（需要 1）が入らなければ建たない。
@@ -225,7 +242,7 @@ impl World {
     }
 
     /// マスの区画と使い道。メモリにないチャンクのマスは `None` である。
-    pub(super) fn tile_state(&self, t: TilePos) -> Option<(Option<ZoneKind>, TileUse)> {
+    pub(super) fn tile_state(&self, t: TilePos) -> Option<(Option<Zone>, TileUse)> {
         let tiles = self.chunks.get(&t.chunk()?)?.layer(Layer::Ground)?;
         let (lx, ly) = t.local();
         let i = local_index(lx, ly);
@@ -284,7 +301,7 @@ impl World {
     /// 敷地に `zone` の建物を建てられるか。
     fn lot_fits(
         &self,
-        zone: ZoneKind,
+        zone: Zone,
         front: TilePos,
         toward_road: (i64, i64),
         w: u64,
@@ -344,14 +361,14 @@ impl World {
         }
         for t in around {
             if let Some((zone, _)) = self.lots.fronts.remove(&t) {
-                self.lots.by_zone[zone.index()].remove(&t);
+                self.lots.by_zone[zone.kind().index()].remove(&t);
             }
             let Some((Some(zone), TileUse::Empty)) = self.tile_state(t) else {
                 continue;
             };
             if let Some(d) = self.front_dir(t) {
                 self.lots.fronts.insert(t, (zone, d));
-                self.lots.by_zone[zone.index()].insert(t);
+                self.lots.by_zone[zone.kind().index()].insert(t);
             }
         }
     }
@@ -372,7 +389,7 @@ impl World {
     /// `paint` が `Some(z)` なら、区画 `z` を `area` に塗るときの判定である。使えるマスは、`area` の中の
     /// 空きマスか、`area` の外ですでに `z` が塗ってあるマスである。`None` なら、区画を塗る道具に示す
     /// 目安で、買った陸の空きマスをすべて使えるものとして数える。道路、建物、施設のマスは、塗るときと同じく続かない。
-    pub fn buildable_mask(&self, area: TileRect, paint: Option<ZoneKind>) -> Vec<bool> {
+    pub fn buildable_mask(&self, area: TileRect, paint: Option<Zone>) -> Vec<bool> {
         let (w, h) = crate::zone::rect_size(area).expect("区画の長方形が大きすぎる");
         let width = usize::try_from(w).expect("区画の長方形が大きすぎる");
         let mut mask =
@@ -481,11 +498,11 @@ impl World {
             let b = *self.buildings.get(id).expect("建物がない");
             let supplied = b.supply.power && b.supply.water;
             let full = occupants.get(&id).copied().unwrap_or(0) >= b.households() + b.workplaces();
-            let wanted = demand(&stats)[b.zone.index()] > 0;
+            let wanted = demand(&stats)[b.zone.kind().index()] > 0;
             if supplied
                 && full
                 && wanted
-                && b.level < MAX_LEVEL
+                && b.level < b.zone.max_level()
                 && !(b.form == LotForm::Lane && b.level == LANE_MAX_LEVEL)
                 && tick.since(b.leveled_at) >= LEVEL_UP_TICKS
                 && level_room.take(&self.network, b.entrance, b.tile_count())
@@ -499,7 +516,7 @@ impl World {
                 *self.buildings.get_mut(id).expect("建物がない") = up;
                 // 需要が増えたので、次の tick の頭で供給を判定し直す。
                 self.supply_dirty = true;
-                homes_grew |= b.zone == ZoneKind::Residential;
+                homes_grew |= b.zone.kind() == ZoneKind::Residential;
             }
         }
         // 住宅の段階が上がると駐車場の台数が増えるので、増えた枠を配る。
@@ -523,11 +540,18 @@ impl World {
                 let mut r = rng(self.seed, RngPurpose::BuildingGrowth, id, tick);
                 let len = u32::try_from(list.len()).expect("候補の数が u32 に収まらない");
                 let front = *list.iter().nth(r.below(len) as usize).expect("候補がない");
-                let toward_road = FRONT_DIRS[usize::from(self.lots.fronts[&front].1)];
+                // 住宅の候補には低密度と高密度の両方が入っているので、塗った区画は間口のマスから読む。
+                let (lot_zone, d) = self.lots.fronts[&front];
+                let toward_road = FRONT_DIRS[usize::from(d)];
+                let low = lot_zone.density() == Density::Low;
                 let sizes: Vec<(u64, u64)> = if is_diagonal(toward_road) {
                     // 斜めの道路沿いは、引いた 1 辺の正方形から、収まるまで小さくする。
                     let side = 1 + u64::from(r.below(DIAGONAL_LOT_SIDE as u32));
                     (1..=side).rev().map(|s| (s, s)).collect()
+                } else if low {
+                    // 低密度は一軒家の並ぶ形だけにする。間口 2 の私道の敷地を深い順に試し、
+                    // 入らなければ通りに面した家にする。間口 1 の深い敷地は作らない。
+                    LOW_DENSITY_SIZES.to_vec()
                 } else {
                     // 間口は引いた幅から、奥行きは区画の奥行きいっぱいから、収まるまで小さくする。
                     let wt = 1 + u64::from(r.below(MAX_LOT_SIDE as u32));
@@ -544,20 +568,25 @@ impl World {
                     sizes
                         .into_iter()
                         .filter(|(w, k)| w * k <= room)
-                        .find(|(w, k)| self.lot_fits(zone, front, toward_road, *w, *k))
+                        .find(|(w, k)| self.lot_fits(lot_zone, front, toward_road, *w, *k))
                 });
                 let (Some(link), Some((w, k))) = (link, fit) else {
                     continue;
                 };
                 assert!(headroom.take(&self.network, link, w * k));
-                // 大きさを決めたあとに引くので、ほかの建物の位置と大きさは私道の有無に左右されない。
-                let lane = zone == ZoneKind::Residential
-                    && !is_diagonal(toward_road)
-                    && w == LANE_FRONTAGE
-                    && k >= LANE_MIN_DEPTH
-                    && r.below(100) < LANE_PERCENT;
+                // 低密度では、私道の敷地にできる大きさなら必ず私道にする。高密度では、大きさを決めたあとに
+                // 引くので、ほかの建物の位置と大きさは私道の有無に左右されない。
+                let lane_size = !is_diagonal(toward_road) && w == LANE_FRONTAGE;
+                let lane = if low {
+                    lane_size && k >= LANE_MIN_DEPTH
+                } else {
+                    lot_zone == Zone::Residential
+                        && lane_size
+                        && k >= LANE_PERCENT_MIN_DEPTH
+                        && r.below(100) < LANE_PERCENT
+                };
                 let form = if lane { LotForm::Lane } else { LotForm::Street };
-                let id = self.place_building(zone, front, toward_road, w, k, form);
+                let id = self.place_building(lot_zone, front, toward_road, w, k, form);
                 stats = stats.with(self.buildings.get(id).expect("建てた建物がない"));
             }
         }
@@ -565,7 +594,7 @@ impl World {
 
     fn place_building(
         &mut self,
-        zone: ZoneKind,
+        zone: Zone,
         front: TilePos,
         toward_road: (i64, i64),
         w: u64,
@@ -668,7 +697,7 @@ impl World {
             entrance: Some(entrance),
         });
         // CS2 と同じく、施設の下の区画は消し、区画の建物は取り壊す。
-        let mut zones = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
+        let mut zones = BTreeMap::<ChunkCoord, Vec<(usize, Option<Zone>)>>::new();
         for t in &tiles {
             let (lx, ly) = t.local();
             zones
@@ -770,7 +799,8 @@ fn overlaps(a: TileRect, b: TileRect) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{Command, RoadKind};
+    use crate::building::MAX_LEVEL;
+    use crate::command::{Command, LOW_DENSITY_MAX_LEVEL, RoadKind};
     use crate::movement::SidewalkPos;
     use crate::service::{UNSUPPLIED_ALLOWANCE, building_demand};
     use crate::units::{Mm, Money, Tick, WorldPos};
@@ -786,6 +816,11 @@ mod tests {
     }
 
     fn zoned_street_with(seed: u64) -> World {
+        zoned_street_of(seed, Zone::Residential)
+    }
+
+    /// 北を住宅の `home` で塗った通り。
+    fn zoned_street_of(seed: u64, home: Zone) -> World {
         let mut w = World::new(seed);
         let road = Command::BuildRoad {
             from: TilePos::new(0, 10),
@@ -794,8 +829,8 @@ mod tests {
         };
         assert_eq!(w.apply(&road), ApplyOutcome::Applied);
         for (area, zone) in [
-            (rect((0, 4), (40, 9)), ZoneKind::Residential),
-            (rect((0, 11), (40, 16)), ZoneKind::Industrial),
+            (rect((0, 4), (40, 9)), home),
+            (rect((0, 11), (40, 16)), Zone::Industrial),
         ] {
             let paint = Command::PaintZone {
                 area,
@@ -831,7 +866,11 @@ mod tests {
     }
 
     fn served_street_with(seed: u64) -> World {
-        let mut w = zoned_street_with(seed);
+        served_street_of(seed, Zone::Residential)
+    }
+
+    fn served_street_of(seed: u64, home: Zone) -> World {
+        let mut w = zoned_street_of(seed, home);
         assert_eq!(
             place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
             ApplyOutcome::Applied
@@ -925,7 +964,7 @@ mod tests {
                 let t = World::tile_of(c.coord(), i);
                 if let Some(d) = w.front_dir(t) {
                     rebuilt.fronts.insert(t, (zone, d));
-                    rebuilt.by_zone[zone.index()].insert(t);
+                    rebuilt.by_zone[zone.kind().index()].insert(t);
                 }
             }
         }
@@ -963,10 +1002,10 @@ mod tests {
                 let x = b.area.max.x.abs_diff(b.area.min.x) + 1;
                 let y = b.area.max.y.abs_diff(b.area.min.y) + 1;
                 let (frontage, depth) = if b.toward_road.0 == 0 { (x, y) } else { (y, x) };
-                let fits = b.zone == ZoneKind::Residential
+                let fits = b.zone == Zone::Residential
                     && !is_diagonal(b.toward_road)
                     && frontage == LANE_FRONTAGE
-                    && depth >= LANE_MIN_DEPTH;
+                    && depth >= LANE_PERCENT_MIN_DEPTH;
                 eligible += u32::from(fits);
                 if b.form == LotForm::Lane {
                     assert!(fits, "{b:?}");
@@ -1045,7 +1084,7 @@ mod tests {
             let mut w = served_street_with(seed);
             run(&mut w, 10 * TICKS_PER_DAY);
             for (_, b) in w.buildings().iter() {
-                if b.zone != ZoneKind::Residential {
+                if b.zone.kind() != ZoneKind::Residential {
                     continue;
                 }
                 if b.form == LotForm::Lane {
@@ -1066,6 +1105,77 @@ mod tests {
         );
     }
 
+    /// 低密度の住宅は、一軒家の並ぶ形だけが建つ。縦横の道路沿いでは、間口 2、奥行き 3 以上はいつも私道の敷地で、
+    /// それ以外は奥行き 2 までの通りに面した家である。どの建物も段階 2 で止まる。
+    #[test]
+    fn low_density_homes_are_houses_that_stop_at_level_two() {
+        let (mut lanes, mut street, mut top) = (0, 0, 0);
+        for seed in [0, 1, 2] {
+            let mut w = served_street_of(seed, Zone::ResidentialLow);
+            run(&mut w, 10 * TICKS_PER_DAY);
+            check_buildings(&w);
+            for (_, b) in w.buildings().iter() {
+                if b.zone.kind() != ZoneKind::Residential {
+                    continue;
+                }
+                assert_eq!(b.zone, Zone::ResidentialLow, "{seed} {b:?}");
+                assert!(b.level <= LOW_DENSITY_MAX_LEVEL, "{seed} {b:?}");
+                top = top.max(b.level);
+                if is_diagonal(b.toward_road) {
+                    continue;
+                }
+                let x = b.area.max.x.abs_diff(b.area.min.x) + 1;
+                let y = b.area.max.y.abs_diff(b.area.min.y) + 1;
+                let (frontage, depth) = if b.toward_road.0 == 0 { (x, y) } else { (y, x) };
+                assert!(frontage <= LANE_FRONTAGE, "{seed} {b:?}");
+                if frontage == LANE_FRONTAGE && depth >= LANE_MIN_DEPTH {
+                    assert_eq!(b.form, LotForm::Lane, "{seed} {b:?}");
+                    assert!(b.lane_plan().is_some(), "{seed} {b:?}");
+                    lanes += 1;
+                } else {
+                    assert_eq!(b.form, LotForm::Street, "{seed} {b:?}");
+                    assert!(depth <= 2, "間口 1 の深い敷地がある：{seed} {b:?}");
+                    street += 1;
+                }
+            }
+        }
+        assert!(lanes > 0, "低密度に私道の敷地が建たない");
+        assert!(street + lanes > 0);
+        assert_eq!(
+            top, LOW_DENSITY_MAX_LEVEL,
+            "低密度の住宅が段階 2 まで育たない"
+        );
+    }
+
+    /// 低密度と高密度の住宅は別の区画で、1 つの建物が両方にまたがらない。
+    #[test]
+    fn low_and_high_density_do_not_share_a_lot() {
+        let mut w = served_street_with(0);
+        let low = Command::PaintZone {
+            area: rect((20, 4), (40, 9)),
+            zone: Some(Zone::ResidentialLow),
+        };
+        assert_eq!(w.apply(&low), ApplyOutcome::Applied);
+        run(&mut w, 6 * TICKS_PER_DAY);
+        check_buildings(&w);
+        let mut seen = [false; 2];
+        for (_, b) in w.buildings().iter() {
+            if b.zone.kind() != ZoneKind::Residential {
+                continue;
+            }
+            seen[usize::from(b.zone == Zone::ResidentialLow)] = true;
+            for t in crate::zone::tiles_of(b.area) {
+                assert_eq!(w.zone_at(t), Some(b.zone), "{b:?}");
+            }
+            if b.zone == Zone::Residential {
+                assert!(b.area.max.x < 20, "{b:?}");
+            } else {
+                assert!(b.area.min.x >= 20, "{b:?}");
+            }
+        }
+        assert_eq!(seen, [true, true], "どちらかの密度の住宅が建たない");
+    }
+
     /// 古い保存データにある段階 3 以上の私道の敷地は、ふつうの住宅と同じく上がれる。
     #[test]
     fn legacy_lane_lots_above_the_cap_keep_growing() {
@@ -1075,7 +1185,7 @@ mod tests {
             .buildings()
             .iter()
             .filter(|(_, b)| {
-                b.zone == ZoneKind::Residential
+                b.zone.kind() == ZoneKind::Residential
                     && b.form == LotForm::Street
                     && (LANE_MAX_LEVEL + 1..MAX_LEVEL).contains(&b.level)
             })
@@ -1164,7 +1274,7 @@ mod tests {
         ] {
             let paint = Command::PaintZone {
                 area,
-                zone: Some(zone),
+                zone: Some(Zone::from(zone)),
             };
             assert_eq!(w.apply(&paint), ApplyOutcome::Applied);
         }
@@ -1389,7 +1499,7 @@ mod tests {
             let (entrance, entrance_at) = w.frontage(front, toward_road).unwrap();
             let far = (x + 7, y - 7 * toward_road.1);
             w.buildings.insert(Building {
-                zone: ZoneKind::Residential,
+                zone: Zone::Residential,
                 area: rect((x, y), far),
                 front,
                 toward_road,
@@ -1485,7 +1595,7 @@ mod tests {
         let front = TilePos::new(x, y);
         let (entrance, entrance_at) = w.frontage(front, toward_road).unwrap();
         w.buildings.insert(Building {
-            zone: ZoneKind::Residential,
+            zone: Zone::Residential,
             area: rect((x, y), (x + side - 1, y - (side - 1) * toward_road.1)),
             front,
             toward_road,
@@ -1951,7 +2061,7 @@ mod tests {
     fn paint(w: &mut World, a: (i64, i64), b: (i64, i64), zone: ZoneKind) {
         let c = Command::PaintZone {
             area: rect(a, b),
-            zone: Some(zone),
+            zone: Some(Zone::from(zone)),
         };
         let outcome = w.apply(&c);
         assert!(
@@ -2071,7 +2181,7 @@ mod tests {
                             [(sx + 1) as usize];
                         w.apply(&Command::PaintZone {
                             area: rect((x - len, y - len), (x + len, y + len)),
-                            zone,
+                            zone: zone.map(Zone::from),
                         });
                     }
                     2 => run(&mut w, GROWTH_INTERVAL),
@@ -2094,7 +2204,7 @@ mod tests {
     fn paint_outcome(w: &mut World, a: (i64, i64), b: (i64, i64)) -> ApplyOutcome {
         w.apply(&Command::PaintZone {
             area: rect(a, b),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
     }
 
@@ -2169,7 +2279,7 @@ mod tests {
         assert_eq!(
             w.apply(&Command::PaintZone {
                 area: rect((18, 5), (24, 9)),
-                zone: Some(ZoneKind::Commercial),
+                zone: Some(Zone::Commercial),
             }),
             ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile)
         );
@@ -2193,7 +2303,7 @@ mod tests {
         let commercial = |w: &mut World, a, b| {
             w.apply(&Command::PaintZone {
                 area: rect(a, b),
-                zone: Some(ZoneKind::Commercial),
+                zone: Some(Zone::Commercial),
             })
         };
         w.write_occupancy((4..=8).map(|x| (TilePos::new(x, 9), TileUse::Building)));
@@ -2253,7 +2363,7 @@ mod tests {
         // 道路の脇が別の種類の区画だと、その奥に住宅の建物は続かない。
         let industrial = Command::PaintZone {
             area: rect((4, 9), (10, 9)),
-            zone: Some(ZoneKind::Industrial),
+            zone: Some(Zone::Industrial),
         };
         assert_eq!(w.apply(&industrial), ApplyOutcome::Applied);
         assert_eq!(
@@ -2263,7 +2373,7 @@ mod tests {
     }
 
     /// 敷地の一部として建ちうるマスか。間口の候補と大きさを、建てるときと同じ決まりで総当たりする。
-    fn in_some_lot(w: &World, zone: ZoneKind, t: TilePos) -> bool {
+    fn in_some_lot(w: &World, zone: Zone, t: TilePos) -> bool {
         w.lots.fronts.iter().any(|(front, (z, d))| {
             if *z != zone {
                 return false;
@@ -2308,16 +2418,16 @@ mod tests {
                 .collect::<Vec<_>>();
             assert!(!painted.is_empty());
             for t in painted {
-                assert!(in_some_lot(&w, ZoneKind::Residential, t), "{t:?}");
+                assert!(in_some_lot(&w, Zone::Residential, t), "{t:?}");
             }
         }
     }
 
     /// 区画を全面に塗ったと見て、建てる側の決まり（間口の候補と `lot_fits`）で敷地に入りうるマスを総当たりで求める。
     fn lot_tiles_if_all_zoned(w: &World, area: TileRect) -> Vec<bool> {
-        let zone = ZoneKind::Residential;
+        let zone = Zone::Residential;
         let mut all = w.clone();
-        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
+        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<Zone>)>>::new();
         for t in crate::zone::tiles_of(area) {
             let empty = matches!(all.tile_state(t), Some((_, TileUse::Empty)));
             if let (true, Some(c)) = (empty && all.check_buildable(t).is_ok(), t.chunk()) {
@@ -2384,7 +2494,7 @@ mod tests {
         for (name, w, area) in cases {
             let want = lot_tiles_if_all_zoned(&w, area);
             assert!(want.iter().any(|b| *b), "{name}: 敷地に入るマスがない");
-            let got = w.buildable_mask(area, Some(ZoneKind::Residential));
+            let got = w.buildable_mask(area, Some(Zone::Residential));
             for (i, t) in crate::zone::tiles_of(area).enumerate() {
                 assert_eq!(got[i], want[i], "{name} {t:?}");
             }

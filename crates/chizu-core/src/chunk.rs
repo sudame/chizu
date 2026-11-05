@@ -1,6 +1,6 @@
 //! チャンクと層。
 
-use crate::command::ZoneKind;
+use crate::command::Zone;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::terrain::{TerrainTiles, terrain};
 use crate::tile::{CHUNK_AREA, ChunkCoord};
@@ -44,7 +44,7 @@ pub struct LayerTiles {
     pub occupancy: [TileUse; CHUNK_AREA],
     /// 地上の層だけが意味を持つ。
     #[serde(with = "crate::snapshot::big_array")]
-    pub zone: [Option<ZoneKind>; CHUNK_AREA],
+    pub zone: [Option<Zone>; CHUNK_AREA],
 }
 
 impl LayerTiles {
@@ -171,7 +171,7 @@ mod tests {
         let mut owned = base.clone();
         owned.set_owned();
         let mut zoned = base.clone();
-        zoned.edit_layer(Layer::Ground, |t| t.zone[5] = Some(ZoneKind::Office));
+        zoned.edit_layer(Layer::Ground, |t| t.zone[5] = Some(Zone::Office));
         let mut elevated = base.clone();
         elevated.edit_layer(Layer::Elevated, |_| ());
         let h = state_hash_of(&base);
@@ -185,7 +185,7 @@ mod tests {
         }
         // 版が同じでも、中身が違えばハッシュが違う。
         let mut other_zone = base.clone();
-        other_zone.edit_layer(Layer::Ground, |t| t.zone[5] = Some(ZoneKind::Industrial));
+        other_zone.edit_layer(Layer::Ground, |t| t.zone[5] = Some(Zone::Industrial));
         assert_ne!(state_hash_of(&other_zone), state_hash_of(&zoned));
     }
 

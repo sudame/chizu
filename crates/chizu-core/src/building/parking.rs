@@ -35,9 +35,10 @@ const HOUSE_MAX_DEPTH_MM: u64 = 10_000;
 pub const LANE_FRONTAGE: u64 = 2;
 
 /// 私道の敷地にできる奥行きの下限（マス）。
-pub const LANE_MIN_DEPTH: u64 = 4;
+pub const LANE_MIN_DEPTH: u64 = 3;
 
 /// 私道の敷地が上がれる段階の上限。戸建ての段階（1〜2）で止め、集合住宅には上がらない。
+/// 低密度の住宅は [`crate::command::Zone::max_level`] で止まるので、これが効くのは高密度の住宅に建った私道の敷地である。
 pub const LANE_MAX_LEVEL: u8 = 2;
 
 /// 平面の駐車場に使えるのは、建物のマスのこの数分の 1（切り捨て）までである。建物の本体を、
@@ -172,7 +173,7 @@ impl Building {
         };
         // 戸建ては建物の中に駐車場を持たず、平面に入りきらない分は切り捨てる。ただし斜めの道路に面した
         // 戸建ては切り欠けないので、建物の中の車庫に持つ。
-        let detached = self.zone == ZoneKind::Residential && self.level <= 2 && !diagonal;
+        let detached = self.zone.kind() == ZoneKind::Residential && self.level <= 2 && !diagonal;
         let indoor = if detached { 0 } else { needed - surface };
         ParkingLayout {
             needed,
@@ -192,7 +193,7 @@ impl Building {
         let h = self.area.max.y.abs_diff(self.area.min.y) + 1;
         let (frontage, depth) = if dx == 0 { (w, h) } else { (h, w) };
         let fits = self.form == LotForm::Lane
-            && self.zone == ZoneKind::Residential
+            && self.zone.kind() == ZoneKind::Residential
             && self.level <= LANE_MAX_LEVEL
             && (dx == 0 || dy == 0)
             && frontage == LANE_FRONTAGE
@@ -215,7 +216,7 @@ impl Building {
 
     /// 要る台数。住宅は世帯の数、商業と工業は職場の数、オフィスは職場の数の 0.5 倍で、端数は切り上げる。
     fn parking_needed(&self) -> u64 {
-        let (base, num, den) = match self.zone {
+        let (base, num, den) = match self.zone.kind() {
             ZoneKind::Residential => (self.households(), 1, 1),
             ZoneKind::Commercial | ZoneKind::Industrial => (self.workplaces(), 1, 1),
             ZoneKind::Office => (self.workplaces(), 1, 2),
@@ -226,7 +227,7 @@ impl Building {
     /// 要る台数 `needed` のうち、平面の駐車場に持ちたい台数。集合住宅（住宅の段階 3〜5）は世帯の数の
     /// 0.7 倍（切り上げ）までで、残りは地下の駐車場として建物の中に持つ。ほかの建物は `needed` のまま。
     fn surface_wanted(&self, needed: u64) -> u64 {
-        if self.zone == ZoneKind::Residential && self.level > 2 {
+        if self.zone.kind() == ZoneKind::Residential && self.level > 2 {
             (self.households() * 7).div_ceil(10)
         } else {
             needed
@@ -237,6 +238,7 @@ impl Building {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::Zone;
     use crate::network::{Dir, LaneMode, LinkId, SegmentId};
     use crate::service::Supply;
     use crate::tile::{TilePos, TileRect};
@@ -245,7 +247,7 @@ mod tests {
     /// 間口 `w` マス、奥行き `h` マスの建物。道路は南（y の小さい側）にある。
     fn building(zone: ZoneKind, (w, h): (i64, i64), level: u8) -> Building {
         Building {
-            zone,
+            zone: Zone::from(zone),
             area: TileRect::from_corners(TilePos::new(0, 0), TilePos::new(w - 1, h - 1)),
             front: TilePos::new(0, 0),
             toward_road: (0, -1),
@@ -524,22 +526,26 @@ mod tests {
         for depth in 1..=6_i64 {
             for frontage in 1..=4_i64 {
                 for road in [(0, -1), (0, 1), (1, 0), (-1, 0), (1, 1)] {
-                    for level in 1..=crate::building::MAX_LEVEL {
+                    for (zone, level) in [Zone::Residential, Zone::ResidentialLow]
+                        .into_iter()
+                        .flat_map(|z| (1..=z.max_level()).map(move |l| (z, l)))
+                    {
                         let size = if road.0 == 0 {
                             (frontage, depth)
                         } else {
                             (depth, frontage)
                         };
                         let mut b = building(ZoneKind::Residential, size, level);
+                        b.zone = zone;
                         b.toward_road = road;
                         b.form = LotForm::Lane;
-                        let at = format!("{frontage}×{depth} {road:?} の段階 {level}");
+                        let at = format!("{zone:?} {frontage}×{depth} {road:?} の段階 {level}");
                         let street = Building {
                             form: LotForm::Street,
                             ..b
                         };
                         let eligible = frontage == 2
-                            && depth >= 4
+                            && depth >= LANE_MIN_DEPTH as i64
                             && level <= 2
                             && (road.0 == 0 || road.1 == 0);
                         let Some(plan) = b.lane_plan() else {
@@ -583,7 +589,7 @@ mod tests {
                 }
             }
         }
-        // 2×4、2×5、2×6 の段階 1〜2 を、縦横の 4 つの向きで
-        assert_eq!(seen, 3 * 2 * 4);
+        // 2×3〜2×6 の段階 1〜2 を、縦横の 4 つの向きで、高密度と低密度の両方で
+        assert_eq!(seen, 4 * 2 * 4 * 2);
     }
 }

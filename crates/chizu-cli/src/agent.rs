@@ -10,6 +10,7 @@ mod command_json;
 mod export;
 mod map;
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -25,11 +26,11 @@ use chizu_core::world::economy::Finances;
 use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
 use chizu_core::{
-    ApplyOutcome, CHUNK_SIDE, CarPlace, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
-    CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic, DenyReason, GameTime,
-    HappinessParts, Heading, Line, LotMisses, MigrationOutlook, NodeControl, NodeId, ParkingTally,
-    Rescues, ServiceKind, SharedLot, TICKS_PER_DAY, TILE_MM, TilePos, TileRect, Traffic, World,
-    ZoneKind, replay,
+    ApplyOutcome, BuildingId, CHUNK_SIDE, CarPlace, CarSample, ChunkCoord, CitizenPlaces, Command,
+    CommandLog, CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic, DenyReason, GameTime,
+    HappinessParts, Heading, Layer, Line, LotMisses, MigrationOutlook, NodeControl, NodeId,
+    ParkingTally, Rescues, ServiceKind, SharedLot, TICKS_PER_DAY, TILE_MM, TilePos, TileRect,
+    TileUse, Traffic, World, Zone, ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -937,6 +938,60 @@ fn by_zone<T: Into<Value>>(f: impl Fn(ZoneKind) -> T) -> Value {
     Value::Object(map)
 }
 
+/// 塗る区画（[`Zone`]）ごとの値。住宅は高密度が `Residential`、低密度が `ResidentialLow` である。
+fn by_paint_zone<T: Into<Value>>(f: impl Fn(Zone) -> T) -> Value {
+    let map: Map<String, Value> = Zone::ALL
+        .into_iter()
+        .map(|z| (format!("{z:?}"), f(z).into()))
+        .collect();
+    Value::Object(map)
+}
+
+/// 住宅の密度ごとの、建物の数、世帯の数の上限、住んでいる世帯の数。
+fn residential_by_density(world: &World) -> Value {
+    let p = world.population();
+    let mut housed = BTreeMap::<BuildingId, u64>::new();
+    for h in p.household_ids() {
+        if let Some(home) = p.home(h).flatten() {
+            *housed.entry(home).or_insert(0) += 1;
+        }
+    }
+    let of = |zone: Zone| {
+        let (mut count, mut households, mut living) = (0_u64, 0_u64, 0_u64);
+        for (id, b) in world.buildings().iter() {
+            if b.zone == zone {
+                count += 1;
+                households += b.households();
+                living += housed.get(&id).copied().unwrap_or(0);
+            }
+        }
+        json!({"buildings": count, "households": households, "housedHouseholds": living})
+    };
+    json!({"high": of(Zone::Residential), "low": of(Zone::ResidentialLow)})
+}
+
+/// 塗る区画ごとの、塗ったマスの数と、そのうち建物の建っていない空きマスの数。
+fn zone_tiles(world: &World) -> Value {
+    let mut painted = [0_u64; Zone::ALL.len()];
+    let mut empty = [0_u64; Zone::ALL.len()];
+    for c in world.chunks() {
+        let Some(tiles) = c.layer(Layer::Ground) else {
+            continue;
+        };
+        for (z, u) in tiles.zone.iter().zip(&tiles.occupancy) {
+            if let Some(z) = z {
+                let i = usize::from(*z as u8 - 1);
+                painted[i] += 1;
+                empty[i] += u64::from(*u == TileUse::Empty);
+            }
+        }
+    }
+    by_paint_zone(|z| {
+        let i = usize::from(z as u8 - 1);
+        json!({"painted": painted[i], "empty": empty[i]})
+    })
+}
+
 /// 職場を持つ区画だけの、雇える割合（‰）。住宅は職場を持たないので出さない。
 fn jobs_kept_by_zone(tax_permille: &[u16; 4]) -> Value {
     let map: Map<String, Value> = ZoneKind::ALL
@@ -1027,7 +1082,7 @@ struct CurbWaitRow {
 struct CurbBuilding {
     /// 建物が占めるマスのうち、座標が最小のマス。
     at: (i64, i64),
-    zone: ZoneKind,
+    zone: Zone,
     level: u8,
 }
 
@@ -1213,7 +1268,7 @@ fn parking(world: &World) -> Value {
     for (id, b) in world.buildings().iter() {
         let layout = b.parking_layout();
         let lot = world.trips().lot(id);
-        let z = &mut zones[b.zone.index()];
+        let z = &mut zones[b.zone.kind().index()];
         let used = u64::from(lot.parked) + u64::from(lot.reserved);
         z.spaces += layout.total();
         z.surface += layout.surface;
@@ -1345,7 +1400,7 @@ const SHORTAGE_LIMIT: usize = 10;
 struct ShortageRow {
     /// 建物が占めるマスのうち、座標が最小のマス。
     at: (i64, i64),
-    zone: ZoneKind,
+    zone: Zone,
     level: u8,
     spaces: u64,
     parked: u32,
@@ -1622,6 +1677,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 .collect::<Vec<Value>>()
         }),
         "zoned": by_zone(|z| zoned[z.index()]),
+        "zoneTiles": zone_tiles(world),
         "jobs": {
             "workplaces": by_zone(|z| workplaces[z.index()]),
             "filled": by_zone(|z| filled[z.index()]),
@@ -1633,7 +1689,8 @@ fn observe(world: &World, before: &CarSample) -> Value {
         },
         "buildings": {
             "total": buildings.len(),
-            "byZone": by_zone(|z| count(&|b| b.zone == z)),
+            "byZone": by_zone(|z| count(&|b| b.zone.kind() == z)),
+            "residentialByDensity": residential_by_density(world),
             "powered": count(&|b| b.supply.power),
             "watered": count(&|b| b.supply.water),
             "lanes": {
@@ -2536,7 +2593,7 @@ mod tests {
         };
         ShortageRow {
             at,
-            zone: ZoneKind::Commercial,
+            zone: Zone::Commercial,
             level: 1,
             spaces: 4,
             parked: 2,
@@ -2571,7 +2628,7 @@ mod tests {
     fn curb_wait(at: (i64, i64), waiting: u32, long: u32) -> CurbWaitRow {
         let b = |at| CurbBuilding {
             at,
-            zone: ZoneKind::Industrial,
+            zone: Zone::Industrial,
             level: 2,
         };
         CurbWaitRow {

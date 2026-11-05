@@ -477,7 +477,7 @@ impl Parking {
     /// 住宅なら `own` であるときに限る。住宅の駐車場は、その建物の自宅の枠を持つ世帯の車だけが使う。
     fn is_free(&self, id: BuildingId, b: &Building, own: Option<BuildingId>) -> bool {
         let l = self.get(id);
-        (b.zone != ZoneKind::Residential || own == Some(id))
+        (b.zone.kind() != ZoneKind::Residential || own == Some(id))
             && u64::from(l.parked) + u64::from(l.reserved) < b.parking_spaces()
     }
 

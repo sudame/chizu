@@ -4,7 +4,7 @@
 //! 中核にコマンドの種類や欄を足したとき、ここがコンパイルで止まって直し忘れに気づけるようにするためである。
 
 use chizu_core::{
-    ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect,
+    ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, Zone,
     ZoneKind,
 };
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,17 @@ mirror_enum!(
         Office
     }
 );
+// 塗る区画。`Residential` は高密度の住宅で、低密度は `ResidentialLow` である。税率の区画（`ZoneJson`）には低密度はない。
+mirror_enum!(
+    PaintZoneJson,
+    Zone {
+        Residential,
+        Commercial,
+        Industrial,
+        Office,
+        ResidentialLow
+    }
+);
 mirror_enum!(
     HeadingJson,
     Heading {
@@ -100,7 +111,7 @@ enum CommandJson {
         area: [[i64; 2]; 2],
         // 省いたときに区画を消してしまわないよう、null と書かせる。
         #[serde(deserialize_with = "Option::deserialize")]
-        zone: Option<ZoneJson>,
+        zone: Option<PaintZoneJson>,
     },
     PlaceBuilding {
         kind: ServiceJson,
@@ -191,7 +202,7 @@ impl From<Command> for CommandJson {
             },
             Command::PaintZone { area, zone } => CommandJson::PaintZone {
                 area: rect_json(area),
-                zone: zone.map(ZoneJson::from),
+                zone: zone.map(PaintZoneJson::from),
             },
             Command::PlaceBuilding { kind, at, rotation } => CommandJson::PlaceBuilding {
                 kind: kind.into(),
@@ -245,7 +256,7 @@ impl CommandJson {
             CommandJson::Bulldoze { area } => Command::Bulldoze { area: rect(area) },
             CommandJson::PaintZone { area, zone } => Command::PaintZone {
                 area: rect(area),
-                zone: zone.map(ZoneKind::from),
+                zone: zone.map(Zone::from),
             },
             CommandJson::PlaceBuilding { kind, at, rotation } => Command::PlaceBuilding {
                 kind: kind.into(),
@@ -317,6 +328,7 @@ mod tests {
             json!({"type":"BuildRoad","from":[0,1],"to":[5,1],"kind":"Medium"}),
             json!({"type":"Bulldoze","area":[[3,3],[1,1]]}),
             json!({"type":"PaintZone","area":[[0,0],[2,2]],"zone":"Office"}),
+            json!({"type":"PaintZone","area":[[0,0],[2,2]],"zone":"ResidentialLow"}),
             json!({"type":"PaintZone","area":[[0,0],[2,2]],"zone":null}),
             json!({"type":"PlaceBuilding","kind":"WaterPump","at":[4,4],"rotation":2}),
             json!({"type":"SetSignal","node":{"index":3,"generation":1},"on":true}),
@@ -385,7 +397,11 @@ mod tests {
             Command::Bulldoze { area },
             Command::PaintZone {
                 area,
-                zone: Some(ZoneKind::Industrial),
+                zone: Some(Zone::Industrial),
+            },
+            Command::PaintZone {
+                area,
+                zone: Some(Zone::ResidentialLow),
             },
             Command::PaintZone { area, zone: None },
             Command::PlaceBuilding {
@@ -450,6 +466,9 @@ mod tests {
         for z in ZoneKind::ALL {
             assert_eq!(ZoneKind::from(ZoneJson::from(z)), z);
         }
+        for z in Zone::ALL {
+            assert_eq!(Zone::from(PaintZoneJson::from(z)), z);
+        }
         for k in ServiceKind::ALL {
             assert_eq!(ServiceKind::from(ServiceJson::from(k)), k);
         }
@@ -470,6 +489,7 @@ mod tests {
             json!({"type":"PaintZone","area":[[0,0],[2,2]]}),
             json!({"type":"SetSimSpeed","speed":0}),
             json!({"type":"SetTaxRate","zone":"Commercial","permille":-1}),
+            json!({"type":"SetTaxRate","zone":"ResidentialLow","permille":100}),
             json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"Up","on":false}),
         ];
         for c in &cases {

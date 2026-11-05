@@ -140,7 +140,7 @@ impl World {
             };
             let r = ZoneKind::Residential.index();
             base[r] = add(base[r], wage_per_day(b.level));
-            let z = b.zone.index();
+            let z = b.zone.kind().index();
             base[z] = add(base[z], PROFIT_PER_WORKER_PER_DAY[z]);
         }
         let mut f = Finances::default();

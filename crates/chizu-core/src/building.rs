@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-use crate::command::ZoneKind;
+use crate::command::{Zone, ZoneKind};
 use crate::happiness::REFERENCE_TAX_PERMILLE;
 use crate::id::{BuildingId, Slots};
 use crate::network::LinkId;
@@ -45,7 +45,7 @@ pub enum LotForm {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Building {
-    pub zone: ZoneKind,
+    pub zone: Zone,
     /// 建物が占めるマス。
     pub area: TileRect,
     /// 道路に面したマスの 1 つ。
@@ -78,7 +78,7 @@ impl Building {
 
     /// 住める世帯の数の上限。4 マスあたり段階ぶんの世帯で、端数は切り上げる。住宅でなければ 0 である。
     pub fn households(&self) -> u64 {
-        match self.zone {
+        match self.zone.kind() {
             ZoneKind::Residential => (self.tile_count() * u64::from(self.level)).div_ceil(4),
             _ => 0,
         }
@@ -86,7 +86,7 @@ impl Building {
 
     /// 職場の数の上限。住宅なら 0 である。
     pub fn workplaces(&self) -> u64 {
-        let per_four_tiles = match self.zone {
+        let per_four_tiles = match self.zone.kind() {
             ZoneKind::Residential => return 0,
             ZoneKind::Commercial => 2,
             ZoneKind::Industrial => 3,
@@ -227,7 +227,7 @@ impl Buildings {
         let mut t = ZoneTotals::default();
         for (_, b) in self.iter() {
             t.households += b.households();
-            t.workplaces[b.zone.index()] += b.workplaces();
+            t.workplaces[b.zone.kind().index()] += b.workplaces();
         }
         t
     }
@@ -236,7 +236,7 @@ impl Buildings {
     pub fn job_slots(&self, tax_permille: [u16; 4]) -> [u64; 4] {
         let mut slots = [0; 4];
         for (_, b) in self.iter() {
-            slots[b.zone.index()] += b.workplaces_at(tax_permille[b.zone.index()]);
+            slots[b.zone.kind().index()] += b.workplaces_at(tax_permille[b.zone.kind().index()]);
         }
         slots
     }
@@ -348,7 +348,7 @@ impl Default for CityStats {
 impl CityStats {
     /// 建物を 1 つ除いたときの値。
     pub fn without(mut self, b: &Building) -> CityStats {
-        let i = b.zone.index();
+        let i = b.zone.kind().index();
         self.homes -= b.households();
         self.workplaces[i] -= b.workplaces();
         self.job_slots[i] -= b.workplaces_at(self.tax_permille[i]);
@@ -357,7 +357,7 @@ impl CityStats {
 
     /// 建物を 1 つ足したときの値。
     pub fn with(mut self, b: &Building) -> CityStats {
-        let i = b.zone.index();
+        let i = b.zone.kind().index();
         self.homes += b.households();
         self.workplaces[i] += b.workplaces();
         self.job_slots[i] += b.workplaces_at(self.tax_permille[i]);
@@ -564,7 +564,7 @@ mod tests {
         use crate::network::{Dir, LaneMode, LinkId, SegmentId};
         use crate::units::LaneOffset;
         let shop = |x: i64, y: i64, tiles: i64| Building {
-            zone: ZoneKind::Commercial,
+            zone: Zone::Commercial,
             area: TileRect::from_corners(TilePos::new(x, y), TilePos::new(x + tiles - 1, y)),
             front: TilePos::new(x, y),
             toward_road: (0, -1),

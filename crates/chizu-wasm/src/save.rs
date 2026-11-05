@@ -424,7 +424,7 @@ impl RestoredSimulation {
 mod tests {
     use super::*;
     use chizu_core::world::growth::GROWTH_INTERVAL;
-    use chizu_core::{Command, RoadKind, TilePos, TileRect, ZoneKind};
+    use chizu_core::{Command, RoadKind, TilePos, TileRect, Zone};
 
     fn build_city(sim: &mut Sim) {
         sim.submit(Command::BuildRoad {
@@ -435,13 +435,13 @@ mod tests {
         .unwrap();
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
         .unwrap();
         sim.advance(u32::try_from(GROWTH_INTERVAL * 3 + 5).unwrap());
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 4), TilePos::new(30, 9)),
-            zone: Some(ZoneKind::Commercial),
+            zone: Some(Zone::Commercial),
         })
         .unwrap();
         sim.advance(u32::try_from(GROWTH_INTERVAL * 2).unwrap());
