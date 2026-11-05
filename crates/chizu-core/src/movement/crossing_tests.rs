@@ -394,6 +394,89 @@ fn a_turning_car_on_green_goes_before_walkers_who_come_after_it() {
     assert!(t.trips.is_empty(), "残った {}", t.trips.len());
 }
 
+/// 信号の十字路で、東から来て南へ左折する車を `every` tick ごとに出し、`start` tick 目に、西の腕の南の歩道から
+/// 東へ、南の腕の横断歩道を渡る人を 1 人出す。その人が着くまでの tick 数を返す。`limit` tick で着かなければ `None`。
+fn walker_among_turning_cars(every: u64, start: u64, limit: u64) -> Option<u64> {
+    let (mut n, node) = crossroads();
+    n.set_signal(node, true).unwrap();
+    let mut t = Town::new(n);
+    let mut walker = None;
+    for k in 0..start + limit {
+        if k % every == 0 {
+            t.drive(at(16, 10, (-1, 0), 0), at(10, 18, (0, 1), 0));
+        }
+        if k == start {
+            walker = Some(t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0)));
+        }
+        t.step(node);
+        if walker.is_some_and(|w| t.trips.get(w).is_none()) {
+            return Some(k - start);
+        }
+    }
+    None
+}
+
+#[test]
+fn a_walker_gets_across_turning_cars_at_a_signal() {
+    // 信号の十字路で、青の向きから曲がる車が途切れずに来る。人は曲がる車を先に通すが、待ちすぎた所で
+    // 止まりきれる車を止めて渡る。信号のある交差点でも、人が待ち続けることはない。
+    let cycle = 2 * signal::PHASE;
+    for every in 1..=3 {
+        for start in (100..100 + cycle).step_by(7) {
+            // 歩くのに約 60 tick かかる。待つのは、渡ってよい窓が来るまでの 1 周期と、待ちすぎるまでである。
+            let gone = walker_among_turning_cars(every, start, 1_200)
+                .unwrap_or_else(|| panic!("歩く人が渡れない every={every} start={start}"));
+            assert!(
+                gone < 60 + cycle + u64::from(crossing::PED_WAIT),
+                "待ちすぎた every={every} start={start} {gone}"
+            );
+        }
+    }
+}
+
+#[test]
+fn walkers_do_not_wait_for_cars_queued_at_a_red_light() {
+    // 信号の十字路で、x の向きの直進の車が青を使い続け、北から来る車は赤で停止線に並ぶ。北の腕の横断歩道を
+    // 東から西へ渡る人は、並んだ車を待たずに渡り始める。赤の車は横断歩道を通らないからである。
+    let (mut n, node) = crossroads();
+    n.set_signal(node, true).unwrap();
+    let start = x_green_start(&n, node);
+    let mut t = Town::new(n);
+    t.now = Tick(start);
+    let north = link(&t.net, (10, 9), (10, 10), LaneMode::Car);
+    let mut walker = None;
+    let mut started = None;
+    for k in 0..60_u64 {
+        if k % 2 == 0 && k < 40 {
+            t.drive(at(1, 10, (1, 0), 0), at(19, 10, (1, 0), 0));
+        }
+        if k < 6 && k % 2 == 0 {
+            t.drive(at(10, 5, (0, 1), 0), at(10, 19, (0, 1), 0));
+        }
+        if k == 8 {
+            walker = Some(t.walk(at(11, 10, (-1, 0), 0), at(2, 10, (-1, 0), 0)));
+        }
+        t.step(node);
+        let Some(w) = walker.and_then(|w| t.trips.get(w)) else {
+            continue;
+        };
+        assert_eq!(w.waited, 0, "人が待った {k}");
+        if w.leg == 0 && w.offset > w.link_len {
+            let queued = t
+                .trips
+                .iter()
+                .filter(|(_, c)| {
+                    c.mode == LaneMode::Car && c.link() == north && c.speed() == MmPerTick::ZERO
+                })
+                .count();
+            assert!(queued >= 2, "赤で並んだ車がいない {queued}");
+            started = Some(k);
+            break;
+        }
+    }
+    started.expect("人が渡り始めない");
+}
+
 #[test]
 fn a_walker_crossing_midblock_stops_the_car() {
     // 両端の行き止まりまで遠い長い道路の真ん中で、南の側の出入口から北の側の出入口へ横切る。
@@ -671,14 +754,17 @@ fn walkers_and_cars_take_turns_when_neither_stops_coming() {
     assert!(walker < 60 + 80, "人が待ちすぎた {walker}");
 }
 
-#[test]
-fn a_car_stuck_behind_a_blocked_exit_does_not_keep_walkers_waiting() {
-    // 南の腕の出口に動かない車があり、北から来た車が交差点の手前で先の車線の空きを待ち続ける。
-    // この車は横断歩道の人に譲って待っているのではないので、人は待ちすぎた所で渡る。
-    let (n, node) = crossroads();
+/// 南の腕の出口に動かない車を置き、`from` から南の腕へ入る車に、交差点の手前で先の車線の空きを待たせる。
+/// 100 tick 目に、西の腕の南の歩道から東へ、南の腕の横断歩道を渡る人を出し、その人が着いた tick と、
+/// 渡り始めるのを待った tick 数を返す。空きを待つ車が、人が着くまで動かなかったことも確かめる。
+fn walker_past_a_blocked_exit(signalled: bool, from: SidewalkPos) -> (u64, u32) {
+    let (mut n, node) = crossroads();
+    if signalled {
+        n.set_signal(node, true).unwrap();
+    }
     let mut t = Town::new(n);
     let block = t.drive(at(10, 11, (0, 1), 2_000), at(10, 19, (0, 1), 0));
-    let stuck = t.drive(at(10, 2, (0, 1), 0), at(10, 19, (0, 1), 0));
+    let stuck = t.drive(from, at(10, 19, (0, 1), 0));
     let hold = |t: &mut Town| {
         // 交差点を抜けた所より先にいるが、後ろの車が交差点を抜けきるだけの空きはない。
         let b = t.trips.rows[block.slot()].as_mut().unwrap();
@@ -687,12 +773,16 @@ fn a_car_stuck_behind_a_blocked_exit_does_not_keep_walkers_waiting() {
     hold(&mut t);
     let mut walker = None;
     let mut gone = None;
-    for k in 0..300_u64 {
+    let mut waited = 0;
+    for k in 0..400_u64 {
         if k == 100 {
             walker = Some(t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0)));
         }
         t.step(node);
         hold(&mut t);
+        if let Some(w) = walker.and_then(|w| t.trips.get(w)) {
+            waited = waited.max(w.waited);
+        }
         if walker.is_some_and(|w| t.trips.get(w).is_none()) {
             gone = Some(k);
             break;
@@ -704,11 +794,26 @@ fn a_car_stuck_behind_a_blocked_exit_does_not_keep_walkers_waiting() {
         c.speed() == MmPerTick::ZERO && c.waited > 100,
         "車が空きを待っていない"
     );
-    // 歩くのに約 60 tick かかる。待つのは、待ちすぎるまでである。
-    assert!(
-        gone < 100 + 60 + u64::from(crossing::PED_WAIT) + 20,
-        "待ちすぎた {gone}"
-    );
+    (gone, waited)
+}
+
+#[test]
+fn a_car_stuck_behind_a_blocked_exit_does_not_keep_walkers_waiting() {
+    // 北から来た車が、交差点の手前で先の車線の空きを待ち続ける。この車は動く見込みがないので、人は待たずに渡る。
+    let (gone, waited) = walker_past_a_blocked_exit(false, at(10, 2, (0, 1), 0));
+    assert!(waited < crossing::PED_WAIT, "車を待った {waited}");
+    // 歩くのに約 60 tick かかる。
+    assert!(gone < 100 + 60 + 10, "待ちすぎた {gone}");
+}
+
+#[test]
+fn a_car_stuck_behind_a_blocked_exit_does_not_keep_walkers_waiting_at_a_signal() {
+    // 信号の十字路で、東から来て南へ左折する車が、交差点の手前で先の車線の空きを待ち続ける。車の腕は青でも、
+    // 動く見込みのない車を、人は待たない。待つのは、渡ってよい窓が来るまでである。
+    let (gone, waited) = walker_past_a_blocked_exit(true, at(16, 10, (-1, 0), 0));
+    assert!(waited < crossing::PED_WAIT, "車を待った {waited}");
+    // 歩くのに約 60 tick かかる。待つのは、渡ってよい窓が来るまでの 1 周期までである。
+    assert!(gone < 100 + 60 + 2 * signal::PHASE, "待ちすぎた {gone}");
 }
 
 #[test]
