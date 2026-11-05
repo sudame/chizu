@@ -168,6 +168,11 @@ impl Trip {
         self.lane
     }
 
+    /// 車が終わりのノードの通り抜けの区間に入っているか。交差点では、停止線を越えてノードを越えるまでのあいだである。
+    pub fn past_stop_line(&self) -> bool {
+        self.bound.is_some()
+    }
+
     /// 車線に出るのを待っている車か。車線に戻るのを待つ車も含む。
     pub fn waiting(&self) -> bool {
         self.waiting
