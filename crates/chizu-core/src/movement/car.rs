@@ -517,12 +517,13 @@ fn room_clear_of(
 ///
 /// 止まりきれずに交差点へ入る車と交差点の中の車が入る腕と出る腕の横断歩道は、`busy` に入れる。
 /// 交差点の手前まで来た、止まりきれる車が入る腕と出る腕の横断歩道は、`near` に入れ、止まって横断歩道の人に
-/// 譲った tick 数を添える。信号のある交差点で譲った車は、その腕が青のときだけ数える。赤で待つあいだは、
-/// 歩く人が渡る番だからである。最後に、[`crossing::PED_WAIT`] tick より長く待った人のいる横断歩道を、
-/// 譲った車と待った長さを比べて `claimed` に入れる。
+/// 譲った tick 数を添える。信号のある交差点では、腕が青の車だけを数える。黄と赤の車は停止線で止まり、
+/// 横断歩道を通らないからである。先の車線の最後尾が止まっていて、交差点を抜けきる空きがない車も数えない。
+/// 最後に、[`crossing::PED_WAIT`] tick 以上待った人のいる横断歩道を、譲った車と待った長さを比べて `claimed` に入れる。
 pub(super) fn gate(
     rows: &[Option<Trip>],
     net: &Network,
+    conn: &[Connector],
     now: Tick,
     signals: signal::Demand,
 ) -> crossing::Gate {
@@ -555,6 +556,7 @@ pub(super) fn gate(
     if !walkers {
         return g;
     }
+    let st = LaneState::of(rows);
     // 出発で置かれる車は、出発の位置に止まった、まだ車線に出ていない車として数える。
     for t in waiting {
         let link = t.link();
@@ -620,15 +622,31 @@ pub(super) fn gate(
             g.busy.insert((node, next.segment));
             continue;
         }
-        let green = || {
-            let axis = net
-                .segment_line(link.segment)
-                .map_or(0, |l| signal::axis(l.step));
-            signal::state(net, node, now, &g.signals)
-                .is_none_or(|st| st.light_for(axis) == signal::Light::Green)
-        };
+        // 信号のある交差点では、腕が青の車だけを手前まで来た車として数える。黄と赤の車は停止線で止まり、
+        // 横断歩道を通らないので、歩く人はその車を待たない。
+        let axis = net
+            .segment_line(link.segment)
+            .map_or(0, |l| signal::axis(l.step));
+        let light = signal::state(net, node, now, &g.signals).map(|st| st.light_for(axis));
+        if light.is_some_and(|l| l != signal::Light::Green) {
+            continue;
+        }
+        // 信号のある交差点では、先の車線の最後尾が止まっていて、交差点を抜けきるだけの空きがない車も数えない。
+        // 動く見込みのない車に、渡ってよい窓を使わせない。最後尾が動いていれば空きはすぐにできるので、その車は数える。
+        // 信号のない交差点では数える。人が先に渡ると、空きができたときに車が人の列に止められ、止まった車が増えた。
+        let after = t.route.links.get(t.leg as usize + 2).copied();
+        let (to_lane, room) = exit_lane(net, conn, &st, t, node, next, after);
+        if light.is_some()
+            && !room
+            && st
+                .rear
+                .get(&to_lane)
+                .is_some_and(|r| r.1 == MmPerTick::ZERO)
+        {
+            continue;
+        }
         let stopped = t.speed == MmPerTick::ZERO;
-        let yielded = if stopped && t.yielded > 0 && green() {
+        let yielded = if stopped && t.yielded > 0 {
             t.yielded
         } else {
             0
@@ -721,16 +739,8 @@ fn look(
         out.next_lane = Some(choose_lane(net, conn, st, t.lane, node, next, after));
         return out;
     }
-    // 先の車線の最後尾がこの tick も同じ速さで進むとして、入った車が交差点を抜けきれるか。
-    // 抜けきれそうになければ、ノードの手前に止まる。
-    let room = |l: &LaneId| {
-        st.rear.get(l).is_none_or(|(at, v)| {
-            i64::from(at.0) + i64::from(v.0) >= i64::from(room_needed(net, node))
-        })
-    };
-    let to_lane = junction_lane(net, conn, st, t, node, next, after, room);
+    let (to_lane, room) = exit_lane(net, conn, st, t, node, next, after);
     out.next_lane = Some(to_lane);
-    let room = room(&to_lane);
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
     out.approach = Some(Approach {
         id: k,
@@ -746,6 +756,26 @@ fn look(
     });
     out.no_room = !room;
     out
+}
+
+/// 交差点 `node` で `next` のリンクへ入る車 `t` が入る車線と、先の車線に交差点を抜けきるだけの空きが
+/// ありそうか。先の車線の最後尾がこの tick も同じ速さで進むとして決める。空きがなければ、車はノードの手前に止まる。
+fn exit_lane(
+    net: &Network,
+    conn: &[Connector],
+    st: &LaneState,
+    t: &Trip,
+    node: NodeId,
+    next: LinkId,
+    after: Option<LinkId>,
+) -> (LaneId, bool) {
+    let room = |l: &LaneId| {
+        st.rear.get(l).is_none_or(|(at, v)| {
+            i64::from(at.0) + i64::from(v.0) >= i64::from(room_needed(net, node))
+        })
+    };
+    let to_lane = junction_lane(net, conn, st, t, node, next, after, room);
+    (to_lane, room(&to_lane))
 }
 
 /// リンクの終わりまでが、最高速度から止まるまでの距離と車間より近いか。

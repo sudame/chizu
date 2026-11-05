@@ -1029,7 +1029,13 @@ impl Trips {
     /// 歩く人と車を 1 tick 進め、区切りの終わりに着いた行を番号の順に返す。
     fn advance(&mut self, net: &Network, connectors: &[Connector], now: Tick) -> Vec<usize> {
         // 信号の灯火と、歩く人が渡り始めてよいかは、前の tick の車と歩く人の様子だけから決める。
-        let gate = car::gate(&self.rows, net, now, car::signal_demand(&self.rows, net));
+        let gate = car::gate(
+            &self.rows,
+            net,
+            connectors,
+            now,
+            car::signal_demand(&self.rows, net),
+        );
         let advance = |(i, t): (usize, &mut Option<Trip>)| {
             let t = t.as_mut().filter(|t| t.mode == LaneMode::Sidewalk)?;
             let (arrived, occ) = t.advance(net, &gate);
