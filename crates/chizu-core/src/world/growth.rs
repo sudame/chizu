@@ -2038,6 +2038,36 @@ mod tests {
         assert!(!zoned(&w, 4, 9) && !zoned(&w, 4, 0));
     }
 
+    /// 同じ区画が載ったマスは、空きでも建物が建っていても、塗れたものとして同じに数える。
+    #[test]
+    fn repainting_the_same_zone_is_judged_alike_for_empty_and_built_tiles() {
+        let mut w = World::new(42);
+        w.money = Money(1_000_000_000);
+        build(&mut w, (-63, 25), (-20, 25));
+        assert_eq!(
+            paint_outcome(&mut w, (-60, 26), (-25, 31)),
+            ApplyOutcome::Applied
+        );
+        run(&mut w, 3000);
+        assert!(
+            w.buildings().iter().count() > 0,
+            "住宅が建っていないと、この検査にならない"
+        );
+        // 奥行きの外が残るので、どちらも同じ理由で断る。
+        for (a, b) in [((-32, 26), (-29, 36)), ((-33, 26), (-29, 36))] {
+            assert_eq!(
+                paint_outcome(&mut w, a, b),
+                ApplyOutcome::Denied(DenyReason::NoZonableTile),
+                "{a:?}"
+            );
+        }
+        // 塗れなかったマスがなければ、空きでも建物でも ZoneUnchanged である。
+        assert_eq!(
+            paint_outcome(&mut w, (-32, 26), (-29, 31)),
+            ApplyOutcome::Denied(DenyReason::ZoneUnchanged)
+        );
+    }
+
     #[test]
     fn zone_is_not_paintable_behind_another_kind_of_zone() {
         let mut w = World::new(0);

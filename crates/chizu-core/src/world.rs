@@ -371,15 +371,14 @@ impl World {
     /// [`ApplyOutcome::AppliedPartly`] を返す。道路のマスは、区画を載せる所ではないので、塗れなかったマスに数えない。
     /// 1 マスも新しく塗れなければ断る。塗れなかったマスがあるときの理由は、建物か施設のマスのほうが、
     /// それ以外（道路を除く）のマスより多ければ [`DenyReason::Occupied`]、そうでなければ [`DenyReason::NoZonableTile`] である。
-    /// 塗れるマスがあって、すべてすでに塗ってあるとき（と、塗れなかったマスがないとき）は [`DenyReason::ZoneUnchanged`] である。
-    /// すでに同じ区画が載っているマスは、塗れたものとして数える。
+    /// 同じ区画がすでに載ったマスは、空きでも建物が建っていても、塗れたものとして同じに数える。
+    /// 塗れなかったマス（道路を除く）が 1 つもなければ [`DenyReason::ZoneUnchanged`] である。
     fn paint_zone(&mut self, area: TileRect, zone: Option<ZoneKind>) -> ApplyOutcome {
         // 塗れるのは、建物の建ちうるマス（道路に面した間口から奥へ途切れずに続くマス）だけである。
         // 道路から奥行きの範囲にあっても、間口との間に塗れないマスを挟んで切れたマスは塗らない。
         let near = zone.map(|z| self.buildable_mask(area, Some(z)));
         let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
         // 塗れなかったマスのうち、建物か施設のマスと、道路でも建物でもないマスの数。
-        let mut zonable = false;
         let mut unpainted = false;
         let mut partly = false;
         let mut blocked_by_building = 0_u64;
@@ -419,14 +418,13 @@ impl World {
                     }
                     continue;
                 }
-                zonable = true;
             }
             if tiles.zone[idx] != zone {
                 edits.entry(*coord).or_default().push((idx, zone));
             }
         }
         if edits.is_empty() {
-            let reason = if zone.is_none() || zonable || !unpainted {
+            let reason = if zone.is_none() || !unpainted {
                 DenyReason::ZoneUnchanged
             } else if blocked_by_building > blocked_otherwise {
                 DenyReason::Occupied
@@ -1377,7 +1375,8 @@ mod tests {
         );
         assert_eq!(
             paint(&mut w, (0, -10), (10, 10), res),
-            ApplyOutcome::Denied(DenyReason::ZoneUnchanged)
+            ApplyOutcome::Denied(DenyReason::NoZonableTile),
+            "奥行きの外のマスが残るので、塗り直しでも ZoneUnchanged ではない"
         );
         // 区画のあるマスに道路を引くと、そのマスの区画は消える。
         road(&mut w, (3, 0), (3, 4), RoadKind::Small);

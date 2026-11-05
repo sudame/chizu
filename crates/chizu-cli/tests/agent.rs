@@ -1525,3 +1525,42 @@ fn paint_zone_counts_the_tiles_it_left_out_by_reason() {
     assert_eq!(r["outcome"], "Applied", "{r}");
     assert!(r.get("paint").is_none(), "{r}");
 }
+
+/// 同じ区画が載ったマスは、空きでも建物が建っていても、塗れたものとして同じに数える。
+#[test]
+fn paint_zone_counts_same_zone_tiles_alike_whether_empty_or_built() {
+    let dir = session("agent-paint-same-zone");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let setup = write(
+        &dir.join("setup.json"),
+        r#"[{"type":"BuildRoad","from":[-63,25],"to":[-20,25],"kind":"Medium"},
+            {"type":"PaintZone","area":[[-60,26],[-25,31]],"zone":"Residential"}]"#,
+    );
+    cli(&["agent", "act", d, &setup]);
+    cli(&["agent", "advance", d, "3000"]);
+    let paint = |name: &str, area: &str| {
+        let file = write(
+            &dir.join(format!("{name}.json")),
+            &format!(r#"[{{"type":"PaintZone","area":{area},"zone":"Residential"}}]"#),
+        );
+        json(&cli(&["agent", "act", d, &file]))["results"][0].clone()
+    };
+    // 奥行きの外 (y=32〜36) は塗れない。x=-33 の列を足しても、塗れたマスが増えるだけで理由は同じである。
+    let a = paint("a", "[[-32,26],[-29,36]]");
+    let b = paint("b", "[[-33,26],[-29,36]]");
+    for r in [&a, &b] {
+        assert_eq!(r["outcome"], "Denied", "{r}");
+        assert_eq!(r["reason"], "NoZonableTile", "{r}");
+    }
+    assert_eq!(a["paint"]["unpainted"]["beyondDepth"], 5 * 4, "{a}");
+    assert_eq!(b["paint"]["unpainted"]["beyondDepth"], 5 * 5, "{b}");
+    assert_eq!(a["paint"]["painted"], 6 * 4, "{a}");
+    assert_eq!(b["paint"]["painted"], 6 * 5, "{b}");
+    // 塗れなかったマスがなければ ZoneUnchanged で、paint は付く。
+    let r = paint("c", "[[-32,26],[-29,31]]");
+    assert_eq!(r["outcome"], "Denied", "{r}");
+    assert_eq!(r["reason"], "ZoneUnchanged", "{r}");
+    assert_eq!(r["paint"]["unpainted"]["total"], 0, "{r}");
+    assert_eq!(r["paint"]["painted"], 4 * 6, "{r}");
+}

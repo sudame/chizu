@@ -226,8 +226,9 @@ observe の removedCrosswalks:
       塗れなかったマスが 1 つでもあれば、理由を問わず AppliedPartly である（奥行き 6 マスを超えた、買っていない、
       道路に面していない、建物のマス、水辺のマスなど）。道路のマスは数えない。
       塗れるマスが 1 つもなければ Denied で、塗れなかったマスの理由が建物か施設のマスのほうが多ければ Occupied、
-      そうでなければ NoZonableTile である。すでに同じ区画が載っているマスは塗れたものとして数える。
-      AppliedPartly と、この 2 つの理由の Denied には、結果に paint が付く（下の「act の結果」）。1 辺は 256 マスまで。
+      そうでなければ NoZonableTile である。すでに同じ区画が載っているマスは、空きでも建物が建っていても、塗れたものとして数える。
+      新しく塗れたマスがなく、塗れなかったマス（道路を除く）もないときは Denied（ZoneUnchanged）である。
+      AppliedPartly と、この 2 つの理由と ZoneUnchanged の Denied には、結果に paint が付く（下の「act の結果」）。1 辺は 256 マスまで。
   {"type":"PlaceBuilding","kind":"PowerPlant"|"WaterPump","at":[x,y],"rotation":0..3}
       施設を置く。発電所は 4×4 で 60000、浄水場は 2×2 で 25000。at は間口の角のマスで、
       rotation 0、1、2、3 のとき、at から y-1、x+1、y+1、x-1 の向きに 1 歩のマスが道路でなければならない。
@@ -271,7 +272,7 @@ act の結果:
     NotImplemented 中核にまだ中身がない
     Invalid        形か値が正しくない。message に理由がある。記録には足さない
   Applied、AppliedPartly、Denied、NotImplemented は記録に足す。画面で遊んだときと同じ扱いである。
-  PaintZone の AppliedPartly と、reason が NoZonableTile か Occupied の Denied には paint が付く。
+  PaintZone の AppliedPartly と、reason が NoZonableTile、Occupied、ZoneUnchanged の Denied には paint が付く。
     painted その区画が載っているマスの数（もとから載っていたマスを含む）、
     unpainted 載っていないマスの数 total と、その理由ごとの内訳（道路のマスは、塗る所ではないので数えない）。
       理由は次の順に当てはめ、最初に当たったものに数える。
@@ -636,7 +637,10 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                     if reason == DenyReason::NotOwned {
                         out["notOwned"] = not_owned(world, &command);
                     }
-                    if matches!(reason, DenyReason::NoZonableTile | DenyReason::Occupied)
+                    if matches!(
+                        reason,
+                        DenyReason::NoZonableTile | DenyReason::Occupied | DenyReason::ZoneUnchanged
+                    )
                         && let Some(paint) = paint_breakdown(world, &command)
                     {
                         out["paint"] = paint;
