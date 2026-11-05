@@ -37,6 +37,22 @@ pub fn fee_cap(savings: Money) -> i64 {
     BASE_SHARED_LOT_FEE * (100 + percent) / 100
 }
 
+/// テストが自宅の枠の足りない街を作るための口。このクレートのテストと、`test-util` を付けた他のクレートのテストだけで使える。
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// 建物の自宅の枠の数の上限。`None` なら建物の駐車場の台数のままである。
+        pub(crate) static HOME_SPACES_LIMIT: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// 建物の自宅の枠の数の上限を、このスレッドで決める。決めた上限は、以後の枠の配り直しから効く。
+    pub fn set_home_spaces_limit(limit: Option<u64>) {
+        HOME_SPACES_LIMIT.with(|l| l.set(limit));
+    }
+}
+
 /// 世帯の車を置く枠。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CarPlace {

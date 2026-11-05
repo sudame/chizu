@@ -10,6 +10,7 @@ import {
   MAX_ROAD_TILES,
   MAX_ZONE_SIDE,
   paintZoneCommand,
+  parkingRangeNote,
   parseRoadCostTable,
   parseServiceTable,
   pickCrosswalk,
@@ -215,11 +216,12 @@ describe("施設", () => {
   });
 
   test("施設の表を読み、置くコマンドを組み立てる", () => {
-    expect(parseServiceTable([60000, 4, 4, 25000, 2, 2]).WaterPump).toEqual({
-      cost: 25000,
-      width: 2,
-      depth: 2,
-    });
+    const table = parseServiceTable([
+      60000, 4, 4, 0, 25000, 2, 2, 0, 3000, 2, 2, 12, 72000, 4, 4, 240,
+    ]);
+    expect(table.WaterPump).toEqual({ cost: 25000, width: 2, depth: 2, spaces: 0 });
+    expect(table.ParkingLot).toEqual({ cost: 3000, width: 2, depth: 2, spaces: 12 });
+    expect(table.ParkingGarage).toEqual({ cost: 72000, width: 4, depth: 4, spaces: 240 });
     expect(() => parseServiceTable([1, 2])).toThrow();
     expect(placeServiceCommand("PowerPlant", { x: -3, y: 4 }, 2)).toEqual({
       kind: "PlaceBuilding",
@@ -277,6 +279,25 @@ describe("signalCommand", () => {
       x: 0,
       y: 0,
       on: false,
+    });
+  });
+});
+
+describe("共同の駐車場の届く範囲", () => {
+  test("範囲の中の車を持てない世帯の数と台数を出す", () => {
+    expect(parkingRangeNote(1200, 240)).toBe("範囲 32 マスの中で車を持てない世帯 1,200・240 台");
+    expect(parkingRangeNote(0, 12)).toBe("範囲 32 マスの中で車を持てない世帯 0・12 台");
+    // 中核の答えがまだ届いていないときは、世帯の数を出さない
+    expect(parkingRangeNote(null, 12)).toBe("範囲 32 マス・12 台");
+  });
+
+  test("共同の駐車場を置くコマンドは施設の名前を送る", () => {
+    expect(placeServiceCommand("ParkingGarage", { x: 5, y: -2 }, 1)).toEqual({
+      kind: "PlaceBuilding",
+      service: "ParkingGarage",
+      atX: 5,
+      atY: -2,
+      rotation: 1,
     });
   });
 });

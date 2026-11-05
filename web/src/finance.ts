@@ -16,6 +16,9 @@ export const TAX_ZONES: { zone: TaxZone; label: string }[] = [
 /** ボタン 1 回で動かす税率（‰）。1% である。 */
 export const RATE_STEP_PERMILLE = 10;
 
+/** 維持費の行の数。道路、発電所、浄水場、駐車場。 */
+const EXPENSE_ROWS = 4;
+
 /** chizu-wasm の finance を読んだもの。金額はどれも 1 日あたり。 */
 export type Finance = {
   /** 税率の上限（‰）。 */
@@ -27,6 +30,8 @@ export type Finance = {
   roadUpkeep: number;
   powerUpkeep: number;
   waterUpkeep: number;
+  /** 共同の駐車場の維持費。 */
+  parkingUpkeep: number;
   income: number;
   expenses: number;
   /** 収入から支出を引いた額。負なら赤字。 */
@@ -40,7 +45,7 @@ export function parseFinance(values: ArrayLike<number>): Finance | null {
   const at = (i: number) => values[i] ?? 0;
   const taxes = [at(5), at(6), at(7), at(8)];
   const income = taxes.reduce((a, b) => a + b, 0);
-  const expenses = at(9) + at(10) + at(11);
+  const expenses = at(9) + at(10) + at(11) + at(12);
   return {
     maxPermille: at(0),
     permille: [at(1), at(2), at(3), at(4)],
@@ -48,6 +53,7 @@ export function parseFinance(values: ArrayLike<number>): Finance | null {
     roadUpkeep: at(9),
     powerUpkeep: at(10),
     waterUpkeep: at(11),
+    parkingUpkeep: at(12),
     income,
     expenses,
     net: income - expenses,
@@ -125,6 +131,7 @@ export function financeRows(finance: Finance): {
       { label: "道路の維持費", value: formatSigned(-finance.roadUpkeep) },
       { label: "発電所の維持費", value: formatSigned(-finance.powerUpkeep) },
       { label: "浄水場の維持費", value: formatSigned(-finance.waterUpkeep) },
+      { label: "駐車場の維持費", value: formatSigned(-finance.parkingUpkeep) },
     ],
     net: { label: "差し引き", value: formatSigned(finance.net) },
   };
@@ -243,7 +250,7 @@ export function setupFinance(
     rateLabels.push(rate);
     amounts.push(amount);
   });
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < EXPENSE_ROWS; i++) {
     const row = make("div", "", "finance-row");
     const label = make("span");
     const value = make("span", "", "finance-amount");

@@ -197,8 +197,10 @@ export function paintZoneCommand(zone: ZoneName, a: Tile, b: Tile): CommandMessa
   };
 }
 
-/** chizu-wasm の service_table の中身。 */
-export type ServiceInfo = { cost: number; width: number; depth: number };
+/** chizu-wasm の service_table の中身。spaces は共同の駐車場の台数で、ほかの施設は 0。 */
+export type ServiceInfo = { cost: number; width: number; depth: number; spaces: number };
+
+const SERVICE_STRIDE = 4;
 
 export function parseServiceTable(table: ArrayLike<number>): Record<ServiceName, ServiceInfo> {
   const at = (i: number) => {
@@ -208,9 +210,17 @@ export function parseServiceTable(table: ArrayLike<number>): Record<ServiceName,
     }
     return v;
   };
+  const info = (i: number): ServiceInfo => ({
+    cost: at(i * SERVICE_STRIDE),
+    width: at(i * SERVICE_STRIDE + 1),
+    depth: at(i * SERVICE_STRIDE + 2),
+    spaces: at(i * SERVICE_STRIDE + 3),
+  });
   return {
-    PowerPlant: { cost: at(0), width: at(1), depth: at(2) },
-    WaterPump: { cost: at(3), width: at(4), depth: at(5) },
+    PowerPlant: info(0),
+    WaterPump: info(1),
+    ParkingLot: info(2),
+    ParkingGarage: info(3),
   };
 }
 
@@ -247,6 +257,21 @@ export function serviceFootprint(
     min: { x: Math.min(at.x, far.x), y: Math.min(at.y, far.y) },
     max: { x: Math.max(at.x, far.x), y: Math.max(at.y, far.y) },
   };
+}
+
+/** 共同の駐車場の届く範囲（マス）。chizu-core の SHARED_LOT_RADIUS と同じ。 */
+export const SHARED_LOT_RADIUS = 32;
+
+/**
+ * 共同の駐車場を置く前に出す、届く範囲の説明。carless は範囲の中の車を持てない世帯の数で、
+ * 中核の答えがまだ届いていなければ null にする。
+ */
+export function parkingRangeNote(carless: number | null, spaces: number): string {
+  const range = `範囲 ${SHARED_LOT_RADIUS} マス`;
+  const lot = `${spaces.toLocaleString("ja-JP")} 台`;
+  return carless === null
+    ? `${range}・${lot}`
+    : `${range}の中で車を持てない世帯 ${carless.toLocaleString("ja-JP")}・${lot}`;
 }
 
 /** 中核に問い合わせた、向き 0〜3 ごとの置けるか。置けるなら null、置けないなら理由の文。 */

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { TRAFFIC_LAYER } from "./layers.ts";
+import { DATA_LAYERS, PALETTE_SIZE, PARKING_LAYER, TRAFFIC_LAYER } from "./layers.ts";
 import {
   DEFAULT_THEME,
   DEMAND_MIN_SHARE,
@@ -33,8 +33,9 @@ function memoryStorage(throws = false) {
 }
 
 describe("主題図の選択", () => {
-  test("なし、交通、電気、水道、需要の順に並び、交通だけが交通のレイヤーを Worker に頼む", () => {
-    expect(THEMES.map((t) => t.label)).toEqual(["なし", "交通", "電気", "水道", "需要"]);
+  test("なし、交通、電気、水道、駐車場、需要の順に並び、交通だけが交通のレイヤーを Worker に頼む", () => {
+    expect(THEMES.map((t) => t.label)).toEqual(["なし", "交通", "電気", "水道", "駐車場", "需要"]);
+    expect(themeOf("parking").layer).toBe(PARKING_LAYER);
     expect(themeOf("traffic").layer).toBe(TRAFFIC_LAYER);
     expect(themeOf("none").layer).toBeNull();
     expect(themeOf("demand").layer).toBeNull();
@@ -111,5 +112,37 @@ describe("主題図の凡例", () => {
     expect(demandShare(0)).toBe(DEMAND_MIN_SHARE);
     expect(demandShare(1)).toBe(1);
     expect(demandShare(0.5)).toBeGreaterThan(demandShare(0.2));
+  });
+});
+
+describe("駐車場の主題図", () => {
+  test("車を持てない世帯の家と、共同の駐車場の埋まり具合の 4 段を凡例に出す", () => {
+    const items = themeLegend("parking", 8, null);
+    expect(items.map((i) => i.label)).toEqual([
+      "車を持てない世帯の家",
+      "共同の駐車場：半分に満たない",
+      "共同の駐車場：半分以上",
+      "共同の駐車場：8 割以上",
+      "共同の駐車場：満車",
+    ]);
+    expect(items[0]?.kind).toBe("hatch");
+    expect(items.slice(1).every((i) => i.kind === "fill")).toBe(true);
+    // 埋まり具合は色の違いだけでなく、段ごとに濃くなる
+    const colors = items.slice(1).map((i) => i.color);
+    expect(new Set(colors).size).toBe(4);
+  });
+
+  test("駐車場の値の塗り方は chizu-wasm の値の並びと同じ", () => {
+    const layer = DATA_LAYERS.find((l) => l.code === PARKING_LAYER);
+    expect(layer?.styles.map((s) => s.kind)).toEqual([
+      "none",
+      "hatch",
+      "fill",
+      "fill",
+      "fill",
+      "fill",
+    ]);
+    // 色の表の長さに収まる
+    expect(layer?.styles.length ?? 0).toBeLessThanOrEqual(PALETTE_SIZE);
   });
 });

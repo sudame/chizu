@@ -4,7 +4,7 @@
 //! 差し替えれば、交通量や幸福度のレイヤーも同じ形で足せる。値の意味（色）は画面の側の
 //! `web/src/map/layers.ts` が決める。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chizu_core::service::{Balance, SupplyBalance, supply_balance};
 use chizu_core::zone::tiles_of;
@@ -57,7 +57,27 @@ pub const LAYERS: &[DataLayer] = &[
         version: traffic_version,
         values: traffic_values,
     },
+    DataLayer {
+        code: 4,
+        version: parking_version,
+        values: parking_values,
+    },
 ];
+
+// 駐車場のレイヤーの値。0 は何も塗らない
+/// 車を持てない世帯のいる家。
+pub const PARKING_CARLESS_HOME: u8 = 1;
+/// 共同の駐車場で、借りられた枠と外来の車が台数の半分に満たない。
+pub const PARKING_LOT_FREE: u8 = 2;
+/// 共同の駐車場で、台数の半分以上、8 割に満たない。
+pub const PARKING_LOT_BUSY: u8 = 3;
+/// 共同の駐車場で、台数の 8 割以上、空きが残っている。
+pub const PARKING_LOT_NEARLY_FULL: u8 = 4;
+/// 満車の共同の駐車場。
+pub const PARKING_LOT_FULL: u8 = 5;
+
+/// 駐車場のレイヤーを作り直す間隔（tick）。世帯の枠は移住を見る間隔（60 tick）ごとに動くので、それに合わせる。
+pub const PARKING_REFRESH_TICKS: u64 = 60;
 
 // 交通のレイヤーの値。0 は何も塗らない。中核の `Congestion` の段階に 1 を足した値である
 /// 空いている道路。
@@ -158,6 +178,55 @@ fn traffic_version(sim: &Sim) -> u64 {
     h.write(&sim.network_version());
     h.write(&(sim.world().tick().0 / TRAFFIC_REFRESH_TICKS));
     h.finish()
+}
+
+/// 建物の表か施設、道路網が変わるか、`PARKING_REFRESH_TICKS` が過ぎると変わる。
+fn parking_version(sim: &Sim) -> u64 {
+    let mut h = StateHasher::new();
+    h.write(&sim.buildings_version().to_bits());
+    h.write(&sim.network_version());
+    h.write(&(sim.world().tick().0 / PARKING_REFRESH_TICKS));
+    h.finish()
+}
+
+/// 共同の駐車場の埋まり具合の値。台数に対する、借りられた枠と外来の車（停まっているか押さえているか）の和の割合で決める。
+pub fn parking_lot_value(spaces: u32, taken: u32) -> u8 {
+    if taken >= spaces {
+        PARKING_LOT_FULL
+    } else if u64::from(taken) * 10 >= u64::from(spaces) * 8 {
+        PARKING_LOT_NEARLY_FULL
+    } else if u64::from(taken) * 2 >= u64::from(spaces) {
+        PARKING_LOT_BUSY
+    } else {
+        PARKING_LOT_FREE
+    }
+}
+
+/// 車を持てない世帯のいる家のマスと、共同の駐車場の埋まり具合を塗る。
+fn parking_values(world: &World) -> LayerGrid {
+    let mut grid = LayerGrid::default();
+    for f in world.facilities().iter().filter(|f| f.kind.is_parking()) {
+        let lot = world.trips().shared_lot(f.area.min);
+        let taken = lot.rented + lot.visitors.parked + lot.visitors.reserved;
+        let value = parking_lot_value(f.kind.parking_spaces(), taken);
+        for t in tiles_of(f.area) {
+            grid.set(t, value);
+        }
+    }
+    let homes: BTreeSet<_> = world
+        .carless_households()
+        .into_iter()
+        .map(|c| c.home)
+        .collect();
+    for id in homes {
+        let Some(b) = world.buildings().get(id) else {
+            continue;
+        };
+        for t in tiles_of(b.area) {
+            grid.set(t, PARKING_CARLESS_HOME);
+        }
+    }
+    grid
 }
 
 /// 高速道路を除くすべての区間を、混み具合の段階で塗る。車のいない区間は「空いている」になる。
@@ -369,6 +438,7 @@ impl Simulation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chizu_core::ServiceKind;
     use chizu_core::world::growth::GROWTH_INTERVAL;
     use chizu_core::{ApplyOutcome, Command, RoadKind, TileRect, ZoneKind};
 
@@ -580,5 +650,73 @@ mod tests {
         };
         assert_eq!(road_value(b), SUPPLY_ROAD_SHORT);
         assert_eq!(road_value(Balance::default()), SUPPLY_ROAD_NONE);
+    }
+
+    /// 駐車場のレイヤーは、車を持てない世帯のいる家と、共同の駐車場の埋まり具合を塗る。
+    #[test]
+    fn parking_layer_marks_carless_homes_and_the_fill_of_shared_lots() {
+        let (mut sim, _guard) = crate::test_town::carless_town(2);
+        let layer = LAYERS
+            .iter()
+            .find(|l| l.code == 4)
+            .expect("駐車場の層がない");
+        let mut cache = LayerCache::default();
+        // 駐車場がないうちは、世帯のいる家がすべて塗られ、塗られない建物はない
+        let world = sim.world();
+        let homes: Vec<_> = world
+            .carless_households()
+            .into_iter()
+            .map(|c| c.home)
+            .collect();
+        assert!(!homes.is_empty());
+        for id in &homes {
+            let b = world.buildings().get(*id).unwrap();
+            for t in tiles_of(b.area) {
+                assert_eq!(value_at(&mut cache, &sim, layer, t), PARKING_CARLESS_HOME);
+            }
+        }
+        // 駐車場を置くと、その敷地が埋まり具合で塗られ、借りた分だけ車を持てない家が減る
+        let before = sim.world().carless_households().len();
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
+        sim.advance(chizu_core::world::people::MIGRATION_INTERVAL as u32 * 2);
+        let world = sim.world();
+        let lot = world.facilities().last().unwrap();
+        assert_eq!(world.trips().shared_lot(lot.area.min).rented, 12);
+        for t in tiles_of(lot.area) {
+            assert_eq!(
+                value_at(&mut cache, &sim, layer, t),
+                PARKING_LOT_FULL,
+                "{t:?}"
+            );
+        }
+        assert!(sim.world().carless_households().len() + 12 >= before);
+        // 借りた世帯だけの家は塗られず、車を持てない世帯が残る家は塗られる
+        let still: std::collections::BTreeSet<_> = sim
+            .world()
+            .carless_households()
+            .into_iter()
+            .map(|c| c.home)
+            .collect();
+        for (id, b) in sim.world().buildings().iter() {
+            let want = if still.contains(&id) {
+                PARKING_CARLESS_HOME
+            } else {
+                0
+            };
+            let t = b.area.min;
+            assert_eq!(value_at(&mut cache, &sim, layer, t), want, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn parking_lot_values_step_with_the_share_taken() {
+        assert_eq!(parking_lot_value(10, 0), PARKING_LOT_FREE);
+        assert_eq!(parking_lot_value(10, 4), PARKING_LOT_FREE);
+        assert_eq!(parking_lot_value(10, 5), PARKING_LOT_BUSY);
+        assert_eq!(parking_lot_value(10, 7), PARKING_LOT_BUSY);
+        assert_eq!(parking_lot_value(10, 8), PARKING_LOT_NEARLY_FULL);
+        assert_eq!(parking_lot_value(10, 9), PARKING_LOT_NEARLY_FULL);
+        assert_eq!(parking_lot_value(10, 10), PARKING_LOT_FULL);
+        assert_eq!(parking_lot_value(10, 11), PARKING_LOT_FULL);
     }
 }

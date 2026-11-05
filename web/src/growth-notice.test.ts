@@ -1,20 +1,23 @@
 import { describe, expect, test } from "vitest";
 import {
+  carlessNotice,
   growthNotice,
   growthNotices,
   isolatedNotice,
   LOT_SHORTAGE_TICKS,
   lotNotice,
   parkingNotice,
+  parseCarless,
   parseGrowthBlocks,
   parseIsolated,
   parseParkingShortage,
   parseStalls,
   persistedLotShortage,
+  pickNext,
   pickStall,
   trackLotShortage,
 } from "./growth-notice.ts";
-import { emptyMemory, reconcile } from "./notice-center.ts";
+import { dismiss, emptyMemory, reconcile } from "./notice-center.ts";
 
 /** 区画ごとの [止まっている数, 電気, 水道] から overview の並びを作る。 */
 const overview = (zones: [number, number, number][]) => {
@@ -277,5 +280,86 @@ describe("空き区画がない知らせ", () => {
       const solved = reconcile(again.memory, growthNotices(none, [], [], [], []), 300);
       expect(solved.visible).toEqual([]);
     });
+  });
+});
+
+describe("車を持てない世帯の知らせ", () => {
+  // 世帯の数、理由（範囲に駐車場がない、満車、料金、待ち）、世帯の多い区切り（x, y, 世帯の数）
+  const flat = [120, 80, 30, 10, 0, 44, 12, 50, 20, 9, 31, 8];
+
+  test("平らな配列を読み、世帯の多い所を並びのまま持つ", () => {
+    expect(parseCarless(flat)).toEqual({
+      total: 120,
+      reasons: [80, 30, 10, 0],
+      areas: [
+        { x: 44, y: 12, households: 50 },
+        { x: 20, y: 9, households: 31 },
+      ],
+    });
+    // 世帯がいなければ空
+    expect(parseCarless([0, 0, 0, 0, 0])).toEqual({ total: 0, reasons: [0, 0, 0, 0], areas: [] });
+  });
+
+  test("車を持てない世帯があるときだけ出し、世帯の数と理由を添える", () => {
+    expect(carlessNotice(parseCarless([0, 0, 0, 0, 0]))).toBeNull();
+    const notice = carlessNotice(parseCarless(flat));
+    expect(notice?.headline).toBe("車を持てない世帯がある（120 世帯）");
+    expect(notice?.action).toContain("範囲に駐車場がない 80・満車 30・料金が高い 10");
+    // 待っている世帯だけのときは、理由の文を出さない
+    expect(carlessNotice(parseCarless([3, 0, 0, 0, 3]))?.action).not.toContain("・");
+  });
+
+  test("世帯の多い所へ、並びの順に移り、最後の次は最初へ戻る", () => {
+    const none = parseGrowthBlocks([]);
+    const [n] = growthNotices(none, [], [], [], [], parseCarless(flat));
+    expect(n?.id).toBe("carless");
+    expect(n?.jump?.ordered).toBe(true);
+    expect(n?.jump?.label).toContain("押すたびに次の所");
+    const targets = n?.jump?.targets ?? [];
+    const first = pickNext(targets, null);
+    expect(first).toMatchObject({ x: 44, y: 12 });
+    const second = pickNext(targets, first);
+    expect(second).toMatchObject({ x: 20, y: 9 });
+    expect(pickNext(targets, second)).toMatchObject({ x: 44, y: 12 });
+    // 並びが変わって前の先がなくなったら、いちばん多い所から
+    expect(pickNext(targets, { x: 1, y: 1 })).toMatchObject({ x: 44, y: 12 });
+    expect(pickNext([], null)).toBeNull();
+  });
+
+  test("世帯の数が揺れても key は変わらず、世帯がなくなれば消える", () => {
+    const none = parseGrowthBlocks([]);
+    const key = (carless: number[]) =>
+      growthNotices(none, [], [], [], [], parseCarless(carless))[0]?.key;
+    expect(key(flat)).toBe(key([121, 80, 31, 10, 0, 44, 12, 51]));
+    expect(growthNotices(none, [], [], [], [], parseCarless([0, 0, 0, 0, 0]))).toEqual([]);
+    const shown = growthNotices(none, [], [], [], [], parseCarless(flat));
+    const first = reconcile(emptyMemory(), shown, 100);
+    expect(first.visible.map((v) => v.id)).toEqual(["carless"]);
+    const solved = reconcile(first.memory, [], 200);
+    expect(solved.visible).toEqual([]);
+  });
+
+  test("閉じると、車を持てない世帯が続くあいだは出し直さない", () => {
+    const none = parseGrowthBlocks([]);
+    const shown = growthNotices(none, [], [], [], [], parseCarless(flat));
+    const first = reconcile(emptyMemory(), shown, 100);
+    expect(first.fresh.map((f) => f.id)).toEqual(["carless"]);
+    const [notice] = first.visible;
+    if (notice === undefined) {
+      throw new Error("知らせが出ていない");
+    }
+    const closed = dismiss(first.memory, notice, 100);
+    // 世帯の数が増えても、閉じたままで札も出さない
+    const grown = growthNotices(
+      none,
+      [],
+      [],
+      [],
+      [],
+      parseCarless([200, 150, 50, 0, 0, 44, 12, 90]),
+    );
+    const again = reconcile(closed, grown, 200);
+    expect(again.visible).toEqual([]);
+    expect(again.fresh).toEqual([]);
   });
 });

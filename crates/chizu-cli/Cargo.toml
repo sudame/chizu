@@ -9,3 +9,7 @@ chizu-core = { path = "../chizu-core" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
+
+[dev-dependencies]
+# 自宅の枠の足りない街をテストで作る口（chizu_core::car_place::testing）を使う
+chizu-core = { path = "../chizu-core", features = ["test-util"] }

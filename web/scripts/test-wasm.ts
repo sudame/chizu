@@ -1453,6 +1453,23 @@ try {
     `発電所と浄水場を置ける（${plant.text}、${pump.text}）`,
   );
   await waitUnsupplied("zero");
+  // 共同の駐車場を置く道具は、置く前に届く範囲（32 マス）と、範囲の中の車を持てない世帯の数を示す。
+  // 自宅の枠が足りる街なので、車を持てない世帯は 0 である
+  await hoverService("ParkingLot", 55, 33);
+  await page
+    .waitForFunction(
+      () => document.querySelector<HTMLElement>("#map")?.dataset.parkingCarless === "0",
+      undefined,
+      { timeout: TIMEOUT_MS },
+    )
+    .catch(() => undefined);
+  const parkingInfo = (await page.locator("#tool-info").textContent()) ?? "";
+  check(
+    parkingInfo.includes("範囲 32 マスの中で車を持てない世帯 0・12 台") &&
+      (await map.getAttribute("data-parking-carless")) === "0",
+    `共同の駐車場を置く前に、範囲と、範囲の中の車を持てない世帯の数を示す（${parkingInfo}）`,
+  );
+  await pickTool(page, "none");
   // 施設を置いて余裕が戻ると、建たない理由の知らせは消える。空き区画がない知らせは、別の理由なので残ってよい
   await page
     .waitForFunction(
@@ -2005,9 +2022,9 @@ try {
   await page.locator("#layers-open").click();
   check(
     (await page.locator("#layer-panel").isVisible()) &&
-      (await page.locator("#layers button").count()) === 5 &&
+      (await page.locator("#layers button").count()) === 6 &&
       (await page.locator("#layer-panel #legend").count()) === 1,
-    "レイヤーのボタンで、なし、交通、電気、水道、需要を選ぶパネルが開き、凡例も中にある",
+    "レイヤーのボタンで、なし、交通、電気、水道、駐車場、需要を選ぶパネルが開き、凡例も中にある",
   );
   await page.mouse.click(cx, cy);
   check(!(await page.locator("#layer-panel").isVisible()), "パネルの外（地図）を押すと閉じる");

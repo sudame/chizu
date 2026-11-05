@@ -184,6 +184,7 @@ pub struct World {
     router: RouterSlot,
 }
 
+pub mod carless;
 mod commute;
 pub mod economy;
 mod errand;

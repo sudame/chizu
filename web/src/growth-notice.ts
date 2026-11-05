@@ -1,4 +1,5 @@
 import type { Notice } from "./notice-center.ts";
+import { CARLESS_FIXED } from "./protocol/messages.ts";
 
 // 区画が建たない理由の知らせ。電気か水道の余裕がなくて新築が止まっている間口を、区画の種類ごとに数えて出す。
 // 施設はあるが街の道路網につながっていない場合も、別の知らせとして出す。知らせを並べて見せるのは notice-center.ts である。
@@ -101,6 +102,21 @@ export function pickStall<T extends { x: number; y: number }>(
 }
 
 /**
+ * 前に移った先 last の次を、targets の並びのまま選ぶ。last が並びになければ（先頭、または並びが変わった）先頭を選ぶ。
+ * 最後まで来たら先頭へ戻る。並びの先頭が一番大きい所なら、押し始めはそこへ移る。
+ */
+export function pickNext<T extends { x: number; y: number }>(
+  targets: T[],
+  last: { x: number; y: number } | null,
+): T | null {
+  if (last === null) {
+    return targets[0] ?? null;
+  }
+  const at = targets.findIndex((t) => t.x === last.x && t.y === last.y);
+  return targets[at + 1] ?? targets[0] ?? null;
+}
+
+/**
  * 空き区画がない状態が続いたら知らせる長さ（tick）。ゲーム内の半日である（1 日は 7200 tick）。
  * 区画が建ち尽くした直後や、塗り足してすぐ建ち尽くす間は需要が残っていても、
  * 次の区画を塗る間に知らせが出入りしてちらつく。半日あれば、気づいて塗る時間として足りる。
@@ -183,6 +199,45 @@ export function parkingNotice(shortages: ParkingShortage[]): GrowthNotice | null
   };
 }
 
+/** 車を持てない世帯の数と、理由ごとの数、世帯の多い所。chizu-wasm の carless を読んだもの。 */
+export type Carless = {
+  total: number;
+  /** 範囲に駐車場がない、満車、料金が上限を超える、借りるのを待っている、の順の世帯の数。 */
+  reasons: number[];
+  /** 世帯の多い区切り（8×8 マス）の真ん中のマスと世帯の数。多い順。 */
+  areas: { x: number; y: number; households: number }[];
+};
+
+/** worker から届いた [世帯の数, 理由ごとの数 ×4, x, y, 世帯の数, ...] を読む。 */
+export function parseCarless(flat: number[]): Carless {
+  const at = (i: number) => flat[i] ?? 0;
+  const areas: Carless["areas"] = [];
+  for (let i = CARLESS_FIXED; i + 2 < flat.length; i += 3) {
+    areas.push({ x: at(i), y: at(i + 1), households: at(i + 2) });
+  }
+  return { total: at(0), reasons: [1, 2, 3, 4].map(at), areas };
+}
+
+/** 車を持てない世帯がある。世帯の数と、いちばん多い理由を見出しに出す。なければ null。 */
+export function carlessNotice(carless: Carless): GrowthNotice | null {
+  if (carless.total === 0) {
+    return null;
+  }
+  const n = (v: number) => v.toLocaleString("ja-JP");
+  const [noLot = 0, full = 0, fee = 0] = carless.reasons;
+  const parts = [
+    ...(noLot > 0 ? [`範囲に駐車場がない ${n(noLot)}`] : []),
+    ...(full > 0 ? [`満車 ${n(full)}`] : []),
+    ...(fee > 0 ? [`料金が高い ${n(fee)}`] : []),
+  ];
+  return {
+    headline: `車を持てない世帯がある（${n(carless.total)} 世帯）`,
+    action:
+      (parts.length > 0 ? `${parts.join("・")}。` : "") +
+      "世帯の多い所の近くに、共同の駐車場を置く。歩いて 32 マス（256m）の中の駐車場だけを借りる",
+  };
+}
+
 const jumpLabel = (what: string, count: number, next: string) =>
   count > 1 ? `${what}へ移る（押すたびに次の${next}）` : `${what}へ移る`;
 
@@ -196,6 +251,7 @@ export function growthNotices(
   isolated: Isolated[] = [],
   lotZones: number[] = [],
   parking: ParkingShortage[] = [],
+  carless: Carless = { total: 0, reasons: [0, 0, 0, 0], areas: [] },
 ): Notice[] {
   const out: Notice[] = [];
   const growth = growthNotice(blocks);
@@ -232,6 +288,21 @@ export function growthNotices(
       jump: {
         label: jumpLabel("駐車場が足りない建物", parking.length, "建物"),
         targets: parking,
+      },
+    });
+  }
+  const poor = carlessNotice(carless);
+  if (poor !== null) {
+    out.push({
+      id: "carless",
+      // 世帯の数のように揺れる値は入れない。車を持てない世帯がなくなるまで、同じ状態である
+      key: "carless",
+      headline: poor.headline,
+      details: [poor.action],
+      jump: {
+        label: jumpLabel("車を持てない世帯の多い所", carless.areas.length, "所"),
+        targets: carless.areas,
+        ordered: true,
       },
     });
   }

@@ -19,7 +19,7 @@ describe("parseInspect", () => {
   });
 
   it("住宅を読む", () => {
-    expect(parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 5, 2])).toEqual({
+    expect(parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 5, 2])).toEqual({
       kind: "building",
       target: [1, 5, 2],
       zone: "Residential",
@@ -36,13 +36,16 @@ describe("parseInspect", () => {
         wealth: 55,
         commuteSeconds: 3960,
       },
+      carPlaces: { homeSpaces: 4, home: 1, shared: 0, none: 2 },
     });
   });
 
   it("住民のいない住宅は住民の様子が null になり、職のない住民の通勤は null になる", () => {
     const empty = parseInspect(pad([1, 1, 1, 1, 1, 2, 0, 0]));
     expect(empty).toMatchObject({ kind: "building", residents: null });
-    const jobless = parseInspect([1, 1, 1, 1, 1, 2, 1, 2, 40, 100, 100, 0, -1, 6, 1]);
+    const jobless = parseInspect([
+      1, 1, 1, 1, 1, 2, 1, 2, 40, 100, 100, 0, -1, -1, -1, -1, -1, 6, 1,
+    ]);
     expect(jobless).toMatchObject({ residents: { commuteSeconds: null } });
   });
 
@@ -59,6 +62,7 @@ describe("parseInspect", () => {
       service: "WaterPump",
       capacity: 1000,
       upkeepPerDay: 600,
+      parking: null,
     });
   });
 
@@ -71,7 +75,7 @@ describe("parseInspect", () => {
 
 describe("describeInspect", () => {
   it("住宅の世帯、住民、幸福度とその要素、電気と水道、通勤を出す", () => {
-    const view = parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 5, 2]);
+    const view = parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 5, 2]);
     expect(view).not.toBeNull();
     const text = describeInspect(view as NonNullable<typeof view>);
     expect(text.title).toBe("住宅（段階 2）");
@@ -85,7 +89,36 @@ describe("describeInspect", () => {
       { label: "電気", value: "届いている" },
       { label: "水道", value: "届いていない" },
       { label: "通勤の所要時間", value: "約 66 分" },
+      { label: "自宅の駐車場", value: "4 台" },
+      { label: "　自宅の枠の世帯", value: "1 世帯" },
+      { label: "　共同の駐車場を借りた世帯", value: "0 世帯" },
+      { label: "　車を持てない世帯", value: "2 世帯" },
     ]);
+  });
+
+  it("共同の駐車場は、供給量でなく、台数と貸した枠、停まっている台数、外来の車を出す", () => {
+    const view = parseInspect(pad([2, 3, 0, 96, 12, 5, 4, 2]));
+    expect(view).toMatchObject({
+      kind: "facility",
+      service: "ParkingLot",
+      capacity: 0,
+      parking: { spaces: 12, rented: 5, parked: 4, visitors: 2 },
+    });
+    expect(describeInspect(view as NonNullable<typeof view>)).toEqual({
+      title: "平面の駐車場",
+      rows: [
+        { label: "台数", value: "12 台" },
+        { label: "貸した枠", value: "5 / 12" },
+        { label: "停まっている", value: "4 台" },
+        { label: "外来の車", value: "2 台" },
+        { label: "維持費", value: "96 / 日" },
+      ],
+    });
+    const garage = parseInspect(pad([2, 4, 0, 2880, 240, 0, 0, 0]));
+    expect(describeInspect(garage as NonNullable<typeof garage>).title).toBe("駐車場ビル");
+    // 供給量の行は、発電所と浄水場だけに出す
+    const labels = describeInspect(garage as NonNullable<typeof garage>).rows.map((r) => r.label);
+    expect(labels).not.toContain("供給量");
   });
 
   it("住民のいない住宅は幸福度と通勤を出さない", () => {
@@ -131,7 +164,7 @@ describe("formatDuration", () => {
 
 describe("applyInspectReply", () => {
   const tile: InspectQuery = { kind: "tile", x: 3, y: 4 };
-  const facility = [2, 1, 1200, 1200, ...Array(9).fill(-1), 8, 9];
+  const facility = [2, 1, 1200, 1200, ...Array(13).fill(-1), 8, 9];
 
   it("マスで押した最初の答えが届いたら、以後は識別子で引く", () => {
     const result = applyInspectReply(tile, tile, facility);
@@ -231,7 +264,7 @@ describe("setupInspector", () => {
     (globalThis as { document?: unknown }).document = { createElement: make };
     const inspector = setupInspector(panel() as unknown as HTMLElement, () => {});
     const at = (n: number) =>
-      parseInspect([1, 3, 1, 1, 1, 10, n, -1, -1, -1, -1, -1, -1, 1, 1]) as NonNullable<
+      parseInspect([1, 3, 1, 1, 1, 10, n, ...Array(10).fill(-1), 1, 1]) as NonNullable<
         ReturnType<typeof parseInspect>
       >;
     inspector.show(at(1));
