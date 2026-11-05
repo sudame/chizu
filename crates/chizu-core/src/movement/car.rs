@@ -852,9 +852,8 @@ fn look(
 }
 
 /// 交差点 `node` で `next` のリンクへ入る車 `t` が入る車線と、先の車線に交差点を抜けきるだけの空きが
-/// ありそうか。先の車線の最後尾（停止線を越えてその車線へ向かう車を含む）が同じ速さで進むとして、`t` が
-/// 交差点を抜けきる所（[`clear_line`]）に着くまでに空きができるかで決める。`t` が着くまでの tick 数は、
-/// 加速の上限で速さを上げていくとしたいちばん少ない数で、最後尾が進む距離を少なめに見込む。
+/// ありそうか。先の車線の最後尾（停止線を越えてその車線へ向かう車を含む）がこの tick も同じ速さで進むとして決める。
+/// ただし、最後尾がまだ交差点の中にいれば、`t` が交差点を抜けきる所に着くまで同じ速さで進むとして決める（[`roomy`]）。
 /// 空きがなければ、車は停止線で止まる。
 fn exit_lane(
     net: &Network,
@@ -871,12 +870,22 @@ fn exit_lane(
         t,
         i64::from(t.link_len.0) - i64::from(t.offset.0) + i64::from(clear_line(net, next).0),
     );
+    let clear = i64::from(clear_line(net, next).0);
     let room = |l: &LaneId| {
         st.last(*l)
-            .is_none_or(|(at, v)| at + i64::from(v.0) * ticks >= need)
+            .is_none_or(|(at, v)| roomy(at, i64::from(v.0), 1, ticks, clear, need))
     };
     let to_lane = junction_lane(net, conn, st, t, node, next, after, room);
     (to_lane, room(&to_lane))
+}
+
+/// 先の車線の最後尾（位置 `at`、速さ `v`）が `need` より先まで進んでいそうか。最後尾が交差点を抜けきる所
+/// `clear` より手前にいれば、交差点を抜けていく車なので、入る車が抜けきる所に着くまでの `ticks` tick のあいだ
+/// 同じ速さで進むとみなす。そうでなければ `base` tick のあいだ進むとみなす。交差点を抜けていく車の後ろに続く車を、
+/// 前の車が交差点を抜けきるまで待たせないためである。
+fn roomy(at: i64, v: i64, base: i64, ticks: i64, clear: i64, need: i64) -> bool {
+    let k = if at < clear { ticks } else { base };
+    at + v * k >= need
 }
 
 /// 車 `t` が、いまの速さから加速の上限で速さを上げていき、いまのリンクの最高速度で `d` だけ進むのに要る
@@ -1178,7 +1187,11 @@ pub(super) fn step(
             let left = i64::from(t.link_len.0) - i64::from(t.offset.0)
                 + i64::from(clear_line(net, next).0);
             let ticks = ticks_to(net, t, left);
-            if last.get(&lane).is_some_and(|(r, v)| r + v * ticks < need) {
+            let clear = i64::from(clear_line(net, next).0);
+            if last
+                .get(&lane)
+                .is_some_and(|(r, v)| !roomy(*r, *v, 0, ticks, clear, need))
+            {
                 (t.offset, t.speed) = (LaneOffset(line), MmPerTick::ZERO);
                 continue;
             }
