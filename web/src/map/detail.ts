@@ -5,7 +5,7 @@
 
 import { BUILDING_STRIDE, SEGMENT_STRIDE, SIGNAL_STRIDE } from "../protocol/messages.ts";
 import { carriagewayHalfWidth, HIGHWAY_CODE, hasSidewalks, SIDEWALK_WIDTH } from "./lanes.ts";
-import { bodyShape, type Lot, largestPiece, lotKey, parseLots, siteOf } from "./lots.ts";
+import { bodyShape, homeCount, type Lot, largestPiece, lotKey, parseLots, siteOf } from "./lots.ts";
 import { type Color, hex } from "./palette.ts";
 import {
   asphaltHalfWidth,
@@ -29,6 +29,7 @@ import {
   ZEBRA_LENGTH,
 } from "./roads.ts";
 import { showsFine } from "./stages.ts";
+import { isResidentialZone, ZONE_COMMERCIAL, ZONE_INDUSTRIAL, ZONE_OFFICE } from "./zones.ts";
 
 /** ワールド座標（マス）の長方形。min は含み、max は含まない。 */
 export type TileRect = { minX: number; minY: number; maxX: number; maxY: number };
@@ -42,12 +43,6 @@ const contains = (outer: TileRect, inner: TileRect) =>
 /** 長方形 (x0, y0)〜(x1, y1) が rect に少しでもかかるか。 */
 const overlaps = (r: TileRect, x0: number, y0: number, x1: number, y1: number) =>
   x1 >= r.minX && x0 <= r.maxX && y1 >= r.minY && y0 <= r.maxY;
-
-// 区画の番号。chizu-wasm の zone_code と同じ
-const RESIDENTIAL = 1;
-const COMMERCIAL = 2;
-const INDUSTRIAL = 3;
-const OFFICE = 4;
 
 /** 住宅の屋根の棟と隅棟の、半分の太さ（画面のピクセル）。線の太さは 1.5px である。 */
 export const ROOF_RIDGE_HALF_PX = 0.75;
@@ -97,7 +92,7 @@ export function equipmentCenters(
 
 /**
  * 屋根を置く本体の長方形。駐車場に切り欠いた所があれば、それを除いたいちばん広い長方形である。
- * 私道の敷地なら、いちばん広い家になる（roofGeometry は家ごとに屋根を描く）。
+ * 私道の敷地や、`homes` が 2 以上の低密度の家なら、いちばん広い家になる（roofGeometry は家ごとに屋根を描く）。
  */
 export function roofBody(
   tx0: number,
@@ -105,9 +100,10 @@ export function roofBody(
   tx1: number,
   ty1: number,
   lot: Lot | undefined,
+  homes = 1,
 ): TileRect | undefined {
   const piece = largestPiece(
-    bodyShape(siteOf(tx0, ty0, tx1, ty1), BUILDING_INSET, BUILDING_EDGE, lot).inner,
+    bodyShape(siteOf(tx0, ty0, tx1, ty1), BUILDING_INSET, BUILDING_EDGE, lot, homes).inner,
   );
   return piece === undefined
     ? undefined
@@ -131,12 +127,32 @@ export function roofGeometry(
     const tx1 = buildings[i + 2] ?? 0;
     const ty1 = buildings[i + 3] ?? 0;
     const zone = buildings[i + 4] ?? 0;
+    const level = buildings[i + 5] ?? 1;
     const lot = lots.get(lotKey(tx0, ty0));
     if (lot !== undefined && lot.houses.length > 0) {
       // 私道の敷地は、家ごとに屋根を描く。住宅だけが私道の敷地になる
       const edge = buildingEdgeColor(zone);
       for (const h of bodyShape(siteOf(tx0, ty0, tx1, ty1), 0, BUILDING_EDGE, lot).inner) {
         if (overlaps(rect, h.x0, h.y0, h.x1, h.y1)) {
+          hipRoof(geometry, h.x0, h.y0, h.x1, h.y1, edge);
+        }
+      }
+      continue;
+    }
+    const homes = homeCount(zone, level, siteOf(tx0, ty0, tx1, ty1), lot);
+    if (homes > 1) {
+      // 通りに面した低密度の家は、世帯ごとの棟に寄棟の屋根を描く
+      const edge = buildingEdgeColor(zone);
+      const shape = bodyShape(
+        siteOf(tx0, ty0, tx1, ty1),
+        BUILDING_INSET,
+        BUILDING_EDGE,
+        lot,
+        homes,
+      );
+      for (const part of shape.parts) {
+        const h = largestPiece(part);
+        if (h !== undefined && overlaps(rect, h.x0, h.y0, h.x1, h.y1)) {
           hipRoof(geometry, h.x0, h.y0, h.x1, h.y1, edge);
         }
       }
@@ -152,11 +168,11 @@ export function roofGeometry(
       continue;
     }
     const edge = buildingEdgeColor(zone);
-    if (zone === RESIDENTIAL) {
+    if (isResidentialZone(zone)) {
       hipRoof(geometry, x0, y0, x1, y1, edge);
-    } else if (zone === INDUSTRIAL) {
+    } else if (zone === ZONE_INDUSTRIAL) {
       roofStripes(geometry, x0, y0, x1, y1, edge);
-    } else if (zone === COMMERCIAL || zone === OFFICE) {
+    } else if (zone === ZONE_COMMERCIAL || zone === ZONE_OFFICE) {
       for (const c of equipmentCenters(x0, y0, x1, y1, tileHash(tx0, ty0))) {
         geometry.box(
           c.x - EQUIPMENT_HALF,

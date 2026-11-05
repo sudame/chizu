@@ -1117,7 +1117,8 @@ try {
     near(commercial, mixHex("#eaf0f8", "#dde6f3", blocks), 4),
     `塗ったマスが商業の淡い青の地面で描かれる（${commercial.join(", ")}）`,
   );
-  // 低密度の住宅は、区画の番号 5 で送られ、高密度の住宅と違う黄緑の地面で描かれる。確かめたら消す
+  // 低密度の住宅は、区画の番号 5 で送られ、高密度の住宅と違う黄緑の地面と建物の色で描かれる。
+  // 高密度の住宅を塗る前に確かめ、建った家は取り壊して区画も消す。確かめたら消す
   {
     await pickTool(page, "zone-ResidentialLow");
     const beforeLow = await outcomeCount();
@@ -1141,6 +1142,50 @@ try {
       lowZoned.command === "PaintZone" && lowZoned.outcome === "Applied" && near(low, wantLow, 4),
       `低密度の住宅を塗ると、黄緑の地面（#f0f5d6）で描かれる（${low.join(", ")}、${lowZoned.text}）`,
     );
+    // 建物は、建物のまとまりを薄く重ねた色で描かれる。高密度の住宅の色とは別である
+    const lowBuildingHex = mixHex(
+      mixHex("#f0f5d6", "#d6e59c", blocks),
+      "#dce8ad",
+      stageWeights(view.zoom).clusters,
+    );
+    const highBuildingHex = mixHex(
+      mixHex("#eef4e6", "#cde0b9", blocks),
+      "#d3e3c0",
+      stageWeights(view.zoom).clusters,
+    );
+    const lowBuilding = async () => {
+      for (let x = 14; x <= 18; x++) {
+        for (let y = 29; y <= 31; y++) {
+          const c = await pixel(
+            cx + (x + 0.6 - view.x) * view.zoom,
+            cy + (y + 0.8 - view.y) * view.zoom,
+          );
+          if (near(c, lowBuildingHex, 4)) {
+            return { x, y, c };
+          }
+        }
+      }
+      return null;
+    };
+    await setSpeed(FAST_SPEED);
+    let found = await lowBuilding();
+    for (let i = 0; i < 100 && found === null; i++) {
+      await page.waitForTimeout(200);
+      found = await lowBuilding();
+    }
+    await setSpeed(1);
+    check(
+      found !== null && !near(found.c, highBuildingHex, 4),
+      `低密度の住宅の建物が、高密度と違う黄緑の色で描かれる（${found === null ? "見つからない" : `マス (${found.x}, ${found.y})、${found.c.join(", ")}`}、期待 ${lowBuildingHex}）`,
+    );
+    // 建った家を取り壊し、区画も消して、あとの確かめを前と同じ街から始める
+    await page.locator('button[data-tool="bulldoze"]').click();
+    const beforeBulldozeLow = await outcomeCount();
+    await page.mouse.move(l0.x, l0.y);
+    await page.mouse.down();
+    await page.mouse.move(l1.x, l1.y, { steps: 4 });
+    await page.mouse.up();
+    await nextOutcome(beforeBulldozeLow);
     await pickTool(page, "zone-Clear");
     const beforeClear = await outcomeCount();
     await page.mouse.move(l0.x, l0.y);

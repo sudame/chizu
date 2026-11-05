@@ -19,7 +19,7 @@ import {
   roadHalfWidth,
   SIDEWALK_WIDTH,
 } from "./lanes.ts";
-import { addLot, bodyShape, lotKey, parseLots, siteOf } from "./lots.ts";
+import { addLot, bodyShape, homeCount, lotKey, parseLots, siteOf } from "./lots.ts";
 import { type Color, facilityStyle, GROUND_COLOR, hex } from "./palette.ts";
 import { stageWeights } from "./stages.ts";
 
@@ -687,7 +687,7 @@ export function buildingMeshes(
   const marks: [number, number, number][] = [];
   const e = BUILDING_EDGE;
   for (let i = 0; i + BUILDING_STRIDE <= buildings.length; i += BUILDING_STRIDE) {
-    const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, zone = 0, , supply = 0] = buildings.subarray(
+    const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, zone = 0, level = 1, supply = 0] = buildings.subarray(
       i,
       i + BUILDING_STRIDE,
     );
@@ -698,14 +698,15 @@ export function buildingMeshes(
     }
     const color = buildingColor(zone);
     const edge = buildingEdgeColor(zone);
-    const shape = bodyShape(site, BUILDING_INSET, e, lot);
+    const homes = homeCount(zone, level, site, lot);
+    const shape = bodyShape(site, BUILDING_INSET, e, lot, homes);
     for (const r of shape.outer) {
       buildingBoxes.push({ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, color, edge });
     }
     for (const r of shape.inner) {
       bodyBoxes.push({ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, color, edge });
     }
-    for (const r of bodyShape(site, CLUSTER_INSET, 0, lot).outer) {
+    for (const r of bodyShape(site, CLUSTER_INSET, 0, lot, homes).outer) {
       meshes.clusters.box(r.x0, r.y0, r.x1, r.y1, color);
     }
     marks.push([x0, y0, supply]);

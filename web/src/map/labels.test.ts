@@ -405,6 +405,15 @@ describe("建物の中の駐車場の台数", () => {
     expect(parkingLabels(buildings, new Map([["99,99", 3]]))).toEqual([]);
   });
 
+  test("世帯ごとに 2 棟へ割った低密度の家では、隙間ではなく最初の棟の中心に置く", () => {
+    // 2×2 の段階 2 の低密度（区画 5）。敷地は x 10〜12、y 20〜22 で、棟は x の向きに並ぶ
+    const [label] = parkingLabels([10, 20, 11, 21, 5, 2, 3], new Map([["10,20", 3]]));
+    expect(label?.y).toBe(21);
+    expect(label?.x).toBeLessThan(10.95);
+    // 高密度の同じ大きさは、敷地の中心のまま
+    expect(parkingLabels([10, 20, 11, 21, 1, 2, 3], new Map([["10,20", 3]]))[0]?.x).toBe(11);
+  });
+
   test("数字は「P 台数」で出し、台数が変わっても同じラベルのまま字だけ変わる", () => {
     const at = (n: number) =>
       parkingCandidates(

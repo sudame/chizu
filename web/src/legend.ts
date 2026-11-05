@@ -36,19 +36,17 @@ export function cssColor(c: readonly number[]): string {
   return `rgb(${ch(0)} ${ch(1)} ${ch(2)})`;
 }
 
+// 建物の凡例。住宅は密度で 2 つに分かれる
 const ZONES: [number, string][] = [
-  [1, "住宅"],
+  [5, "住宅（低密度）"],
+  [1, "住宅（高密度）"],
   [2, "商業"],
   [3, "工業"],
   [4, "オフィス"],
 ];
 
-// 区画の地面の色の凡例。住宅は密度で 2 つに分かれる（建物は、低密度の描き分けを入れるまで住宅 1 つ）
-const GROUND_ZONES: [number, string][] = [
-  [5, "住宅（低密度）"],
-  [1, "住宅（高密度）"],
-  ...ZONES.slice(1),
-];
+// 区画の地面の色の凡例。建物と同じ並びである
+const GROUND_ZONES: [number, string][] = ZONES;
 
 // 施設の種類（ServiceKind の値）と凡例の名前
 const FACILITIES: [number, string][] = [
