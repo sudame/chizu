@@ -45,8 +45,8 @@ pub use commute::{CommuteRequest, Commuter, DRIVE_MIN_MM, HouseholdCar, OWNER_DR
 pub use congestion::{Congestion, classify as classify_congestion};
 pub use junction::Rescues;
 pub use parking::{
-    DailyLotMisses, Lot, LotEnd, LotMisses, PARK_RADIUS, ParkingTally, SHORTAGE_LOTS_FULL,
-    building_spot, lot_end, lot_spot, lot_tiles,
+    CurbWait, DailyLotMisses, Lot, LotEnd, LotMisses, PARK_RADIUS, ParkingTally,
+    SHORTAGE_LOTS_FULL, building_spot, lot_end, lot_spot, lot_tiles,
 };
 pub use pos::SidewalkPos;
 
@@ -169,6 +169,16 @@ impl Trip {
     /// 駐車場の中で、車線に出る順番を待っている車か。
     pub fn waiting_to_depart(&self) -> bool {
         self.mode == LaneMode::Car && self.waiting && !self.rejoining
+    }
+
+    /// 駐車場の中で車線に出るのを待ち始めてから数えた tick 数。車線に出るのを待っていない車は 0。
+    /// 読み取り用で、`RESCUE` を越えると歩きに切り替わる。
+    pub fn curb_wait_ticks(&self) -> u32 {
+        if self.waiting_to_depart() {
+            self.stalled
+        } else {
+            0
+        }
     }
 
     /// 行き先の建物の駐車場が満車で、近くのほかの建物の駐車場に停めに向かっているか。

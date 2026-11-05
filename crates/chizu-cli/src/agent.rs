@@ -28,7 +28,8 @@ use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
     CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic, DenyReason, GameTime,
     HappinessParts, Heading, Line, LotMisses, MigrationOutlook, NodeControl, NodeId, ParkingTally,
-    Rescues, ServiceKind, TICKS_PER_DAY, TilePos, TileRect, Traffic, World, ZoneKind, replay,
+    Rescues, ServiceKind, TICKS_PER_DAY, TILE_MM, TilePos, TileRect, Traffic, World, ZoneKind,
+    replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -112,6 +113,12 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  stopped は 100 tick 動いていない、動けなくなった車だけを数え、止まっては進む列は入らない。
                  地図の詰まりと見比べるときは queued を見る。stopped が多いまま増える街は、詰まって動かなくなっているおそれがある。waitingAtCurb が多いのは、
                  建物の前の車線が埋まって出られない車が多いということである。
+                 curbWaits waitingAtCurb の車を、待っている点ごとに数えた上位 10 件。待っている台数（waiting）の多い順で、
+                 同じなら点の位置（x、y の順）。at 車が待っている点のマスの座標。点は道路の中心線の上にあるので、道路をはさんで
+                 向かい合う建物は同じ点になり、どちらの建物の前で待つ車か見分けられない。そこで buildings に、その点を出入口か
+                 出入りの位置にする建物を全部並べる（at 建物が占めるマスの最小の座標、zone 区画の種類、level 段階）。
+                 waiting いま待っている台数、long そのうち 100 tick 以上待っている台数。300 tick を越えると歩きに切り替わる。
+                 全部の点の合計は waitingAtCurb 以下で、上位 10 件の waiting の和はさらに小さくなりうる。
   traffic.walkers 車道を渡るところの歩く人。atCrosswalks 交差点の横断歩道を渡っているか渡るのを待っている人、
                  midblock 区間の途中で道路を横切っているか横切るのを待っている人。横断歩道は 3 本以上の道路が集まる
                  交差点の、高速道路でないどの腕にも自動で置かれ、人が渡っているあいだ、その腕から入る車と出る車は止まる。
@@ -948,8 +955,82 @@ fn cars(world: &World, before: &CarSample) -> Value {
         "stopped": stopped,
         "queued": now.queued_on_road(),
         "waitingAtCurb": waiting,
+        "curbWaits": rank_curb_waits(
+            world
+                .curb_waits(CURB_WAIT_LONG_TICKS)
+                .into_iter()
+                .map(|w| CurbWaitRow {
+                    at: (w.at.x.0, w.at.y.0),
+                    buildings: w
+                        .buildings
+                        .iter()
+                        .filter_map(|id| {
+                            let b = world.buildings().get(*id)?;
+                            Some(CurbBuilding {
+                                at: (b.area.min.x, b.area.min.y),
+                                zone: b.zone,
+                                level: b.level,
+                            })
+                        })
+                        .collect(),
+                    waiting: w.waiting,
+                    long: w.long,
+                })
+                .collect(),
+        ),
         "stoppedAfterTicks": STOPPED_TICKS,
     })
+}
+
+/// observe の `traffic.cars.curbWaits` に出す点の数の上限。
+const CURB_WAIT_LIMIT: usize = 10;
+
+/// `curbWaits` で「待ちが長い」とみなす tick 数。
+const CURB_WAIT_LONG_TICKS: u32 = 100;
+
+/// 車線に出るのを待つ車を、待っている点ごとに数えた 1 行。
+struct CurbWaitRow {
+    /// 待っている点のワールド座標（mm）。
+    at: (i64, i64),
+    /// その点を出入口か出入りの位置にする建物。
+    buildings: Vec<CurbBuilding>,
+    waiting: u32,
+    long: u32,
+}
+
+struct CurbBuilding {
+    /// 建物が占めるマスのうち、座標が最小のマス。
+    at: (i64, i64),
+    zone: ZoneKind,
+    level: u8,
+}
+
+/// 待っている台数の多い順に、同じなら点の位置（x、y の順）で並べ、上位だけを JSON にする。
+/// 点の `at` は、マスの座標にして出す（点は道路の中心線の上にある）。
+fn rank_curb_waits(mut rows: Vec<CurbWaitRow>) -> Vec<Value> {
+    rows.sort_by(|a, b| b.waiting.cmp(&a.waiting).then(a.at.cmp(&b.at)));
+    rows.into_iter()
+        .take(CURB_WAIT_LIMIT)
+        .map(|r| {
+            let buildings: Vec<Value> = r
+                .buildings
+                .iter()
+                .map(|b| {
+                    json!({
+                        "at": [b.at.0, b.at.1],
+                        "zone": format!("{:?}", b.zone),
+                        "level": b.level,
+                    })
+                })
+                .collect();
+            json!({
+                "at": [r.at.0.div_euclid(TILE_MM), r.at.1.div_euclid(TILE_MM)],
+                "buildings": buildings,
+                "waiting": r.waiting,
+                "long": r.long,
+            })
+        })
+        .collect()
 }
 
 /// 1 日ぶんの移動の結果。
@@ -2107,6 +2188,51 @@ mod tests {
         assert_eq!(out[1]["yesterday"]["lotsFull"], 5);
         let many: Vec<_> = (0..30).map(|i| shortage((i, 0), 1, 0)).collect();
         assert_eq!(rank_shortages(many).len(), SHORTAGE_LIMIT);
+    }
+
+    fn curb_wait(at: (i64, i64), waiting: u32, long: u32) -> CurbWaitRow {
+        let b = |at| CurbBuilding {
+            at,
+            zone: ZoneKind::Industrial,
+            level: 2,
+        };
+        CurbWaitRow {
+            at: (at.0 * TILE_MM, at.1 * TILE_MM),
+            buildings: vec![b((at.0, at.1 - 1)), b((at.0, at.1 + 1))],
+            waiting,
+            long,
+        }
+    }
+
+    /// 待っている台数の多い順で、同じなら点の位置の順。上位だけを出し、台数の和は元の和を超えない。
+    /// 向かい合う建物は、1 つの点の `buildings` に並ぶ。
+    #[test]
+    fn curb_waits_are_ranked_by_waiting_then_position() {
+        let rows = vec![
+            curb_wait((9, 1), 3, 1),
+            curb_wait((3, 8), 5, 2),
+            curb_wait((3, 2), 3, 0),
+            curb_wait((7, 7), 9, 9),
+        ];
+        let total: u64 = rows.iter().map(|r| u64::from(r.waiting)).sum();
+        let out = rank_curb_waits(rows);
+        let at: Vec<_> = out.iter().map(|v| v["at"].clone()).collect();
+        assert_eq!(
+            at,
+            [json!([7, 7]), json!([3, 8]), json!([3, 2]), json!([9, 1])]
+        );
+        assert_eq!(out[1]["waiting"], 5);
+        assert_eq!(out[1]["long"], 2);
+        assert_eq!(out[1]["buildings"].as_array().unwrap().len(), 2);
+        assert_eq!(out[1]["buildings"][0]["zone"], "Industrial");
+        assert_eq!(out[1]["buildings"][1]["at"], json!([3, 9]));
+        let shown: u64 = out.iter().map(|v| v["waiting"].as_u64().unwrap()).sum();
+        assert!(shown <= total);
+        let many: Vec<_> = (0..30).map(|i| curb_wait((i, 0), 1, 0)).collect();
+        let top = rank_curb_waits(many);
+        assert_eq!(top.len(), CURB_WAIT_LIMIT);
+        // 同じ台数なら、位置の小さい点が残る。
+        assert_eq!(top[CURB_WAIT_LIMIT - 1]["at"], json!([9, 0]));
     }
 
     fn commands() -> Vec<Value> {
