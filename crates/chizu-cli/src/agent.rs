@@ -80,7 +80,9 @@ observe の utilities（power と water）:
     basis は "demandSameTimeYesterday"、見積もれないときは null で、reason に理由を書く（state は "unknown"）。
     1 日前の控えがないときは、前の observe との差には戻らず、unknown を出す。差だと朝の伸びを 1 日の伸びと取り違えるからである。
     見積もれないのは、控えがない（フィードバックのディレクトリなど、セッションではない）、街がまだ 1 日たっていない、1 日前をはさむ控えがない、
-    はさむ 2 つの控えが 1800 tick（ゲーム内の 6 時間）より離れている、headroomPeople が決まらない、のとき。
+    はさむ 2 つの控えが 1800 tick（ゲーム内の 6 時間）より離れている、1 日前から主の網が替わった、headroomPeople が決まらない、のとき。
+    主の網が替わったかは main.networkMark（網のいちばん小さい区間の ID から作った印）で見分け、控えの印と違えば unknown にする（網が替わると需要が飛ぶので、伸びとして使えない）。
+    近すぎる observe（前の控えから 60 tick 未満）の控えは足さず、古いほうを残す。同じ tick の observe だけ置き換える。
     1 日に数回 observe しておく（たとえば 6 時間ごと、または advance 7200 のたびに 1 回）と、2 日目から見積もれる。
     state は "shrinking"（需要が伸びて、余りが減っている）、"notShrinking"（需要が伸びていない）、"short"（すでに足りない）、"unknown"（見積もれない）。
     targetTick は 1 日前の tick、demandBefore はその tick の主の網の需要（控えを直線でつないだ値）、demandNow はいまの需要、
@@ -1416,6 +1418,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 "shortage": headroom < 0,
                 "shortBy": (-headroom).max(0),
                 "at": balance.spots[i].map(|p| json!([p.x, p.y])),
+                "networkMark": balance.network_mark(i),
             })
         });
         let (mut o_networks, mut o_capacity, mut o_demand) = (0_u64, 0_u64, 0_u64);
@@ -1769,25 +1772,40 @@ fn since_last_observe(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct DemandSample {
     tick: u64,
-    power: Option<u64>,
-    water: Option<u64>,
+    power: Option<NetDemand>,
+    water: Option<NetDemand>,
+}
+
+/// 主の網の需要と、その網を見分ける印（[`chizu_core::service::SupplyBalance::network_mark`]）。
+/// 主の網が別の網に替わると需要が飛ぶので、印が違う控えは比べない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct NetDemand {
+    demand: u64,
+    net: u64,
 }
 
 impl DemandSample {
-    fn of(self, kind: &str) -> Option<(u64, u64)> {
+    fn of(self, kind: &str) -> Option<Past> {
         let d = if kind == "power" {
             self.power
         } else {
             self.water
         };
-        d.map(|d| (self.tick, d))
+        d.map(|d| Past {
+            tick: self.tick,
+            demand: d.demand,
+            net: d.net,
+        })
     }
 
     /// observe の出力から、いまの控えを取る。
     fn seen(seen: &Value) -> Self {
         let main_demand = |kind: &str| {
-            seen.pointer(&format!("/utilities/{kind}/main/demand"))
-                .and_then(Value::as_u64)
+            let main = seen.pointer(&format!("/utilities/{kind}/main"))?;
+            Some(NetDemand {
+                demand: main.get("demand")?.as_u64()?,
+                net: main.get("networkMark")?.as_u64()?,
+            })
         };
         Self {
             tick: seen.get("tick").and_then(Value::as_u64).unwrap_or(0),
@@ -1797,14 +1815,23 @@ impl DemandSample {
     }
 
     fn to_json(self) -> Value {
-        json!({"tick": self.tick, "power": self.power, "water": self.water})
+        let part = |d: Option<NetDemand>| d.map(|d| json!({"demand": d.demand, "net": d.net}));
+        json!({"tick": self.tick, "power": part(self.power), "water": part(self.water)})
     }
 
     fn from_json(v: &Value) -> Option<Self> {
+        // 印のない古い形の控えは、どの網のものか分からないので読み飛ばす。
+        let part = |k: &str| {
+            let d = v.get(k)?;
+            Some(NetDemand {
+                demand: d.get("demand")?.as_u64()?,
+                net: d.get("net")?.as_u64()?,
+            })
+        };
         Some(Self {
             tick: v.get("tick")?.as_u64()?,
-            power: v.get("power").and_then(Value::as_u64),
-            water: v.get("water").and_then(Value::as_u64),
+            power: part("power"),
+            water: part("water"),
         })
     }
 }
@@ -1813,7 +1840,8 @@ impl DemandSample {
 /// これより離れていると、間の建設の波を直線でならしてしまう。
 const MAX_BRACKET_TICKS: u64 = TICKS_PER_DAY / 4;
 
-/// 控えを足す最短の間隔。これより近い observe は、前の控えを新しい値で置き換えるだけにする。
+/// 控えを足す最短の間隔。これより近い observe の控えは足さず、古いほうを残す
+/// （1 日後の observe が、ちょうど 1 日前の控えを見つけられるように）。同じ tick のときだけ置き換える。
 const MIN_SAMPLE_GAP_TICKS: u64 = 60;
 
 /// last-observe.json の控えの列。形が違う行は読み飛ばす。
@@ -1829,13 +1857,15 @@ fn read_demand_history(last: Option<&Value>) -> Vec<DemandSample> {
 
 /// いまの控えを足した列を返す。1 日前をはさむのに要る分（はさむ間隔を含めて 1 日強）だけ残し、いまより先の控えは捨てる。
 fn push_demand_sample(mut history: Vec<DemandSample>, now: DemandSample) -> Vec<DemandSample> {
-    history.retain(|s| s.tick < now.tick);
-    if let Some(prev) = history.last()
-        && now.tick - prev.tick < MIN_SAMPLE_GAP_TICKS
-    {
-        history.pop();
+    history.retain(|s| s.tick <= now.tick);
+    match history.last() {
+        Some(prev) if prev.tick == now.tick => {
+            history.pop();
+            history.push(now);
+        }
+        Some(prev) if now.tick - prev.tick < MIN_SAMPLE_GAP_TICKS => {}
+        _ => history.push(now),
     }
-    history.push(now);
     let keep_from = now.tick.saturating_sub(TICKS_PER_DAY + MAX_BRACKET_TICKS);
     history.retain(|s| s.tick >= keep_from);
     history
@@ -1864,10 +1894,12 @@ fn attach_utility_trends(seen: &mut Value, last: Option<&Value>) -> Vec<DemandSa
         let now = main
             .get("demand")
             .and_then(Value::as_u64)
-            .zip(main.get("headroom").and_then(Value::as_i64).map(i128::from));
+            .zip(main.get("headroom").and_then(Value::as_i64).map(i128::from))
+            .zip(main.get("networkMark").and_then(Value::as_u64))
+            .map(|((demand, headroom), net)| (demand, headroom, net));
         let has_people = main.get("headroomPeople").is_some_and(Value::is_i64);
         let people = need.zip(housed).filter(|_| has_people);
-        let past: Vec<(u64, u64)> = history.iter().filter_map(|s| s.of(kind)).collect();
+        let past: Vec<Past> = history.iter().filter_map(|s| s.of(kind)).collect();
         main["trend"] = utility_trend(tick.zip(now), people, &past, last.is_some());
     }
     if tick.is_some() {
@@ -1877,42 +1909,57 @@ fn attach_utility_trends(seen: &mut Value, last: Option<&Value>) -> Vec<DemandSa
     }
 }
 
+/// 控え 1 つ。ある種類の、主の網の需要と、その網の印。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Past {
+    tick: u64,
+    demand: u64,
+    net: u64,
+}
+
 /// `tick` の 1 日前の需要を、控え `past`（tick の昇順）から求める。戻り値は `(1 日前の tick, 需要)`。
 /// 1 日前をはさむ 2 つの控え（ちょうど同じ tick の控えがあればそれ）を直線でつなぐ。はさめなければ理由を返す。
-fn demand_a_day_ago(past: &[(u64, u64)], tick: u64) -> Result<(u64, u64), String> {
+/// はさむ控えの網の印が `net`（いまの主の網）と違えば、主の網が替わって需要が飛んでいるので求めない。
+fn demand_a_day_ago(past: &[Past], tick: u64, net: u64) -> Result<(u64, u64), String> {
     let Some(target) = tick.checked_sub(TICKS_PER_DAY) else {
         return Err(format!(
             "街がまだ 1 日たっていない（{tick} tick < {TICKS_PER_DAY} tick）ので、1 日前の需要がない"
         ));
     };
-    let lo = past.iter().rev().find(|(t, _)| *t <= target);
-    let hi = past.iter().find(|(t, _)| *t >= target);
+    let lo = past.iter().rev().find(|p| p.tick <= target);
+    let hi = past.iter().find(|p| p.tick >= target);
     let (Some(&lo), Some(&hi)) = (lo, hi) else {
         return Err(format!(
             "1 日前（tick {target}）をはさむ需要の控えがない。セッションで 1 日に数回 observe すると控えが貯まる"
         ));
     };
-    if hi.0 - lo.0 > MAX_BRACKET_TICKS {
+    if lo.net != net || hi.net != net {
         return Err(format!(
-            "1 日前（tick {target}）をはさむ控え（tick {} と {}）が {MAX_BRACKET_TICKS} tick（ゲーム内の 6 時間）より離れていて、間の建設の波をならしてしまう。もっと短い間隔で observe する",
-            lo.0, hi.0
+            "1 日前（tick {target}）から主の網が替わった（networkMark が違う）ので、需要の伸びを比べられない"
         ));
     }
-    let before = interpolate_demand(lo, hi, target).ok_or_else(|| {
-        format!(
-            "1 日前（tick {target}）の需要を、控え（tick {} と {}）から決められない",
-            lo.0, hi.0
-        )
-    })?;
+    if hi.tick - lo.tick > MAX_BRACKET_TICKS {
+        return Err(format!(
+            "1 日前（tick {target}）をはさむ控え（tick {} と {}）が {MAX_BRACKET_TICKS} tick（ゲーム内の 6 時間）より離れていて、間の建設の波をならしてしまう。もっと短い間隔で observe する",
+            lo.tick, hi.tick
+        ));
+    }
+    let before = interpolate_demand((lo.tick, lo.demand), (hi.tick, hi.demand), target)
+        .ok_or_else(|| {
+            format!(
+                "1 日前（tick {target}）の需要を、控え（tick {} と {}）から決められない",
+                lo.tick, hi.tick
+            )
+        })?;
     Ok((target, before))
 }
 
-/// `now` は `(tick, (主の網の需要, 余り))`。`people` は `(街の需要の合計, 家に住む人)` で、人数にできないときは `None`。
+/// `now` は `(tick, (主の網の需要, 余り, 主の網の印))`。`people` は `(街の需要の合計, 家に住む人)` で、人数にできないときは `None`。
 /// `has_last` は、セッションで前の observe があるか（理由の言い分けに使う）。
 fn utility_trend(
-    now: Option<(u64, (u64, i128))>,
+    now: Option<(u64, (u64, i128, u64))>,
     people: Option<(u64, u64)>,
-    past: &[(u64, u64)],
+    past: &[Past],
     has_last: bool,
 ) -> Value {
     let none = |reason: String| {
@@ -1922,7 +1969,7 @@ fn utility_trend(
             "changePerDay": null, "ticksUntilOut": null, "hoursUntilOut": null,
         })
     };
-    let Some((tick, (demand, headroom))) = now else {
+    let Some((tick, (demand, headroom, net))) = now else {
         return none("主の網がない、または tick が決まらないので、減り方は見積もれない".into());
     };
     let Some((need, housed)) = people else {
@@ -1933,7 +1980,7 @@ fn utility_trend(
     if !has_last {
         return none("需要の控えがない（セッションではないか、new の直後でない最初の observe）ので、減り方は見積もれない。控えは agent new で作ったセッションで observe するたびに貯まる".into());
     }
-    let (target, before) = match demand_a_day_ago(past, tick) {
+    let (target, before) = match demand_a_day_ago(past, tick, net) {
         Ok(v) => v,
         Err(reason) => return none(reason),
     };
@@ -2192,11 +2239,20 @@ mod tests {
     /// 1 日前（tick 0）の需要が 1,000 の控えで、いま tick 7200 の主の網を見る。
     fn trend_at(demand: u64, headroom: i128, past: &[(u64, u64)], tick: u64) -> Value {
         utility_trend(
-            Some((tick, (demand, headroom))),
+            Some((tick, (demand, headroom, NET))),
             Some((2300, 1000)),
-            past,
+            &pasts(past, NET),
             true,
         )
+    }
+
+    /// 主の網の印。
+    const NET: u64 = 7;
+
+    fn pasts(past: &[(u64, u64)], net: u64) -> Vec<Past> {
+        past.iter()
+            .map(|&(tick, demand)| Past { tick, demand, net })
+            .collect()
     }
 
     #[test]
@@ -2269,7 +2325,7 @@ mod tests {
         // 控えを持たない（セッションではない）
         assert!(
             reason(utility_trend(
-                Some((DAY, (1500, 1000))),
+                Some((DAY, (1500, 1000, NET))),
                 Some((2300, 1000)),
                 &[],
                 false
@@ -2297,19 +2353,35 @@ mod tests {
             ))
             .contains("離れていて")
         );
+        // 1 日前の控えが別の網のもの（主の網が替わって、需要が飛んでいる）
+        assert!(
+            reason(utility_trend(
+                Some((DAY, (1500, 1000, NET))),
+                Some((2300, 1000)),
+                &pasts(&[(0, 100)], NET + 1),
+                true
+            ))
+            .contains("主の網が替わった")
+        );
         // 人数が決まらない
         assert!(
             reason(utility_trend(
-                Some((DAY, (1500, 1000))),
+                Some((DAY, (1500, 1000, NET))),
                 None,
-                &[(0, 1000)],
+                &pasts(&[(0, 1000)], NET),
                 true
             ))
             .contains("headroomPeople が null")
         );
         // 主の網がない
         assert!(
-            reason(utility_trend(None, Some((2300, 1000)), &[(0, 1000)], true)).contains("主の網")
+            reason(utility_trend(
+                None,
+                Some((2300, 1000)),
+                &pasts(&[(0, 1000)], NET),
+                true
+            ))
+            .contains("主の網")
         );
     }
 
@@ -2317,18 +2389,53 @@ mod tests {
     fn demand_history_keeps_a_day_and_drops_the_future() {
         let s = |tick| DemandSample {
             tick,
-            power: Some(tick),
+            power: Some(NetDemand {
+                demand: tick,
+                net: NET,
+            }),
             water: None,
         };
         let h = push_demand_sample(vec![s(0), s(1000), s(10_000)], s(9000));
         // 先の控え（tick 10,000）は捨てる。tick 0 は 9000 - 9000 = 0 で、まだ残る
         assert_eq!(h, vec![s(0), s(1000), s(9000)]);
         let h = push_demand_sample(h, s(9010));
-        // 60 tick より近い控えは置き換える
-        assert_eq!(h, vec![s(1000), s(9010)]);
+        // 60 tick より近い控えは足さず、古いほうを残す（窓は 9010 まで進むので、tick 0 は捨てる）
+        assert_eq!(h, vec![s(1000), s(9000)]);
         let h = push_demand_sample(h, s(9400));
-        // 9400 - 9000 = 400 より古い控えは捨てる（tick 9010 の置き換えで、tick 0 は 10 より古く、すでに捨ててある）
-        assert_eq!(h, vec![s(1000), s(9010), s(9400)]);
+        // 9400 - 9000 = 400 より古い控えは捨てる
+        assert_eq!(h, vec![s(1000), s(9000), s(9400)]);
+        // 同じ tick の控えは置き換える
+        let mut again = s(9400);
+        again.power = Some(NetDemand {
+            demand: 1,
+            net: NET,
+        });
+        let h = push_demand_sample(h, again);
+        assert_eq!(h, vec![s(1000), s(9000), again]);
+    }
+
+    #[test]
+    fn a_close_second_observe_keeps_the_sample_a_day_back() {
+        // tick 14400 の 30 tick 後にもう一度 observe しても、14400 の控えは残り、
+        // ちょうど 1 日後の tick 21600 で 1 日前（14400）の需要を見つけられる。
+        let s = |tick, demand| DemandSample {
+            tick,
+            power: Some(NetDemand { demand, net: NET }),
+            water: None,
+        };
+        let h = push_demand_sample(vec![], s(14_400, 1000));
+        let h = push_demand_sample(h, s(14_430, 1001));
+        let h = push_demand_sample(h, s(21_600, 1500));
+        let past: Vec<Past> = h.iter().filter_map(|x| x.of("power")).collect();
+        let t = utility_trend(
+            Some((21_600, (1500, 1000, NET))),
+            Some((2300, 1000)),
+            &past,
+            true,
+        );
+        assert_eq!(t["state"], "shrinking", "{t}");
+        assert_eq!(t["targetTick"], 14_400);
+        assert_eq!(t["demandBefore"], 1000);
     }
 
     fn shortage(at: (i64, i64), today: u32, yesterday: u32) -> ShortageRow {

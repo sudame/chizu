@@ -1,7 +1,7 @@
 // 電気と水道の余りが尽きるまでの見積もり。画面だけの値で、状態には入れない。
 // 式は chizu-core の service::demand_trend と同じで、整数で切り捨てる。
 // 余りの差ではなく、1 日前の同じ時刻からの需要の伸びを使う。施設を足しても需要は変わらないので、足した直後でも見積もれ、
-// 朝の建設の波を 1 日の伸びと取り違えない。
+// 朝の建設の波を 1 日の伸びと取り違えない。主の網が替わったときは、需要が飛ぶので見積もらない。
 
 /** 1 日の tick の数。chizu-core の TICKS_PER_DAY と同じ。 */
 export const TICKS_PER_DAY = 7200;
@@ -9,67 +9,68 @@ export const TICKS_PER_DAY = 7200;
 /** 時計の 1 時間の tick の数。chizu-core の MIN_TREND_TICKS と同じ。 */
 export const MIN_TREND_TICKS = TICKS_PER_DAY / 24;
 
-/** 需要の控えを足す間隔（tick）。これより短いあいだは足さない。 */
+/** 需要の控えを足す間隔（tick）。これより短いあいだは足さない（古いほうを残す）。 */
 const SAMPLE_GAP_TICKS = 60;
 
 /**
- * 1 日前をはさむ 2 つの控えの最大の間隔（tick）。ゲーム内の 6 時間。
- * 画面は数十 tick ごとに控えを足すので、ふつうは超えない。超えるのは、タブを閉じていたあとなど。
+ * ある時点の、主の網の需要と、その網を見分ける印（chizu-core の SupplyBalance::network_mark）。
+ * 主の網が別の網に替わると需要が飛ぶので、印が違う控えは比べない。
  */
-const MAX_BRACKET_TICKS = TICKS_PER_DAY / 4;
-
-/** ある時点の、主の網の需要。 */
-export type DemandSample = { tick: number; demand: number };
+export type DemandSample = { tick: number; demand: number; net: number };
 
 /**
- * 控えを足す。控えは、1 日前をはさむのに要る分（はさむ間隔を含めて 1 日強）だけ持つ。
+ * 控えを足す。画面に届くのは数字が変わったときだけなので、控えのあいだは値が変わっていない。
+ * そのため、1 日前の需要は「1 日前以前でいちばん新しい控えの値」で、間の長さに上限は置かない。
+ * 1 日前より古い控えは、1 日前以前でいちばん新しい 1 つだけ残して捨てる。
  * tick が戻ったとき（読み込みや新しい街）は、そこから数え直す。
  */
 export function pushDemandSample(
   series: readonly DemandSample[],
   tick: number,
   demand: number,
+  net: number,
 ): DemandSample[] {
   const last = series[series.length - 1];
   if (last === undefined || tick < last.tick) {
-    return [{ tick, demand }];
+    return [{ tick, demand, net }];
   }
   if (tick - last.tick < SAMPLE_GAP_TICKS) {
     return [...series];
   }
-  const keepFrom = tick - TICKS_PER_DAY - MAX_BRACKET_TICKS;
-  return [...series, { tick, demand }].filter((s) => s.tick >= keepFrom);
+  const all = [...series, { tick, demand, net }];
+  let from = 0;
+  all.forEach((s, i) => {
+    if (s.tick <= tick - TICKS_PER_DAY) {
+      from = i;
+    }
+  });
+  return all.slice(from);
 }
 
 /**
- * tick の 1 日前の需要を、その tick をはさむ 2 つの控えを直線でつないで求める。
- * chizu-core の interpolate_demand と同じく、増減の小数は 0 向きに切り捨てる。
- * 街がまだ 1 日たっていないとき、はさむ控えがないとき、離れすぎているときは null。
+ * tick の 1 日前の需要。1 日前以前でいちばん新しい控えの値である（控えのあいだは値が変わっていない）。
+ * 街がまだ 1 日たっていないとき、そのような控えがないとき、
+ * その控えの網の印が `net`（いまの主の網）と違うとき（主の網が替わった）は null。
  */
-export function demandADayAgo(series: readonly DemandSample[], tick: number): number | null {
+export function demandADayAgo(
+  series: readonly DemandSample[],
+  tick: number,
+  net: number,
+): number | null {
   const target = tick - TICKS_PER_DAY;
   if (target < 0) {
     return null;
   }
   let lo: DemandSample | undefined;
-  let hi: DemandSample | undefined;
   for (const s of series) {
     if (s.tick <= target) {
       lo = s;
     }
-    if (s.tick >= target && hi === undefined) {
-      hi = s;
-    }
   }
-  if (lo === undefined || hi === undefined || hi.tick - lo.tick > MAX_BRACKET_TICKS) {
+  if (lo === undefined || lo.net !== net) {
     return null;
   }
-  if (hi.tick === lo.tick) {
-    return lo.demand === hi.demand ? lo.demand : null;
-  }
-  return (
-    lo.demand + Math.trunc(((hi.demand - lo.demand) * (target - lo.tick)) / (hi.tick - lo.tick))
-  );
+  return lo.demand;
 }
 
 export type HeadroomTrend =
@@ -86,8 +87,9 @@ export function demandTrend(
   tick: number,
   demand: number,
   headroom: number,
+  net: number,
 ): HeadroomTrend | null {
-  const before = demandADayAgo(series, tick);
+  const before = demandADayAgo(series, tick, net);
   if (before === null) {
     return null;
   }

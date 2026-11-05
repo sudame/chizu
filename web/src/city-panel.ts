@@ -50,6 +50,8 @@ export type CityStats = {
   /** 発電所 1 基と浄水場 1 基で増える住民の数。peopleKnown が偽のときは使わない。 */
   powerFacilityPeople: number;
   waterFacilityPeople: number;
+  /** 主の網を見分ける印。主の網が別の網に替わったかを見る。主の網がなければ 0。 */
+  mainNetwork: number;
   /** 住宅・商業・工業・オフィスの順の、需要の内訳。寄与の合計がその区画の需要である。 */
   demandFactors: DemandFactor[][];
 };
@@ -105,6 +107,7 @@ export function parseCityStats(stats: number[]): CityStats {
     peopleKnown: at(23) === 1,
     powerFacilityPeople: at(24),
     waterFacilityPeople: at(25),
+    mainNetwork: at(26),
   };
 }
 
@@ -203,10 +206,10 @@ export function resetUtilityTrends(): void {
  */
 export function trackUtilityTrends(stats: CityStats, tick: number): UtilityTrends {
   const m = mainView(stats);
-  demandSeries = pushDemandSample(demandSeries, tick, m.demand);
+  demandSeries = pushDemandSample(demandSeries, tick, m.demand, stats.mainNetwork);
   return {
-    power: demandTrend(demandSeries, tick, m.demand, m.power - m.demand),
-    water: demandTrend(demandSeries, tick, m.demand, m.water - m.demand),
+    power: demandTrend(demandSeries, tick, m.demand, m.power - m.demand, stats.mainNetwork),
+    water: demandTrend(demandSeries, tick, m.demand, m.water - m.demand, stats.mainNetwork),
   };
 }
 

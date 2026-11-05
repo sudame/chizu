@@ -274,6 +274,18 @@ impl SupplyBalance {
         }
         best.map(|(_, i)| i)
     }
+
+    /// 成分 `component` を見分ける印。成分の中でいちばん小さい区間の ID を、0 にならない 1 つの数にしたもの。
+    /// 読み取り用で、状態には入れない。道路を足しても、いちばん小さい区間が消えなければ変わらない。
+    /// 主の網が別の網に替わったかを見分けるのに使う。区間のない成分は `None`。
+    pub fn network_mark(&self, component: usize) -> Option<u64> {
+        self.segments
+            .iter()
+            .filter(|(_, c)| *c == component)
+            .map(|(id, _)| id)
+            .min()
+            .map(|id| ((u64::from(id.index) + 1) << 16) | u64::from(id.generation))
+    }
 }
 
 /// 街の道路網につながっていない施設（定義は [`isolated_facilities`]）。

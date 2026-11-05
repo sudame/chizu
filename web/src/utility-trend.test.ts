@@ -8,17 +8,19 @@ import {
   TICKS_PER_DAY,
 } from "./utility-trend.ts";
 
+const N = 7; // 主の網の印
+
 describe("需要の伸びからの見積もり", () => {
   test("伸びているなら、尽きるまでの tick を整数で求める", () => {
     // chizu-core の demand_trend のテストと同じ数。余り 1,000 で、需要が 1 日に 500 伸びる。
-    const series = [{ tick: 0, demand: 1000 }];
-    expect(demandTrend(series, TICKS_PER_DAY, 1500, 1000)).toEqual({
+    const series = [{ tick: 0, demand: 1000, net: N }];
+    expect(demandTrend(series, TICKS_PER_DAY, 1500, 1000, N)).toEqual({
       kind: "shrinking",
       growthPerDay: 500,
       ticksUntilOut: 2 * TICKS_PER_DAY,
     });
     // 伸びが倍なら、尽きるのは半分の時間
-    expect(demandTrend(series, TICKS_PER_DAY, 2000, 1000)).toEqual({
+    expect(demandTrend(series, TICKS_PER_DAY, 2000, 1000, N)).toEqual({
       kind: "shrinking",
       growthPerDay: 1000,
       ticksUntilOut: TICKS_PER_DAY,
@@ -26,84 +28,78 @@ describe("需要の伸びからの見積もり", () => {
   });
 
   test("伸びていなければ減っていない、余りが負なら足りない", () => {
-    const series = [{ tick: 0, demand: 1000 }];
-    expect(demandTrend(series, TICKS_PER_DAY, 1000, 500)).toEqual({ kind: "notShrinking" });
-    expect(demandTrend(series, TICKS_PER_DAY, 900, 500)).toEqual({ kind: "notShrinking" });
-    expect(demandTrend(series, TICKS_PER_DAY, 1500, -1)).toEqual({ kind: "short" });
+    const series = [{ tick: 0, demand: 1000, net: N }];
+    expect(demandTrend(series, TICKS_PER_DAY, 1000, 500, N)).toEqual({ kind: "notShrinking" });
+    expect(demandTrend(series, TICKS_PER_DAY, 900, 500, N)).toEqual({ kind: "notShrinking" });
+    expect(demandTrend(series, TICKS_PER_DAY, 1500, -1, N)).toEqual({ kind: "short" });
   });
 
   test("余りが増えても（施設を足しても）、伸びは変わらない", () => {
-    const series = [{ tick: 0, demand: 1000 }];
-    const a = demandTrend(series, TICKS_PER_DAY, 1300, 300);
-    const b = demandTrend(series, TICKS_PER_DAY, 1300, 3900);
-    expect(a?.kind === "shrinking" && b?.kind === "shrinking" && a.growthPerDay).toBe(300);
+    const series = [{ tick: 0, demand: 1000, net: N }];
+    const b = demandTrend(series, TICKS_PER_DAY, 1300, 3900, N);
     expect(b).toEqual({ kind: "shrinking", growthPerDay: 300, ticksUntilOut: 13 * TICKS_PER_DAY });
+    expect(demandTrend(series, TICKS_PER_DAY, 1300, 300, N)).toMatchObject({ growthPerDay: 300 });
   });
 
   test("1 日前の控えがないあいだは見積もらない", () => {
-    expect(demandTrend([], TICKS_PER_DAY, 1500, 1000)).toBeNull();
-    const series = [{ tick: 0, demand: 1000 }];
-    expect(demandTrend(series, TICKS_PER_DAY - 1, 1500, 1000)).toBeNull();
-    expect(demandTrend(series, TICKS_PER_DAY, 1500, 1000)?.kind).toBe("shrinking");
+    expect(demandTrend([], TICKS_PER_DAY, 1500, 1000, N)).toBeNull();
+    const series = [{ tick: 0, demand: 1000, net: N }];
+    expect(demandTrend(series, TICKS_PER_DAY - 1, 1500, 1000, N)).toBeNull();
+    expect(demandTrend(series, TICKS_PER_DAY, 1500, 1000, N)?.kind).toBe("shrinking");
+  });
+
+  test("主の網が替わったときは見積もらない", () => {
+    const series = [{ tick: 0, demand: 100, net: N + 1 }];
+    expect(demandTrend(series, TICKS_PER_DAY, 1500, 1000, N)).toBeNull();
   });
 });
 
 describe("1 日前の需要", () => {
-  test("その tick をはさむ 2 つの控えを直線でつなぐ（小数は 0 向きに切り捨て）", () => {
+  test("1 日前以前でいちばん新しい控えの値を使う（控えのあいだは値が変わっていない）", () => {
     const series = [
-      { tick: 0, demand: 1000 },
-      { tick: 1200, demand: 1200 },
+      { tick: 0, demand: 1000, net: N },
+      { tick: 1200, demand: 1200, net: N },
     ];
-    expect(demandADayAgo(series, TICKS_PER_DAY + 600)).toBe(1100);
-    expect(demandADayAgo(series, TICKS_PER_DAY)).toBe(1000);
-    // chizu-core の interpolate_demand と同じ向き
-    expect(
-      demandADayAgo(
-        [
-          { tick: 100, demand: 1000 },
-          { tick: 400, demand: 995 },
-        ],
-        TICKS_PER_DAY + 200,
-      ),
-    ).toBe(999);
+    expect(demandADayAgo(series, TICKS_PER_DAY + 600, N)).toBe(1000);
+    expect(demandADayAgo(series, TICKS_PER_DAY + 1200, N)).toBe(1200);
   });
 
-  test("はさむ控えがないとき、離れすぎているときは求めない", () => {
-    expect(demandADayAgo([{ tick: 100, demand: 1000 }], TICKS_PER_DAY)).toBeNull();
-    expect(demandADayAgo([{ tick: 0, demand: 1000 }], TICKS_PER_DAY + 5)).toBeNull();
-    const far = [
-      { tick: 0, demand: 1000 },
-      { tick: TICKS_PER_DAY / 2, demand: 1100 },
+  test("静かな時間が長くても、直前の値をそのまま使う", () => {
+    // 1 日前の前後 1 日、控えがない（数字が変わらず、画面に何も届かなかった）
+    const series = [
+      { tick: 1000, demand: 1000, net: N },
+      { tick: 3 * TICKS_PER_DAY, demand: 1100, net: N },
     ];
-    expect(demandADayAgo(far, TICKS_PER_DAY + 1800)).toBeNull();
+    expect(demandADayAgo(series, 2 * TICKS_PER_DAY, N)).toBe(1000);
+    expect(demandADayAgo(series, 3 * TICKS_PER_DAY, N)).toBe(1000);
+  });
+
+  test("1 日前以前の控えがないとき、網の印が違うときは求めない", () => {
+    expect(demandADayAgo([{ tick: 100, demand: 1000, net: N }], TICKS_PER_DAY, N)).toBeNull();
+    expect(demandADayAgo([{ tick: 0, demand: 1000, net: N + 1 }], TICKS_PER_DAY, N)).toBeNull();
   });
 });
 
 describe("控え", () => {
-  test("間隔が短いあいだは足さず、1 日とはさむ間隔より古い控えは捨てる", () => {
-    let s = pushDemandSample([], 0, 1000);
-    s = pushDemandSample(s, 10, 990);
-    expect(s).toEqual([{ tick: 0, demand: 1000 }]);
-    s = pushDemandSample(s, 100, 990);
-    s = pushDemandSample(s, TICKS_PER_DAY + 1800 + 50, 900);
-    expect(s).toEqual([
-      { tick: 100, demand: 990 },
-      { tick: TICKS_PER_DAY + 1800 + 50, demand: 900 },
-    ]);
+  test("間隔が短いあいだは足さず（古いほうを残す）、1 日前より古い控えは 1 つだけ残す", () => {
+    let s = pushDemandSample([], 0, 1000, N);
+    s = pushDemandSample(s, 10, 990, N);
+    expect(s).toEqual([{ tick: 0, demand: 1000, net: N }]);
+    s = pushDemandSample(s, 100, 990, N);
+    s = pushDemandSample(s, TICKS_PER_DAY + 50, 900, N);
+    // 1 日前（tick 50）以前でいちばん新しい控えは tick 0
+    expect(s.map((x) => x.tick)).toEqual([0, 100, TICKS_PER_DAY + 50]);
+    s = pushDemandSample(s, TICKS_PER_DAY + 150, 880, N);
+    // 1 日前（tick 150）以前でいちばん新しい控えは tick 100 なので、tick 0 は捨てる
+    expect(s.map((x) => x.tick)).toEqual([100, TICKS_PER_DAY + 50, TICKS_PER_DAY + 150]);
   });
 
   test("tick が戻ったとき（読み込みや新しい街）は数え直す", () => {
     const s = [
-      { tick: 1000, demand: 800 },
-      { tick: 2000, demand: 700 },
+      { tick: 1000, demand: 800, net: N },
+      { tick: 2000, demand: 700, net: N },
     ];
-    expect(pushDemandSample(s, 500, 650)).toEqual([{ tick: 500, demand: 650 }]);
-  });
-
-  test("施設を足したなどで余りが変わっても、控えは捨てない", () => {
-    // 控えは需要だけを持つので、供給量の変化は関わらない
-    const s = pushDemandSample(pushDemandSample([], 0, 1000), 3000, 1200);
-    expect(s).toHaveLength(2);
+    expect(pushDemandSample(s, 500, 650, N)).toEqual([{ tick: 500, demand: 650, net: N }]);
   });
 });
 

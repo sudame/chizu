@@ -51,6 +51,7 @@ describe("街の数字", () => {
       peopleKnown: false,
       powerFacilityPeople: 0,
       waterFacilityPeople: 0,
+      mainNetwork: 0,
       demandFactors: [[], [], [], []],
     });
     expect(formatUtilities(parseCityStats([0, 0, 0, 0, 0, 0, 0, 400, 0, 1200, 1, 2]))).toBe(

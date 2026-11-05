@@ -22,7 +22,7 @@ pub const OVERVIEW_LENGTH: usize = 21;
 
 /// [`Sim::city_stats`] が返す数のうち、固定の並びの個数。そのあとに需要の内訳が続く。
 /// 画面の側は `city-stats-layout.json` から読むので、変えたら `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` で書き直す。
-pub const CITY_STATS_FIXED: usize = 26;
+pub const CITY_STATS_FIXED: usize = 27;
 
 /// 画面の側が読む、街の数字の並びと要因の番号の表。
 pub fn city_stats_layout_json() -> String {
@@ -63,7 +63,7 @@ pub struct Sim {
     /// 建物の表の版の控え。`(記録の件数, 建つ・育つが走った回数, 版)` で、前の 2 つが変わったときだけ計算し直す。
     buildings_version: Cell<Option<(usize, u64, f64)>>,
     /// 街の数字の電気と水道の分の控え。`(供給の版, 値)` で、版が変わったときだけ計算し直す。
-    utility_cache: Cell<Option<(u64, [f64; 14])>>,
+    utility_cache: Cell<Option<(u64, [f64; 15])>>,
 }
 
 /// 記録したコマンドを適用した結果。
@@ -538,7 +538,8 @@ impl Sim {
     /// 発電所 1 基と浄水場 1 基で増える住民の数（決まらないときは 0）。
     /// 人数の求め方は `chizu_core::service::headroom_people` と `facility_people` にある。建物がまだなく主の網がないうちは、施設の供給量の合計で見る。
     /// 供給量は道路網につながった施設の合計である。余りは網をまたいで足さず、主の網で見る。
-    /// そのあとに、需要の内訳が続く。区画の種類ごとに、要因の数と、要因ごとの `[要因の番号, 寄与]` を並べる。
+    /// そのあとに、主の網を見分ける印（`chizu_core::service::SupplyBalance::network_mark`。主の網がなければ 0）が 1 個、
+    /// 続けて需要の内訳が続く。区画の種類ごとに、要因の数と、要因ごとの `[要因の番号, 寄与]` を並べる。
     pub fn city_stats(&self) -> Vec<f64> {
         let buildings = self.world.buildings();
         let capacity = buildings.capacity();
@@ -553,8 +554,10 @@ impl Sim {
         let breakdown = demand_factors(&self.world.city_stats());
         out.extend(breakdown.totals().map(|d| d as f64));
         let utility = self.utility_numbers();
-        out.extend(utility);
+        out.extend(&utility[..14]);
         out.extend(self.headroom_people_numbers(&utility));
+        // 最後に、主の網を見分ける印。画面が、需要の控えを別の網のものと比べないために使う
+        out.push(utility[14]);
         debug_assert_eq!(out.len(), CITY_STATS_FIXED);
         // 固定の並びのあとに、需要の内訳を区画の種類（住宅・商業・工業・オフィスの順）ごとに並べる。
         // 種類ごとに、要因の数、そのあとに要因ごとの `[要因の番号, 寄与]`。番号は `DemandFactorKind` の値である。
@@ -570,7 +573,7 @@ impl Sim {
 
     /// 街の数字のうち、余りが住民の何人分かの 3 個と、施設 1 基で増える人数の 2 個。`utility` は [`Sim::utility_numbers`] の値である。
     /// 住民の数は建物の表が変わらなくても動くので、キャッシュの外で毎回求める。
-    fn headroom_people_numbers(&self, utility: &[f64; 14]) -> [f64; 5] {
+    fn headroom_people_numbers(&self, utility: &[f64; 15]) -> [f64; 5] {
         let [
             power,
             water,
@@ -579,6 +582,7 @@ impl Sim {
             main_power,
             main_water,
             main_need,
+            _,
             _,
             _,
         ] = *utility;
@@ -610,18 +614,18 @@ impl Sim {
         }
     }
 
-    /// 街の数字のうち、電気と水道の 14 個。電気の供給量、水道の供給量、需要、足りない網の数（電気、水道）、
+    /// 街の数字のうち、電気と水道の 14 個と、主の網を見分ける印 1 個（最後）。電気の供給量、水道の供給量、需要、足りない網の数（電気、水道）、
     /// 施設のない網の数と不足量、主の網の値と、ほかの網の数。
     /// 道路と建物の全体をたどって求めるので、建物の表と道路網の版（[`crate::layers::supply_version`]）が
     /// 変わらないあいだは前の値を使い回す。
-    fn utility_numbers(&self) -> [f64; 14] {
+    fn utility_numbers(&self) -> [f64; 15] {
         let version = crate::layers::supply_version(self);
         if let Some((cached, numbers)) = self.utility_cache.get()
             && cached == version
         {
             return numbers;
         }
-        let (totals, main, gaps) = crate::layers::utility_summary(&self.world);
+        let (totals, main, gaps, mark) = crate::layers::utility_summary(&self.world);
         let [power, water, power_short, water_short] = totals;
         let need: u64 = self
             .world
@@ -629,11 +633,12 @@ impl Sim {
             .iter()
             .map(|(_, b)| building_demand(b))
             .sum();
-        let mut out = [0.0; 14];
+        let mut out = [0.0; 15];
         let values = [power, water, need, power_short, water_short]
             .into_iter()
             .chain(gaps)
-            .chain(main);
+            .chain(main)
+            .chain([mark]);
         for (slot, v) in out.iter_mut().zip(values) {
             *slot = v as f64;
         }
@@ -994,6 +999,7 @@ mod tests {
         assert_eq!(sim.city_stats()[..3], [0.0, 0.0, 0.0]);
         // 人口がないうちは人数が決まらない
         assert_eq!(sim.city_stats()[21..26], [0.0; 5]);
+        assert_eq!(sim.city_stats()[26], 0.0, "主の網がないので印もない");
         sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
         let buildings = sim.buildings();
         let count = sim.world().buildings().len();
@@ -1175,6 +1181,7 @@ mod tests {
         );
         let stats = sim.city_stats();
         assert!(stats[9] > 0.0, "{stats:?}");
+        assert!(stats[26] > 0.0, "主の網の印がある: {stats:?}");
         let power = ServiceKind::PowerPlant.capacity() as f64;
         // 主の網の電気は 0、合計は 1 基ぶん。ほかの網は電気だけが 1 つある。
         assert_eq!(stats[7], power, "{stats:?}");

@@ -1180,6 +1180,21 @@ fn observe_gives_the_trend_of_growing_demand() {
     assert!((hours - ticks as f64 / 300.0).abs() < 0.06, "{trend}");
 }
 
+/// 60 tick 以内にもう一度 observe しても、ちょうど 1 日前の控えは消えず、1 日後の trend が見積もれる。
+#[test]
+fn observe_trend_survives_a_second_observe_just_after() {
+    let (dir, _, _) = supplied_town("agent-trend-close");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "observe", d]);
+    cli(&["agent", "advance", d, "30"]);
+    cli(&["agent", "observe", d]);
+    cli(&["agent", "advance", d, "7170"]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let trend = &o["utilities"]["power"]["main"]["trend"];
+    assert_eq!(trend["basis"], "demandSameTimeYesterday", "{trend}");
+    assert_eq!(trend["targetTick"], 7200 * 2);
+}
+
 /// 前の observe から発電所を足していても、供給量は需要の伸びに入らないので、減り方を見積もれる。
 #[test]
 fn observe_trend_is_estimated_across_a_new_facility() {
