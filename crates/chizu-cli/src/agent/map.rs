@@ -573,7 +573,7 @@ fn text(grid: &Grid, layer: MapLayer) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chizu_core::{CommandLog, TICKS_PER_DAY, replay};
+    use chizu_core::{Command, CommandLog, TICKS_PER_DAY, replay};
 
     /// 詰まりが起きる街（`chizu-core/tests/gridlock/city.rec`）の、車が混み合う朝を再生した世界。
     fn jammed_city() -> World {
@@ -582,9 +582,24 @@ mod tests {
 
     /// 人が遊んだ街（種 0）を、`ticks` まで再生した街。
     fn city_at(ticks: u64) -> World {
+        city_with_homes(ticks, Zone::Residential)
+    }
+
+    /// [`city_at`] の記録の高密度の住宅の塗りを、`home` の塗りに書き換えて再生した街。
+    fn city_with_homes(ticks: u64, home: Zone) -> World {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../chizu-core/tests/gridlock/city.rec");
-        let log = CommandLog::decode(&std::fs::read(path).unwrap()).unwrap();
+        let src = CommandLog::decode(&std::fs::read(path).unwrap()).unwrap();
+        let mut log = CommandLog::new();
+        for e in src.entries() {
+            let mut e = *e;
+            if let Command::PaintZone { zone, .. } = &mut e.command
+                && *zone == Some(Zone::Residential)
+            {
+                *zone = Some(home);
+            }
+            log.push(e).unwrap();
+        }
         let mut world = World::new(0);
         replay(&mut world, &log, ticks);
         world
@@ -684,8 +699,8 @@ mod tests {
     /// 私道の通るマスは =、私道の敷地の残りのマスは区画の文字になる。凡例にも = がある。
     #[test]
     fn private_lanes_are_drawn_before_buildings() {
-        // 育ちきった街の住宅は段階 3 以上で私道がないので、住宅が建ち始めた頃の街で見る
-        let world = city_at(8 * TICKS_PER_DAY);
+        // 私道の敷地は低密度にだけ建つので、住宅の塗りを低密度に書き換えた街で見る
+        let world = city_with_homes(8 * TICKS_PER_DAY, Zone::ResidentialLow);
         let net = world.network();
         let (mut lanes, mut rest) = (0, 0);
         for (_, b) in world.buildings().iter() {
