@@ -50,7 +50,10 @@ describe("施設の記号の見た目", () => {
   test("決まりの表の色と、種類ごとの絵を持つ", () => {
     expect(FACILITY_STYLES[1]).toMatchObject({ circle: "#e8710a", glyph: "bolt", name: "#a8500a" });
     expect(FACILITY_STYLES[2]).toMatchObject({ circle: "#12a4af", glyph: "drop", name: "#0b6f78" });
-    expect(Object.keys(GLYPH_PATHS).sort()).toEqual(["bolt", "drop"]);
+    for (const kind of [3, 4]) {
+      expect(FACILITY_STYLES[kind]).toMatchObject({ circle: "#5f6b7a", glyph: "parking" });
+    }
+    expect(Object.keys(GLYPH_PATHS).sort()).toEqual(["bolt", "drop", "parking"]);
   });
 });
 

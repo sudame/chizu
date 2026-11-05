@@ -96,8 +96,10 @@ pub struct Finances {
     pub taxes: [Money; 4],
     /// 道路の維持費。外部接続の高速道路は含めない。
     pub road_upkeep: Money,
-    /// 施設の種類ごとの維持費。添え字は [`ServiceKind::index`]。
+    /// 発電所と浄水場の維持費。添え字は [`ServiceKind::utility_slot`]。
     pub facility_upkeep: [Money; 2],
+    /// 共同の駐車場の維持費。
+    pub parking_upkeep: Money,
 }
 
 impl Finances {
@@ -108,7 +110,7 @@ impl Finances {
     pub fn expenses(&self) -> Money {
         self.facility_upkeep
             .iter()
-            .fold(self.road_upkeep, |a, b| a + *b)
+            .fold(self.road_upkeep + self.parking_upkeep, |a, b| a + *b)
     }
 
     /// 収入から支出を引いた額。負なら赤字である。
@@ -161,8 +163,11 @@ impl World {
             mul(TILE_MM, 1_000),
         ));
         for facility in &self.facilities {
-            let i = facility.kind.index();
-            f.facility_upkeep[i] = f.facility_upkeep[i] + facility.kind.upkeep_per_day();
+            let upkeep = facility.kind.upkeep_per_day();
+            match facility.kind.utility_slot() {
+                Some(i) => f.facility_upkeep[i] = f.facility_upkeep[i] + upkeep,
+                None => f.parking_upkeep = f.parking_upkeep + upkeep,
+            }
         }
         f
     }

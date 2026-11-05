@@ -47,6 +47,8 @@ const ZONES: [number, string][] = [
 const FACILITIES: [number, string][] = [
   [1, "発電所"],
   [2, "浄水場"],
+  [3, "平面の駐車場"],
+  [4, "駐車場ビル"],
 ];
 
 const ROADS: [number, string][] = [

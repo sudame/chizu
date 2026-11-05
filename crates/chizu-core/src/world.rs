@@ -668,8 +668,8 @@ impl World {
         self.sync_router();
         let now = self.tick;
         let (net, router) = (&self.network, &mut self.router.router);
-        self.trips
-            .spawn_drive(net, router, &self.buildings, (from, to), now)
+        let sites = (&self.buildings, self.facilities.as_slice());
+        self.trips.spawn_drive(net, router, sites, (from, to), now)
     }
 
     /// マスの範囲 `rect` にいる移動体を ID の順に返す。状態は変えない。

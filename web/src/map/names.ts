@@ -95,7 +95,12 @@ const KIND_LARGE = 3;
 const KIND_HIGHWAY = 4;
 
 /** 施設の種類の番号（ServiceKind の値）と、名前の後半。 */
-const FACILITY_NAMES: Record<number, string> = { 1: "発電所", 2: "浄水場" };
+const FACILITY_NAMES: Record<number, string> = {
+  1: "発電所",
+  2: "浄水場",
+  3: "駐車場",
+  4: "駐車場ビル",
+};
 const FACILITY_FALLBACK = "施設";
 
 const encoder = new TextEncoder();
