@@ -337,7 +337,7 @@ export function setupFinance(
   };
   feeMinus.addEventListener("click", () => changeFee(-1));
   feePlus.addEventListener("click", () => changeFee(1));
-  feeRow.append(make("span", "共同の駐車場"), feeMinus, feeLabel, feePlus, feeAmount);
+  feeRow.append(make("span", "料金"), feeMinus, feeLabel, feePlus, feeAmount);
   feeList.append(feeRow);
 
   for (let i = 0; i < EXPENSE_ROWS; i++) {
