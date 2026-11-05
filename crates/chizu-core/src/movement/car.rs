@@ -627,16 +627,17 @@ pub(super) fn gate(
         let axis = net
             .segment_line(link.segment)
             .map_or(0, |l| signal::axis(l.step));
-        let green = signal::state(net, node, now, &g.signals)
-            .is_none_or(|st| st.light_for(axis) == signal::Light::Green);
-        if !green {
+        let light = signal::state(net, node, now, &g.signals).map(|st| st.light_for(axis));
+        if light.is_some_and(|l| l != signal::Light::Green) {
             continue;
         }
-        // 先の車線の最後尾が止まっていて、交差点を抜けきるだけの空きがない車も数えない。動く見込みのない車を、
-        // 歩く人に待たせない。最後尾が動いていれば空きはすぐにできるので、その車は数える。
+        // 信号のある交差点では、先の車線の最後尾が止まっていて、交差点を抜けきるだけの空きがない車も数えない。
+        // 動く見込みのない車に、渡ってよい窓を使わせない。最後尾が動いていれば空きはすぐにできるので、その車は数える。
+        // 信号のない交差点では数える。人が先に渡ると、空きができたときに車が人の列に止められ、止まった車が増えた。
         let after = t.route.links.get(t.leg as usize + 2).copied();
         let (to_lane, room) = exit_lane(net, conn, &st, t, node, next, after);
-        if !room && st.rear.get(&to_lane).is_some_and(|r| r.1 == MmPerTick::ZERO) {
+        if light.is_some() && !room && st.rear.get(&to_lane).is_some_and(|r| r.1 == MmPerTick::ZERO)
+        {
             continue;
         }
         let stopped = t.speed == MmPerTick::ZERO;

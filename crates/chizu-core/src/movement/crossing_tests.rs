@@ -799,11 +799,14 @@ fn walker_past_a_blocked_exit(signalled: bool, from: SidewalkPos) -> (u64, u32) 
 
 #[test]
 fn a_car_stuck_behind_a_blocked_exit_does_not_keep_walkers_waiting() {
-    // 北から来た車が、交差点の手前で先の車線の空きを待ち続ける。この車は動く見込みがないので、人は待たずに渡る。
-    let (gone, waited) = walker_past_a_blocked_exit(false, at(10, 2, (0, 1), 0));
-    assert!(waited < crossing::PED_WAIT, "車を待った {waited}");
-    // 歩くのに約 60 tick かかる。
-    assert!(gone < 100 + 60 + 10, "待ちすぎた {gone}");
+    // 北から来た車が、交差点の手前で先の車線の空きを待ち続ける。この車は横断歩道の人に譲って待っているのでは
+    // ないので、人は待ちすぎた所で渡る。
+    let (gone, _) = walker_past_a_blocked_exit(false, at(10, 2, (0, 1), 0));
+    // 歩くのに約 60 tick かかる。待つのは、待ちすぎるまでである。
+    assert!(
+        gone < 100 + 60 + u64::from(crossing::PED_WAIT) + 20,
+        "待ちすぎた {gone}"
+    );
 }
 
 #[test]
