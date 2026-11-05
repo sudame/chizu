@@ -217,8 +217,9 @@ pub(super) struct Approach {
     pub room: bool,
     /// ノードの手前で待った tick 数。
     pub waited: u32,
-    /// この tick のうちに車道の四角に入りうるか。
-    pub reaches: bool,
+    /// 車道の四角に入るまでの距離と、この tick に出しうるいちばん速い速さ。その速さのまま進んで四角に入るまでの
+    /// 時間より、交差点の中の車がいまの速さのまま進んで四角を抜けるまでの時間が短ければ、その車を待たない。
+    pub arrives: (i64, i64),
 }
 
 /// 交差点の中にいる車。
@@ -232,8 +233,8 @@ pub(super) struct Inside {
     pub lane: LaneId,
     /// 止まっているか。
     pub stopped: bool,
-    /// いまの速さのまま進めば、この tick のうちに車道の四角を抜けるか。
-    pub clears: bool,
+    /// 車道の四角を抜けるまでの距離と、いまの速さ。
+    pub leaves: (i64, i64),
 }
 
 /// 交差点で止める候補。
@@ -266,8 +267,8 @@ pub(super) fn holds(
     let mut held = Vec::new();
     let mut yielded = Vec::new();
     let mut group: Vec<(Approach, Move)> = Vec::new();
-    // 置いた動きと、それが交差点の中で止まった車のものか、この tick のうちに車道の四角を抜ける車のものか。
-    let mut placed: Vec<(Move, bool, bool)> = Vec::new();
+    // 置いた動きと、それが交差点の中で止まった車のものか、交差点の中の車の、車道の四角を抜けるまでの距離と速さ。
+    let mut placed: Vec<(Move, bool, Option<(i64, i64)>)> = Vec::new();
     for same in cands.chunk_by(|a, b| a.node == b.node) {
         let node = same[0].node;
         let lo = inside.partition_point(|x| x.node < node);
@@ -322,7 +323,7 @@ pub(super) fn holds(
             (
                 Move::into_lane(net, x.from, x.to, x.lane),
                 x.stopped,
-                x.clears,
+                Some(x.leaves),
             )
         }));
         for (c, mv) in &group {
@@ -330,8 +331,9 @@ pub(super) fn holds(
             let blocked = |skip_stopped: bool| {
                 placed
                     .iter()
-                    .filter(|(_, stopped, clears)| {
-                        !(skip_stopped && *stopped) && !(*clears && !c.reaches)
+                    .filter(|(_, stopped, leaves)| {
+                        !(skip_stopped && *stopped)
+                            && !leaves.is_some_and(|l| gone_before(l, c.arrives))
                     })
                     .any(|(m, ..)| m.conflicts_in(mv))
             };
@@ -358,7 +360,7 @@ pub(super) fn holds(
             // 交差点に入らないので、その道筋と交わる後の候補を止めても、どの車も先に進めないためである。
             let for_peds = clear && !free;
             if c.committed || (c.room && !for_peds) {
-                placed.push((*mv, false, false));
+                placed.push((*mv, false, None));
             }
         }
     }
@@ -369,6 +371,12 @@ pub(super) fn holds(
         yielded,
         passed,
     }
+}
+
+/// 交差点の中の車（車道の四角を抜けるまでの距離 `rest` と速さ `v`）が、いまの速さのまま進んで四角を抜けるのが、
+/// 候補（四角に入るまでの距離 `to_box` と、いちばん速い速さ `u`）が四角に入るより先か。止まった車は抜けない。
+fn gone_before((rest, v): (i64, i64), (to_box, u): (i64, i64)) -> bool {
+    v > 0 && to_box > 0 && rest.saturating_mul(u) < to_box.saturating_mul(v)
 }
 
 /// 詰まりをほどく救済が働いた回数。状態には入れず、状態ハッシュにも含めない。

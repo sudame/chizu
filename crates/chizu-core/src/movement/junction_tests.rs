@@ -650,7 +650,7 @@ fn approach(
         committed: false,
         room: true,
         waited,
-        reaches: true,
+        arrives: (0, 1),
     }
 }
 
@@ -695,7 +695,7 @@ fn a_left_turn_waits_for_a_right_turn_that_went_first() {
             to: a.to,
             lane: a.to_lane,
             stopped: false,
-            clears: false,
+            leaves: (1, 0),
         }
     };
     assert_eq!(
@@ -853,7 +853,7 @@ fn a_car_waiting_for_walkers_does_not_hold_up_the_moves_it_crosses() {
         to: x.to,
         lane: x.to_lane,
         stopped: false,
-        clears: false,
+        leaves: (1, 0),
     };
     assert_eq!(held(&peds, vec![inside]).ids, [0, 1]);
 }

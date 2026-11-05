@@ -789,7 +789,7 @@ fn look(
                 to: t.link(),
                 lane: t.lane,
                 stopped: t.speed == MmPerTick::ZERO,
-                clears: at + v >= out_at,
+                leaves: (out_at - at, v),
             });
         }
     }
@@ -806,7 +806,7 @@ fn look(
                 to: next,
                 lane: to_lane,
                 stopped: t.speed == MmPerTick::ZERO,
-                clears: at + v >= box_reach(net, node, next),
+                leaves: (box_reach(net, node, next) - at, v),
             });
         }
         return out;
@@ -831,8 +831,9 @@ fn look(
     let (to_lane, room) = exit_lane(net, conn, st, t, node, next, after);
     out.next_lane = Some(to_lane);
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
-    // 車道の四角に入るまでの距離。
+    // 車道の四角に入るまでの距離と、この tick に出しうるいちばん速い速さ。
     let to_box = i64::from(t.link_len.0) - i64::from(t.offset.0) - box_reach(net, node, t.link());
+    let fastest = (v + i64::from(CAR_ACCEL)).min(i64::from(speed_limit(seg.kind).0));
     out.approach = Some(Approach {
         id: k,
         node,
@@ -844,7 +845,7 @@ fn look(
         committed: committed(net, t),
         room,
         waited: t.waited,
-        reaches: to_box <= v + i64::from(CAR_ACCEL),
+        arrives: (to_box, fastest),
     });
     out.no_room = !room;
     out
