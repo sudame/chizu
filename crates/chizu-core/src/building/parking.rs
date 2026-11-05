@@ -6,15 +6,36 @@
 //! 1. 要る台数を、住宅なら世帯の数、それ以外なら職場の数（税で減らす前）から決める。
 //! 2. 要る台数を、敷地を切り欠いた平面の駐車場と、建物の中（地下か立体）の駐車場に分ける。
 //!    集合住宅（住宅の段階 3〜5）は、平面には世帯の数の 0.7 倍までしか持たず、残りを建物の中に持つ。
+//!
+//! 私道の敷地（`LotForm::Lane`）は、私道の脇に世帯ごとの家と枠を並べる。形は `docs/design.md` の 3.8 にある。
 
-use super::Building;
+use super::{Building, LotForm};
 use crate::command::ZoneKind;
+use crate::network::TILE_MM;
 
 /// 平面の駐車場の、1 マスに並ぶ枠の数。枠は 2.5m × 5m で、8m の幅に 3 つ並ぶ。
 pub const SLOTS_PER_TILE: u64 = 3;
 
 /// 平面の駐車場の、1 つの枠の幅（mm）。前面の帯は、この幅の枠を道路に沿って並べる。
 pub const SLOT_WIDTH_MM: u64 = 2_500;
+
+/// 平面の駐車場の、1 つの枠の奥行き（mm）。
+pub const SLOT_DEPTH_MM: u64 = 5_000;
+
+/// 私道の幅（mm）。脇の駐車場の通路と同じで、車 1 台が通れる。
+pub const LANE_WIDTH_MM: u64 = 3_000;
+
+/// 私道の脇の家の、まわりに空ける幅（mm）。
+pub const HOUSE_GAP_MM: u64 = 600;
+
+/// 私道の脇の家の奥行きの上限（mm）。
+const HOUSE_MAX_DEPTH_MM: u64 = 10_000;
+
+/// 私道の敷地にできる間口（マス）。
+pub const LANE_FRONTAGE: u64 = 2;
+
+/// 私道の敷地にできる奥行きの下限（マス）。
+pub const LANE_MIN_DEPTH: u64 = 4;
 
 /// 平面の駐車場に使えるのは、建物のマスのこの数分の 1（切り捨て）までである。建物の本体を、
 /// 敷地の 2/3 より小さくしない。
@@ -36,6 +57,52 @@ pub enum ParkingCut {
     /// 列は `columns` 本で、最後の列だけ浅いことがある。どちらの端の列にするかは、面した道路の
     /// 交差点の位置で決まるので、ここでは決めない（`movement::lot_spot`）。
     Side { columns: u64, tiles: u64 },
+    /// 私道の脇に、家ごとに 1 台ずつ並べた枠。私道の敷地（[`LanePlan`]）の建物に使う。枠の数は家の数である。
+    /// どちらの端に私道を通すかは、脇の駐車場と同じく `movement::lot_end` で決まる。
+    Lane { houses: u64 },
+}
+
+/// 私道の敷地の形。間口の座標 u は私道のある端の外側の辺を 0 として内へ、奥行きの座標 v は道路に面した辺を 0
+/// として奥へ増える。単位は mm である。
+///
+/// 私道は u が `0..LANE_WIDTH_MM`、v が `0..length` で、そこで行き止まりになる。奥行きを家の数で等分した区切りの
+/// `p` 番め（道路の側から 0）に、家と枠を 1 つずつ置く。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LanePlan {
+    /// 家の数。世帯の数と同じである。
+    pub houses: u64,
+    /// 区切り 1 つの奥行き。
+    pub plot: u64,
+    /// 家の奥行き。家の間口は `house_u` の幅である。
+    pub house_depth: u64,
+    /// 私道の長さ。いちばん奥の枠の奥の端まで。
+    pub length: u64,
+}
+
+impl LanePlan {
+    /// 家の u の範囲。2 列めのマスの、まわりに [`HOUSE_GAP_MM`] 空けた所である。
+    pub fn house_u(&self) -> (u64, u64) {
+        let tile = TILE_MM as u64;
+        (tile + HOUSE_GAP_MM, LANE_FRONTAGE * tile - HOUSE_GAP_MM)
+    }
+
+    /// `p` 番めの家の v の範囲。
+    pub fn house_v(&self, p: u64) -> (u64, u64) {
+        let v0 = p * self.plot + HOUSE_GAP_MM;
+        (v0, v0 + self.house_depth)
+    }
+
+    /// 枠の u の範囲。私道に面した奥行き 5m である。
+    pub fn slot_u(&self) -> (u64, u64) {
+        (LANE_WIDTH_MM, LANE_WIDTH_MM + SLOT_DEPTH_MM)
+    }
+
+    /// `p` 番めの枠の v の範囲。家の真ん中にそろえる。
+    pub fn slot_v(&self, p: u64) -> (u64, u64) {
+        let (h0, _) = self.house_v(p);
+        let v0 = h0 + (self.house_depth - SLOT_WIDTH_MM) / 2;
+        (v0, v0 + SLOT_WIDTH_MM)
+    }
 }
 
 /// 建物の駐車場の配置。
@@ -70,6 +137,17 @@ impl Building {
         // 道路が南北の側にあれば、間口は東西の幅で、奥行きは南北の長さである。
         let (frontage, depth) = if dx == 0 { (w, h) } else { (h, w) };
         let diagonal = dx != 0 && dy != 0;
+        if let Some(plan) = self.lane_plan() {
+            // 私道の敷地は戸建てで、家ごとに 1 台の枠を私道の脇に持つ。
+            return ParkingLayout {
+                needed,
+                surface: plan.houses,
+                indoor: 0,
+                cut: ParkingCut::Lane {
+                    houses: plan.houses,
+                },
+            };
+        }
         let (surface, cut) = if diagonal {
             (0, ParkingCut::None)
         } else if tiles <= STRIP_MAX_TILES {
@@ -99,6 +177,36 @@ impl Building {
             indoor,
             cut,
         }
+    }
+
+    /// 私道の敷地の形。`form` が [`LotForm::Lane`] で、縦か横の道路に面した、間口 [`LANE_FRONTAGE`] マス、
+    /// 奥行き [`LANE_MIN_DEPTH`] マス以上の、段階 1〜2 の住宅のときだけ `Some` になる。段階 3 以上は
+    /// 集合住宅に建て替えたと見なす。
+    pub fn lane_plan(&self) -> Option<LanePlan> {
+        let (dx, dy) = self.toward_road;
+        let w = self.area.max.x.abs_diff(self.area.min.x) + 1;
+        let h = self.area.max.y.abs_diff(self.area.min.y) + 1;
+        let (frontage, depth) = if dx == 0 { (w, h) } else { (h, w) };
+        let fits = self.form == LotForm::Lane
+            && self.zone == ZoneKind::Residential
+            && self.level <= 2
+            && (dx == 0 || dy == 0)
+            && frontage == LANE_FRONTAGE
+            && depth >= LANE_MIN_DEPTH;
+        if !fits {
+            return None;
+        }
+        let houses = self.households();
+        let plot = depth * TILE_MM as u64 / houses;
+        let house_depth = (plot - 2 * HOUSE_GAP_MM).min(HOUSE_MAX_DEPTH_MM);
+        let mut plan = LanePlan {
+            houses,
+            plot,
+            house_depth,
+            length: 0,
+        };
+        plan.length = plan.slot_v(houses - 1).1;
+        Some(plan)
     }
 
     /// 要る台数。住宅は世帯の数、商業と工業は職場の数、オフィスは職場の数の 0.5 倍で、端数は切り上げる。
@@ -149,6 +257,7 @@ mod tests {
             level,
             leveled_at: Tick(0),
             supply: Supply::default(),
+            form: crate::building::LotForm::Street,
         }
     }
 
@@ -364,6 +473,9 @@ mod tests {
                                     assert_eq!(slots, l.surface, "{at}");
                                     assert!(slots <= frontage * SLOTS_PER_TILE, "{at}");
                                 }
+                                ParkingCut::Lane { .. } => {
+                                    panic!("通りに面した建物が私道を持つ：{at}")
+                                }
                                 Side { columns, tiles } => {
                                     assert!(b.tile_count() >= 3, "{at}");
                                     assert!(tiles * 3 <= b.tile_count(), "{at}");
@@ -400,5 +512,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn lane_lots_hold_a_house_and_a_slot_per_household() {
+        let mut seen = 0;
+        for depth in 1..=6_i64 {
+            for frontage in 1..=4_i64 {
+                for road in [(0, -1), (0, 1), (1, 0), (-1, 0), (1, 1)] {
+                    for level in 1..=crate::building::MAX_LEVEL {
+                        let size = if road.0 == 0 {
+                            (frontage, depth)
+                        } else {
+                            (depth, frontage)
+                        };
+                        let mut b = building(ZoneKind::Residential, size, level);
+                        b.toward_road = road;
+                        b.form = LotForm::Lane;
+                        let at = format!("{frontage}×{depth} {road:?} の段階 {level}");
+                        let street = Building {
+                            form: LotForm::Street,
+                            ..b
+                        };
+                        let eligible = frontage == 2
+                            && depth >= 4
+                            && level <= 2
+                            && (road.0 == 0 || road.1 == 0);
+                        let Some(plan) = b.lane_plan() else {
+                            assert!(!eligible, "{at}");
+                            assert_eq!(b.parking_layout(), street.parking_layout(), "{at}");
+                            continue;
+                        };
+                        assert!(eligible, "{at}");
+                        seen += 1;
+                        let l = b.parking_layout();
+                        // 台数は通りに面した建物と同じで、家ごとに 1 台をすべて平面に持つ
+                        assert_eq!(l.total(), street.parking_layout().total(), "{at}");
+                        assert_eq!(plan.houses, b.households(), "{at}");
+                        assert_eq!(l.surface, plan.houses, "{at}");
+                        assert_eq!(l.indoor, 0, "{at}");
+                        assert_eq!(
+                            l.cut,
+                            ParkingCut::Lane {
+                                houses: plan.houses
+                            }
+                        );
+                        assert!(plan.houses >= 2, "奥に家がない：{at}");
+                        let depth_mm = depth.unsigned_abs() * TILE_MM as u64;
+                        let (hu0, hu1) = plan.house_u();
+                        let (su0, su1) = plan.slot_u();
+                        assert!(su0 >= LANE_WIDTH_MM && su1 <= hu0, "{at}");
+                        assert!(hu1 <= LANE_FRONTAGE * TILE_MM as u64, "{at}");
+                        for p in 0..plan.houses {
+                            let (v0, v1) = plan.house_v(p);
+                            let (s0, s1) = plan.slot_v(p);
+                            // 家は自分の区切りの中にあり、枠は家の脇にある
+                            assert!(v0 >= p * plan.plot && v1 <= (p + 1) * plan.plot, "{at}");
+                            assert!(s0 >= v0 && s1 <= v1, "{at}");
+                            assert!(s1 <= plan.length, "{at}");
+                        }
+                        // 私道は区画の奥の端に届かない行き止まりである
+                        assert!(plan.length < depth_mm, "{at}");
+                        assert_eq!(plan.length, plan.slot_v(plan.houses - 1).1, "{at}");
+                        assert!(plan.house_depth >= SLOT_WIDTH_MM, "{at}");
+                    }
+                }
+            }
+        }
+        // 2×4、2×5、2×6 の段階 1〜2 を、縦横の 4 つの向きで
+        assert_eq!(seen, 3 * 2 * 4);
     }
 }

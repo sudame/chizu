@@ -59,7 +59,12 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ ...buildings, stats: [1, 2] })).toBe(false);
     expect(isWorkerToMain({ ...buildings, tick: undefined })).toBe(false);
     // 駐車場の形は、見出しの長方形と枠の並びの数のとおりに続く
-    const lot = [10, 12, 3, 0, 1, 1, 10, 12, 11, 13, 10, 12, 11, 13, 1, 0, 3];
+    const lot = [10, 12, 3, 0, 1, 1, 0, 0, 10, 12, 11, 13, 10, 12, 11, 13, 1, 0, 3];
+    // 私道の敷地は、私道と家の長方形が続く
+    const lane = [10, 12, 1, 0, 1, 1, 1, 1, ...[10, 12, 11, 13], ...[10, 12, 11, 13, 1, 0, 1]];
+    const laneLot = [...lane, ...[10, 12, 10.375, 15], ...[11, 12, 12, 13]];
+    expect(isWorkerToMain({ ...buildings, lots: new Float64Array(laneLot) })).toBe(true);
+    expect(isWorkerToMain({ ...buildings, lots: new Float64Array(lane) })).toBe(false);
     expect(isWorkerToMain({ ...buildings, lots: new Float64Array(lot) })).toBe(true);
     expect(isWorkerToMain({ ...buildings, lots: new Float64Array([...lot, ...lot]) })).toBe(true);
     expect(isWorkerToMain({ ...buildings, lots: new Float64Array(lot.slice(0, -1)) })).toBe(false);

@@ -3,6 +3,8 @@ import { roofGeometry } from "./detail.ts";
 import {
   carve,
   grow,
+  LANE_EDGE_COLOR,
+  LANE_FACE_COLOR,
   LOT_EDGE_COLOR,
   LOT_FACE_COLOR,
   LOT_LINE_COLOR,
@@ -51,9 +53,9 @@ const FACES: Rect[] = [
   { x0: 10, y0: 20, x1: 11, y1: 24 },
   { x0: 11, y0: 23, x1: 12, y1: 24 },
 ];
-// 数の並び：見出し 6、長方形 2 つ、枠の並び 2 本
+// 数の並び：見出し 8、長方形 2 つ、枠の並び 2 本
 const LOT = [
-  ...[10, 20, 14, 25, 2, 2],
+  ...[10, 20, 14, 25, 2, 2, 0, 0],
   ...[10, 20, 11, 24],
   ...[11, 23, 12, 24],
   ...[10.375, 20, 11, 24, -1, 0, 12],
@@ -188,12 +190,76 @@ describe("駐車場のある建物の絵", () => {
   });
 });
 
+describe("私道の敷地の絵", () => {
+  // 2×6 の住宅 (10, 20)〜(11, 25)。道路は南（y の大きい側）で、西の端の列に私道が通る。
+  // 家は 3 軒で、枠はそれぞれ私道の東に 1 台ずつ
+  const SITE = [10, 20, 11, 25, 1, 5, 3];
+  const lane = { x0: 10, y0: 21.14, x1: 10.375, y1: 26 };
+  const houses = [
+    { x0: 11.075, y0: 24.675, x1: 11.925, y1: 25.925 },
+    { x0: 11.075, y0: 22.675, x1: 11.925, y1: 23.925 },
+    { x0: 11.075, y0: 20.675, x1: 11.925, y1: 21.925 },
+  ];
+  const slots = houses.map((h) => ({ x0: 10.375, y0: h.y0 + 0.47, x1: 11, y1: h.y0 + 0.78 }));
+  const rect = (r: Rect) => [r.x0, r.y0, r.x1, r.y1];
+  const data = new Float64Array([
+    ...[10, 20, 3, 0, 3, 3, 1, 3],
+    ...slots.flatMap(rect),
+    ...slots.flatMap((r) => [...rect(r), -1, 0, 1]),
+    ...rect(lane),
+    ...houses.flatMap(rect),
+  ]);
+  const m = buildingMeshes(new Float64Array(SITE), new Float64Array(), data);
+
+  test("私道と家を読む", () => {
+    const lot = parseLots(data).get("10,20");
+    expect(lot?.lanes).toEqual([lane]);
+    expect(lot?.houses).toEqual(houses);
+    expect(lot?.strips.length).toBe(3);
+  });
+
+  test("建物の本体は家だけで、私道にも枠にも重ならない", () => {
+    for (const g of [m.clusters, m.bodies]) {
+      const pieces = boxes(g);
+      expect(pieces.length).toBe(houses.length);
+      for (const p of pieces) {
+        expect(houses.some((h) => overlaps(p, h))).toBe(true);
+        for (const f of [lane, ...slots]) {
+          expect(overlaps(p, f)).toBe(false);
+        }
+      }
+    }
+  });
+
+  test("私道は駐車場と同じ段の面で、私道の色で塗る", () => {
+    const near = (a: Rect, b: Rect) =>
+      Math.max(
+        Math.abs(a.x0 - b.x0),
+        Math.abs(a.y0 - b.y0),
+        Math.abs(a.x1 - b.x1),
+        Math.abs(a.y1 - b.y1),
+      ) < 1e-4;
+    expect(boxes(m.lots).some((b) => near(b, lane))).toBe(true);
+    expect(colorOf(m.lots, 0)).toEqual(f32(LANE_FACE_COLOR));
+    // 私道の縁は長い辺の 2 本、枠の縁は敷地の外周に接する辺がないので引かない
+    expect(m.lotEdges.vertexCount).toBe(6 * 2);
+    expect(colorOf(m.lotEdges, 0)).toEqual(f32(LANE_EDGE_COLOR));
+  });
+
+  test("細部の段の屋根は、家ごとに描く", () => {
+    const wide = { minX: 0, minY: 0, maxX: 40, maxY: 40 };
+    const g = roofGeometry(new Float64Array(SITE), wide, parseLots(data));
+    // 寄棟の屋根は 1 軒につき棟と隅棟の 5 本
+    expect(g.vertexCount).toBe(6 * 5 * houses.length);
+  });
+});
+
 describe("1×1 の建物の前面の帯", () => {
   // 道路は南（y の大きい側）で、帯は西の端から道路の側に 0.625 マスの奥行きで、枠の数ぶんだけ延びる
   const strip = (slots: number): number[] => {
     const length = slots * 0.3125;
     const r = [10, 20.375, 10 + length, 21];
-    return [10, 20, slots, 0, 1, 1, ...r, ...r, 0, -1, slots];
+    return [10, 20, slots, 0, 1, 1, 0, 0, ...r, ...r, 0, -1, slots];
   };
 
   test.each([1, 2, 3])("枠が %i 台でも、本体は短い辺が下限以上ある", (slots) => {

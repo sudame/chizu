@@ -4,14 +4,17 @@
 //! 間口のどちらの端に寄せるかは中核の `lot_end`（出入りの位置 `lot_spot` と同じ決まり）が決める。
 //! ここはその値を、ワールドのマスの座標の長方形に置くだけで、状態は変えない。
 //! 決め方は `docs/design.md` の 3.6「敷地の切り欠き方」にある。
+//! 私道の敷地は、私道と家の長方形も送る。形は中核の `Building::lane_plan` が決め、3.8 にある。
 
-use chizu_core::building::{Building, ParkingCut, SLOT_WIDTH_MM, SLOTS_PER_TILE};
+use chizu_core::building::{
+    Building, LANE_WIDTH_MM, ParkingCut, SLOT_DEPTH_MM, SLOT_WIDTH_MM, SLOTS_PER_TILE,
+};
 use chizu_core::movement::{LotEnd, lot_end};
 use chizu_core::network::{Network, TILE_MM};
 use chizu_core::world::World;
 
 /// 1 つの枠の奥行き（マス）。5m である。
-const SLOT_DEPTH: f64 = 5_000.0 / TILE_MM as f64;
+const SLOT_DEPTH: f64 = SLOT_DEPTH_MM as f64 / TILE_MM as f64;
 /// 1 つの枠の幅（マス）。2.5m である。
 const SLOT_WIDTH: f64 = SLOT_WIDTH_MM as f64 / TILE_MM as f64;
 /// 脇の駐車場の列の中の通路の幅（マス）。3m である。
@@ -35,6 +38,10 @@ pub struct LotShape {
     /// 切り欠いた所を覆う長方形。重ならない。
     pub faces: Vec<Rect>,
     pub strips: Vec<Strip>,
+    /// 私道の長方形。私道の敷地でなければ空。
+    pub lanes: Vec<Rect>,
+    /// 私道の脇の家の長方形。道路の側から並べる。空でなければ、建物の本体はこの家だけになる。
+    pub houses: Vec<Rect>,
 }
 
 /// 建物の駐車場の切り欠いた形。切り欠かない建物（斜めの道路に面した建物）は `None`。
@@ -75,9 +82,32 @@ pub fn lot_shape(net: &Network, b: &Building) -> Option<LotShape> {
     let mut shape = LotShape {
         faces: Vec::new(),
         strips: Vec::new(),
+        lanes: Vec::new(),
+        houses: Vec::new(),
     };
     match layout.cut {
         ParkingCut::None => return None,
+        ParkingCut::Lane { .. } => {
+            let plan = b.lane_plan().expect("私道の切り欠きなのに私道の形がない");
+            let mm = |v: u64| v as f64 / TILE_MM as f64;
+            shape
+                .lanes
+                .push(rect(0.0, 0.0, mm(LANE_WIDTH_MM), mm(plan.length)));
+            let (hu0, hu1) = plan.house_u();
+            let (su0, su1) = plan.slot_u();
+            for p in 0..plan.houses {
+                let (hv0, hv1) = plan.house_v(p);
+                let (sv0, sv1) = plan.slot_v(p);
+                shape.houses.push(rect(mm(hu0), mm(hv0), mm(hu1), mm(hv1)));
+                let slot = rect(mm(su0), mm(sv0), mm(su1), mm(sv1));
+                shape.faces.push(slot);
+                shape.strips.push(Strip {
+                    rect: slot,
+                    open: direction(-1, 0),
+                    count: 1,
+                });
+            }
+        }
         ParkingCut::FrontStrip { slots } => {
             let length = slots as f64 * SLOT_WIDTH;
             let r = rect(0.0, 0.0, length, SLOT_DEPTH);
@@ -131,8 +161,9 @@ pub fn lot_shape(net: &Network, b: &Building) -> Option<LotShape> {
 
 /// 画面に送る数。建物ごとに、切り欠く建物だけを次の並びで続ける。
 ///
-/// `[建物の min の x, min の y, 平面の台数, 建物の中の台数, 長方形の数, 枠の並びの数,`
-/// `長方形ごとに x0, y0, x1, y1, 枠の並びごとに x0, y0, x1, y1, 向きの x, 向きの y, 枠の数]`。
+/// `[建物の min の x, min の y, 平面の台数, 建物の中の台数, 長方形の数, 枠の並びの数, 私道の数, 家の数,`
+/// `長方形ごとに x0, y0, x1, y1, 枠の並びごとに x0, y0, x1, y1, 向きの x, 向きの y, 枠の数,`
+/// `私道ごとに x0, y0, x1, y1, 家ごとに x0, y0, x1, y1]`。
 pub fn encode<'a>(net: &Network, buildings: impl Iterator<Item = &'a Building>) -> Vec<f64> {
     let mut out = Vec::new();
     for b in buildings {
@@ -147,6 +178,8 @@ pub fn encode<'a>(net: &Network, buildings: impl Iterator<Item = &'a Building>) 
             layout.indoor as f64,
             shape.faces.len() as f64,
             shape.strips.len() as f64,
+            shape.lanes.len() as f64,
+            shape.houses.len() as f64,
         ]);
         for f in &shape.faces {
             out.extend(*f);
@@ -154,6 +187,9 @@ pub fn encode<'a>(net: &Network, buildings: impl Iterator<Item = &'a Building>) 
         for s in &shape.strips {
             out.extend(s.rect);
             out.extend([s.open.0 as f64, s.open.1 as f64, s.count as f64]);
+        }
+        for r in shape.lanes.iter().chain(&shape.houses) {
+            out.extend(*r);
         }
     }
     out
@@ -244,6 +280,7 @@ mod tests {
         let kinds = [ZoneKind::Residential, ZoneKind::Industrial];
         let mut checked = 0;
         let mut centered = 0;
+        let mut lanes = 0;
         for zone in kinds {
             // 道路が南北のどちらの側にあっても確かめるため、道路の両側に区画を塗る
             let sim = town(
@@ -279,17 +316,22 @@ mod tests {
                         "{zone:?} 枠が切り欠きの外に出る"
                     );
                 }
-                // 地図に出すマス（lot_tiles）は、切り欠いた長方形にかかるマスと同じである
-                let mut tiles: Vec<(i64, i64)> = chizu_core::movement::lot_tiles(net, b)
-                    .iter()
-                    .map(|t| (t.x, t.y))
-                    .collect();
+                // 地図に出すマス（lot_tiles、私道の敷地なら lane_tiles）は、切り欠いた長方形と私道にかかるマスと同じである
+                let is_lane = matches!(layout.cut, ParkingCut::Lane { .. });
+                lanes += usize::from(is_lane);
+                let map_tiles = if is_lane {
+                    chizu_core::movement::lane_tiles(net, b)
+                } else {
+                    chizu_core::movement::lot_tiles(net, b)
+                };
+                let mut tiles: Vec<(i64, i64)> = map_tiles.iter().map(|t| (t.x, t.y)).collect();
                 tiles.sort_unstable();
+                let paved: Vec<Rect> = shape.faces.iter().chain(&shape.lanes).copied().collect();
                 let mut covered: Vec<(i64, i64)> = (b.area.min.x..=b.area.max.x)
                     .flat_map(|x| (b.area.min.y..=b.area.max.y).map(move |y| (x, y)))
                     .filter(|(x, y)| {
                         let cell = [*x as f64, *y as f64, *x as f64 + 1.0, *y as f64 + 1.0];
-                        shape.faces.iter().any(|f| overlap(*f, cell))
+                        paved.iter().any(|f| overlap(*f, cell))
                     })
                     .collect();
                 covered.sort_unstable();
@@ -303,6 +345,7 @@ mod tests {
                 let expect = match layout.cut {
                     ParkingCut::FrontStrip { slots } => slots as f64 * SLOT_WIDTH * SLOT_DEPTH,
                     ParkingCut::Side { tiles, .. } => tiles as f64,
+                    ParkingCut::Lane { houses } => houses as f64 * SLOT_WIDTH * SLOT_DEPTH,
                     ParkingCut::None => unreachable!(),
                 };
                 assert!((area(&shape) - expect).abs() < 1e-9, "{zone:?} {b:?}");
@@ -313,8 +356,9 @@ mod tests {
                     spot.y.0 as f64 / TILE_MM as f64,
                 );
                 let (tx, ty) = b.toward_road;
-                let road_side = shape
-                    .faces
+                // 私道の敷地は、私道が道路に面する
+                let road_side = if is_lane { &shape.lanes } else { &shape.faces };
+                let road_side = road_side
                     .iter()
                     .filter(|f| {
                         if tx == 0 {
@@ -340,6 +384,23 @@ mod tests {
                     near,
                     "{zone:?} 出入りの位置 ({px}, {py}) が切り欠きの道路側の辺の範囲に入らない：{shape:?} {b:?}"
                 );
+                // 私道の敷地は、出入口も出入りの位置も同じ点で、どちらも私道の幅の中に入る（出入口に落とさない）
+                if is_lane {
+                    for (name, s) in [
+                        ("lot_spot", Some(spot)),
+                        ("building_spot", building_spot(net, b).map(|d| d.world())),
+                    ] {
+                        let s = s.expect("私道の入口がない");
+                        let p = along(s.x.0 as f64 / TILE_MM as f64, s.y.0 as f64 / TILE_MM as f64);
+                        assert!(
+                            road_side.iter().any(|f| {
+                                let (lo, hi) = if tx == 0 { (f[0], f[2]) } else { (f[1], f[3]) };
+                                p >= lo - 1e-9 && p <= hi + 1e-9
+                            }),
+                            "{zone:?} {name} が私道の幅の外にある：{p} {shape:?} {b:?}"
+                        );
+                    }
+                }
                 // 出入口に落とさなかったときは、中心の位置が一致する。前面の帯なら帯の真ん中、脇の駐車場なら端の列の真ん中
                 if Some(spot) != building_spot(net, b).map(|d| d.world()) {
                     let (lo, hi) = road_side.iter().fold((f64::MAX, f64::MIN), |(lo, hi), f| {
@@ -348,7 +409,9 @@ mod tests {
                     });
                     let p = along(px, py);
                     let ok = match layout.cut {
-                        ParkingCut::FrontStrip { .. } => (p - (lo + hi) / 2.0).abs() < 0.02,
+                        ParkingCut::FrontStrip { .. } | ParkingCut::Lane { .. } => {
+                            (p - (lo + hi) / 2.0).abs() < 0.02
+                        }
                         _ => (p - (lo + 0.5)).abs() < 0.02 || (p - (hi - 0.5)).abs() < 0.02,
                     };
                     centered += 1;
@@ -364,6 +427,7 @@ mod tests {
             "出入りの位置の一致を確かめた建物が少ない：{centered}"
         );
         assert!(checked >= 4, "確かめた建物が少ない：{checked}");
+        assert!(lanes >= 1, "私道の敷地を確かめていない");
     }
 
     #[test]
@@ -429,7 +493,8 @@ mod tests {
         while i < data.len() {
             let faces = data[i + 4] as usize;
             let strips = data[i + 5] as usize;
-            i += 6 + faces * 4 + strips * 7;
+            let rects = (data[i + 6] + data[i + 7]) as usize;
+            i += 8 + faces * 4 + strips * 7 + rects * 4;
             records += 1;
         }
         assert_eq!(i, data.len());
@@ -442,7 +507,7 @@ mod tests {
         assert!(records > 0);
     }
 
-    /// 実際に建った建物を雛形にして、大きさと向きと段階を変えた建物。出入口はそのままなので、形だけを確かめる。
+    /// 実際に建った建物を雛形にして、大きさと向きと段階を変えた、通りに面した建物。出入口はそのままなので、形だけを確かめる。
     fn variant(
         template: &Building,
         zone: ZoneKind,
@@ -451,6 +516,7 @@ mod tests {
         level: u8,
     ) -> Building {
         let mut b = *template;
+        b.form = chizu_core::building::LotForm::Street;
         b.zone = zone;
         b.level = level;
         b.toward_road = toward;
@@ -561,6 +627,85 @@ mod tests {
             }
         }
         assert!(multi_column > 0, "2 列にまたがる切り欠きを確かめていない");
+    }
+
+    #[test]
+    fn lane_lots_keep_the_lane_houses_and_slots_apart_inside_the_site() {
+        let sim = town(
+            ZoneKind::Residential,
+            (TilePos::new(10, 20), TilePos::new(30, 20)),
+            TileRect::from_corners(TilePos::new(10, 12), TilePos::new(30, 19)),
+        );
+        let (_, template) = sim.world().buildings().iter().next().expect("建物がない");
+        let net = sim.world().network();
+        let mut checked = 0;
+        for depth in 4..=6_i64 {
+            for toward in [(0, -1), (0, 1), (1, 0), (-1, 0)] {
+                for level in [1, 2] {
+                    let size = if toward.0 == 0 {
+                        (2, depth)
+                    } else {
+                        (depth, 2)
+                    };
+                    let mut b = variant(template, ZoneKind::Residential, size, toward, level);
+                    b.form = chizu_core::building::LotForm::Lane;
+                    let at = format!("2×{depth} {toward:?} 段階 {level}");
+                    let shape = lot_shape(net, &b).expect("私道の敷地に形がない");
+                    let site = [
+                        b.area.min.x as f64,
+                        b.area.min.y as f64,
+                        b.area.max.x as f64 + 1.0,
+                        b.area.max.y as f64 + 1.0,
+                    ];
+                    assert_eq!(shape.lanes.len(), 1, "{at}");
+                    assert_eq!(shape.houses.len() as u64, b.households(), "{at}");
+                    let all: Vec<Rect> = shape
+                        .lanes
+                        .iter()
+                        .chain(&shape.faces)
+                        .chain(&shape.houses)
+                        .copied()
+                        .collect();
+                    for (i, r) in all.iter().enumerate() {
+                        assert!(inside(site, *r), "{at} {r:?}");
+                        for q in &all[i + 1..] {
+                            assert!(!overlap(*r, *q), "{at} {r:?} と {q:?} が重なる");
+                        }
+                    }
+                    // 私道は道路に面した辺から始まり、奥の端に届かない
+                    let lane = shape.lanes[0];
+                    let (tx, ty) = toward;
+                    let (near, back) = match (tx, ty) {
+                        (0, -1) => (lane[1] - site[1], site[3] - lane[3]),
+                        (0, 1) => (site[3] - lane[3], lane[1] - site[1]),
+                        (-1, 0) => (lane[0] - site[0], site[2] - lane[2]),
+                        _ => (site[2] - lane[2], lane[0] - site[0]),
+                    };
+                    assert!(near.abs() < 1e-9, "{at} 私道が道路に面しない");
+                    assert!(back > 0.1, "{at} 私道が奥の端まで届く");
+                    // 枠はどれも私道に接し、車の入る側が私道を向く
+                    for s in &shape.strips {
+                        assert_eq!(s.count, 1, "{at}");
+                        let touches = (s.rect[0] - lane[2]).abs() < 1e-9
+                            || (s.rect[2] - lane[0]).abs() < 1e-9
+                            || (s.rect[1] - lane[3]).abs() < 1e-9
+                            || (s.rect[3] - lane[1]).abs() < 1e-9;
+                        assert!(touches, "{at} 枠が私道に接しない");
+                        let (cx, cy) =
+                            ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+                        let (lx, ly) = ((lane[0] + lane[2]) / 2.0, (lane[1] + lane[3]) / 2.0);
+                        let toward_lane = if s.open.0 != 0 {
+                            (lx - cx) * s.open.0 as f64
+                        } else {
+                            (ly - cy) * s.open.1 as f64
+                        };
+                        assert!(toward_lane > 0.0, "{at} 枠が私道を向かない");
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert_eq!(checked, 3 * 4 * 2);
     }
 
     #[test]
