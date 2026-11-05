@@ -185,6 +185,7 @@ impl Building {
     /// 私道の敷地の形。`form` が [`LotForm::Lane`] で、縦か横の道路に面した、間口 [`LANE_FRONTAGE`] マス、
     /// 奥行き [`LANE_MIN_DEPTH`] マス以上の、段階 1〜2 の住宅のときだけ `Some` になる。私道の敷地は
     /// [`LANE_MAX_LEVEL`] より上に上がらないので、段階 3 以上は読み込んだ古い状態にしかない。
+    /// その敷地は集合住宅と同じ扱いで、ふつうの住宅と同じく段階 5 まで上がれる。
     pub fn lane_plan(&self) -> Option<LanePlan> {
         let (dx, dy) = self.toward_road;
         let w = self.area.max.x.abs_diff(self.area.min.x) + 1;

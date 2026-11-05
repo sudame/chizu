@@ -486,7 +486,7 @@ impl World {
                 && full
                 && wanted
                 && b.level < MAX_LEVEL
-                && !(b.form == LotForm::Lane && b.level >= LANE_MAX_LEVEL)
+                && !(b.form == LotForm::Lane && b.level == LANE_MAX_LEVEL)
                 && tick.since(b.leveled_at) >= LEVEL_UP_TICKS
                 && level_room.take(&self.network, b.entrance, b.tile_count())
             {
@@ -1063,6 +1063,34 @@ mod tests {
         assert!(
             street_top > LANE_MAX_LEVEL,
             "ふつうの住宅が段階 3 に上がらない"
+        );
+    }
+
+    /// 古い保存データにある段階 3 以上の私道の敷地は、ふつうの住宅と同じく上がれる。
+    #[test]
+    fn legacy_lane_lots_above_the_cap_keep_growing() {
+        let mut w = served_street_with(0);
+        run(&mut w, 4 * TICKS_PER_DAY);
+        let before: Vec<(BuildingId, u8)> = w
+            .buildings()
+            .iter()
+            .filter(|(_, b)| {
+                b.zone == ZoneKind::Residential
+                    && b.form == LotForm::Street
+                    && (LANE_MAX_LEVEL + 1..MAX_LEVEL).contains(&b.level)
+            })
+            .map(|(id, b)| (id, b.level))
+            .collect();
+        assert!(!before.is_empty(), "段階 3 以上で上がれる住宅がない");
+        for (id, _) in &before {
+            w.buildings.get_mut(*id).unwrap().form = LotForm::Lane;
+        }
+        run(&mut w, 4 * TICKS_PER_DAY);
+        assert!(
+            before
+                .iter()
+                .any(|(id, level)| w.buildings().get(*id).unwrap().level > *level),
+            "段階 3 以上の私道の敷地が上がらない"
         );
     }
 
