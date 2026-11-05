@@ -9,7 +9,10 @@ mod cache;
 mod command_json;
 mod export;
 mod map;
+#[cfg(test)]
+mod test_world;
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
@@ -25,11 +28,11 @@ use chizu_core::world::economy::Finances;
 use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
 use chizu_core::{
-    ApplyOutcome, CHUNK_SIDE, CarPlace, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
-    CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic, DenyReason, GameTime,
-    HappinessParts, Heading, Line, LotMisses, MigrationOutlook, NodeControl, NodeId, ParkingTally,
-    Rescues, ServiceKind, SharedLot, TICKS_PER_DAY, TILE_MM, TilePos, TileRect, Traffic, World,
-    ZoneKind, replay,
+    ApplyOutcome, BuildingId, CHUNK_SIDE, CarPlace, CarSample, Carless, CarlessReason, ChunkCoord,
+    CitizenPlaces, Command, CommandLog, CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic,
+    DenyReason, GameTime, HappinessParts, Heading, Layer, Line, LotMisses, MigrationOutlook,
+    NodeControl, NodeId, ParkingTally, Rescues, ServiceKind, SharedLot, TICKS_PER_DAY, TILE_MM,
+    TilePos, TileRect, TileUse, Traffic, World, Zone, ZoneKind, carless_areas, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -40,7 +43,7 @@ pub const USAGE: &str = r#"使い方:
                                              いまの tick でコマンドを順に適用し、記録に足す
   chizu-cli agent advance <dir> <tick 数>    時間を進める（1 tick はゲーム内の 12 秒、1 日は 7200 tick）
   chizu-cli agent observe <dir>              街の様子を JSON で出す（前の observe からの増減つき）
-  chizu-cli agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic]
+  chizu-cli agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic|parking]
                                              範囲の地図を、1 マス 1 文字のマス目のテキストで出す
   chizu-cli agent export <dir>               セッションの再現手順を、Issue にそのまま貼れる markdown で出す
 
@@ -60,8 +63,14 @@ observe の sinceLastObserve（前の observe からの増減）:
   見る数は、お金、収支、人口、就業、幸福度、車、転入、需要、建物の数、電気と水道の余裕、施設の数、買ったチャンクの数である。
   new の直後の observe は、new が見た街との増減になる。前の observe がないとき（フィードバックのディレクトリなど）は null で、何も書かない。
 
-observe の buildings.lanes: 行き止まりの私道の脇に一軒家を並べた住宅（段階 1〜2 の、間口 2 マスで奥行き 4 マス以上の住宅の一部）。
+observe の buildings.lanes: 行き止まりの私道の脇に一軒家を並べた住宅。低密度の住宅の、間口 2 マスで奥行き 3 マス以上の敷地はすべてこれになる。
+  高密度の住宅では、段階 1〜2 の、間口 2 マスで奥行き 4 マス以上の住宅の一部（25%）がこれになる。
   lots その建物の数、houses その家の数（世帯の数と同じ）。私道は map で = になる。住民と車は私道の入口から出入りする。
+observe の buildings.byZone は区画の大きな種類ごとの建物の数で、Residential は低密度と高密度の和である。
+observe の buildings.residentialByDensity: 住宅を密度で分けた数。high は高密度（PaintZone の Residential）、low は低密度（ResidentialLow）。
+  buildings 建物の数、households 住める世帯の数の上限、housedHouseholds 住んでいる世帯の数。
+observe の zoneTiles: 塗る区画（Residential は高密度、ResidentialLow は低密度）ごとの、painted 塗ったマスの数と、
+  empty そのうち建物の建っていないマスの数。低密度は間口 1 の深い敷地を作らないので、塗った間口の端数が 1 マスの列の奥は空きのまま残る。
 observe の shortages: 主の網の余りが負の種類（"power"、"water"）の一覧。足りているときは空。lowHeadroom は足りないと偽になるので、足りないことはここか main.shortage で読む。
 observe の utilities（power と water）:
   capacity と demand 道路網をまたいだ供給量と需要の合計。この合計から余りは出さない。つながっていない施設の分まで足されて、
@@ -144,8 +153,9 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  occupiedPermille 停めてある台数と押さえた台数の和の、台数に対する千分率（台数 0 なら null）、
                  parkedPermille 停めてある台数だけの千分率（押さえた分を含まない）、
                  fullLots 満車の駐車場の数。
-                 台数は建物の種類、大きさ、段階から決まる。住宅は世帯の数（段階 3〜5 は平面が世帯の数の 0.7 倍までで、
-                 残りは建物の中）、商業と工業は職場の数、オフィスは職場の数の 0.5 倍（端数は切り上げ）。
+                 台数は建物の種類、大きさ、段階から決まる。住宅は自宅の枠の数で、戸建て（段階 1〜2）は世帯の数
+                 （1〜2 マスの家の 3 軒に 1 軒は 0）、集合住宅（段階 3〜5）は世帯の数の 0.5 倍。商業と工業は職場の数、
+                 オフィスは職場の数の 0.5 倍（端数は切り上げ）。平面に入らない分は建物の中に持つ。
                  住宅の駐車場は、その建物の自宅の枠を持つ世帯の車だけが使う。
                  redirectedCars いま移動中の車のうち、16 マスの中のほかの建物の駐車場か、共同の駐車場の外来の枠へ停めに
                  向かっている車。行き先の建物の駐車場が満車のときのほか、そこへ車か歩きで届かないときも、近くのほかの駐車場に
@@ -163,12 +173,21 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  noPlace 世帯が車を置く枠を持たず、車で向かわなかった移動の数。車で向かうほど遠い移動だけを数える
                  （始まりからの積み上げ。noCar とは別に数える）。
                  households 家のある世帯を、車を置く枠で分けた数。home 自宅の枠（住んでいる建物の駐車場）を持つ世帯、
-                 shared 共同の駐車場の枠を借りた世帯、none 枠を持たない世帯。枠のない世帯は車を持たず、どの移動も歩く。
+                 shared 共同の駐車場の枠を借りた世帯、none 枠を持たない世帯（車を持てない世帯）。枠のない世帯は車を持たず、どの移動も歩く。
+                 家のない世帯は、どれにも数えない。
+                 noneReasons none の理由ごとの数で、5 つの和が none に等しい。noLotInRange 家の正面のマスから 32 マスの中に共同の駐車場が 1 つもない、
+                 full 範囲の中に共同の駐車場はあるがどれも空きがない、feeTooHigh 料金が世帯の払える上限を超える、
+                 waiting 範囲の中に空きがあって料金も払えるので、次の決め直し（移住を見る間隔ごと）で借りる、
+                 lotNotOnRoad 範囲の中に共同の駐車場はあるが、どれも道路に面していない（前の道路が消えた）ので貸せない。駐車場の前に道路を引く。
+                 理由は状態に持たず、読み出すときに借りる決まりと同じ探し方で求める。
                  自宅の枠は住宅の駐車場の台数だけあり、建物に住む世帯に ID の順に配る（枠を持つ世帯からは取り上げない）。
                  自宅の枠のない世帯は、家の正面のマスから直線で 32 マスの中の共同の駐車場を近い順に試し、空きがあれば枠を借りる。
                  借りた枠は、車がいないあいだも空かない（月極）。家と借りた枠のあいだは歩く。借りる世帯を決め直すのは、
                  世帯が越してきたときと、自宅の枠を配り直すときと、ゲーム内の 1 日に 1 回である。料金はまだない（0）。
                  共同の駐車場を取り壊すと、借りていた世帯は枠をなくし、停まっていた車も消える。
+                 carlessAreas 車を持てない世帯の多い所の上位 10 件。家の正面のマスを 8×8 マスの区切りで数え、世帯の多い順
+                 （同じなら区切りの座標の x、y の順）に並べる。at 区切りの最小の座標、center 真ん中のマス、households 世帯の数、
+                 reasons 理由ごとの数（noneReasons と同じ）。共同の駐車場を置く所を決める目安にする。
                  sharedLots 共同の駐車場を置いた順に並べる。at 駐車場が占めるマスの最小の座標（世帯が借りた枠はこの角で指す）、
                  kind 種類（ParkingLot か ParkingGarage）、spaces 台数、rented 世帯に貸した枠の数、parked 停まっている台数で、
                  そのうち rentedParked 借りた世帯の車、visitorParked 借りていない車（外来）の台数、visitorReserved 外来の車の
@@ -249,6 +268,8 @@ observe の removedCrosswalks:
   出力は 9216 文字（96×96 など）までで、超える範囲は、必要な --scale を添えて断る。
   いまの買った土地の範囲は observe の land.ownedBounds にある。
   --layer traffic を付けると、道路の文字を種類の代わりに混み具合の段階にする（画面の「交通」のレイヤーと同じ計算）。
+  --layer parking を付けると、車を持てない世帯のいる住宅を ! にし、共同の駐車場の文字を埋まり具合の段階
+  （- 半分に満たない、+ 半分以上、# 8 割以上、X 満車。画面の「駐車場」のレイヤーと同じ計算）にする。
   文字は、「-」空いている、「+」やや混んでいる、「#」混んでいる、「X」詰まっている（車が多く、半分以上が止まっている）。
   区間の上の車の台数を、その区間に並べる台数（車線ごとに長さを 7m で割った台数の合計。最低 1 台）で割った占有率で決め、向きの違う 2 方向のうち混んでいるほうを取る。
   車が 1 台以下の区間は空いている（1 台しか並べない短い区間で、その 1 台が止まっているときを除く）。高速道路は H のままである。
@@ -276,8 +297,11 @@ observe の removedCrosswalks:
       変える道路がなければ Denied（NoRoadToChange）、どれもすでに kind なら Denied（RoadKindUnchanged）。
   {"type":"Bulldoze","area":[[x,y],[x,y]]}
       範囲の道路、施設、建物を取り壊す。
-  {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"Commercial"|"Industrial"|"Office"|null}
-      区画を塗る。null は消す。塗れるのは、建物が建つマス（道路に面した空きマスと、そこから道路と反対へ
+  {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"ResidentialLow"|"Commercial"|"Industrial"|"Office"|null}
+      区画を塗る。null は消す。Residential は高密度の住宅で、段階 5 まで上がり、集合住宅になる。
+      ResidentialLow は低密度の住宅で、段階 2 で止まり、一軒家だけが建つ（縦横の道路沿いでは、間口 2、奥行き 3〜6 の私道の敷地か、
+      奥行き 1〜2 の通りに面した家）。住宅の需要と税率は、低密度と高密度で 1 つである。
+      低密度と高密度は別の区画で、1 つの建物は両方にまたがらない。建物の建ったマスは塗り替えられないので、密度を変えるには取り壊してから塗る。塗れるのは、建物が建つマス（道路に面した空きマスと、そこから道路と反対へ
       6 マスまで、塗れるマスが途切れず続く空きマス）だけである。道路の脇を空けて奥だけを塗る、道路の端の外や
       空きを挟んだ先を塗る、といった塗れないマスが混ざると、塗れるマスだけを塗って AppliedPartly を返す。
       塗れなかったマスが 1 つでもあれば、理由を問わず AppliedPartly である（奥行き 6 マスを超えた、買っていない、
@@ -319,8 +343,8 @@ observe の removedCrosswalks:
       腕を取り壊すと印も消える。外した腕は observe の removedCrosswalks と、map の Y と s で分かる。
   {"type":"BuyChunk","chunk":[cx,cy]}
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
-  {"type":"SetTaxRate","zone":"Residential"|...,"permille":0..300}
-      税率を千分率で決める。
+  {"type":"SetTaxRate","zone":"Residential"|"Commercial"|"Industrial"|"Office","permille":0..300}
+      税率を千分率で決める。住宅の税率は低密度と高密度で 1 つで、Residential で決める（ResidentialLow は断る）。
   {"type":"SetSimSpeed","speed":1..288}
       画面での速さの倍率。1 倍は実時間の 1 秒に 5 tick で、288 倍は 1 日を 5 秒で回す。advance の進み方は変わらない。
 
@@ -937,6 +961,60 @@ fn by_zone<T: Into<Value>>(f: impl Fn(ZoneKind) -> T) -> Value {
     Value::Object(map)
 }
 
+/// 塗る区画（[`Zone`]）ごとの値。住宅は高密度が `Residential`、低密度が `ResidentialLow` である。
+fn by_paint_zone<T: Into<Value>>(f: impl Fn(Zone) -> T) -> Value {
+    let map: Map<String, Value> = Zone::ALL
+        .into_iter()
+        .map(|z| (format!("{z:?}"), f(z).into()))
+        .collect();
+    Value::Object(map)
+}
+
+/// 住宅の密度ごとの、建物の数、世帯の数の上限、住んでいる世帯の数。
+fn residential_by_density(world: &World) -> Value {
+    let p = world.population();
+    let mut housed = BTreeMap::<BuildingId, u64>::new();
+    for h in p.household_ids() {
+        if let Some(home) = p.home(h).flatten() {
+            *housed.entry(home).or_insert(0) += 1;
+        }
+    }
+    let of = |zone: Zone| {
+        let (mut count, mut households, mut living) = (0_u64, 0_u64, 0_u64);
+        for (id, b) in world.buildings().iter() {
+            if b.zone == zone {
+                count += 1;
+                households += b.households();
+                living += housed.get(&id).copied().unwrap_or(0);
+            }
+        }
+        json!({"buildings": count, "households": households, "housedHouseholds": living})
+    };
+    json!({"high": of(Zone::Residential), "low": of(Zone::ResidentialLow)})
+}
+
+/// 塗る区画ごとの、塗ったマスの数と、そのうち建物の建っていない空きマスの数。
+fn zone_tiles(world: &World) -> Value {
+    let mut painted = [0_u64; Zone::ALL.len()];
+    let mut empty = [0_u64; Zone::ALL.len()];
+    for c in world.chunks() {
+        let Some(tiles) = c.layer(Layer::Ground) else {
+            continue;
+        };
+        for (z, u) in tiles.zone.iter().zip(&tiles.occupancy) {
+            if let Some(z) = z {
+                let i = usize::from(*z as u8 - 1);
+                painted[i] += 1;
+                empty[i] += u64::from(*u == TileUse::Empty);
+            }
+        }
+    }
+    by_paint_zone(|z| {
+        let i = usize::from(z as u8 - 1);
+        json!({"painted": painted[i], "empty": empty[i]})
+    })
+}
+
 /// 職場を持つ区画だけの、雇える割合（‰）。住宅は職場を持たないので出さない。
 fn jobs_kept_by_zone(tax_permille: &[u16; 4]) -> Value {
     let map: Map<String, Value> = ZoneKind::ALL
@@ -1027,7 +1105,7 @@ struct CurbWaitRow {
 struct CurbBuilding {
     /// 建物が占めるマスのうち、座標が最小のマス。
     at: (i64, i64),
-    zone: ZoneKind,
+    zone: Zone,
     level: u8,
 }
 
@@ -1211,9 +1289,9 @@ fn parking(world: &World) -> Value {
     }
     let mut zones: [Zone; 4] = Default::default();
     for (id, b) in world.buildings().iter() {
-        let layout = b.parking_layout();
+        let layout = b.parking_layout(world.seed());
         let lot = world.trips().lot(id);
-        let z = &mut zones[b.zone.index()];
+        let z = &mut zones[b.zone.kind().index()];
         let used = u64::from(lot.parked) + u64::from(lot.reserved);
         z.spaces += layout.total();
         z.surface += layout.surface;
@@ -1234,7 +1312,7 @@ fn parking(world: &World) -> Value {
                     at: (b.area.min.x, b.area.min.y),
                     zone: b.zone,
                     level: b.level,
-                    spaces: b.parking_spaces(),
+                    spaces: b.parking_spaces(world.seed()),
                     parked: lot.parked,
                     reserved: lot.reserved,
                     today: m.today,
@@ -1255,11 +1333,12 @@ fn parking(world: &World) -> Value {
         no_car_other: _,
         no_place: _,
     } = world.trips().parking_tally();
-    let p = world.population();
-    let housed = p
-        .household_ids()
-        .filter(|h| p.home(*h).flatten().is_some())
-        .count();
+    // 車を持てない世帯は家のある世帯のうち枠のない世帯で、理由は共同の駐車場を借りる決まりを読み取りだけで回して求める。
+    let carless = world.carless_households();
+    let mut reasons = [0_u64; CarlessReason::ALL.len()];
+    for c in &carless {
+        reasons[c.reason.index()] += 1;
+    }
     let with_home_place = world
         .car_places()
         .iter()
@@ -1305,10 +1384,43 @@ fn parking(world: &World) -> Value {
         "households": {
             "home": with_home_place,
             "shared": with_shared_place,
-            "none": housed.saturating_sub(with_home_place + with_shared_place),
+            "none": carless.len(),
+            "noneReasons": {
+                "noLotInRange": reasons[CarlessReason::NoLotInRange.index()],
+                "full": reasons[CarlessReason::Full.index()],
+                "feeTooHigh": reasons[CarlessReason::FeeTooHigh.index()],
+                "waiting": reasons[CarlessReason::Waiting.index()],
+                "lotNotOnRoad": reasons[CarlessReason::LotNotOnRoad.index()],
+            },
         },
+        "carlessAreas": carless_areas_json(&carless),
         "sharedLots": shared_lots(world),
     })
+}
+
+/// observe の `parking.carlessAreas` に出す区切りの数の上限。
+const CARLESS_AREA_LIMIT: usize = 10;
+
+/// observe の `parking.carlessAreas`。車を持てない世帯を 8×8 マスの区切りで数え、多い順に上位だけを出す。
+fn carless_areas_json(carless: &[Carless]) -> Vec<Value> {
+    carless_areas(carless, CARLESS_AREA_LIMIT)
+        .into_iter()
+        .map(|a| {
+            let c = a.center();
+            json!({
+                "at": [a.min.x, a.min.y],
+                "center": [c.x, c.y],
+                "households": a.households,
+                "reasons": {
+                    "noLotInRange": a.by_reason[CarlessReason::NoLotInRange.index()],
+                    "full": a.by_reason[CarlessReason::Full.index()],
+                    "feeTooHigh": a.by_reason[CarlessReason::FeeTooHigh.index()],
+                    "waiting": a.by_reason[CarlessReason::Waiting.index()],
+                    "lotNotOnRoad": a.by_reason[CarlessReason::LotNotOnRoad.index()],
+                },
+            })
+        })
+        .collect()
 }
 
 /// observe の `parking.sharedLots`。共同の駐車場を置いた順に並べる。
@@ -1345,7 +1457,7 @@ const SHORTAGE_LIMIT: usize = 10;
 struct ShortageRow {
     /// 建物が占めるマスのうち、座標が最小のマス。
     at: (i64, i64),
-    zone: ZoneKind,
+    zone: Zone,
     level: u8,
     spaces: u64,
     parked: u32,
@@ -1622,6 +1734,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
                 .collect::<Vec<Value>>()
         }),
         "zoned": by_zone(|z| zoned[z.index()]),
+        "zoneTiles": zone_tiles(world),
         "jobs": {
             "workplaces": by_zone(|z| workplaces[z.index()]),
             "filled": by_zone(|z| filled[z.index()]),
@@ -1633,7 +1746,8 @@ fn observe(world: &World, before: &CarSample) -> Value {
         },
         "buildings": {
             "total": buildings.len(),
-            "byZone": by_zone(|z| count(&|b| b.zone == z)),
+            "byZone": by_zone(|z| count(&|b| b.zone.kind() == z)),
+            "residentialByDensity": residential_by_density(world),
             "powered": count(&|b| b.supply.power),
             "watered": count(&|b| b.supply.water),
             "lanes": {
@@ -2327,6 +2441,67 @@ mod tests {
 
     const DAY: u64 = TICKS_PER_DAY_FOR_TEST;
 
+    /// 車を持てない世帯の数と理由、多い所が、中核の読み取りと合う。共同の駐車場を置くと、範囲の中の世帯が借りて減る。
+    #[test]
+    fn observe_shows_carless_households_with_reasons_and_areas() {
+        use crate::agent::test_world::{carless_world, place, run};
+        let (mut w, _guard) = carless_world(2);
+        let none = |o: &Value| o["households"]["none"].as_u64().unwrap();
+        let o = parking(&w);
+        let total = none(&o);
+        assert!(total > 12, "世帯が足りない: {total}");
+        assert_eq!(total, w.carless_households().len() as u64);
+        // 駐車場がないので、理由は範囲に駐車場がないだけ
+        let reasons = &o["households"]["noneReasons"];
+        assert_eq!(reasons["noLotInRange"], total);
+        assert_eq!(reasons["full"], 0);
+        assert_eq!(reasons["feeTooHigh"], 0);
+        assert_eq!(reasons["waiting"], 0);
+        let areas = o["carlessAreas"].as_array().unwrap();
+        assert!(!areas.is_empty() && areas.len() <= CARLESS_AREA_LIMIT);
+        // 世帯の多い順に並び、区切りは 8 の倍数で始まり、真ん中のマスは区切りの中にある
+        let counts: Vec<u64> = areas
+            .iter()
+            .map(|a| a["households"].as_u64().unwrap())
+            .collect();
+        assert!(counts.windows(2).all(|c| c[0] >= c[1]), "{counts:?}");
+        assert!(counts.iter().sum::<u64>() <= total);
+        for a in areas {
+            let (at, center) = (&a["at"], &a["center"]);
+            assert_eq!(at[0].as_i64().unwrap() % 8, 0);
+            assert_eq!(at[1].as_i64().unwrap() % 8, 0);
+            assert_eq!(center[0].as_i64().unwrap(), at[0].as_i64().unwrap() + 4);
+            assert_eq!(center[1].as_i64().unwrap(), at[1].as_i64().unwrap() + 4);
+            assert_eq!(a["reasons"]["noLotInRange"], a["households"]);
+        }
+        // 平面の駐車場を置いて決め直しを待つと、12 世帯が借りて、残りは満車になる
+        place(&mut w, ServiceKind::ParkingLot, 24);
+        run(&mut w, 120);
+        let o = parking(&w);
+        assert_eq!(o["households"]["shared"], 12);
+        let reasons = &o["households"]["noneReasons"];
+        let sum: u64 = [
+            "noLotInRange",
+            "full",
+            "feeTooHigh",
+            "waiting",
+            "lotNotOnRoad",
+        ]
+        .iter()
+        .map(|k| reasons[k].as_u64().unwrap())
+        .sum();
+        assert_eq!(sum, none(&o), "理由の和が車を持てない世帯の数と違う");
+        assert!(reasons["full"].as_u64().unwrap() > 0, "満車の世帯がいない");
+        assert_eq!(reasons["waiting"], 0);
+        let areas = o["carlessAreas"].as_array().unwrap();
+        assert!(
+            areas
+                .iter()
+                .any(|a| a["reasons"]["full"].as_u64().unwrap() > 0),
+            "{areas:?}"
+        );
+    }
+
     /// 1 日前（tick 0）の需要が 1,000 の控えで、いま tick 7200 の主の網を見る。
     fn trend_at(demand: u64, headroom: i128, past: &[(u64, u64)], tick: u64) -> Value {
         utility_trend(
@@ -2536,7 +2711,7 @@ mod tests {
         };
         ShortageRow {
             at,
-            zone: ZoneKind::Commercial,
+            zone: Zone::Commercial,
             level: 1,
             spaces: 4,
             parked: 2,
@@ -2571,7 +2746,7 @@ mod tests {
     fn curb_wait(at: (i64, i64), waiting: u32, long: u32) -> CurbWaitRow {
         let b = |at| CurbBuilding {
             at,
-            zone: ZoneKind::Industrial,
+            zone: Zone::Industrial,
             level: 2,
         };
         CurbWaitRow {

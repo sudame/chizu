@@ -280,6 +280,12 @@ impl Trips {
         self.commuters.by_trip.get(&id).copied()
     }
 
+    /// 移動 `trip` が世帯の車で向かう通勤で、走っているあいだにその車をなくしたか（[`Trips::forget_car`]）。
+    /// なくした車は、着いても駐車場に停めず、押さえた空きを返す。
+    pub fn car_dropped(&self, trip: TripId) -> bool {
+        self.commuters.dropped(trip)
+    }
+
     /// 世帯の車のいる所。
     pub fn household_car(&self, household: HouseholdId) -> Option<HouseholdCar> {
         self.commuters.cars.get(&household).copied()

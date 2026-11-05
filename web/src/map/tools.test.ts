@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { Camera } from "./camera.ts";
 import {
@@ -10,6 +11,7 @@ import {
   MAX_ROAD_TILES,
   MAX_ZONE_SIDE,
   paintZoneCommand,
+  parkingRangeNote,
   parseRoadCostTable,
   parseServiceTable,
   pickCrosswalk,
@@ -160,6 +162,34 @@ describe("コマンドの組み立て", () => {
     });
   });
 
+  test("低密度の住宅は、高密度の住宅と別の区画の名前で塗る", () => {
+    expect(paintZoneCommand("ResidentialLow", { x: 1, y: 2 }, { x: 3, y: 4 })).toMatchObject({
+      kind: "PaintZone",
+      zone: "ResidentialLow",
+    });
+    expect(paintZoneCommand("Residential", { x: 1, y: 2 }, { x: 3, y: 4 })).toMatchObject({
+      zone: "Residential",
+    });
+  });
+
+  test("区画の道具のボタンは、住宅（低密度）、住宅（高密度）の順に並ぶ", () => {
+    const html = readFileSync(new URL("../../index.html", import.meta.url), "utf8");
+    const start = html.indexOf('id="menu-zone"');
+    const buttons = [
+      ...html
+        .slice(start, html.indexOf("</div>", html.indexOf("</div>", start) + 1))
+        .matchAll(/data-tool="zone-(\w+)"[^>]*>(?:<span[^>]*><\/span>)?([^<]*)</g),
+    ].map((m) => [m[1], m[2]]);
+    expect(buttons).toEqual([
+      ["ResidentialLow", "住宅（低密度）"],
+      ["Residential", "住宅（高密度）"],
+      ["Commercial", "商業"],
+      ["Industrial", "工業"],
+      ["Office", "オフィス"],
+      ["Clear", "区画を消す"],
+    ]);
+  });
+
   test("区画の長方形は 1 辺が上限を超えないところで止める", () => {
     const from = { x: 10, y: -5 };
     expect(clampArea(from, { x: 20, y: 0 }, MAX_ZONE_SIDE)).toEqual({ x: 20, y: 0 });
@@ -215,11 +245,12 @@ describe("施設", () => {
   });
 
   test("施設の表を読み、置くコマンドを組み立てる", () => {
-    expect(parseServiceTable([60000, 4, 4, 25000, 2, 2]).WaterPump).toEqual({
-      cost: 25000,
-      width: 2,
-      depth: 2,
-    });
+    const table = parseServiceTable([
+      60000, 4, 4, 0, 25000, 2, 2, 0, 3000, 2, 2, 12, 72000, 4, 4, 240,
+    ]);
+    expect(table.WaterPump).toEqual({ cost: 25000, width: 2, depth: 2, spaces: 0 });
+    expect(table.ParkingLot).toEqual({ cost: 3000, width: 2, depth: 2, spaces: 12 });
+    expect(table.ParkingGarage).toEqual({ cost: 72000, width: 4, depth: 4, spaces: 240 });
     expect(() => parseServiceTable([1, 2])).toThrow();
     expect(placeServiceCommand("PowerPlant", { x: -3, y: 4 }, 2)).toEqual({
       kind: "PlaceBuilding",
@@ -277,6 +308,25 @@ describe("signalCommand", () => {
       x: 0,
       y: 0,
       on: false,
+    });
+  });
+});
+
+describe("共同の駐車場の届く範囲", () => {
+  test("範囲の中の車を持てない世帯の数と台数を出す", () => {
+    expect(parkingRangeNote(1200, 240)).toBe("範囲 32 マスの中で車を持てない世帯 1,200・240 台");
+    expect(parkingRangeNote(0, 12)).toBe("範囲 32 マスの中で車を持てない世帯 0・12 台");
+    // 中核の答えがまだ届いていないときは、世帯の数を出さない
+    expect(parkingRangeNote(null, 12)).toBe("範囲 32 マス・12 台");
+  });
+
+  test("共同の駐車場を置くコマンドは施設の名前を送る", () => {
+    expect(placeServiceCommand("ParkingGarage", { x: 5, y: -2 }, 1)).toEqual({
+      kind: "PlaceBuilding",
+      service: "ParkingGarage",
+      atX: 5,
+      atY: -2,
+      rotation: 1,
     });
   });
 });

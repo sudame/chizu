@@ -6,7 +6,7 @@
 use core::fmt;
 
 use chizu_core::{
-    ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect,
+    ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, Zone,
     ZoneKind,
 };
 
@@ -121,10 +121,11 @@ pub fn parse(
         "PaintZone" => {
             let zone = match field("zone") {
                 Field::Text(t) => match t.as_str() {
-                    "Residential" => Some(ZoneKind::Residential),
-                    "Commercial" => Some(ZoneKind::Commercial),
-                    "Industrial" => Some(ZoneKind::Industrial),
-                    "Office" => Some(ZoneKind::Office),
+                    "Residential" => Some(Zone::Residential),
+                    "ResidentialLow" => Some(Zone::ResidentialLow),
+                    "Commercial" => Some(Zone::Commercial),
+                    "Industrial" => Some(Zone::Industrial),
+                    "Office" => Some(Zone::Office),
                     "Clear" => None,
                     _ => return Err(InputError::BadZone),
                 },
@@ -164,6 +165,8 @@ pub fn parse(
             let kind = match field("service") {
                 Field::Text(t) if t == "PowerPlant" => ServiceKind::PowerPlant,
                 Field::Text(t) if t == "WaterPump" => ServiceKind::WaterPump,
+                Field::Text(t) if t == "ParkingLot" => ServiceKind::ParkingLot,
+                Field::Text(t) if t == "ParkingGarage" => ServiceKind::ParkingGarage,
                 _ => return Err(InputError::BadService),
             };
             let rotation = integer(&field, "rotation")
@@ -442,7 +445,21 @@ mod tests {
             paint(Field::Text("Office".into())),
             Ok(Command::PaintZone {
                 area,
-                zone: Some(ZoneKind::Office)
+                zone: Some(Zone::Office)
+            })
+        );
+        assert_eq!(
+            paint(Field::Text("ResidentialLow".into())),
+            Ok(Command::PaintZone {
+                area,
+                zone: Some(Zone::ResidentialLow)
+            })
+        );
+        assert_eq!(
+            paint(Field::Text("Residential".into())),
+            Ok(Command::PaintZone {
+                area,
+                zone: Some(Zone::Residential)
             })
         );
         assert_eq!(

@@ -3,15 +3,36 @@
 import { validCityStats } from "./city-stats.ts";
 
 export type RoadKindName = "Small" | "Medium" | "Large";
-/** 施設の種類。 */
-export type ServiceName = "PowerPlant" | "WaterPump";
+/** 施設の種類。ServiceKind::ALL の順で、service_table の並びと同じである。 */
+export type ServiceName = "PowerPlant" | "WaterPump" | "ParkingLot" | "ParkingGarage";
+/** 施設の種類の順（ServiceKind の値は 1 から数える）。 */
+export const SERVICE_NAMES: readonly ServiceName[] = [
+  "PowerPlant",
+  "WaterPump",
+  "ParkingLot",
+  "ParkingGarage",
+];
+/** 共同の駐車場か。 */
+export const isParking = (service: ServiceName): boolean =>
+  service === "ParkingLot" || service === "ParkingGarage";
+/** 施設の種類の値（ServiceKind の値）。 */
+export const serviceCode = (service: ServiceName): number => SERVICE_NAMES.indexOf(service) + 1;
 /** chizu-wasm の finance の数の個数。 */
-export const FINANCE_LENGTH = 12;
+export const FINANCE_LENGTH = 13;
+
+/** chizu-wasm の carless の、固定の並びの個数。そのあとに世帯の多い区切りの `[x, y, 世帯の数]` が続く。 */
+export const CARLESS_FIXED = 6;
 
 /** chizu-wasm の overview の数の個数。 */
 export const OVERVIEW_LENGTH = 21;
-/** 区画の種類。Clear は区画を消す。 */
-export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
+/** 区画の種類。Residential は高密度の住宅、Clear は区画を消す。 */
+export type ZoneName =
+  | "Residential"
+  | "ResidentialLow"
+  | "Commercial"
+  | "Industrial"
+  | "Office"
+  | "Clear";
 
 /** 画面から送るコマンド。chizu-wasm が Command に直し、検証する。座標はマスの座標。 */
 export type CommandMessage =
@@ -44,7 +65,7 @@ export type CommandMessage =
     }
   | { kind: "BuyChunk"; cx: number; cy: number }
   /** 区画の種類ごとの税率（‰）。上限は chizu-core の MAX_TAX_PERMILLE で、中核が検証する。 */
-  | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear">; permille: number }
+  | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear" | "ResidentialLow">; permille: number }
   | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number }
   /** マス (x, y) の交差点に信号を置くか（on が true）、外す。chizu-wasm がマスのノードを引く。 */
   | { kind: "SetSignal"; x: number; y: number; on: boolean }
@@ -115,7 +136,7 @@ export const TILE_WATER = 1;
 export const TILE_ROAD = 1 << 1;
 /** 区画を塗れる。 */
 export const TILE_ZONABLE = 1 << 2;
-/** 区画の種類（1 住宅、2 商業、3 工業、4 オフィス、なければ 0）を置くビットの位置。3 ビットを使う。 */
+/** 区画の種類（1 住宅（高密度）、2 商業、3 工業、4 オフィス、5 住宅（低密度）、なければ 0）を置くビットの位置。3 ビットを使う。 */
 export const TILE_ZONE_SHIFT = 3;
 /** 区画に建った建物がある。施設のマスには立たない。 */
 export const TILE_BUILDING = 1 << 6;
@@ -223,6 +244,8 @@ export type WorkerToMain =
       x: number;
       y: number;
       results: (string | null)[];
+      /** 共同の駐車場の届く範囲の中の、車を持てない世帯の数。ほかの施設は 0。 */
+      carless: number;
     }
   /** inspect の答え。query は問い合わせの写しで、info は chizu-wasm の inspect の数。何もなければ空。 */
   | { kind: "inspect"; query: InspectQuery; info: number[] }
@@ -268,6 +291,7 @@ export type WorkerToMain =
    * stalls は chizu-wasm の growth_stalls で、新築が止まっている道路網ごとに [x, y, 足りない資源] が並ぶ。
    * isolated は chizu-wasm の isolated_facilities で、街の道路網につながっていない施設ごとに [x, y, 種類] が並ぶ。
    * parkingShortage は chizu-wasm の parking_shortage で、駐車場が足りない建物ごとに [x, y, 区画の種類, 満車で車をやめた数] が並ぶ。
+   * carless は chizu-wasm の carless で、車を持てない世帯の数、理由ごとの数、世帯の多い区切りの並びである（CARLESS_FIXED が固定の個数）。
    * lotShortage は chizu-wasm の lot_shortage で、住宅・商業・工業・オフィスの順に、需要が正なのに空き区画がなければ 1、そうでなければ 0 の 4 個。tick は overview を作った時点の Worker の tick で、空き区画がない状態の続いた長さを数える。
    */
   | {
@@ -277,6 +301,7 @@ export type WorkerToMain =
       isolated: number[];
       lotShortage: number[];
       parkingShortage: number[];
+      carless: number[];
       tick: number;
     }
   /**
@@ -286,7 +311,7 @@ export type WorkerToMain =
   | { kind: "outcome"; id: number; seq?: number; outcome: Outcome; reason?: string }
   /**
    * 収支の見込みと税率。chizu-wasm の finance で、Worker が一定の間隔で送る。
-   * 並びは税率の上限、区画の種類ごとの税率、税収、道路の維持費、発電所と浄水場の維持費。
+   * 並びは税率の上限、区画の種類ごとの税率、税収、道路の維持費、発電所と浄水場の維持費、共同の駐車場の維持費。
    */
   | { kind: "finance"; values: number[] }
   /**
@@ -399,6 +424,10 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         Array.isArray(v.parkingShortage) &&
         v.parkingShortage.length % 4 === 0 &&
         v.parkingShortage.every((x) => typeof x === "number") &&
+        Array.isArray(v.carless) &&
+        v.carless.length >= CARLESS_FIXED &&
+        (v.carless.length - CARLESS_FIXED) % 3 === 0 &&
+        v.carless.every((x) => typeof x === "number") &&
         typeof v.tick === "number"
       );
     case "outcome":
@@ -425,7 +454,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         Number.isInteger(v.y) &&
         Array.isArray(v.results) &&
         v.results.length === 4 &&
-        v.results.every((r) => r === null || typeof r === "string")
+        v.results.every((r) => r === null || typeof r === "string") &&
+        typeof v.carless === "number"
       );
     case "inspect":
       return (

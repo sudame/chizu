@@ -120,6 +120,7 @@ impl World {
         if !left.is_empty() {
             return Err(SnapshotError::TrailingBytes(left.len()));
         }
+        world.restore_derived();
         if !accept(&world) {
             return Err(SnapshotError::Rejected);
         }

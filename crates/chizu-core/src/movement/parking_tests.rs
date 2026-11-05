@@ -2,7 +2,7 @@ use super::parking::MissTable;
 use super::*;
 use crate::building::{Building, Buildings, ParkingCut};
 use crate::car_place::CarPlace;
-use crate::command::{RoadKind, ZoneKind};
+use crate::command::{RoadKind, Zone, ZoneKind};
 use crate::id::BuildingId;
 use crate::network::{Dir, Line};
 use crate::rng::{RngPurpose, rng};
@@ -41,7 +41,7 @@ impl Street {
                 let east = net.segment_line(segment).unwrap().end().x;
                 let entrance_at = LaneOffset(u32::try_from(east - x).unwrap() * 8_000);
                 buildings.insert(Building {
-                    zone: ZoneKind::Commercial,
+                    zone: Zone::Commercial,
                     area: TileRect::from_corners(front, front),
                     front,
                     toward_road: (0, 1),
@@ -108,7 +108,9 @@ impl Street {
         }
         for (id, lot) in self.trips.lots() {
             let b = self.buildings.get(id).expect("消えた建物に駐車場が残った");
-            assert!(u64::from(lot.parked + lot.reserved) <= b.parking_spaces());
+            assert!(
+                u64::from(lot.parked + lot.reserved) <= b.parking_spaces(self.buildings.seed())
+            );
             assert_eq!(lot.reserved, holding.remove(&id).unwrap_or(0), "{id:?}");
         }
         assert!(
@@ -677,7 +679,7 @@ fn wide(net: &Network, zone: ZoneKind, front_x: i64, (w, h): (i64, i64), level: 
     let segment = net.segments_through(TilePos::new(front_x, 0))[0];
     let east = net.segment_line(segment).unwrap().end().x;
     Building {
-        zone,
+        zone: Zone::from(zone),
         area: TileRect::from_corners(front, TilePos::new(front_x - (w - 1), -h)),
         front,
         toward_road: (0, 1),
@@ -708,7 +710,7 @@ fn street_with_junctions(xs: &[i64]) -> Network {
 
 /// 出入りの位置の、x のワールド座標（mm）。
 fn spot_x(net: &Network, b: &Building) -> i64 {
-    let p = lot_spot(net, b).unwrap();
+    let p = lot_spot(net, b, 0).unwrap();
     assert!(p.resolve_on(net, LaneMode::Car).is_some());
     assert!(p.resolve_on(net, LaneMode::Sidewalk).is_some());
     p.world().x.0
@@ -725,7 +727,7 @@ fn a_side_lot_opens_at_the_end_far_from_the_nearest_junction() {
     // 4×4 の商業の段階 1 は 8 台で、端の 1 列を切り欠く。出入りの位置は、端の列のマスの真ん中である。
     let near_west = wide(&net, ZoneKind::Commercial, 14, (4, 4), 1);
     assert!(matches!(
-        near_west.parking_layout().cut,
+        near_west.parking_layout(0).cut,
         ParkingCut::Side { columns: 1, .. }
     ));
     // 西の交差点から 1 マスの西の端（x = 11）より、4 マスの東の端（x = 14）が遠い。
@@ -733,7 +735,10 @@ fn a_side_lot_opens_at_the_end_far_from_the_nearest_junction() {
     // 東の交差点のそばでは、西の端（x = 46）にする。出入口（x = 49）とは別の所になる。
     let near_east = wide(&net, ZoneKind::Commercial, 49, (4, 4), 1);
     assert_eq!(spot_x(&net, &near_east), mid(46));
-    assert_ne!(lot_spot(&net, &near_east), building_spot(&net, &near_east));
+    assert_ne!(
+        lot_spot(&net, &near_east, 0),
+        building_spot(&net, &near_east)
+    );
     // 2 つの交差点のうち近いほうまでの距離で比べる。x = 27〜30 なら、西の端は西の交差点から 17 マス、
     // 東の端は東の交差点から 20 マスで、東の端が遠い。x = 30〜33 なら逆になる。
     let middle = wide(&net, ZoneKind::Commercial, 30, (4, 4), 1);
@@ -748,14 +753,14 @@ fn a_front_strip_opens_in_the_middle_of_its_slots() {
     // 1 マスの商業の段階 1 は 1 台で、帯は枠 1 つ（2.5m）。交差点から遠い東の辺に寄せ、その真ん中から出入りする。
     let one = wide(&net, ZoneKind::Commercial, 11, (1, 1), 1);
     assert_eq!(
-        one.parking_layout().cut,
+        one.parking_layout(0).cut,
         ParkingCut::FrontStrip { slots: 1 }
     );
     assert_eq!(spot_x(&net, &one), mid(11) + 4_000 - 1_250);
     // 間口 2 マスの工業の段階 4 は 6 台で、帯は 15m。東の端の辺から 7.5m 内に入った所である。
     let two = wide(&net, ZoneKind::Industrial, 13, (2, 1), 4);
     assert_eq!(
-        two.parking_layout().cut,
+        two.parking_layout(0).cut,
         ParkingCut::FrontStrip { slots: 6 }
     );
     assert_eq!(spot_x(&net, &two), mid(13) + 4_000 - 7_500);
@@ -838,7 +843,7 @@ fn a_lot_spanning_two_unjoined_roads_opens_onto_the_road_of_its_door() {
     let east = s.net.segments_through(TilePos::new(22, 0))[0];
     assert_ne!(west, east);
     let b = wide(&s.net, ZoneKind::Commercial, 22, (4, 4), 1);
-    let (link, _) = lot_spot(&s.net, &b)
+    let (link, _) = lot_spot(&s.net, &b, s.buildings.seed())
         .unwrap()
         .resolve_on(&s.net, LaneMode::Sidewalk)
         .unwrap();
@@ -936,7 +941,7 @@ fn residential_lots_take_only_their_own_residents() {
     let other = s
         .buildings
         .insert(wide(&s.net, ZoneKind::Residential, 8, (1, 1), 1));
-    assert!(s.buildings.get(house).unwrap().parking_spaces() > 0);
+    assert!(s.buildings.parking_spaces(house) > 0);
     let drive = |s: &mut Street, home: Option<BuildingId>| {
         let (net, router) = (&s.net, &mut s.router);
         let id = s
@@ -1319,7 +1324,7 @@ fn cars_waiting_at_the_curb_are_grouped_by_point_with_the_facing_buildings() {
     let now = waits(&s, 0);
     // 向かい合う 2 つの建物は同じ点で、どちらも並ぶ。
     let here = |b: BuildingId| {
-        lot_spot(&s.net, s.buildings.get(b).unwrap())
+        lot_spot(&s.net, s.buildings.get(b).unwrap(), s.buildings.seed())
             .unwrap()
             .world()
     };

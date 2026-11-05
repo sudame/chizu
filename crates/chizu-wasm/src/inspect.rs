@@ -4,7 +4,7 @@
 
 use chizu_core::clock::GAME_SECONDS_PER_TICK;
 use chizu_core::happiness::{commute_time, total};
-use chizu_core::{BuildingId, TilePos, TileRect, World, ZoneKind};
+use chizu_core::{BuildingId, CarPlace, TilePos, TileRect, World, Zone, ZoneKind};
 
 /// 住宅の住民の様子。住民が 1 人もいなければ `None` にする項目が多い。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,7 +25,8 @@ pub struct Residents {
 /// 押された建物の様子。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildingInfo {
-    pub zone: ZoneKind,
+    /// 区画の種類。低密度の住宅は高密度の住宅と別の値になる。
+    pub zone: Zone,
     pub level: u8,
     pub power: bool,
     pub water: bool,
@@ -35,14 +36,45 @@ pub struct BuildingInfo {
     pub occupied: u64,
     /// 住宅だけ。住民がいなければ `None`。
     pub residents: Option<Residents>,
+    /// 住宅だけ。車を置く枠の様子。
+    pub car_places: Option<CarPlaceInfo>,
+}
+
+/// 住宅の車を置く枠の様子。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CarPlaceInfo {
+    /// 建物の駐車場の台数。自宅の枠の数である。
+    pub home_spaces: u64,
+    /// 自宅の枠を持つ世帯の数。
+    pub home: u64,
+    /// 共同の駐車場の枠を借りている世帯の数。
+    pub shared: u64,
+    /// 枠を持たない世帯の数。車を持てない世帯である。
+    pub none: u64,
 }
 
 /// 押された施設の様子。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FacilityInfo {
     pub kind: chizu_core::ServiceKind,
+    /// 電気か水道の供給量。共同の駐車場は 0 である。
     pub capacity: u64,
     pub upkeep_per_day: i64,
+    /// 共同の駐車場だけ。
+    pub parking: Option<ParkingInfo>,
+}
+
+/// 共同の駐車場の埋まり具合。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParkingInfo {
+    /// 台数。
+    pub spaces: u64,
+    /// 世帯に貸した枠の数。
+    pub rented: u64,
+    /// 停まっている車の台数。借りた世帯の車と、借りていない車（外来）の和である。
+    pub parked: u64,
+    /// 外来の車が停まっているか、向かっていて押さえている台数。
+    pub visitors: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,13 +103,23 @@ pub struct Found {
     pub info: Inspected,
 }
 
-fn facility_info(f: &chizu_core::service::Facility) -> Found {
+fn facility_info(world: &World, f: &chizu_core::service::Facility) -> Found {
+    let parking = f.kind.is_parking().then(|| {
+        let lot = world.trips().shared_lot(f.area.min);
+        ParkingInfo {
+            spaces: u64::from(f.kind.parking_spaces()),
+            rented: u64::from(lot.rented),
+            parked: u64::from(lot.rented_parked) + u64::from(lot.visitors.parked),
+            visitors: u64::from(lot.visitors.parked) + u64::from(lot.visitors.reserved),
+        }
+    });
     Found {
         target: Target::Facility(f.area.min),
         info: Inspected::Facility(FacilityInfo {
             kind: f.kind,
             capacity: f.kind.capacity(),
             upkeep_per_day: f.kind.upkeep_per_day().0,
+            parking,
         }),
     }
 }
@@ -98,7 +140,7 @@ pub fn inspect(world: &World, at: TilePos) -> Option<Found> {
         .facilities()
         .iter()
         .find(|f| contains(f.area, at))
-        .map(facility_info)
+        .map(|f| facility_info(world, f))
 }
 
 /// 識別子で調べる。消えていれば `None`。
@@ -109,7 +151,7 @@ pub fn inspect_target(world: &World, target: Target) -> Option<Found> {
             .facilities()
             .iter()
             .find(|f| f.area.min == min)
-            .map(facility_info),
+            .map(|f| facility_info(world, f)),
     }
 }
 
@@ -138,9 +180,10 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
         capacity: 0,
         occupied: 0,
         residents: None,
+        car_places: None,
     };
-    if b.zone != ZoneKind::Residential {
-        info.capacity = b.workplaces_at(world.tax_permille(b.zone));
+    if b.zone.kind() != ZoneKind::Residential {
+        info.capacity = b.workplaces_at(world.tax_permille(b.zone.kind()));
         // 税率を上げた直後は、職の割り当て直しまで勤め人が枠を超えている。枠で頭打ちにして出す。
         info.occupied = (pop
             .citizen_ids()
@@ -154,11 +197,22 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
     let mut sums = [0u64; 3];
     let mut happiness = 0u64;
     let (mut commute_total, mut commuters) = (0u64, 0u64);
+    let mut places = CarPlaceInfo {
+        home_spaces: b.parking_spaces(world.seed()),
+        home: 0,
+        shared: 0,
+        none: 0,
+    };
     for household in pop.household_ids() {
         if pop.home(household).flatten() != Some(id) {
             continue;
         }
         info.occupied += 1;
+        match world.car_places().get(household) {
+            Some(CarPlace::Home) => places.home += 1,
+            Some(CarPlace::Shared(_)) => places.shared += 1,
+            None => places.none += 1,
+        }
         for member in pop.members(household).unwrap_or(&[]) {
             let Some(row) = pop.citizen(*member) else {
                 continue;
@@ -175,6 +229,7 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
             }
         }
     }
+    info.car_places = Some(places);
     if count > 0 {
         info.residents = Some(Residents {
             count,
@@ -188,13 +243,15 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
 }
 
 /// 画面に渡す数の個数。
-pub const INSPECT_LENGTH: usize = 15;
+pub const INSPECT_LENGTH: usize = 19;
 
 /// 数に直す。要素がないものは -1 にする。なければ空の配列。
 ///
 /// 建物：`[1, 区画の種類, 段階, 電気, 水道, 上限, 埋まっている数, 住民の数, 幸福度, 通勤の点数,
-/// 生活サービスの点数, 暮らし向きの点数, 通勤の所要時間（時計の秒）]`。
-/// 施設：`[2, 施設の種類, 供給量, 1 日の維持費, -1, ...]`。
+/// 生活サービスの点数, 暮らし向きの点数, 通勤の所要時間（時計の秒）, 自宅の枠の数, 自宅の枠を持つ世帯,
+/// 共同の駐車場の枠を借りている世帯, 枠を持たない世帯]`。最後の 4 つは住宅だけで、ほかは -1 である。
+/// 施設：`[2, 施設の種類, 供給量, 1 日の維持費, 台数, 貸した枠, 停まっている台数, 外来の車, -1, ...]`。
+/// 台数からあとの 4 つは共同の駐車場だけで、ほかの施設は -1 である。
 /// どちらも最後の 2 つは識別子の a と b で、建物なら ID の添え字と世代、施設なら min のマスの x と y である。
 /// 先頭の値が識別子の種類を兼ねる。
 pub fn encode(found: Option<Found>) -> Vec<f64> {
@@ -214,6 +271,14 @@ pub fn encode(found: Option<Found>) -> Vec<f64> {
             out[1] = f64::from(f.kind as u8);
             out[2] = f.capacity as f64;
             out[3] = f.upkeep_per_day as f64;
+            if let Some(p) = f.parking {
+                out[4..8].copy_from_slice(&[
+                    p.spaces as f64,
+                    p.rented as f64,
+                    p.parked as f64,
+                    p.visitors as f64,
+                ]);
+            }
         }
         Inspected::Building(b) => {
             out[..7].copy_from_slice(&[
@@ -234,8 +299,16 @@ pub fn encode(found: Option<Found>) -> Vec<f64> {
                 if let Some(s) = r.commute_seconds {
                     out[12] = s as f64;
                 }
-            } else if b.zone == ZoneKind::Residential {
+            } else if b.zone.kind() == ZoneKind::Residential {
                 out[7] = 0.0;
+            }
+            if let Some(c) = b.car_places {
+                out[13..17].copy_from_slice(&[
+                    c.home_spaces as f64,
+                    c.home as f64,
+                    c.shared as f64,
+                    c.none as f64,
+                ]);
             }
         }
     }
@@ -247,7 +320,7 @@ mod tests {
     use super::*;
     use crate::sim::Sim;
     use chizu_core::world::growth::GROWTH_INTERVAL;
-    use chizu_core::{CitizenRow, Command, RoadKind, ServiceKind, TICKS_PER_DAY};
+    use chizu_core::{CitizenRow, Command, RoadKind, ServiceKind, TICKS_PER_DAY, Zone};
 
     fn road(from: (i64, i64), to: (i64, i64)) -> Command {
         Command::BuildRoad {
@@ -260,13 +333,18 @@ mod tests {
     fn paint(sim: &mut Sim, x: (i64, i64), zone: ZoneKind) {
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(x.0, 11), TilePos::new(x.1, 15)),
-            zone: Some(zone),
+            zone: Some(Zone::from(zone)),
         })
         .unwrap();
     }
 
     /// 外の世界とつながった道路の南側に住宅を塗り、発電所と浄水場を置いた街。商業を塗るかは選べる。
     fn new_town(commercial: bool) -> Sim {
+        new_town_with(Zone::Residential, commercial)
+    }
+
+    /// [`new_town`] の、住宅の区画を選べる版。
+    fn new_town_with(home: Zone, commercial: bool) -> Sim {
         let mut sim = Sim::new(0);
         sim.submit(road((10, 10), (30, 10))).unwrap();
         let inner = chizu_core::world::highway_line(0).start;
@@ -287,7 +365,11 @@ mod tests {
             })
             .unwrap();
         }
-        paint(&mut sim, (10, 20), ZoneKind::Residential);
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(20, 15)),
+            zone: Some(home),
+        })
+        .unwrap();
         if commercial {
             paint(&mut sim, (21, 30), ZoneKind::Commercial);
         }
@@ -326,7 +408,7 @@ mod tests {
         world
             .buildings()
             .iter()
-            .filter(|(_, b)| b.zone == ZoneKind::Residential)
+            .filter(|(_, b)| b.zone == Zone::Residential)
             .map(|(id, _)| id)
             .collect()
     }
@@ -336,6 +418,27 @@ mod tests {
         pop.household_ids()
             .filter(|h| pop.home(*h).flatten() == Some(id))
             .count() as u64
+    }
+
+    /// 検査の答えの区画は `Zone` の値で送り、低密度の住宅（5）を高密度の住宅（1）と見分けさせる。
+    #[test]
+    fn a_home_reports_its_density_in_the_zone_code() {
+        for (zone, code) in [(Zone::ResidentialLow, 5.0), (Zone::Residential, 1.0)] {
+            let mut sim = new_town_with(zone, false);
+            sim.advance((TICKS_PER_DAY * 3) as u32);
+            let world = sim.world();
+            let (id, _) = world
+                .buildings()
+                .iter()
+                .find(|(_, b)| b.zone == zone)
+                .expect("住宅が建たない");
+            let (_, info) = building(world, area_min(world, id));
+            assert_eq!(info.zone, zone);
+            let encoded = encode(inspect(world, area_min(world, id)));
+            assert_eq!(encoded[1], code);
+            // 低密度でも住宅なので、世帯の欄が出る
+            assert!(info.capacity > 0);
+        }
     }
 
     #[test]
@@ -471,7 +574,7 @@ mod tests {
         let (id, _) = world
             .buildings()
             .iter()
-            .find(|(_, b)| b.zone == ZoneKind::Commercial)
+            .find(|(_, b)| b.zone == Zone::Commercial)
             .expect("商業が建たない");
         let (_, info) = building(world, area_min(world, id));
         let workers = pop
@@ -516,5 +619,81 @@ mod tests {
             decode_target(2.0, -3.0, 4.0),
             Some(Target::Facility(TilePos::new(-3, 4)))
         );
+    }
+
+    /// 住宅は、自宅の枠の数と、枠を持つ世帯、共同の駐車場を借りた世帯、枠のない世帯の数を出す。
+    /// 数はどれも、世帯ごとの枠から数えた値と合う。
+    #[test]
+    fn a_home_shows_how_its_households_keep_cars() {
+        let (mut sim, _guard) = crate::test_town::carless_town(2);
+        let world = sim.world();
+        let id = homes(world)
+            .into_iter()
+            .max_by_key(|id| households_in(world, *id))
+            .expect("住宅が建たない");
+        let at = area_min(world, id);
+        let (_, info) = building(world, at);
+        let places = info.car_places.expect("住宅の枠の様子がない");
+        let spaces = world.buildings().parking_spaces(id);
+        assert!(info.occupied > 0 && spaces > 0);
+        assert_eq!(
+            places.home_spaces, spaces,
+            "自宅の枠の数は建物の駐車場の台数"
+        );
+        // 自宅の枠を 0 にしてあるので、枠のない世帯が車を持てない
+        assert_eq!(
+            (places.home, places.shared, places.none),
+            (0, 0, info.occupied)
+        );
+        let out = encode(inspect(world, at));
+        assert_eq!(out[13..17], [spaces as f64, 0.0, 0.0, info.occupied as f64]);
+
+        // 駐車場を置いて次の決め直しを過ぎると、借りた世帯は枠を持つ側に移る
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
+        sim.advance(chizu_core::world::people::MIGRATION_INTERVAL as u32);
+        let world = sim.world();
+        let (mut shared, mut none, mut housed) = (0, 0, 0);
+        for id in homes(world) {
+            let (_, info) = building(world, area_min(world, id));
+            let p = info.car_places.unwrap();
+            assert_eq!(p.home + p.shared + p.none, info.occupied);
+            shared += p.shared;
+            none += p.none;
+            housed += info.occupied;
+        }
+        assert_eq!(shared, 12);
+        assert_eq!(none + shared, housed);
+    }
+
+    /// 共同の駐車場は、供給量ではなく、台数と貸した枠、停まっている台数を出す。
+    #[test]
+    fn a_shared_lot_shows_spaces_rented_and_parked() {
+        let (mut sim, _guard) = crate::test_town::carless_town(1);
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
+        sim.advance(TICKS_PER_DAY as u32);
+        let found = sim.inspect(TilePos::new(24, 9));
+        let kind = ServiceKind::ParkingLot;
+        assert_eq!(found.len(), INSPECT_LENGTH);
+        let lot = sim.world().trips().shared_lot(TilePos::new(23, 8));
+        assert_eq!(lot.rented, 12, "枠がすべて借りられていない");
+        let parked = f64::from(lot.rented_parked + lot.visitors.parked);
+        let visitors = f64::from(lot.visitors.parked + lot.visitors.reserved);
+        assert_eq!(
+            found[..8],
+            [
+                2.0,
+                f64::from(kind as u8),
+                0.0,
+                kind.upkeep_per_day().0 as f64,
+                12.0,
+                12.0,
+                parked,
+                visitors
+            ]
+        );
+        // 発電所は、供給量を出し、台数の欄は空
+        let plant = sim.inspect(TilePos::new(16, 8));
+        assert_eq!(plant[2], ServiceKind::PowerPlant.capacity() as f64);
+        assert_eq!(plant[4..8], [-1.0; 4]);
     }
 }

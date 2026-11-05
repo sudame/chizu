@@ -529,6 +529,41 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
         }
     }
     assert_eq!(o["parking"]["households"]["shared"], 0);
+    // 世帯がいないので、車を持てない世帯も、世帯の多い所もない。理由の欄はそろっている
+    assert_eq!(o["parking"]["households"]["none"], 0);
+    let reasons = &o["parking"]["households"]["noneReasons"];
+    for k in [
+        "noLotInRange",
+        "full",
+        "feeTooHigh",
+        "waiting",
+        "lotNotOnRoad",
+    ] {
+        assert_eq!(reasons[k], 0, "{k}");
+    }
+    assert_eq!(o["parking"]["carlessAreas"], serde_json::json!([]));
+    // 駐車場の層では、埋まり具合の文字（借りられた枠がなければ半分に満たない -）で出る
+    let layer = cli(&[
+        "agent", "map", d, "9", "-2", "18", "2", "--layer", "parking",
+    ]);
+    assert_eq!(
+        grid_rows(&layer, 5, 10),
+        [
+            "----......",
+            "----......",
+            "2222222222",
+            "rrrrrrrr--",
+            "rrrrrrrr--"
+        ],
+        "{layer}"
+    );
+    assert!(
+        layer.contains("- + # X  共同の駐車場の埋まり具合"),
+        "{layer}"
+    );
+    assert!(!layer.contains("L 平面の共同の駐車場"), "{layer}");
+    let err = cli_fails(&["agent", "map", d, "9", "-2", "18", "2", "--layer", "power"]);
+    assert!(err.contains("traffic か parking"), "{err}");
     assert_eq!(o["facilities"]["ParkingLot"], 1);
     assert_eq!(o["facilities"]["ParkingGarage"], 1);
     let upkeep = &o["financesPerDay"]["facilityUpkeep"];
@@ -655,12 +690,16 @@ fn observe_gives_people_and_traffic_counts() {
     assert!(n(&time["measured"]) <= n(&time["commuters"]));
     assert!(n(&time["medianMinutes"]) <= n(&time["p90Minutes"]));
     assert!(n(&time["overHour"]) <= n(&time["commuters"]));
-    // いまの台数では、家のある世帯はみな自宅の枠を持ち、枠がなくて歩いた移動もない。
+    // 共同の駐車場のない街では、自宅の枠のない世帯は車を持てず、どの移動も歩く。
     let households = &o["parking"]["households"];
     assert!(n(&households["home"]) > 0, "自宅の枠を持つ世帯がいない");
-    assert!(n(&households["home"]) <= n(&o["population"]["households"]));
-    assert_eq!(n(&households["none"]), 0);
-    assert_eq!(n(&o["parking"]["noPlace"]), 0);
+    assert!(n(&households["none"]) > 0, "自宅の枠のない世帯がいない");
+    assert_eq!(n(&households["shared"]), 0);
+    assert!(n(&households["home"]) + n(&households["none"]) <= n(&o["population"]["households"]));
+    assert!(
+        n(&o["parking"]["noPlace"]) > 0,
+        "枠がなくて歩いた移動がない"
+    );
     let parts = &o["population"]["happinessParts"];
     for k in ["commute", "services", "wealth"] {
         assert!(n(&parts[k]) <= 100, "{k}");
@@ -1800,4 +1839,56 @@ fn paint_zone_counts_same_zone_tiles_alike_whether_empty_or_built() {
     assert_eq!(r["reason"], "ZoneUnchanged", "{r}");
     assert_eq!(r["paint"]["unpainted"]["total"], 0, "{r}");
     assert_eq!(r["paint"]["painted"], 4 * 6, "{r}");
+}
+
+/// 低密度の住宅を塗ると、observe が密度ごとに数え、map が D と d で出す。
+#[test]
+fn low_density_homes_show_in_observe_and_map() {
+    let dir = session("agent-low-density");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "42"]);
+    let highway = json(&cli(&["agent", "observe", d]))["highway"]["end"].clone();
+    let [x, y] = [highway[0].as_i64().unwrap(), highway[1].as_i64().unwrap()];
+    let cmds = write(
+        &dir.join("low.json"),
+        &serde_json::json!([
+            {"type":"BuildRoad","from":[x,y],"to":[x+40,y],"kind":"Medium"},
+            {"type":"PaintZone","area":[[x+1,y+1],[x+40,y+6]],"zone":"ResidentialLow"},
+            {"type":"PaintZone","area":[[x+1,y-6],[x+40,y-1]],"zone":"Commercial"},
+        ])
+        .to_string(),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    for r in acted["results"].as_array().unwrap() {
+        assert_eq!(r["outcome"], "Applied", "{acted}");
+    }
+    cli(&["agent", "advance", d, "3000"]);
+    let seen = json(&cli(&["agent", "observe", d]));
+    let density = &seen["buildings"]["residentialByDensity"];
+    assert!(density["low"]["buildings"].as_u64().unwrap() > 0, "{seen}");
+    assert_eq!(density["high"]["buildings"], 0, "{seen}");
+    assert_eq!(
+        density["low"]["buildings"],
+        seen["buildings"]["byZone"]["Residential"]
+    );
+    assert!(density["low"]["households"].as_u64().unwrap() > 0, "{seen}");
+    let tiles = &seen["zoneTiles"];
+    assert_eq!(tiles["ResidentialLow"]["painted"], 40 * 6, "{seen}");
+    assert_eq!(tiles["Residential"]["painted"], 0, "{seen}");
+    assert!(
+        tiles["ResidentialLow"]["empty"].as_u64().unwrap() < 40 * 6,
+        "{seen}"
+    );
+    let (x0, x1) = ((x + 1).to_string(), (x + 40).to_string());
+    let (y0, y1) = ((y + 1).to_string(), (y + 6).to_string());
+    let map = cli(&["agent", "map", d, &x0, &y0, &x1, &y1]);
+    // 行頭に y の目盛りのある行だけを見る。凡例にも R と D の文字がある。
+    let body: String = map
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter(|(y, _)| y.parse::<i64>().is_ok())
+        .map(|(_, row)| row)
+        .collect();
+    assert!(body.contains('D') || body.contains('d'), "{map}");
+    assert!(!body.contains('R') && !body.contains('r'), "{map}");
 }

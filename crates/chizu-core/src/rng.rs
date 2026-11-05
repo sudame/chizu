@@ -35,6 +35,8 @@ pub enum RngPurpose {
     CarOwnership = 9,
     /// 費用の同じ経路から 1 本を選ぶ順。
     RouteVariant = 10,
+    /// 狭い戸建てが自宅の駐車場を持つか。
+    HomeParking = 11,
 }
 
 pub(crate) const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;

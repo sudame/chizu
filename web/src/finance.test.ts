@@ -15,8 +15,8 @@ import {
 } from "./finance.ts";
 import { FINANCE_LENGTH, isWorkerToMain } from "./protocol/messages.ts";
 
-// 税率の上限、税率 4 つ、税収 4 つ、道路、発電所、浄水場
-const SAMPLE = [300, 100, 120, 100, 0, 1_000, 400, 300, 0, 180, 1_200, 0];
+// 税率の上限、税率 4 つ、税収 4 つ、道路、発電所、浄水場、駐車場
+const SAMPLE = [300, 100, 120, 100, 0, 1_000, 400, 300, 0, 180, 1_200, 0, 96];
 
 describe("parseFinance", () => {
   it("長さの違う配列は読まない", () => {
@@ -33,15 +33,16 @@ describe("parseFinance", () => {
       roadUpkeep: 180,
       powerUpkeep: 1_200,
       waterUpkeep: 0,
+      parkingUpkeep: 96,
       income: 1_700,
-      expenses: 1_380,
-      net: 320,
+      expenses: 1_476,
+      net: 224,
     });
   });
 
   it("支出が収入を上回れば赤字", () => {
-    const deficit = parseFinance([300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0]);
-    expect(deficit?.net).toBe(-1_380);
+    const deficit = parseFinance([300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0, 96]);
+    expect(deficit?.net).toBe(-1_476);
     expect(deficit !== null && isDeficit(deficit)).toBe(true);
     const f = parseFinance(SAMPLE);
     expect(f !== null && isDeficit(f)).toBe(false);
@@ -66,15 +67,15 @@ describe("文言と数字の整形", () => {
   it("見出しと所持金の横の文は、赤字のときだけそれを示す", () => {
     expect(summaryText(null)).toBe("収支");
     const surplus = parseFinance(SAMPLE);
-    expect(summaryText(surplus)).toBe("収支 +320 / 日");
+    expect(summaryText(surplus)).toBe("収支 +224 / 日");
     expect(deficitNote(surplus)).toBe("");
     expect(deficitNote(null)).toBe("");
-    const deficit = parseFinance([300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0]);
-    expect(summaryText(deficit)).toBe("収支 -1,380 / 日（赤字）");
-    expect(deficitNote(deficit)).toBe("赤字 -1,380 / 日");
+    const deficit = parseFinance([300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0, 96]);
+    expect(summaryText(deficit)).toBe("収支 -1,476 / 日（赤字）");
+    expect(deficitNote(deficit)).toBe("赤字 -1,476 / 日");
     // 上の帯には、黒字でも 1 日あたりの収支を出す
-    expect(balanceNote(surplus)).toBe("+320 / 日");
-    expect(balanceNote(deficit)).toBe("赤字 -1,380 / 日");
+    expect(balanceNote(surplus)).toBe("+224 / 日");
+    expect(balanceNote(deficit)).toBe("赤字 -1,476 / 日");
     expect(balanceNote(null)).toBe("");
   });
 
@@ -95,8 +96,9 @@ describe("文言と数字の整形", () => {
       { label: "道路の維持費", value: "-180" },
       { label: "発電所の維持費", value: "-1,200" },
       { label: "浄水場の維持費", value: "0" },
+      { label: "駐車場の維持費", value: "-96" },
     ]);
-    expect(rows.net).toEqual({ label: "差し引き", value: "+320" });
+    expect(rows.net).toEqual({ label: "差し引き", value: "+224" });
   });
 });
 

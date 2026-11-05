@@ -10,7 +10,7 @@ use crate::service::Facility;
 
 use crate::chunk::{Chunk, Layer, TileUse};
 use crate::citizens::{CitizenChange, CitizenRow, Population};
-use crate::command::{Command, RoadKind, SimSpeed, ZoneKind};
+use crate::command::{Command, RoadKind, SimSpeed, Zone, ZoneKind};
 use crate::happiness::{CitizenContext, update_citizen};
 use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
@@ -184,6 +184,7 @@ pub struct World {
     router: RouterSlot,
 }
 
+pub mod carless;
 mod commute;
 pub mod economy;
 mod errand;
@@ -296,7 +297,7 @@ impl World {
             network,
             population: Population::default(),
             car_places: CarPlaces::default(),
-            buildings: Buildings::default(),
+            buildings: Buildings::with_seed(seed),
             facilities: Vec::new(),
             supply_dirty: false,
             lots: Default::default(),
@@ -349,14 +350,14 @@ impl World {
     }
 
     /// マスの区画。メモリにないチャンクのマスは `None` である。
-    pub fn zone_at(&self, t: TilePos) -> Option<ZoneKind> {
+    pub fn zone_at(&self, t: TilePos) -> Option<Zone> {
         let chunk = self.chunks.get(&t.chunk()?)?;
         let (lx, ly) = t.local();
         chunk.layer(Layer::Ground)?.zone[local_index(lx, ly)]
     }
 
     /// 区画の表をまとめて書き換え、変えたチャンクの版を上げる。
-    fn write_zones(&mut self, edits: BTreeMap<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>) {
+    fn write_zones(&mut self, edits: BTreeMap<ChunkCoord, Vec<(usize, Option<Zone>)>>) {
         let touched = World::edited_tiles(&edits);
         for (coord, list) in edits {
             let chunk = self.chunks.get_mut(&coord).expect("チャンクがない");
@@ -377,11 +378,11 @@ impl World {
     /// それ以外（道路を除く）のマスより多ければ [`DenyReason::Occupied`]、そうでなければ [`DenyReason::NoZonableTile`] である。
     /// 同じ区画がすでに載ったマスは、空きでも建物が建っていても、塗れたものとして同じに数える。
     /// 塗れなかったマス（道路を除く）が 1 つもなければ [`DenyReason::ZoneUnchanged`] である。
-    fn paint_zone(&mut self, area: TileRect, zone: Option<ZoneKind>) -> ApplyOutcome {
+    fn paint_zone(&mut self, area: TileRect, zone: Option<Zone>) -> ApplyOutcome {
         // 塗れるのは、建物の建ちうるマス（道路に面した間口から奥へ途切れずに続くマス）だけである。
         // 道路から奥行きの範囲にあっても、間口との間に塗れないマスを挟んで切れたマスは塗らない。
         let near = zone.map(|z| self.buildable_mask(area, Some(z)));
-        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
+        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<Zone>)>>::new();
         // 塗れなかったマスのうち、建物か施設のマスと、道路でも建物でもないマスの数。
         let mut unpainted = false;
         let mut partly = false;
@@ -449,7 +450,7 @@ impl World {
     /// 長方形の中で、道路から奥行きの範囲を外れた区画を消す。
     fn prune_zones(&mut self, area: TileRect) {
         let near = near_road(&self.network, area);
-        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<ZoneKind>)>>::new();
+        let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, Option<Zone>)>>::new();
         for (i, t) in tiles_of(area).enumerate() {
             if near[i] || self.zone_at(t).is_none() {
                 continue;
@@ -613,6 +614,11 @@ impl World {
 
     pub fn seed(&self) -> u64 {
         self.seed
+    }
+
+    /// 書き出しに入れない、種から写した値を作り直す。書き出しから読み戻したあとに呼ぶ。
+    pub(crate) fn restore_derived(&mut self) {
+        self.buildings.set_seed(self.seed);
     }
 
     /// 次に進める tick。これまでに進めた tick 数でもある。
@@ -1350,7 +1356,10 @@ mod tests {
 
     fn paint(w: &mut World, a: (i64, i64), b: (i64, i64), zone: Option<ZoneKind>) -> ApplyOutcome {
         let area = TileRect::from_corners(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1));
-        w.apply(&Command::PaintZone { area, zone })
+        w.apply(&Command::PaintZone {
+            area,
+            zone: zone.map(Zone::from),
+        })
     }
 
     #[test]
@@ -1370,8 +1379,8 @@ mod tests {
             "道路から 6 マスを超えた奥は塗れない"
         );
         assert_eq!(w.chunk(origin).unwrap().version(), v + 1);
-        assert_eq!(w.zone_at(TilePos::new(5, 6)), res);
-        assert_eq!(w.zone_at(TilePos::new(10, 6)), res);
+        assert_eq!(w.zone_at(TilePos::new(5, 6)), res.map(Zone::from));
+        assert_eq!(w.zone_at(TilePos::new(10, 6)), res.map(Zone::from));
         assert_eq!(w.zone_at(TilePos::new(5, 7)), None);
         assert_eq!(
             w.zone_at(TilePos::new(5, 0)),
@@ -1389,7 +1398,7 @@ mod tests {
         // 消す。
         assert_eq!(paint(&mut w, (0, 1), (1, 6), None), ApplyOutcome::Applied);
         assert_eq!(w.zone_at(TilePos::new(0, 1)), None);
-        assert_eq!(w.zone_at(TilePos::new(2, 1)), res);
+        assert_eq!(w.zone_at(TilePos::new(2, 1)), res.map(Zone::from));
         assert_eq!(
             paint(&mut w, (0, 1), (1, 6), None),
             ApplyOutcome::Denied(DenyReason::ZoneUnchanged)
@@ -1405,7 +1414,7 @@ mod tests {
             ApplyOutcome::AppliedPartly(DenyReason::NoZonableTile),
             "買っていない土地や水辺は塗れない"
         );
-        assert_eq!(w.zone_at(TilePos::new(127, 1)), Some(ZoneKind::Office));
+        assert_eq!(w.zone_at(TilePos::new(127, 1)), Some(Zone::Office));
         assert_eq!(w.zone_at(TilePos::new(128, 1)), None);
         // 水辺は is_buildable と同じ判定で弾く。
         assert!(w.check_buildable(TilePos::new(128, 1)).is_err());
@@ -1423,8 +1432,8 @@ mod tests {
         // 消した道路にだけ面していたマスは消え、残った道路にも面するマスは残る。
         assert_eq!(w.zone_at(TilePos::new(5, -3)), None);
         assert_eq!(w.zone_at(TilePos::new(5, 3)), None);
-        assert_eq!(w.zone_at(TilePos::new(5, 4)), res);
-        assert_eq!(w.zone_at(TilePos::new(5, 14)), res);
+        assert_eq!(w.zone_at(TilePos::new(5, 4)), res.map(Zone::from));
+        assert_eq!(w.zone_at(TilePos::new(5, 14)), res.map(Zone::from));
     }
 
     #[test]

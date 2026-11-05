@@ -19,7 +19,7 @@ import type {
   Outcome,
   WorkerToMain,
 } from "./protocol/messages.ts";
-import { OVERVIEW_LENGTH } from "./protocol/messages.ts";
+import { isParking, OVERVIEW_LENGTH, serviceCode } from "./protocol/messages.ts";
 import { layout } from "./protocol/snapshot.ts";
 import { startSimulation } from "./save/worker-side.ts";
 import { stepBudget, tickRate } from "./speed.ts";
@@ -215,6 +215,7 @@ function sendOverview(sim: Simulation, now: number, paused: boolean, force = fal
     isolated: [...sim.isolated_facilities()],
     lotShortage: [...sim.lot_shortage()],
     parkingShortage: [...sim.parking_shortage()],
+    carless: [...sim.carless()],
     tick: sim.current_tick(),
   });
 }
@@ -321,9 +322,11 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         break;
       case "probe-service": {
         const { service, x, y } = message;
-        const code = service === "PowerPlant" ? 1 : 2;
+        const code = serviceCode(service);
         const results = [...sim.service_probe(code, x, y)] as (string | null)[];
-        reply({ kind: "service-probe", service, x, y, results });
+        // 共同の駐車場は、届く範囲の中の車を持てない世帯の数も添える
+        const carless = isParking(service) ? sim.carless_in_range(x, y) : 0;
+        reply({ kind: "service-probe", service, x, y, results, carless });
         break;
       }
       case "inspect": {

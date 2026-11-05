@@ -16,8 +16,8 @@ use chizu_core::movement::signal;
 use chizu_core::{
     Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, Heading, HouseholdCar,
     LaneMode, LaneOffset, Money, RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind,
-    SidewalkPos, SimSpeed, StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, ZoneKind,
-    replay, rng,
+    SidewalkPos, SimSpeed, StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, Zone,
+    ZoneKind, replay, rng,
 };
 
 /// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
@@ -218,13 +218,10 @@ fn zoning() -> CommandLog {
     };
     rec(10, road((0, 0), (30, 0)));
     rec(10, road((0, 12), (30, 12)));
-    rec(20, paint((0, -6), (30, 18), Some(ZoneKind::Residential)));
-    rec(20, paint((0, -6), (30, -1), Some(ZoneKind::Office)));
-    rec(
-        30,
-        paint((100, 100), (110, 110), Some(ZoneKind::Commercial)),
-    );
-    rec(30, paint((0, -6), (30, -1), Some(ZoneKind::Office)));
+    rec(20, paint((0, -6), (30, 18), Some(Zone::Residential)));
+    rec(20, paint((0, -6), (30, -1), Some(Zone::Office)));
+    rec(30, paint((100, 100), (110, 110), Some(Zone::Commercial)));
+    rec(30, paint((0, -6), (30, -1), Some(Zone::Office)));
     rec(40, paint((0, 1), (5, 5), None));
     rec(
         100,
@@ -284,7 +281,7 @@ fn growth() -> CommandLog {
             2,
             Command::PaintZone {
                 area,
-                zone: Some(zone),
+                zone: Some(Zone::from(zone)),
             },
         );
     }
@@ -330,8 +327,14 @@ fn long_run() -> CommandLog {
         (2 * TICKS_PER_DAY, None),
         (3 * TICKS_PER_DAY + 600, Some(ZoneKind::Residential)),
     ] {
-        log.record(Tick(tick), Command::PaintZone { area, zone })
-            .unwrap();
+        log.record(
+            Tick(tick),
+            Command::PaintZone {
+                area,
+                zone: zone.map(Zone::from),
+            },
+        )
+        .unwrap();
     }
     log
 }
@@ -396,7 +399,7 @@ fn utilities() -> CommandLog {
                 t + 1,
                 Command::PaintZone {
                     area,
-                    zone: Some(zone),
+                    zone: Some(Zone::from(zone)),
                 },
             );
         }
@@ -465,7 +468,7 @@ fn commute() -> CommandLog {
             2,
             Command::PaintZone {
                 area,
-                zone: Some(zone),
+                zone: Some(Zone::from(zone)),
             },
         );
     }
@@ -715,7 +718,7 @@ fn errand() -> CommandLog {
         Tick(3),
         Command::PaintZone {
             area,
-            zone: Some(ZoneKind::Commercial),
+            zone: Some(Zone::Commercial),
         },
     )
     .unwrap();
@@ -974,7 +977,7 @@ fn street_city() -> CommandLog {
             2,
             Command::PaintZone {
                 area,
-                zone: Some(zone),
+                zone: Some(Zone::from(zone)),
             },
         );
     }
@@ -1049,7 +1052,7 @@ fn clock_and_commands() -> CommandLog {
         0,
         Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(0, 1), TilePos::new(20, 4)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         },
     );
     rec(30, tax(ZoneKind::Residential, 120));
@@ -1176,12 +1179,12 @@ fn zoning_covers_the_rules() {
         ],
     );
     let zone = |x, y| world.zone_at(TilePos::new(x, y));
-    assert_eq!(zone(10, -3), Some(ZoneKind::Office));
-    assert_eq!(zone(10, 3), Some(ZoneKind::Residential));
+    assert_eq!(zone(10, -3), Some(Zone::Office));
+    assert_eq!(zone(10, 3), Some(Zone::Residential));
     assert_eq!(zone(3, 3), None);
     // 消した道路にだけ面していたマスは消え、残った下の道路に面するマスは残る。
     assert_eq!(zone(10, 15), None);
-    assert_eq!(zone(10, 6), Some(ZoneKind::Residential));
+    assert_eq!(zone(10, 6), Some(Zone::Residential));
 }
 
 /// 建物の記録が、4 種類の区画に建ち、道路を消すと消えることを確かめる。
@@ -1193,8 +1196,12 @@ fn growth_builds_every_zone_and_removes_with_the_road() {
         .unwrap();
     let mut world = World::new(s.seed);
     replay(&mut world, &s.log, 1_799);
-    let count =
-        |w: &World, zone: ZoneKind| w.buildings().iter().filter(|(_, b)| b.zone == zone).count();
+    let count = |w: &World, zone: ZoneKind| {
+        w.buildings()
+            .iter()
+            .filter(|(_, b)| b.zone == Zone::from(zone))
+            .count()
+    };
     for zone in ZoneKind::ALL {
         assert!(count(&world, zone) > 0, "{zone:?} の建物が建たない");
     }
@@ -1566,7 +1573,7 @@ fn driving_checkpoints_on(log: &CommandLog, seed: u64, ticks: u64) -> (String, u
                 .buildings()
                 .get(id)
                 .expect("消えた建物に駐車場が残った");
-            assert!(u64::from(lot.parked + lot.reserved) <= b.parking_spaces());
+            assert!(u64::from(lot.parked + lot.reserved) <= b.parking_spaces(world.seed()));
             assert_eq!(lot.reserved, heading.remove(&id).unwrap_or(0), "{id:?}");
         }
         assert!(
@@ -1643,7 +1650,7 @@ fn mixed_grid_city(east_west: RoadKind, north_south: RoadKind) -> CommandLog {
                 2,
                 Command::PaintZone {
                     area,
-                    zone: Some(zone),
+                    zone: Some(Zone::from(zone)),
                 },
             );
         }

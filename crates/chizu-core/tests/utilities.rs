@@ -1,7 +1,7 @@
 //! 電気と水道の釣り合いを、街を育てて確かめる。
 
 use chizu_core::clock::TICKS_PER_DAY;
-use chizu_core::command::{Command, RoadKind, ServiceKind, ZoneKind};
+use chizu_core::command::{Command, RoadKind, ServiceKind, Zone, ZoneKind};
 use chizu_core::service::building_demand;
 use chizu_core::tile::{TilePos, TileRect};
 use chizu_core::units::Money;
@@ -50,7 +50,7 @@ fn town() -> World {
             &mut w,
             Command::PaintZone {
                 area,
-                zone: Some(zone),
+                zone: Some(Zone::from(zone)),
             },
         );
     }

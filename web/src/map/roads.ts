@@ -248,6 +248,9 @@ const corners = (sides: number) =>
   });
 const DISC_CORNERS = corners(DISC_SIDES);
 const HEX_CORNERS = corners(6);
+// 施設の届く範囲の円を描く正多角形の辺の数。半径 32 マスでも角が目立たない
+const CIRCLE_SIDES = 64;
+const CIRCLE_CORNERS = corners(CIRCLE_SIDES);
 
 /** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
 export class Geometry {
@@ -419,6 +422,29 @@ export class Geometry {
     }
   }
 
+  /**
+   * ワールド座標 (x, y) を中心にした、半径 `radius`（マス）の円。`fill` で塗り、縁を `edge` の画面で `edgePx` ピクセルの線で引く。
+   * 施設の届く範囲を見せるのに使う。縁は塗りの外にはみ出さず、半径の上に引く。
+   */
+  circle(x: number, y: number, radius: number, fill: Color, edge: Color, edgePx: number): void {
+    for (let k = 0; k < CIRCLE_SIDES; k++) {
+      const [c0, s0] = CIRCLE_CORNERS[k] ?? [1, 0];
+      const [c1, s1] = CIRCLE_CORNERS[k + 1] ?? [1, 0];
+      this.#vertex(x, y, 0, 0, radius, 0, fill);
+      this.#vertex(x, y, c0, s0, radius, 0, fill);
+      this.#vertex(x, y, c1, s1, radius, 0, fill);
+      this.line(
+        x + c0 * radius,
+        y + s0 * radius,
+        x + c1 * radius,
+        y + s1 * radius,
+        0,
+        edge,
+        edgePx / 2,
+      );
+    }
+  }
+
   /** 角のマスを両端に含む長方形。inset（マス）だけ内側に縮める。 */
   rect(min: Tile, max: Tile, color: Color, inset = 0): void {
     this.box(min.x + inset, min.y + inset, max.x + 1 - inset, max.y + 1 - inset, color);
@@ -527,6 +553,14 @@ export const ZONE_COLORS: Record<number, ZoneColors> = {
     block: hex("#b3dade"),
     building: hex("#c2e0e3"),
     edge: hex("#84bbc1"),
+  },
+  // 低密度の住宅。高密度の緑より黄に寄せ、工業の黄とは取り違えない淡い黄緑にする
+  5: {
+    ground: hex("#f0f5d6"),
+    blockEmpty: hex("#e7efc3"),
+    block: hex("#d6e59c"),
+    building: hex("#dce8ad"),
+    edge: hex("#a9c24f"),
   },
 };
 const UNKNOWN_ZONE: ZoneColors = {

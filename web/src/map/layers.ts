@@ -36,6 +36,13 @@ export const THEME_COLORS = {
   enoughRoad: hex("#1a73e8"),
   shortRoad: hex("#f29900"),
   unconnectedRoad: hex("#9aa0a6"),
+  // 駐車場の主題図。車を持てない世帯の家は赤の面に斜線、共同の駐車場は埋まり具合を青の濃さの 4 段で示す
+  carlessHome: hex("#f28b82"),
+  carlessHatch: hex("#d93025"),
+  lotFree: hex("#a8c7fa"),
+  lotBusy: hex("#669df6"),
+  lotNearlyFull: hex("#1a73e8"),
+  lotFull: hex("#174ea6"),
 } as const;
 
 /** 電気、水道、需要の主題図を出すあいだ、下の地図をこの割合だけ白で薄める。 */
@@ -72,10 +79,35 @@ export const TRAFFIC_LEVELS: readonly { label: string; color: Color }[] = [
 /** 交通のレイヤーの番号。chizu-wasm の layers::LAYERS の 3 番めである。交通は線で描くので、ここの面では塗らない。 */
 export const TRAFFIC_LAYER: LayerCode = 3;
 
-/** マスの面で塗るデータレイヤー（電気と水道）。 */
+/** 駐車場の値の塗り方。値は chizu-wasm の layers::PARKING_CARLESS_HOME などと同じ並び。 */
+const PARKING_STYLES: readonly ValueStyle[] = [
+  { kind: "none" },
+  { kind: "hatch", color: THEME_COLORS.carlessHome, accent: THEME_COLORS.carlessHatch },
+  { kind: "fill", color: THEME_COLORS.lotFree },
+  { kind: "fill", color: THEME_COLORS.lotBusy },
+  { kind: "fill", color: THEME_COLORS.lotNearlyFull },
+  { kind: "fill", color: THEME_COLORS.lotFull },
+];
+
+/**
+ * 共同の駐車場の埋まり具合の段階と凡例の名前。値は chizu-wasm の layers::PARKING_LOT_FREE などと同じ並びで、
+ * 台数に対する、借りられた枠と外来の車の割合である。
+ */
+export const PARKING_LOT_LEVELS: readonly { label: string; color: Color }[] = [
+  { label: "半分に満たない", color: THEME_COLORS.lotFree },
+  { label: "半分以上", color: THEME_COLORS.lotBusy },
+  { label: "8 割以上", color: THEME_COLORS.lotNearlyFull },
+  { label: "満車", color: THEME_COLORS.lotFull },
+];
+
+/** 駐車場のレイヤーの番号。chizu-wasm の layers::LAYERS の 4 番めである。 */
+export const PARKING_LAYER: LayerCode = 4;
+
+/** マスの面で塗るデータレイヤー（電気、水道、駐車場）。 */
 export const DATA_LAYERS: readonly DataLayer[] = [
   { code: 1, label: "電気", styles: SUPPLY_STYLES },
   { code: 2, label: "水道", styles: SUPPLY_STYLES },
+  { code: PARKING_LAYER, label: "駐車場", styles: PARKING_STYLES },
 ];
 
 // 塗り方の番号。シェーダーの u_style と同じ

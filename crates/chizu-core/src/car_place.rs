@@ -37,6 +37,33 @@ pub fn fee_cap(savings: Money) -> i64 {
     BASE_SHARED_LOT_FEE * (100 + percent) / 100
 }
 
+/// テストが自宅の枠の足りない街を作るための口。このクレートのテストと、`test-util` を付けた他のクレートのテストだけで使える。
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// 建物の自宅の枠の数の上限。`None` なら建物の駐車場の台数のままである。
+        pub(crate) static HOME_SPACES_LIMIT: Cell<Option<u64>> = const { Cell::new(None) };
+    }
+
+    /// 建物の自宅の枠の数の上限を、このスレッドで決める。決めた上限は、以後の枠の配り直しから効く。
+    pub fn set_home_spaces_limit(limit: Option<u64>) {
+        HOME_SPACES_LIMIT.with(|l| l.set(limit));
+    }
+
+    /// 立てると、住宅はどれも世帯の数だけ自宅の枠を持つ（自宅の枠を減らす前の台数）。駐車場の台数は
+    /// rayon のスレッドでも求めるので、スレッドごとではなくプロセス全体で効く。同じプロセスでほかのテストと
+    /// 並べて回さないテストだけが使う。
+    pub(crate) static EVERY_HOME_LOT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// [`EVERY_HOME_LOT`] を決める。建物の台数が変わるので、街を作る前に呼ぶ。
+    pub fn set_every_home_lot(on: bool) {
+        EVERY_HOME_LOT.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// 世帯の車を置く枠。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CarPlace {

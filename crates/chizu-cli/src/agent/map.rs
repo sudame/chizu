@@ -8,7 +8,7 @@ use chizu_core::movement::{lane_tiles, lot_tiles};
 use chizu_core::network::{NodeControl, SegmentKind};
 use chizu_core::tile::local_index;
 use chizu_core::{
-    CHUNK_SIDE, Congestion, ServiceKind, TilePos, TileRect, World, ZoneKind, is_water,
+    CHUNK_SIDE, Congestion, ServiceKind, TilePos, TileRect, World, Zone, ZoneKind, is_water,
 };
 
 /// 1 回の出力に載せる文字（セル）の数の上限。始めに買ってある 192×192 マスが、縮尺 2 でちょうど収まる。
@@ -30,12 +30,21 @@ pub const LEGEND: &str = "\
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
   =        私道の通るマス（私道の敷地の住宅の、端の列。私道の脇の枠もこの列にある。駐車場と建物より先に出す）
   p        建物の駐車場に切り欠いたマス（建物より先に出す。前面の帯のように 1 マスの一部だけの切り欠きも p にする）
-  * ^ %    電気か水が届いていない建物（* 電気だけ、^ 水だけ、% 両方。R C I O の代わりに出す）
-  R C I O  建物（住宅、商業、工業、オフィスの区画に建っている。電気も水も届いている）
-  r c i o  建物のない区画（同じ並び）
+  * ^ %    電気か水が届いていない建物（* 電気だけ、^ 水だけ、% 両方。R D C I O の代わりに出す）
+  R D C I O  建物（住宅（高密度）、住宅（低密度）、商業、工業、オフィスの区画に建っている。電気も水も届いている）
+  r d c i o  建物のない区画（同じ並び）
   ~        水辺（海か川）
   ,        買っていない土地
   .        買った土地の空きマス（標高はいまどこも 0 の平らな地図なので出さない）";
+
+/// 凡例の「P W L G」の行の代わりに出す、駐車場の層の凡例。
+const PARKING_FACILITY_LEGEND_LINE: &str =
+    "  P W      公共施設（P 発電所、W 浄水場）。共同の駐車場は埋まり具合の文字で出す";
+
+/// 駐車場の層で、凡例の先頭に足す行。
+const PARKING_LEGEND_LINES: &str = "\
+  ! 車を持てない世帯のいる住宅（R と D の代わりに出す。電気か水が届いていない印より先に出す）
+  - + # X  共同の駐車場の埋まり具合（- 借りられた枠と外来の車が台数の半分に満たない、+ 半分以上、# 8 割以上、X 満車。L G の代わりに出す）";
 
 /// 凡例の「H 1 2 3」の行の代わりに出す、交通の層の道路の凡例。
 const TRAFFIC_LEGEND_LINE: &str = "  - + # X  道路の混み具合（- 空いている、+ やや混んでいる、# 混んでいる、X 詰まっている。H 高速道路は混み具合を数えない）";
@@ -48,13 +57,18 @@ pub enum MapLayer {
     Terrain,
     /// 道路を混み具合の段階で出す。
     Traffic,
+    /// 車を持てない世帯のいる住宅と、共同の駐車場の埋まり具合を出す。
+    Parking,
 }
 
 impl MapLayer {
     pub fn parse(name: &str) -> Result<MapLayer, String> {
         match name {
             "traffic" => Ok(MapLayer::Traffic),
-            _ => Err(format!("--layer {name:?} は知らない層。traffic だけ使える")),
+            "parking" => Ok(MapLayer::Parking),
+            _ => Err(format!(
+                "--layer {name:?} は知らない層。traffic か parking を使う"
+            )),
         }
     }
 }
@@ -68,12 +82,26 @@ fn congestion_glyph(level: Congestion) -> char {
     }
 }
 
+/// 共同の駐車場の埋まり具合の段階（0〜3）の文字。
+fn fill_glyph(level: u8) -> char {
+    match level {
+        0 => '-',
+        1 => '+',
+        2 => '#',
+        _ => 'X',
+    }
+}
+
 /// セルにまとめたマスの数え上げ。
 #[derive(Clone, Default)]
 struct Cell {
     /// 通る区間の混み具合の最大。交通の層でだけ入れる。
     congestion: Option<Congestion>,
     facility: [u32; ServiceKind::ALL.len()],
+    /// 共同の駐車場の埋まり具合の段階（0〜3）の最大。駐車場の層でだけ入れる。
+    lot_fill: Option<u8>,
+    /// 車を持てない世帯のいる住宅のマスの数。駐車場の層でだけ入れる。
+    carless: u32,
     /// 信号のある交差点があるか。
     signal: bool,
     /// 横断歩道のある交差点（3 本以上の区間が集まるノード）があるか。
@@ -84,7 +112,7 @@ struct Cell {
     removed: bool,
     /// 道路の最大の種類。0 は道路なし。
     road: u8,
-    building: [u32; 4],
+    building: [u32; Zone::ALL.len()],
     /// 駐車場に切り欠いたマスの数（1 マスの一部だけの帯も 1 と数える）。
     lot: u32,
     /// 私道の通るマスの数。
@@ -93,7 +121,7 @@ struct Cell {
     unpowered: u32,
     /// 水が届いていない建物のマスの数。
     dry: u32,
-    zone: [u32; 4],
+    zone: [u32; Zone::ALL.len()],
     /// 水辺と買った土地は、全部のマスではなく見本のマスで数える。
     samples: u32,
     wet: u32,
@@ -110,13 +138,19 @@ fn argmax<const N: usize>(counts: &[u32; N]) -> Option<usize> {
     best
 }
 
-fn zone_letter(z: ZoneKind) -> char {
+fn zone_letter(z: Zone) -> char {
     match z {
-        ZoneKind::Residential => 'R',
-        ZoneKind::Commercial => 'C',
-        ZoneKind::Industrial => 'I',
-        ZoneKind::Office => 'O',
+        Zone::Residential => 'R',
+        Zone::ResidentialLow => 'D',
+        Zone::Commercial => 'C',
+        Zone::Industrial => 'I',
+        Zone::Office => 'O',
     }
+}
+
+/// [`Zone::ALL`] の中での位置。
+fn zone_slot(z: Zone) -> usize {
+    usize::from(z as u8 - 1)
 }
 
 fn facility_letter(k: ServiceKind) -> char {
@@ -133,7 +167,11 @@ impl Cell {
     /// 同じ種類の中では数の多いものを選ぶ（道路は種類の大きいもの）。
     fn glyph(&self) -> char {
         if let Some(i) = argmax(&self.facility) {
-            return facility_letter(ServiceKind::ALL[i]);
+            let kind = ServiceKind::ALL[i];
+            return match self.lot_fill {
+                Some(level) if kind.is_parking() => fill_glyph(level),
+                _ => facility_letter(kind),
+            };
         }
         // 交通の層では、道路の混み具合を信号より先に出す。
         if self.signal && self.congestion.is_none() {
@@ -160,15 +198,18 @@ impl Cell {
         }
         if let Some(i) = argmax(&self.building) {
             // 電気か水が届いていない建物は、区画の種類より先にそれを出す。
+            if Zone::ALL[i].kind() == ZoneKind::Residential && self.carless > 0 {
+                return '!';
+            }
             return match (self.unpowered > 0, self.dry > 0) {
                 (true, true) => '%',
                 (true, false) => '*',
                 (false, true) => '^',
-                (false, false) => zone_letter(ZoneKind::ALL[i]),
+                (false, false) => zone_letter(Zone::ALL[i]),
             };
         }
         if let Some(i) = argmax(&self.zone) {
-            return zone_letter(ZoneKind::ALL[i]).to_ascii_lowercase();
+            return zone_letter(Zone::ALL[i]).to_ascii_lowercase();
         }
         if self.wet * 2 >= self.samples {
             '~'
@@ -177,6 +218,18 @@ impl Cell {
         } else {
             '.'
         }
+    }
+}
+
+/// 台数 `spaces` の共同の駐車場の、借りられた枠と外来の車の和 `taken` の段階（0〜3）。
+/// 画面の「駐車場」のレイヤーの段階と同じ割り方である。
+fn fill_level(spaces: u32, taken: u32) -> u8 {
+    if taken >= spaces {
+        3
+    } else if u64::from(taken) * 10 >= u64::from(spaces) * 8 {
+        2
+    } else {
+        u8::from(u64::from(taken) * 2 >= u64::from(spaces))
     }
 }
 
@@ -322,19 +375,19 @@ pub fn render(
         grid.each_tile_in(area, |cell, t| {
             let (lx, ly) = t.local();
             if let Some(z) = tiles.zone[local_index(lx, ly)] {
-                cell.zone[z.index()] += 1;
+                cell.zone[zone_slot(z)] += 1;
             }
         });
     }
     for (_, b) in world.buildings().iter() {
         grid.each_tile_in(b.area, |cell, _| {
-            cell.building[b.zone.index()] += 1;
+            cell.building[zone_slot(b.zone)] += 1;
             cell.unpowered += u32::from(!b.supply.power);
             cell.dry += u32::from(!b.supply.water);
         });
     }
     for (_, b) in world.buildings().iter() {
-        for t in lot_tiles(world.network(), b) {
+        for t in lot_tiles(world.network(), b, world.seed()) {
             if let Some(cell) = grid.cell_mut(t) {
                 cell.lot += 1;
             }
@@ -347,6 +400,27 @@ pub fn render(
     }
     for f in world.facilities() {
         grid.each_tile_in(f.area, |cell, _| cell.facility[f.kind.index()] += 1);
+    }
+    if layer == MapLayer::Parking {
+        // 画面の「駐車場」のレイヤー（chizu-wasm の layers）と同じ割合の段階にする
+        for f in world.facilities().iter().filter(|f| f.kind.is_parking()) {
+            let lot = world.trips().shared_lot(f.area.min);
+            let taken = lot.rented + lot.visitors.parked + lot.visitors.reserved;
+            let level = fill_level(f.kind.parking_spaces(), taken);
+            grid.each_tile_in(f.area, |cell, _| {
+                cell.lot_fill = cell.lot_fill.max(Some(level));
+            });
+        }
+        let homes: std::collections::BTreeSet<_> = world
+            .carless_households()
+            .into_iter()
+            .map(|c| c.home)
+            .collect();
+        for id in homes {
+            if let Some(b) = world.buildings().get(id) {
+                grid.each_tile_in(b.area, |cell, _| cell.carless += 1);
+            }
+        }
     }
     // 混み具合は画面の交通のレイヤーと同じ計算で、車のいない区間は載らない（空いている）
     let congestion = (layer == MapLayer::Traffic).then(|| world.road_congestion());
@@ -414,6 +488,21 @@ fn text(grid: &Grid, layer: MapLayer) -> String {
     );
     match layer {
         MapLayer::Terrain => out.push_str(LEGEND),
+        MapLayer::Parking => {
+            let lines: Vec<&str> = LEGEND
+                .lines()
+                .map(|l| {
+                    if l.trim_start().starts_with("P W L G") {
+                        PARKING_FACILITY_LEGEND_LINE
+                    } else {
+                        l
+                    }
+                })
+                .collect();
+            out.push_str(&lines.join("\n"));
+            out.push('\n');
+            out.push_str(PARKING_LEGEND_LINES);
+        }
         MapLayer::Traffic => {
             let lines: Vec<&str> = LEGEND
                 .lines()
@@ -559,7 +648,7 @@ mod tests {
         let mut lots = 0;
         let mut bodies = 0;
         for (_, b) in world.buildings().iter().take(60) {
-            let cut = lot_tiles(net, b);
+            let cut = lot_tiles(net, b, world.seed());
             let rect = b.area;
             let text = render(&world, rect, 1, MapLayer::Terrain).unwrap();
             let rows: Vec<&str> = text
@@ -632,6 +721,82 @@ mod tests {
     #[test]
     fn unknown_layer_is_refused() {
         assert!(MapLayer::parse("traffic").is_ok());
+        assert!(MapLayer::parse("parking").is_ok());
         assert!(MapLayer::parse("power").is_err());
+    }
+
+    fn glyphs_of(world: &World, rect: TileRect, layer: MapLayer) -> Vec<char> {
+        let text = render(world, rect, 1, layer).unwrap();
+        let rows = rect.max.y.abs_diff(rect.min.y) as usize + 1;
+        text.lines()
+            .rev()
+            .take(rows)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .flat_map(|row| {
+                row.chars()
+                    .skip_while(|c| *c != ' ')
+                    .skip(1)
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// 駐車場の層は、車を持てない世帯のいる住宅を !、共同の駐車場を埋まり具合の文字にする。
+    /// 層を付けなければ、住宅は区画の文字、駐車場は L のまま。
+    #[test]
+    fn parking_layer_marks_carless_homes_and_the_fill_of_lots() {
+        use crate::agent::test_world::{carless_world, place, run};
+        let (mut w, _guard) = carless_world(2);
+        let homes: Vec<_> = w
+            .carless_households()
+            .iter()
+            .map(|c| c.home)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert!(!homes.is_empty());
+        let rect_of = |w: &World, id| w.buildings().get(id).unwrap().area;
+        for id in &homes {
+            let rect = rect_of(&w, *id);
+            let glyphs = glyphs_of(&w, rect, MapLayer::Parking);
+            // 駐車場に切り欠いたマス（p）と私道（=）は、建物より先に出す
+            assert!(glyphs.contains(&'!'), "{rect:?} {glyphs:?}");
+            assert!(
+                glyphs.iter().all(|g| matches!(*g, '!' | 'p' | '=')),
+                "{glyphs:?}"
+            );
+            let plain = glyphs_of(&w, rect, MapLayer::Terrain);
+            assert!(!plain.contains(&'!'), "{plain:?}");
+        }
+        let text = render(&w, rect_of(&w, homes[0]), 1, MapLayer::Parking).unwrap();
+        assert!(text.contains("! 車を持てない世帯のいる住宅"), "{text}");
+        assert!(!text.contains("P W L G"), "{text}");
+        let terrain = render(&w, rect_of(&w, homes[0]), 1, MapLayer::Terrain).unwrap();
+        assert!(!terrain.contains("車を持てない世帯"), "{terrain}");
+
+        // 置いたばかり（借りる前）は半分に満たず、借りられると満車になる
+        place(&mut w, ServiceKind::ParkingLot, 24);
+        let lot = w.facilities().last().unwrap().area;
+        let glyphs = glyphs_of(&w, lot, MapLayer::Parking);
+        assert!(glyphs.iter().all(|g| *g == '-'), "{glyphs:?}");
+        assert!(
+            glyphs_of(&w, lot, MapLayer::Terrain)
+                .iter()
+                .all(|g| *g == 'L')
+        );
+        run(&mut w, 120);
+        let glyphs = glyphs_of(&w, lot, MapLayer::Parking);
+        assert!(glyphs.iter().all(|g| *g == 'X'), "{glyphs:?}");
+    }
+
+    #[test]
+    fn fill_levels_step_with_the_share_taken() {
+        let levels: Vec<u8> = [0, 4, 5, 7, 8, 9, 10, 11]
+            .iter()
+            .map(|t| fill_level(10, *t))
+            .collect();
+        assert_eq!(levels, [0, 0, 1, 1, 2, 2, 3, 3]);
     }
 }

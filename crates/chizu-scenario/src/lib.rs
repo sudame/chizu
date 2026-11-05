@@ -133,7 +133,7 @@ fn grid_city(seed: u64, radius: i32, serviced: bool) -> World {
                     TilePos::new(x + 1, y + 1),
                     TilePos::new(x + step - 1, y + step - 1),
                 ),
-                zone: Some(zone),
+                zone: Some(zone.into()),
             });
             // ところどころの街区の北の辺に、発電所 1 つと浄水場 2 つを置く。
             if (bx + by) % 4 == 0 && bx % 3 == 0 {

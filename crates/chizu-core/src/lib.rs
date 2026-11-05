@@ -31,7 +31,10 @@ pub use citizens::{
     Activity, CitizenChange, CitizenRow, HappinessParts, Population, ScheduleState,
 };
 pub use clock::{GameTime, TICKS_PER_DAY};
-pub use command::{Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
+pub use command::{
+    Command, Density, Heading, LOW_DENSITY_MAX_LEVEL, NodeId, RoadKind, ServiceKind, SimSpeed,
+    Zone, ZoneKind,
+};
 pub use id::{BuildingId, CitizenId, HouseholdId, TripId};
 pub use movement::{
     CarPath, Congestion, CurbWait, DailyLotMisses, HouseholdCar, LotId, LotMisses, Mover, Noted,
@@ -50,6 +53,7 @@ pub use state_hash::{StateHash, StateHasher, state_hash_of};
 pub use terrain::{TerrainTiles, is_water, terrain};
 pub use tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, TileRect};
 pub use units::{LaneOffset, Mm, MmPerTick, Money, Tick, WorldPos};
+pub use world::carless::{CARLESS_AREA_SIDE, Carless, CarlessArea, CarlessReason, carless_areas};
 pub use world::people::MigrationOutlook;
 pub use world::{
     ApplyOutcome, CarSample, CitizenPlaces, CommuteDistances, CommuteTimes, DayTraffic, DenyReason,

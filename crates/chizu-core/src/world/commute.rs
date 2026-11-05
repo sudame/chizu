@@ -125,7 +125,7 @@ impl World {
             .collect();
         let buildings = &self.buildings;
         let lost = self.car_places.assign_homes(homes, |b| {
-            let spaces = buildings.get(b).map_or(0, |b| b.parking_spaces());
+            let spaces = buildings.parking_spaces(b);
             home_spaces_limit().map_or(spaces, |limit| spaces.min(limit))
         });
         for h in lost {
@@ -140,21 +140,10 @@ impl World {
     /// 空きがあって料金が払える上限（[`fee_cap`]）以下なら借りる。どこも借りられなければ枠を持たない。
     /// 面した道路のない駐車場は貸さない。
     fn rent_shared_lots(&mut self) {
-        let lots: Vec<(TilePos, TilePos, u32)> = self
-            .facilities
-            .iter()
-            .filter(|f| f.kind.is_parking() && f.entrance.is_some())
-            .map(|f| (f.area.min, f.front, f.kind.parking_spaces()))
-            .collect();
+        let lots = self.shared_lot_sites();
         if lots.is_empty() {
             return;
         }
-        let radius = i128::from(SHARED_LOT_RADIUS);
-        let dist2 = |a: TilePos, b: TilePos| {
-            let d = |p: i64, q: i64| i128::from(p) - i128::from(q);
-            let (dx, dy) = (d(a.x, b.x), d(a.y, b.y));
-            dx * dx + dy * dy
-        };
         let mut rented = self.car_places.rented_counts();
         let p = &self.population;
         let mut renting = Vec::new();
@@ -169,17 +158,13 @@ impl World {
             if SHARED_LOT_FEE > fee_cap(savings) {
                 continue;
             }
-            let mut near: Vec<(i128, TilePos, u32)> = lots
-                .iter()
-                .map(|(c, front, spaces)| (dist2(home.front, *front), *c, *spaces))
-                .filter(|(d, _, _)| *d <= radius * radius)
-                .collect();
-            near.sort_unstable();
-            let found = near.into_iter().find(|(_, c, spaces)| {
-                let mut lot = self.trips.shared_lot(*c);
-                lot.rented = rented.get(c).copied().unwrap_or(0);
-                lot.has_room(*spaces)
-            });
+            let found = lots_in_range(&lots, home.front)
+                .into_iter()
+                .find(|(_, c, spaces)| {
+                    let mut lot = self.trips.shared_lot(*c);
+                    lot.rented = rented.get(c).copied().unwrap_or(0);
+                    lot.has_room(*spaces)
+                });
             if let Some((_, c, _)) = found {
                 let n = rented.entry(c).or_insert(0);
                 *n = n.checked_add(1).expect("貸した枠の数があふれた");
@@ -189,6 +174,25 @@ impl World {
         for (h, c) in renting {
             self.car_places.rent(h, c);
         }
+    }
+
+    /// 貸せる共同の駐車場。駐車場ごとに、角のマス、正面のマス、台数を施設を置いた順に並べる。
+    /// 面した道路のない駐車場は貸さない。
+    pub(super) fn shared_lot_sites(&self) -> Vec<SharedLotSite> {
+        self.facilities
+            .iter()
+            .filter(|f| f.kind.is_parking() && f.entrance.is_some())
+            .map(|f| (f.area.min, f.front, f.kind.parking_spaces()))
+            .collect()
+    }
+
+    /// 道路に面していない共同の駐車場。貸せないが、範囲の中にあるかを理由の判定に使う。並びは [`Self::shared_lot_sites`] と同じ。
+    pub(super) fn unconnected_lot_sites(&self) -> Vec<SharedLotSite> {
+        self.facilities
+            .iter()
+            .filter(|f| f.kind.is_parking() && f.entrance.is_none())
+            .map(|f| (f.area.min, f.front, f.kind.parking_spaces()))
+            .collect()
     }
 
     /// ゲーム内の 1 日に 1 回、料金が払える上限を超えた世帯に借りた枠を返させ、枠のない世帯に貸し直す。
@@ -313,15 +317,36 @@ mod tests {
     }
 }
 
+/// 貸せる共同の駐車場 1 つ。角のマス、正面のマス、台数。
+pub(super) type SharedLotSite = (TilePos, TilePos, u32);
+
+/// 家の正面のマス `from` から [`SHARED_LOT_RADIUS`] マスの中にある駐車場を、直線の距離の近い順（同じなら角のマスの順）に並べる。
+/// 距離は 2 乗で、駐車場の台数が空いているかは見ない。
+pub(super) fn lots_in_range(lots: &[SharedLotSite], from: TilePos) -> Vec<(i128, TilePos, u32)> {
+    let radius = i128::from(SHARED_LOT_RADIUS);
+    let dist2 = |a: TilePos, b: TilePos| {
+        let d = |p: i64, q: i64| i128::from(p) - i128::from(q);
+        let (dx, dy) = (d(a.x, b.x), d(a.y, b.y));
+        dx * dx + dy * dy
+    };
+    let mut near: Vec<(i128, TilePos, u32)> = lots
+        .iter()
+        .map(|(c, front, spaces)| (dist2(from, *front), *c, *spaces))
+        .filter(|(d, _, _)| *d <= radius * radius)
+        .collect();
+    near.sort_unstable();
+    near
+}
+
 /// 建物の自宅の枠の数の上限。テストで自宅の枠が足りない街を作るのに使い、ふつうは `None` である。
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-util")))]
 fn home_spaces_limit() -> Option<u64> {
     None
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 fn home_spaces_limit() -> Option<u64> {
-    car_place_tests::HOME_SPACES_LIMIT.with(std::cell::Cell::get)
+    crate::car_place::testing::HOME_SPACES_LIMIT.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -376,9 +401,25 @@ mod car_place_tests {
         out
     }
 
+    /// 建物ごとの、世帯が車をなくしたまま向かっている移動の数（[`crate::movement::Trips::car_dropped`]）。
+    /// この移動は着いても停めずに、押さえた空きを返す。
+    fn dropped(w: &World) -> BTreeMap<BuildingId, u64> {
+        let mut out = BTreeMap::new();
+        for (id, t) in w.trips().iter() {
+            if let Some(b) = t.parking_lot().and_then(LotId::building)
+                && w.trips().car_dropped(id)
+            {
+                *out.entry(b).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
     /// 枠は家のある世帯だけが持ち、建物の台数を超えない。台数が世帯の数に足りる建物では、どの世帯も枠を持つ。
-    /// 住宅の駐車場に停めてある台数と押さえた台数は、枠を持つ世帯の数を超えない。
+    /// 住宅の駐車場に停めてある台数と押さえた台数は、枠を持つ世帯の数を超えない。ただし、枠をなくした世帯の
+    /// 向かっている車が押さえた空きは、着くまで残る。
     fn check(w: &World) {
+        let dropped = dropped(w);
         let held = holders(w);
         let p = w.population();
         let mut living: BTreeMap<BuildingId, u64> = BTreeMap::new();
@@ -388,16 +429,17 @@ mod car_place_tests {
             }
         }
         for (id, n) in &living {
-            let spaces = w.buildings().get(*id).unwrap().parking_spaces();
+            let spaces = w.buildings().parking_spaces(*id);
             let got = held.get(id).copied().unwrap_or(0);
             assert_eq!(got, (*n).min(spaces), "建物 {id:?} の枠の数");
         }
         for (id, b) in w.buildings().iter() {
-            if b.zone != ZoneKind::Residential {
+            if b.zone.kind() != ZoneKind::Residential {
                 continue;
             }
             let lot = w.trips().lot(id);
-            let used = u64::from(lot.parked) + u64::from(lot.reserved);
+            let used = u64::from(lot.parked) + u64::from(lot.reserved)
+                - dropped.get(&id).copied().unwrap_or(0);
             assert!(
                 used <= held.get(&id).copied().unwrap_or(0),
                 "建物 {id:?} に枠より多く停まっている: {lot:?}"
@@ -417,7 +459,7 @@ mod car_place_tests {
                 leveled |= w
                     .buildings()
                     .iter()
-                    .any(|(_, b)| b.zone == ZoneKind::Residential && b.level > 1);
+                    .any(|(_, b)| b.zone.kind() == ZoneKind::Residential && b.level > 1);
             }
         }
         assert!(leveled, "段階の上がった住宅がない");
@@ -425,7 +467,7 @@ mod car_place_tests {
             holders(&w).values().sum::<u64>() > 20,
             "枠を持つ世帯が少ない"
         );
-        assert_eq!(w.trips().parking_tally().no_place, 0, "枠のない世帯が出た");
+        // 自宅の駐車場を持たない戸建ての世帯は枠を持たないが、そのほかの世帯はみな枠を持つ（`check`）。
         // 世帯の住む住宅を 1 つ取り壊すと、その世帯は枠をなくし、家でない所（職場など）に停めてあった車も
         // その駐車場から外れる。家の駐車場は建物ごと消える。
         let away = |w: &World| {
@@ -495,11 +537,64 @@ mod car_place_tests {
         check(&w);
     }
 
-    thread_local! {
-        /// 建物の自宅の枠の数の上限（[`super::home_spaces_limit`]）。
-        pub(super) static HOME_SPACES_LIMIT: std::cell::Cell<Option<u64>> =
-            const { std::cell::Cell::new(None) };
+    /// 戸建てが集合住宅に上がって自宅の枠が減ると、ID の大きい世帯から枠を返す。返した世帯の車は、停めてあれば
+    /// 駐車場から外し、家へ向かっていれば着いても停めずに、押さえた空きを返す。
+    #[test]
+    fn houses_that_become_apartments_take_back_home_places() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        // 3 マス以上の段階 2 の戸建てで、段階 3 の台数より多く停めてあるか押さえてあり、家へ向かう車のあるもの。
+        let pick = |w: &World| {
+            w.buildings().iter().find_map(|(id, b)| {
+                let mut up = *b;
+                up.level = 3;
+                let lot = w.trips().lot(id);
+                let heading = w
+                    .trips()
+                    .iter()
+                    .any(|(_, t)| t.parking_lot() == Some(LotId::Building(id)));
+                (b.zone == crate::command::Zone::Residential
+                    && b.level == 2
+                    && b.tile_count() >= 3
+                    && heading
+                    && u64::from(lot.parked + lot.reserved) > up.parking_spaces(w.seed()))
+                .then_some(id)
+            })
+        };
+        let mut found = None;
+        while w.tick.0 < 6 * TICKS_PER_DAY && found.is_none() {
+            w.step();
+            found = pick(&w);
+        }
+        let id = found.expect("段階 3 の台数より多く使われている戸建てがない");
+        w.buildings.get_mut(id).unwrap().level = 3;
+        w.assign_car_places();
+        let spaces = w.buildings().parking_spaces(id);
+        assert_eq!(holders(&w).get(&id).copied().unwrap_or(0), spaces);
+        assert!(
+            dropped(&w).contains_key(&id),
+            "家へ向かう車をなくした世帯がない"
+        );
+        check(&w);
+        // 枠を返した世帯の車は、着いても停めない。向かっている車がみな着けば、台数に収まる。
+        let living = |w: &World, h| w.population().home(h).flatten() == Some(id);
+        for _ in 0..TICKS_PER_DAY {
+            w.step();
+            check(&w);
+            let p = w.population();
+            for h in p.household_ids().filter(|h| living(&w, *h)) {
+                if let Some(HouseholdCar::Parked { lot, .. }) = w.trips().household_car(h) {
+                    assert!(
+                        w.car_places().get(h).is_some(),
+                        "枠のない世帯の車が {lot:?} に停まっている"
+                    );
+                }
+            }
+        }
+        let lot = w.trips().lot(id);
+        assert!(u64::from(lot.parked + lot.reserved) <= w.buildings().parking_spaces(id));
     }
+
+    use crate::car_place::testing::HOME_SPACES_LIMIT;
 
     /// 共同の駐車場の枠を借りた世帯を、駐車場の角のマスごとに数える。どの世帯も家から範囲の中の駐車場を借り、
     /// 貸した枠と外来の台数の和は台数を超えず、駐車場の台数の表と世帯の枠が合う。

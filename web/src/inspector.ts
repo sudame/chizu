@@ -1,10 +1,17 @@
 // 「見る」の道具で押した建物や施設の様子を出す小さなパネル。DOM に触るのは setupInspector だけで、
 // 数の読み方と文言は Vitest で確かめられる。
 
-import type { InspectQuery, InspectTarget, ServiceName, ZoneName } from "./protocol/messages.ts";
+import {
+  type InspectQuery,
+  type InspectTarget,
+  isParking,
+  SERVICE_NAMES,
+  type ServiceName,
+  type ZoneName,
+} from "./protocol/messages.ts";
 
 /** chizu-wasm の inspect が返す数の個数。 */
-export const INSPECT_LENGTH = 15;
+export const INSPECT_LENGTH = 19;
 
 /** 幸福度とその要素の満点。chizu-core の HAPPINESS_MAX と同じ。 */
 export const HAPPINESS_MAX = 100;
@@ -20,10 +27,23 @@ export type ResidentsInfo = {
   commuteSeconds: number | null;
 };
 
+/** 住宅の車を置く枠の様子。 */
+export type CarPlacesInfo = {
+  /** 自宅の枠の数。建物の駐車場の台数である。 */
+  homeSpaces: number;
+  /** 自宅の枠を持つ世帯の数。 */
+  home: number;
+  /** 共同の駐車場の枠を借りている世帯の数。 */
+  shared: number;
+  /** 枠を持たない世帯の数。車を持てない。 */
+  none: number;
+};
+
 export type BuildingView = {
   kind: "building";
   /** 押したものの識別子。以後はマスでなくこれで引く。 */
   target: InspectTarget;
+  /** 区画の種類。低密度の住宅は ResidentialLow で、高密度の住宅（Residential）と分かれる。 */
   zone: Exclude<ZoneName, "Clear">;
   level: number;
   power: boolean;
@@ -34,14 +54,31 @@ export type BuildingView = {
   occupied: number;
   /** 住宅のときだけ。住民がいなければ null。 */
   residents: ResidentsInfo | null;
+  /** 住宅のときだけ。 */
+  carPlaces: CarPlacesInfo | null;
+};
+
+/** 共同の駐車場の埋まり具合。 */
+export type ParkingView = {
+  /** 台数。 */
+  spaces: number;
+  /** 世帯に貸した枠の数。 */
+  rented: number;
+  /** 停まっている台数。借りた世帯の車と外来の車の和。 */
+  parked: number;
+  /** 外来の車が停まっているか、向かっていて押さえている台数。 */
+  visitors: number;
 };
 
 export type FacilityView = {
   kind: "facility";
   target: InspectTarget;
   service: ServiceName;
+  /** 電気か水道の供給量。共同の駐車場は 0。 */
   capacity: number;
   upkeepPerDay: number;
+  /** 共同の駐車場のときだけ。 */
+  parking: ParkingView | null;
 };
 
 export type InspectView = BuildingView | FacilityView;
@@ -51,8 +88,14 @@ const ZONES: Record<number, BuildingView["zone"]> = {
   2: "Commercial",
   3: "Industrial",
   4: "Office",
+  5: "ResidentialLow",
 };
-const SERVICES: Record<number, ServiceName> = { 1: "PowerPlant", 2: "WaterPump" };
+
+/** 住宅（高密度でも低密度でも）か。 */
+const isHome = (zone: BuildingView["zone"]) => zone === "Residential" || zone === "ResidentialLow";
+const SERVICES: Record<number, ServiceName> = Object.fromEntries(
+  SERVICE_NAMES.map((name, i) => [i + 1, name]),
+);
 
 /** chizu-wasm の inspect の数を読む。何もなければ（空の配列なら）null。読めない形でも null。 */
 export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
@@ -63,15 +106,23 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
   const target: InspectTarget = [at(0), at(INSPECT_LENGTH - 2), at(INSPECT_LENGTH - 1)];
   if (at(0) === 2) {
     const service = SERVICES[at(1)];
-    return service === undefined
-      ? null
-      : { kind: "facility", target, service, capacity: at(2), upkeepPerDay: at(3) };
+    if (service === undefined) {
+      return null;
+    }
+    return {
+      kind: "facility",
+      target,
+      service,
+      capacity: at(2),
+      upkeepPerDay: at(3),
+      parking: at(4) >= 0 ? { spaces: at(4), rented: at(5), parked: at(6), visitors: at(7) } : null,
+    };
   }
   const zone = ZONES[at(1)];
   if (at(0) !== 1 || zone === undefined) {
     return null;
   }
-  const residents = zone === "Residential" && at(7) > 0;
+  const residents = isHome(zone) && at(7) > 0;
   return {
     kind: "building",
     target,
@@ -91,11 +142,16 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
           commuteSeconds: at(12) >= 0 ? at(12) : null,
         }
       : null,
+    carPlaces:
+      isHome(zone) && at(13) >= 0
+        ? { homeSpaces: at(13), home: at(14), shared: at(15), none: at(16) }
+        : null,
   };
 }
 
 const ZONE_LABEL: Record<BuildingView["zone"], string> = {
-  Residential: "住宅",
+  Residential: "住宅（高密度）",
+  ResidentialLow: "住宅（低密度）",
   Commercial: "商業",
   Industrial: "工業",
   Office: "オフィス",
@@ -103,6 +159,8 @@ const ZONE_LABEL: Record<BuildingView["zone"], string> = {
 const SERVICE_LABEL: Record<ServiceName, string> = {
   PowerPlant: "発電所",
   WaterPump: "浄水場",
+  ParkingLot: "平面の駐車場",
+  ParkingGarage: "駐車場ビル",
 };
 
 const n = (v: number) => v.toLocaleString("ja-JP");
@@ -122,19 +180,31 @@ const reach = (ok: boolean) => (ok ? "届いている" : "届いていない");
 /** パネルに出す題と行。 */
 export function describeInspect(view: InspectView): InspectText {
   if (view.kind === "facility") {
+    const upkeep = { label: "維持費", value: `${n(view.upkeepPerDay)} / 日` };
+    if (isParking(view.service) && view.parking !== null) {
+      const p = view.parking;
+      // 供給量は電気と水道の施設の欄で、駐車場には出さない
+      return {
+        title: SERVICE_LABEL[view.service],
+        rows: [
+          { label: "台数", value: `${n(p.spaces)} 台` },
+          { label: "貸した枠", value: `${n(p.rented)} / ${n(p.spaces)}` },
+          { label: "停まっている", value: `${n(p.parked)} 台` },
+          { label: "外来の車", value: `${n(p.visitors)} 台` },
+          upkeep,
+        ],
+      };
+    }
     return {
       title: SERVICE_LABEL[view.service],
-      rows: [
-        { label: "供給量", value: n(view.capacity) },
-        { label: "維持費", value: `${n(view.upkeepPerDay)} / 日` },
-      ],
+      rows: [{ label: "供給量", value: n(view.capacity) }, upkeep],
     };
   }
   const supply = [
     { label: "電気", value: reach(view.power) },
     { label: "水道", value: reach(view.water) },
   ];
-  if (view.zone !== "Residential") {
+  if (!isHome(view.zone)) {
     return {
       title: `${ZONE_LABEL[view.zone]}の職場（段階 ${view.level}）`,
       rows: [{ label: "働く人", value: `${n(view.occupied)} / ${n(view.capacity)} 人` }, ...supply],
@@ -157,7 +227,17 @@ export function describeInspect(view: InspectView): InspectText {
   if (r !== null && r.commuteSeconds !== null) {
     rows.push({ label: "通勤の所要時間", value: formatDuration(r.commuteSeconds) });
   }
-  return { title: `住宅（段階 ${view.level}）`, rows };
+  const c = view.carPlaces;
+  if (c !== null) {
+    rows.push(
+      { label: "自宅の駐車場", value: `${n(c.homeSpaces)} 台` },
+      { label: "　自宅の枠の世帯", value: `${n(c.home)} 世帯` },
+      { label: "　借りている世帯", value: `${n(c.shared)} 世帯` },
+      { label: "　車を持てない世帯", value: `${n(c.none)} 世帯` },
+    );
+  }
+  const density = view.zone === "ResidentialLow" ? "低密度" : "高密度";
+  return { title: `住宅（${density}、段階 ${view.level}）`, rows };
 }
 
 /** 2 つの問い合わせが同じか。 */

@@ -475,10 +475,15 @@ impl Parking {
 
     /// 世帯の枠が駐車場 `own` にある運転する人が、建物 `id` の駐車場に停められるか。空きがあり、
     /// 住宅なら `own` であるときに限る。住宅の駐車場は、その建物の自宅の枠を持つ世帯の車だけが使う。
-    fn is_free(&self, id: BuildingId, b: &Building, own: Option<BuildingId>) -> bool {
+    fn is_free(
+        &self,
+        (id, b): (BuildingId, &Building),
+        seed: u64,
+        own: Option<BuildingId>,
+    ) -> bool {
         let l = self.get(id);
-        (b.zone != ZoneKind::Residential || own == Some(id))
-            && u64::from(l.parked) + u64::from(l.reserved) < b.parking_spaces()
+        (b.zone.kind() != ZoneKind::Residential || own == Some(id))
+            && u64::from(l.parked) + u64::from(l.reserved) < b.parking_spaces(seed)
     }
 
     /// 世帯の枠が駐車場 `own` にある運転する人が停められる、行き先 `to` の近くの駐車場を、試す順に返す。行き先そのものを
@@ -505,7 +510,7 @@ impl Parking {
             .fronts_in(area)
             .filter(|id| *id != to)
             .filter_map(|id| Some((id, buildings.get(id)?)))
-            .filter(|(id, b)| self.is_free(*id, b, own_building))
+            .filter(|(id, b)| self.is_free((*id, b), buildings.seed(), own_building))
             .map(|(id, b)| (dist(b.front), LotId::Building(id)))
             .collect();
         let first = match own {
@@ -515,7 +520,7 @@ impl Parking {
                 Some(LotId::Rented(c))
             }
             _ => self
-                .is_free(to, dest, own_building)
+                .is_free((to, dest), buildings.seed(), own_building)
                 .then_some(LotId::Building(to)),
         };
         for f in facilities.iter().filter(|f| f.kind.is_parking()) {
@@ -571,8 +576,11 @@ pub struct CurbWait {
 /// 私道の敷地（`Building::lane_plan`）の住民は、私道を通って通りに出るので、私道の入口（[`lot_spot`] と同じ点）を
 /// 出入口にする。私道は経路の網に入れず、私道の中の道のりも足さない（`docs/design.md` の 3.8）。
 pub fn building_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
-    if b.lane_plan().is_some() {
-        return lot_choice(net, b).map(|(p, _)| p);
+    if let Some(plan) = b.lane_plan() {
+        let cut = ParkingCut::Lane {
+            houses: plan.houses,
+        };
+        return lot_choice(net, b, cut).map(|(p, _)| p);
     }
     door_spot(net, b)
 }
@@ -591,8 +599,9 @@ fn door_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
 /// 交差点を抜けた直後の合流から離すためである。
 /// 平面の駐車場のない建物（斜めの道路に面した建物など）は、建物の中の駐車場に出入口から入る。
 /// 出入りの位置が道路の上に取れなければ（行き止まりの端など）、出入口の位置にする。
-pub fn lot_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
-    lot_choice(net, b).map(|(p, _)| p)
+/// `seed` は街の種で、駐車場の形（`Building::parking_layout`）を決めるのに使う。
+pub fn lot_spot(net: &Network, b: &Building, seed: u64) -> Option<SidewalkPos> {
+    lot_choice(net, b, b.parking_layout(seed).cut).map(|(p, _)| p)
 }
 
 /// 共同の駐車場の出入りの位置。施設の正面の道路の上で、建物の脇の駐車場と同じく、間口の両端のうち
@@ -630,8 +639,13 @@ pub enum LotEnd {
 
 /// 切り欠いた駐車場が寄る端。[`lot_spot`] が選ぶ端と同じである。出入りの位置が道路の上に取れず、
 /// 出入口にしたときは、同じ決まりの最後の「座標の大きい側」を返す。描画が切り欠きの位置を決めるのに使う。
-pub fn lot_end(net: &Network, b: &Building) -> LotEnd {
-    lot_choice(net, b)
+pub fn lot_end(net: &Network, b: &Building, seed: u64) -> LotEnd {
+    cut_end(net, b, b.parking_layout(seed).cut)
+}
+
+/// 切り欠く形が `cut` の建物 `b` の、切り欠いた駐車場が寄る端（[`lot_end`]）。
+fn cut_end(net: &Network, b: &Building, cut: ParkingCut) -> LotEnd {
+    lot_choice(net, b, cut)
         .and_then(|(_, end)| end)
         .unwrap_or_else(|| {
             let (tx, ty) = b.toward_road;
@@ -646,7 +660,8 @@ pub fn lot_end(net: &Network, b: &Building) -> LotEnd {
 
 /// 切り欠いた駐車場にかかるマス。1 マスの一部だけを切り欠く前面の帯のマスも含む。切り欠かない建物は空。
 /// 地図に出すためのもので、並びは決まっていない。形は [`lot_end`] と `Building::parking_layout` で決まる。
-pub fn lot_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
+pub fn lot_tiles(net: &Network, b: &Building, seed: u64) -> Vec<TilePos> {
+    let cut = b.parking_layout(seed).cut;
     let (tx, ty) = b.toward_road;
     let (ax, ay) = (-ty, tx);
     let w = b.area.max.x.abs_diff(b.area.min.x) + 1;
@@ -654,7 +669,7 @@ pub fn lot_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
     let (frontage, depth) = if tx == 0 { (w, h) } else { (h, w) };
     // 間口に沿って数えるマスの数 `along` と、道路の側からの行の数 `rows` の長方形を、端に寄せて返す
     let rect = |cols: u64, rows: u64| -> Vec<TilePos> {
-        let far = lot_end(net, b) == LotEnd::Far;
+        let far = cut_end(net, b, cut) == LotEnd::Far;
         let mut out = Vec::new();
         for k in 0..cols {
             let kk =
@@ -669,7 +684,7 @@ pub fn lot_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
         }
         out
     };
-    match b.parking_layout().cut {
+    match cut {
         // 私道の脇の枠は、私道のマス（[`lane_tiles`]）に含める。
         ParkingCut::None | ParkingCut::Lane { .. } => Vec::new(),
         ParkingCut::FrontStrip { slots } => {
@@ -679,7 +694,7 @@ pub fn lot_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
             let last = tiles - (columns - 1) * depth;
             let mut out = rect(columns - 1, depth);
             // 最後の列は、道路の側の `last` マスだけを切り欠く。列の位置は `rect` と同じ向きで続ける
-            let far = lot_end(net, b) == LotEnd::Far;
+            let far = cut_end(net, b, cut) == LotEnd::Far;
             let k = columns - 1;
             let kk =
                 i64::try_from(if far { frontage - 1 - k } else { k }).expect("間口が大きすぎる");
@@ -708,7 +723,10 @@ pub fn lane_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
     } else {
         b.area.max.y.abs_diff(b.area.min.y)
     };
-    let k = if lot_end(net, b) == LotEnd::Far {
+    let cut = ParkingCut::Lane {
+        houses: plan.houses,
+    };
+    let k = if cut_end(net, b, cut) == LotEnd::Far {
         i64::try_from(span).expect("間口が大きすぎる")
     } else {
         0
@@ -721,12 +739,16 @@ pub fn lane_tiles(net: &Network, b: &Building) -> Vec<TilePos> {
         .collect()
 }
 
-/// [`lot_spot`] の本体。出入りの位置と、選んだ端を返す。出入口にしたときの端は `None`。
-fn lot_choice(net: &Network, b: &Building) -> Option<(SidewalkPos, Option<LotEnd>)> {
+/// [`lot_spot`] の本体。切り欠く形が `cut` の建物 `b` の、出入りの位置と、選んだ端を返す。出入口にしたときの端は `None`。
+fn lot_choice(
+    net: &Network,
+    b: &Building,
+    cut: ParkingCut,
+) -> Option<(SidewalkPos, Option<LotEnd>)> {
     let door = door_spot(net, b)?;
     let half = TILE_MM / 2;
     // 端の外側の辺から、出入りの位置まで内へ入る距離（mm）。
-    let inward = match b.parking_layout().cut {
+    let inward = match cut {
         ParkingCut::None => return Some((door, None)),
         ParkingCut::FrontStrip { slots } => slots
             .checked_mul(SLOT_WIDTH_MM)
@@ -740,7 +762,7 @@ fn lot_choice(net: &Network, b: &Building) -> Option<(SidewalkPos, Option<LotEnd
     };
     let (_, step, _) = pos::link_geometry(net, b.entrance)?;
     let site = (b.front, b.toward_road, b.area);
-    let lane = matches!(b.parking_layout().cut, ParkingCut::Lane { .. });
+    let lane = matches!(cut, ParkingCut::Lane { .. });
     Some(
         end_spot(net, b.entrance, site, step, (inward, lane))
             .map_or((door, None), |(p, end)| (p, Some(end))),
@@ -827,9 +849,10 @@ fn reachable_lot_spot(
     net: &Network,
     router: &mut AstarRouter,
     b: &Building,
+    seed: u64,
 ) -> Option<SidewalkPos> {
     let door = building_spot(net, b)?;
-    let at = lot_spot(net, b)?;
+    let at = lot_spot(net, b, seed)?;
     let ok = at == door || reachable(net, router, LaneMode::Sidewalk, door, at);
     Some(if ok { at } else { door })
 }
@@ -999,7 +1022,7 @@ impl Trips {
         });
         let origin = match start.and_then(LotId::shared_corner) {
             Some(c) => facility_spot(net, shared_facility(facilities, c)?)?,
-            None => reachable_lot_spot(net, router, from_b)?,
+            None => reachable_lot_spot(net, router, from_b, buildings.seed())?,
         };
         let dest = building_spot(net, buildings.get(to)?)?;
         let took = take.filter(|lot| self.parking.unpark(*lot));
@@ -1045,7 +1068,9 @@ impl Trips {
         }
         let (lot, park_at) = candidates.into_iter().find_map(|lot| {
             let at = match lot {
-                LotId::Building(b) => reachable_lot_spot(net, router, buildings.get(b)?)?,
+                LotId::Building(b) => {
+                    reachable_lot_spot(net, router, buildings.get(b)?, buildings.seed())?
+                }
                 LotId::Shared(c) | LotId::Rented(c) => {
                     facility_spot(net, shared_facility(facilities, c)?)?
                 }
@@ -1097,7 +1122,7 @@ impl Trips {
         }
         let mut spots: BTreeMap<WorldPos, BTreeSet<BuildingId>> = BTreeMap::new();
         for (id, b) in buildings.iter() {
-            for p in [lot_spot(net, b), building_spot(net, b)]
+            for p in [lot_spot(net, b, buildings.seed()), building_spot(net, b)]
                 .into_iter()
                 .flatten()
             {

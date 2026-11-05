@@ -1117,6 +1117,39 @@ try {
     near(commercial, mixHex("#eaf0f8", "#dde6f3", blocks), 4),
     `塗ったマスが商業の淡い青の地面で描かれる（${commercial.join(", ")}）`,
   );
+  // 低密度の住宅は、区画の番号 5 で送られ、高密度の住宅と違う黄緑の地面で描かれる。確かめたら消す
+  {
+    await pickTool(page, "zone-ResidentialLow");
+    const beforeLow = await outcomeCount();
+    const l0 = tilePoint(14, 29);
+    const l1 = tilePoint(18, 31);
+    await page.mouse.move(l0.x, l0.y);
+    await page.mouse.down();
+    await page.mouse.move(l1.x, l1.y, { steps: 4 });
+    await page.mouse.up();
+    const lowZoned = await nextOutcome(beforeLow);
+    // カーソルの下の仮の表示が地面にかからないよう、離しておく
+    const awayLow = tilePoint(45, 45);
+    await page.mouse.move(awayLow.x, awayLow.y);
+    const wantLow = mixHex("#f0f5d6", "#e7efc3", blocks);
+    let low = await colorOfTile(16, 30);
+    for (let i = 0; i < 50 && !near(low, wantLow, 4); i++) {
+      await page.waitForTimeout(100);
+      low = await colorOfTile(16, 30);
+    }
+    check(
+      lowZoned.command === "PaintZone" && lowZoned.outcome === "Applied" && near(low, wantLow, 4),
+      `低密度の住宅を塗ると、黄緑の地面（#f0f5d6）で描かれる（${low.join(", ")}、${lowZoned.text}）`,
+    );
+    await pickTool(page, "zone-Clear");
+    const beforeClear = await outcomeCount();
+    await page.mouse.move(l0.x, l0.y);
+    await page.mouse.down();
+    await page.mouse.move(l1.x, l1.y, { steps: 4 });
+    await page.mouse.up();
+    await nextOutcome(beforeClear);
+    await pickTool(page, "zone-Commercial");
+  }
   // 需要の主題図では、建物のない区画を、その種類の需要の高さで、白から区画の縁の色へ寄せて濃く塗る
   {
     const away = tilePoint(45, 45);
@@ -1453,6 +1486,23 @@ try {
     `発電所と浄水場を置ける（${plant.text}、${pump.text}）`,
   );
   await waitUnsupplied("zero");
+  // 共同の駐車場を置く道具は、置く前に届く範囲（32 マス）と、範囲の中の車を持てない世帯の数を示す。
+  // 自宅の枠が足りる街なので、車を持てない世帯は 0 である
+  await hoverService("ParkingLot", 55, 33);
+  await page
+    .waitForFunction(
+      () => document.querySelector<HTMLElement>("#map")?.dataset.parkingCarless === "0",
+      undefined,
+      { timeout: TIMEOUT_MS },
+    )
+    .catch(() => undefined);
+  const parkingInfo = (await page.locator("#tool-info").textContent()) ?? "";
+  check(
+    parkingInfo.includes("範囲 32 マスの中で車を持てない世帯 0・12 台") &&
+      (await map.getAttribute("data-parking-carless")) === "0",
+    `共同の駐車場を置く前に、範囲と、範囲の中の車を持てない世帯の数を示す（${parkingInfo}）`,
+  );
+  await pickTool(page, "none");
   // 施設を置いて余裕が戻ると、建たない理由の知らせは消える。空き区画がない知らせは、別の理由なので残ってよい
   await page
     .waitForFunction(
@@ -1731,6 +1781,10 @@ try {
     homeRows.includes("世帯") && homeRows.includes("電気") && homeRows.includes("水道"),
     `住宅を押すと、世帯と電気と水道が出る（${homeRows}）`,
   );
+  // 住宅の欄は行が多く、地図の左側に重なって次に押すマスを隠すので、先に閉じる
+  await page.locator("[data-inspector-close]").click();
+  await inspector.waitFor({ state: "hidden", timeout: TIMEOUT_MS });
+  await page.waitForTimeout(800);
   const plantTile = tilePoint(54, 34);
   await page.mouse.click(plantTile.x, plantTile.y);
   await page.waitForFunction(
@@ -1742,7 +1796,7 @@ try {
   check(await inspector.isHidden(), "閉じるボタンでパネルが閉じる");
   await page.mouse.click(building.x, building.y);
   await inspector.waitFor({ state: "visible", timeout: TIMEOUT_MS });
-  const empty = tilePoint(45, 45);
+  const empty = tilePoint(60, 50);
   await page.mouse.click(empty.x, empty.y);
   await inspector.waitFor({ state: "hidden", timeout: TIMEOUT_MS });
   check(true, "何もないところを押すとパネルが閉じる");
@@ -2005,9 +2059,9 @@ try {
   await page.locator("#layers-open").click();
   check(
     (await page.locator("#layer-panel").isVisible()) &&
-      (await page.locator("#layers button").count()) === 5 &&
+      (await page.locator("#layers button").count()) === 6 &&
       (await page.locator("#layer-panel #legend").count()) === 1,
-    "レイヤーのボタンで、なし、交通、電気、水道、需要を選ぶパネルが開き、凡例も中にある",
+    "レイヤーのボタンで、なし、交通、電気、水道、駐車場、需要を選ぶパネルが開き、凡例も中にある",
   );
   await page.mouse.click(cx, cy);
   check(!(await page.locator("#layer-panel").isVisible()), "パネルの外（地図）を押すと閉じる");
