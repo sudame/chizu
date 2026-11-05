@@ -7,7 +7,7 @@
 //! 家から職場に着いた移動は、かかった時間を住民の通勤の時間に入れ、幸福度の通勤の点に使う。
 
 use super::World;
-use crate::car_place::{CarPlace, CarPlaces, SHARED_LOT_FEE, SHARED_LOT_RADIUS, fee_cap};
+use crate::car_place::{CarPlace, CarPlaces, SHARED_LOT_RADIUS, fee_cap};
 use crate::citizens::Activity;
 use crate::id::{CitizenId, HouseholdId, TripId};
 use crate::movement::{CommuteRequest, Commuter, LotId};
@@ -146,6 +146,7 @@ impl World {
         }
         let mut rented = self.car_places.rented_counts();
         let p = &self.population;
+        let fee = i64::from(self.parking_fee);
         let mut renting = Vec::new();
         for h in p.household_ids() {
             if self.car_places.get(h).is_some() {
@@ -155,7 +156,7 @@ impl World {
                 continue;
             };
             let savings = p.household_money(h).unwrap_or(Money::ZERO);
-            if SHARED_LOT_FEE > fee_cap(savings) {
+            if fee > fee_cap(savings) {
                 continue;
             }
             let found = lots_in_range(&lots, home.front)
@@ -202,12 +203,13 @@ impl World {
             return;
         }
         let p = &self.population;
+        let fee = i64::from(self.parking_fee);
         let over: Vec<HouseholdId> = self
             .car_places
             .iter()
             .filter(|(h, place)| {
                 matches!(place, CarPlace::Shared(_))
-                    && SHARED_LOT_FEE > fee_cap(p.household_money(*h).unwrap_or(Money::ZERO))
+                    && fee > fee_cap(p.household_money(*h).unwrap_or(Money::ZERO))
             })
             .map(|(h, _)| h)
             .collect();

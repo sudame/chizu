@@ -42,6 +42,7 @@
 //! | 8 | `SetSimSpeed` | 倍率 `u16` |
 //! | 9 | `UpgradeRoad` | from `TilePos`、to `TilePos`、kind `u8` |
 //! | 10 | `SetCrosswalk` | index `u32`、generation `u16`、arm `u8`（`Heading` の値）、on `u8`（0 か 1） |
+//! | 11 | `SetParkingFee` | fee `u16` |
 //!
 //! 形式を変えるときは版を上げる。種類の番号は使い回さない。種類を足すだけなら、古い記録はそのまま
 //! 読めるので版は上げない。`PaintZone` の区画に低密度の住宅（5）を足したときも、同じ理由で版を上げていない。
@@ -442,6 +443,10 @@ fn encode_command(w: &mut Writer, c: &Command) {
             w.u8(arm as u8);
             w.u8(u8::from(on));
         }
+        Command::SetParkingFee { fee } => {
+            w.u8(11);
+            w.u16(fee);
+        }
     }
 }
 
@@ -503,6 +508,7 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
             let on = r.check(on <= 1, "SetCrosswalk の on", on == 1)?;
             Command::SetCrosswalk { node, arm, on }
         }
+        11 => Command::SetParkingFee { fee: r.u16()? },
         other => return Err(DecodeError::UnknownCommand(other)),
     };
     Ok(c)
@@ -556,7 +562,7 @@ pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::MAX_TAX_PERMILLE;
+    use crate::command::{MAX_PARKING_FEE, MAX_TAX_PERMILLE};
     use crate::tile::WORLD_LIMIT;
     use proptest::prelude::*;
 
@@ -613,6 +619,9 @@ mod tests {
                 },
                 arm: Heading::NE,
                 on: false,
+            },
+            Command::SetParkingFee {
+                fee: MAX_PARKING_FEE,
             },
         ]
     }
@@ -720,9 +729,11 @@ mod tests {
         rect.extend_from_slice(&0_i64.to_le_bytes());
         rect.extend_from_slice(&0_i64.to_le_bytes());
         assert!(invalid_command(&rect));
+        assert!(invalid_command(&[11, 51, 0])); // 駐車場の料金 51
+        assert!(CommandLog::decode(&single(0, 0, &[11, 50, 0])).is_ok());
         assert_eq!(
-            CommandLog::decode(&single(0, 0, &[11])),
-            Err(DecodeError::UnknownCommand(11))
+            CommandLog::decode(&single(0, 0, &[12])),
+            Err(DecodeError::UnknownCommand(12))
         );
         // 腕の向きは 0〜7、on は 0 か 1 だけを読む。
         let crosswalk = |arm: u8, on: u8| {
@@ -953,7 +964,7 @@ mod tests {
         assert_eq!(
             stats,
             ReplayStats {
-                applied: 6,
+                applied: 7,
                 not_implemented: 0,
                 rejected: 0,
                 denied: 5,
@@ -1058,6 +1069,7 @@ mod tests {
                     on,
                 }
             ),
+            (0..=MAX_PARKING_FEE).prop_map(|fee| Command::SetParkingFee { fee }),
         ]
     }
 

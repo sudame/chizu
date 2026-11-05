@@ -1,12 +1,14 @@
 //! 財政と人口のマイルストーン。
 //!
-//! - 収支：住民の賃金と職場の利益に区画の種類ごとの税率をかけた税収から、道路と施設の維持費を引く。
+//! - 収支：住民の賃金と職場の利益に区画の種類ごとの税率をかけた税収と、共同の駐車場の料金から、
+//!   道路と施設の維持費を引く。
 //!   1 日あたりの見込みを [`World::finances`] で出し、ゲーム内の 1 時間ごとにその 1/24 を所持金に足す。
 //!   24 で割り切れない端数は持ち越すので、何時間たっても 1 日あたりの見込みとずれない。
 //!   所持金は負になってもよい。
 //! - マイルストーン：家のある住民の数が段階に届くと、買えるチャンクの枠が増える。一度届いた段階は人口が減っても戻らない。
 
 use super::World;
+use crate::car_place::CarPlace;
 use crate::clock::TICKS_PER_DAY;
 use crate::command::ZoneKind;
 use crate::network::{SegmentKind, TILE_MM, road_cost_per_tile};
@@ -94,6 +96,8 @@ pub fn wage_per_day(level: u8) -> i64 {
 pub struct Finances {
     /// 区画の種類ごとの税収。住宅は住民の賃金から、ほかは職場の利益から取る。添え字は [`ZoneKind::index`]。
     pub taxes: [Money; 4],
+    /// 共同の駐車場の料金の収入。借りられた枠の数 × 料金である。
+    pub parking_fees: Money,
     /// 道路の維持費。外部接続の高速道路は含めない。
     pub road_upkeep: Money,
     /// 発電所と浄水場の維持費。添え字は [`ServiceKind::utility_slot`]。
@@ -104,7 +108,7 @@ pub struct Finances {
 
 impl Finances {
     pub fn income(&self) -> Money {
-        self.taxes.iter().fold(Money::ZERO, |a, b| a + *b)
+        self.taxes.iter().fold(self.parking_fees, |a, b| a + *b)
     }
 
     pub fn expenses(&self) -> Money {
@@ -149,6 +153,13 @@ impl World {
             let taxed = mul(base[i], i64::from(self.tax_permille[i]));
             f.taxes[i] = Money(round::div_floor(taxed, 1_000));
         }
+        let rented = self
+            .car_places
+            .iter()
+            .filter(|(_, place)| matches!(place, CarPlace::Shared(_)))
+            .count();
+        let rented = i64::try_from(rented).expect("借りられた枠の数があふれた");
+        f.parking_fees = Money(mul(rented, i64::from(self.parking_fee)));
         // 1 マスあたりの建設費 × 長さ（mm）を足してから割り、端数を区間ごとに落とさない。
         let mut road = 0_i64;
         for (id, s) in self.network.segments() {
