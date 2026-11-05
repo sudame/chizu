@@ -481,6 +481,53 @@ fn map_shows_facilities() {
     );
 }
 
+/// 共同の駐車場も act で置け、map では L（平面）と G（駐車場ビル）で出る。observe には台数と維持費が出る。
+#[test]
+fn act_places_shared_parking_and_observe_and_map_show_it() {
+    let dir = small_town("agent-shared-parking");
+    let d = dir.to_str().unwrap();
+    let cmds = write(
+        &dir.join("p.json"),
+        r#"[{"type":"PlaceBuilding","kind":"ParkingLot","at":[17,1],"rotation":0},
+            {"type":"PlaceBuilding","kind":"ParkingGarage","at":[12,-1],"rotation":2}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
+    assert_eq!(acted["results"][1]["outcome"], "Applied", "{acted}");
+    let map = cli(&["agent", "map", d, "9", "-2", "18", "2"]);
+    assert_eq!(
+        grid_rows(&map, 5, 10),
+        [
+            "GGGG......",
+            "GGGG......",
+            "2222222222",
+            "rrrrrrrrLL",
+            "rrrrrrrrLL"
+        ],
+        "{map}"
+    );
+    let o = json(&cli(&["agent", "observe", d]));
+    let lots = o["parking"]["sharedLots"].as_array().expect("sharedLots がない");
+    assert_eq!(lots.len(), 2, "{lots:?}");
+    assert_eq!(lots[0]["kind"], "ParkingLot");
+    assert_eq!(lots[0]["at"], serde_json::json!([17, 1]));
+    assert_eq!(lots[0]["spaces"], 12);
+    assert_eq!(lots[1]["kind"], "ParkingGarage");
+    assert_eq!(lots[1]["at"], serde_json::json!([9, -4]));
+    assert_eq!(lots[1]["spaces"], 240);
+    for lot in lots {
+        for k in ["rented", "parked", "rentedParked", "visitorParked", "visitorReserved"] {
+            assert_eq!(lot[k], 0, "{k}");
+        }
+    }
+    assert_eq!(o["parking"]["households"]["shared"], 0);
+    assert_eq!(o["facilities"]["ParkingLot"], 1);
+    assert_eq!(o["facilities"]["ParkingGarage"], 1);
+    let upkeep = &o["financesPerDay"]["facilityUpkeep"];
+    assert_eq!(upkeep["ParkingLot"], 96);
+    assert_eq!(upkeep["ParkingGarage"], 2880);
+}
+
 /// 大きすぎる縮尺は、あふれずに断る。
 #[test]
 fn map_refuses_huge_scale() {

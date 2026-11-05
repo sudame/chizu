@@ -68,7 +68,7 @@ export const ZONABLE_MIX = 0.1;
 export const ZONABLE_COLOR = hexRgb(BLUE);
 
 /** 施設の絵。丸の中に白く描く。 */
-export type FacilityGlyph = "bolt" | "drop";
+export type FacilityGlyph = "bolt" | "drop" | "parking";
 
 /**
  * 施設の見た目（docs/map-style.md の「施設の記号」）。色は sRGB の 16 進である。
@@ -86,6 +86,9 @@ export type FacilityStyle = {
 export const FACILITY_STYLES: Readonly<Record<number, FacilityStyle>> = {
   1: { circle: "#e8710a", glyph: "bolt", site: "#f8e3cf", siteEdge: "#e8b98e", name: "#a8500a" },
   2: { circle: "#12a4af", glyph: "drop", site: "#d3ecef", siteEdge: "#95c9d0", name: "#0b6f78" },
+  // 共同の駐車場（平面と駐車場ビル）は、決まりの「交通」の系統の灰青にする
+  3: { circle: "#5f6b7a", glyph: "parking", site: "#e4e7eb", siteEdge: "#b9c0c9", name: "#5f6368" },
+  4: { circle: "#5f6b7a", glyph: "parking", site: "#e4e7eb", siteEdge: "#b9c0c9", name: "#5f6368" },
 };
 
 /** 知らない種類の施設の見た目。決まりの「交通」の系統の灰青にする。 */

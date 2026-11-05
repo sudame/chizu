@@ -42,8 +42,8 @@ describe("凡例", () => {
 
   test("施設は丸い記号で、丸の色と絵が描画の定数と同じである", () => {
     const facilities = legendSections()[3]?.items ?? [];
-    expect(facilities.map((i) => i.symbol?.glyph)).toEqual(["bolt", "drop"]);
-    expect(facilities.map((i) => i.color)).toEqual(["#e8710a", "#12a4af"]);
+    expect(facilities.map((i) => i.symbol?.glyph)).toEqual(["bolt", "drop", "parking", "parking"]);
+    expect(facilities.map((i) => i.color)).toEqual(["#e8710a", "#12a4af", "#5f6b7a", "#5f6b7a"]);
   });
 
   test("建物は区画と同じ順で、建物の色を縁の色で囲んで示す", () => {

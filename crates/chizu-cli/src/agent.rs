@@ -28,7 +28,7 @@ use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarPlace, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
     CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic, DenyReason, GameTime,
     HappinessParts, Heading, Line, LotMisses, MigrationOutlook, NodeControl, NodeId, ParkingTally,
-    Rescues, ServiceKind, TICKS_PER_DAY, TILE_MM, TilePos, TileRect, Traffic, World, ZoneKind,
+    Rescues, ServiceKind, SharedLot, TICKS_PER_DAY, TILE_MM, TilePos, TileRect, Traffic, World, ZoneKind,
     replay,
 };
 use serde_json::{Map, Value, json};
@@ -145,8 +145,9 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  台数は建物の種類、大きさ、段階から決まる。住宅は世帯の数（段階 3〜5 は平面が世帯の数の 0.7 倍までで、
                  残りは建物の中）、商業と工業は職場の数、オフィスは職場の数の 0.5 倍（端数は切り上げ）。
                  住宅の駐車場は、その建物の自宅の枠を持つ世帯の車だけが使う。
-                 redirectedCars いま移動中の車のうち、16 マスの中のほかの建物の駐車場へ停めに向かっている車。行き先の建物の
-                 駐車場が満車のときのほか、そこへ車か歩きで届かないときも、近くのほかの駐車場に回る。
+                 redirectedCars いま移動中の車のうち、16 マスの中のほかの建物の駐車場か、共同の駐車場の外来の枠へ停めに
+                 向かっている車。行き先の建物の駐車場が満車のときのほか、そこへ車か歩きで届かないときも、近くのほかの駐車場に
+                 回る。距離が同じなら建物の駐車場を先にする。
                  次の 4 つは始まりからの積み上げで、日ごとの数は 2 つの observe の差で求める。
                  drives 車で走り始めた移動の数、parkedElsewhere そのうちほかの建物の駐車場に回った数（redirectedCars と同じ決まり）、
                  lotsFull 行き先の近くの駐車場がどこも満車で、車で向かうのをやめた数（やめた移動は、歩けるなら歩く）、
@@ -155,13 +156,21 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  ただし、道路網が分かれていて車で届かないなど、3 つのどれも増やさずに歩きへ回る場合は数えない。
                  noCarBreakdown noCar の内訳で、4 つの和が noCar に等しい。inUse 世帯の車を家族が乗っている、
                  parkedAway 家族が家でない所（職場など）に停めている（停めた車が本人のいる建物にあっても、
-                 同じ職場で働く家族が停めた車なら、ここに入る）、carAtHome 車は家にあるが、出発する本人が家にいない、
+                 同じ職場で働く家族が停めた車なら、ここに入る）、carAtHome 車は世帯の枠（自宅か借りた枠）にあるが、出発する本人が家にいない、
                  other そのほか（家のない住民の通勤で、車が停めてあった場合）。
                  noPlace 世帯が車を置く枠を持たず、車で向かわなかった移動の数。車で向かうほど遠い移動だけを数える
                  （始まりからの積み上げ。noCar とは別に数える）。
                  households 家のある世帯を、車を置く枠で分けた数。home 自宅の枠（住んでいる建物の駐車場）を持つ世帯、
-                 none 枠を持たない世帯。枠のない世帯は車を持たず、どの移動も歩く。自宅の枠は住宅の駐車場の台数だけあり、
-                 建物に住む世帯に ID の順に配る（枠を持つ世帯からは取り上げない）。
+                 shared 共同の駐車場の枠を借りた世帯、none 枠を持たない世帯。枠のない世帯は車を持たず、どの移動も歩く。
+                 自宅の枠は住宅の駐車場の台数だけあり、建物に住む世帯に ID の順に配る（枠を持つ世帯からは取り上げない）。
+                 自宅の枠のない世帯は、家の正面のマスから直線で 32 マスの中の共同の駐車場を近い順に試し、空きがあれば枠を借りる。
+                 借りた枠は、車がいないあいだも空かない（月極）。家と借りた枠のあいだは歩く。借りる世帯を決め直すのは、
+                 世帯が越してきたときと、自宅の枠を配り直すときと、ゲーム内の 1 日に 1 回である。料金はまだない（0）。
+                 共同の駐車場を取り壊すと、借りていた世帯は枠をなくし、停まっていた車も消える。
+                 sharedLots 共同の駐車場を置いた順に並べる。at 駐車場が占めるマスの最小の座標（世帯が借りた枠はこの角で指す）、
+                 kind 種類（ParkingLot か ParkingGarage）、spaces 台数、rented 世帯に貸した枠の数、parked 停まっている台数で、
+                 そのうち rentedParked 借りた世帯の車、visitorParked 借りていない車（外来）の台数、visitorReserved 外来の車の
+                 ために押さえた台数。外来の空きは spaces − rented − visitorParked − visitorReserved である。
                  fullLots、redirectedCars、lotsFull が多いのは、駐車場が足りないということである。
                  shortages 行き先にした車が満車で車をやめた建物の上位 10 件。満車で車をやめた数（今日と前の日の和）の多い順で、
                  同じなら位置（x、y の順）。at 建物が占めるマスの最小の座標、zone 区画の種類、level 段階、spaces 台数、
@@ -275,8 +284,11 @@ observe の removedCrosswalks:
       そうでなければ NoZonableTile である。すでに同じ区画が載っているマスは、空きでも建物が建っていても、塗れたものとして数える。
       新しく塗れたマスがなく、塗れなかったマス（道路を除く）もないときは Denied（ZoneUnchanged）である。
       AppliedPartly と、この 2 つの理由と ZoneUnchanged の Denied には、結果に paint が付く（下の「act の結果」）。1 辺は 256 マスまで。
-  {"type":"PlaceBuilding","kind":"PowerPlant"|"WaterPump","at":[x,y],"rotation":0..3}
-      施設を置く。発電所は 4×4 で 60000、浄水場は 2×2 で 25000。at は間口の角のマスで、
+  {"type":"PlaceBuilding","kind":"PowerPlant"|"WaterPump"|"ParkingLot"|"ParkingGarage","at":[x,y],"rotation":0..3}
+      施設を置く。発電所は 4×4 で 60000、浄水場は 2×2 で 25000。
+      ParkingLot は平面の共同の駐車場で 2×2、12 台、3000（維持費 1 日 96）。ParkingGarage は駐車場ビルで 4×4、240 台、
+      72000（維持費 1 日 2880）。共同の駐車場は電気も水道も供給しない。自宅の枠のない世帯が枠を借り（月極）、
+      借りられていない枠には近くへ来た車が停める（observe の parking.sharedLots）。at は間口の角のマスで、
       rotation 0、1、2、3 のとき、at から y-1、x+1、y+1、x-1 の向きに 1 歩のマスが道路でなければならない。
       敷地は at から道路と反対へ延び、間口は at から道路に沿って延びる。浄水場（2×2）の図で、A が at、# が敷地、= が道路である。
         rotation 0（道路は上）   rotation 1（道路は右）   rotation 2（道路は下）   rotation 3（道路は左）
@@ -1251,6 +1263,11 @@ fn parking(world: &World) -> Value {
         .iter()
         .filter(|(_, place)| *place == CarPlace::Home)
         .count();
+    let with_shared_place = world
+        .car_places()
+        .iter()
+        .filter(|(_, place)| matches!(place, CarPlace::Shared(_)))
+        .count();
     let redirected = world
         .trips()
         .iter()
@@ -1285,9 +1302,38 @@ fn parking(world: &World) -> Value {
         "noPlace": tally.no_place,
         "households": {
             "home": with_home_place,
-            "none": housed.saturating_sub(with_home_place),
+            "shared": with_shared_place,
+            "none": housed.saturating_sub(with_home_place + with_shared_place),
         },
+        "sharedLots": shared_lots(world),
     })
+}
+
+/// observe の `parking.sharedLots`。共同の駐車場を置いた順に並べる。
+fn shared_lots(world: &World) -> Vec<Value> {
+    world
+        .facilities()
+        .iter()
+        .filter(|f| f.kind.is_parking())
+        .map(|f| {
+            let c = f.area.min;
+            let SharedLot {
+                rented,
+                rented_parked,
+                visitors,
+            } = world.trips().shared_lot(c);
+            json!({
+                "at": [c.x, c.y],
+                "kind": format!("{:?}", f.kind),
+                "spaces": f.kind.parking_spaces(),
+                "rented": rented,
+                "parked": u64::from(rented_parked) + u64::from(visitors.parked),
+                "rentedParked": rented_parked,
+                "visitorParked": visitors.parked,
+                "visitorReserved": visitors.reserved,
+            })
+        })
+        .collect()
 }
 
 /// observe の `parking.shortages` に出す建物の数の上限。
@@ -1420,7 +1466,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
         // つながっていない施設の分まで足されて、足りない網があるのに余っているように見えるからである。
         // 余りは、主の網（需要がいちばん大きい網）と、それ以外の網に分けて出す。
         let main_idx = balance.main_network(slot);
-        let kind = [ServiceKind::PowerPlant, ServiceKind::WaterPump][slot];
+        let kind = ServiceKind::UTILITIES[slot];
         let main = main_idx.map(|i| {
             let b = balance.components[i][slot];
             let headroom = i128::from(b.capacity) - i128::from(b.demand);
@@ -1499,7 +1545,16 @@ fn observe(world: &World, before: &CarSample) -> Value {
         taxes,
         road_upkeep,
         facility_upkeep,
+        // 共同の駐車場の維持費は、facilityUpkeep の駐車場の種類ごとの額の和である。
+        parking_upkeep: _,
     } = finances;
+    let upkeep_of = |k: ServiceKind| match k.utility_slot() {
+        Some(slot) => facility_upkeep[slot].0,
+        None => {
+            let n = world.facilities().iter().filter(|f| f.kind == k).count();
+            k.upkeep_per_day().0 * n as i64
+        }
+    };
     let highway = highway_line(world.seed());
     let owned: Vec<Value> = world
         .chunks()
@@ -1539,7 +1594,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "net": finances.net().0,
             "taxes": by_zone(|z| taxes[z.index()].0),
             "roadUpkeep": road_upkeep.0,
-            "facilityUpkeep": by_service(|k| facility_upkeep[k.index()].0),
+            "facilityUpkeep": by_service(upkeep_of),
         },
         "taxPermille": by_zone(|z| world.tax_permille(z)),
         "population": {
@@ -1673,6 +1728,7 @@ const WATCHED: &[&str] = &[
     "/traffic/cars/waitingAtCurb",
     "/parking/redirectedCars",
     "/parking/households/home",
+    "/parking/households/shared",
     "/parking/households/none",
     "/migration/wantingHouseholds",
     "/migration/vacantHomes",
@@ -1691,6 +1747,8 @@ const WATCHED: &[&str] = &[
     "/buildings/watered",
     "/facilities/PowerPlant",
     "/facilities/WaterPump",
+    "/facilities/ParkingLot",
+    "/facilities/ParkingGarage",
     "/utilities/power/main/headroom",
     "/utilities/power/main/headroomPeople",
     "/utilities/power/others/headroom",
