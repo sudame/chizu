@@ -13,9 +13,14 @@ import {
 describe("凡例", () => {
   test("区画・建物・印・施設・道路・移動体の順に並ぶ。交通は主題図の凡例に出す", () => {
     const sections = legendSections();
-    expect(sections.map((s) => s.items.length)).toEqual([4, 4, 2, 2, 4, 2]);
+    expect(sections.map((s) => s.items.length)).toEqual([4, 4, 2, 4, 4, 2]);
     expect(sections[0]?.items.map((i) => i.label)).toEqual(["住宅", "商業", "工業", "オフィス"]);
-    expect(sections[3]?.items.map((i) => i.label)).toEqual(["発電所", "浄水場"]);
+    expect(sections[3]?.items.map((i) => i.label)).toEqual([
+      "発電所",
+      "浄水場",
+      "平面の駐車場",
+      "駐車場ビル",
+    ]);
     expect(sections[4]?.items.map((i) => i.label)).toEqual([
       "小さい道路",
       "中くらいの道路",
@@ -42,8 +47,8 @@ describe("凡例", () => {
 
   test("施設は丸い記号で、丸の色と絵が描画の定数と同じである", () => {
     const facilities = legendSections()[3]?.items ?? [];
-    expect(facilities.map((i) => i.symbol?.glyph)).toEqual(["bolt", "drop"]);
-    expect(facilities.map((i) => i.color)).toEqual(["#e8710a", "#12a4af"]);
+    expect(facilities.map((i) => i.symbol?.glyph)).toEqual(["bolt", "drop", "parking", "parking"]);
+    expect(facilities.map((i) => i.color)).toEqual(["#e8710a", "#12a4af", "#5f6b7a", "#5f6b7a"]);
   });
 
   test("建物は区画と同じ順で、建物の色を縁の色で囲んで示す", () => {

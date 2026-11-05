@@ -58,6 +58,10 @@ pub const HOMELESS_LEAVE_TICKS: u64 = TICKS_PER_DAY;
 /// 職場の割り当てを見直す間隔（tick）。300 tick（ゲーム内 1 時間）ごとである。
 pub const JOB_INTERVAL: u64 = 300;
 
+/// 共同の駐車場の枠を決め直す、1 日の中の tick。職場の割り当て（[`JOB_INTERVAL`]）と移住
+/// （[`MIGRATION_INTERVAL`]）のどちらの tick とも重ならない。
+pub const SHARED_LOT_REVIEW_TICK: u64 = 3_630;
+
 /// 職場の区画ごとの勤務の時間帯。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shift {
@@ -252,6 +256,9 @@ impl World {
         }
         if tick.is_multiple_of(TICKS_PER_HOUR) {
             self.emigrate();
+        }
+        if tick % TICKS_PER_DAY == SHARED_LOT_REVIEW_TICK {
+            self.review_shared_lots();
         }
     }
 
@@ -532,8 +539,8 @@ impl World {
             return;
         };
         if row.workplace != workplace {
-            let home = self.population.home(row.household).flatten();
-            self.trips.return_car(row.household, id, home);
+            let own = self.own_lot(row.household);
+            self.trips.return_car(row.household, id, own);
         }
         self.population.set_workplace(id, workplace);
     }
@@ -742,8 +749,11 @@ pub(crate) mod tests {
             let p = w.population();
             p.household_ids()
                 .find_map(|h| match w.trips().household_car(h) {
-                    Some(HouseholdCar::Parked { lot, by }) if p.home(h).flatten() != Some(lot) => {
-                        Some((h, lot, by))
+                    Some(HouseholdCar::Parked { lot, by })
+                        if p.home(h).flatten().map(crate::movement::LotId::Building)
+                            != Some(lot) =>
+                    {
+                        Some((h, lot.building()?, by))
                     }
                     _ => None,
                 })

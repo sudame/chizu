@@ -900,7 +900,7 @@ fn parked_cars_do_not_pile_up_over_days() {
         let owned = p
             .household_ids()
             .filter_map(|h| match world.trips().household_car(h) {
-                Some(HouseholdCar::Parked { lot, .. }) => Some(lot),
+                Some(HouseholdCar::Parked { lot, .. }) => lot.building(),
                 _ => None,
             })
             .filter(|b| world.buildings().get(*b).is_some())
@@ -1555,6 +1555,7 @@ fn driving_checkpoints_on(log: &CommandLog, seed: u64, ticks: u64) -> (String, u
         for (_, t) in world.trips().iter() {
             if let Some(b) = t
                 .parking_lot()
+                .and_then(|lot| lot.building())
                 .filter(|b| world.buildings().get(*b).is_some())
             {
                 *heading.entry(b).or_default() += 1;

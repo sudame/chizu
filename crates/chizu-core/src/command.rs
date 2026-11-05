@@ -78,6 +78,10 @@ impl ZoneKind {
 pub enum ServiceKind {
     PowerPlant = 1,
     WaterPump = 2,
+    /// 平面の共同の駐車場。
+    ParkingLot = 3,
+    /// 共同の駐車場ビル（立体駐車場）。
+    ParkingGarage = 4,
 }
 
 impl ServiceKind {
@@ -85,6 +89,8 @@ impl ServiceKind {
         match code {
             1 => Some(ServiceKind::PowerPlant),
             2 => Some(ServiceKind::WaterPump),
+            3 => Some(ServiceKind::ParkingLot),
+            4 => Some(ServiceKind::ParkingGarage),
             _ => None,
         }
     }

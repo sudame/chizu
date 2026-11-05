@@ -72,7 +72,9 @@ mirror_enum!(
     ServiceJson,
     ServiceKind {
         PowerPlant,
-        WaterPump
+        WaterPump,
+        ParkingLot,
+        ParkingGarage
     }
 );
 

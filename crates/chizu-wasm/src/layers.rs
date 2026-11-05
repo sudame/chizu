@@ -109,10 +109,7 @@ pub fn supply_version(sim: &Sim) -> u64 {
 /// 建物は中核が判定して持っている供給の有無で、道路は網ごとの供給量と需要の釣り合いで塗る。
 // 建物が建った tick は、中核が次の tick の頭まで供給を判定し直さないので、道路は足りていても新しい建物は赤になる
 fn supply_values(world: &World, kind: ServiceKind) -> LayerGrid {
-    let slot = match kind {
-        ServiceKind::PowerPlant => 0,
-        ServiceKind::WaterPump => 1,
-    };
+    let slot = kind.utility_slot().expect("電気か水道の施設でない");
     let mut grid = LayerGrid::default();
     let network = world.network();
     let balance = supply_balance(network, world.facilities(), world.buildings());
@@ -138,9 +135,10 @@ fn supply_values(world: &World, kind: ServiceKind) -> LayerGrid {
         }
     }
     for (_, b) in world.buildings().iter() {
-        let on = match kind {
-            ServiceKind::PowerPlant => b.supply.power,
-            ServiceKind::WaterPump => b.supply.water,
+        let on = if slot == 0 {
+            b.supply.power
+        } else {
+            b.supply.water
         };
         let value = if on {
             SUPPLY_BUILDING_ON
