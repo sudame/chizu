@@ -22,6 +22,11 @@ const EVERY: u64 = TICKS_PER_DAY / 8;
 fn no_car_stays_on_the_road_for_a_day_in_a_jammed_city() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/gridlock/city.rec");
     let log = CommandLog::decode(&std::fs::read(path).unwrap()).unwrap();
+    // 自宅の枠を減らす（`docs/design.md` の 3.7）と、枠のない 4 割ほどの世帯が車を持たなくなり、この街の車は
+    // 半分ほどになって詰まらなくなる。この記録には共同の駐車場がなく、置いても空き地が足りずに車は戻りきらない。
+    // そこでこのテストだけ、どの住宅にも世帯の数だけ自宅の枠を持たせ、#81 のときと同じだけの車を走らせる。
+    // このテストのバイナリにはほかのテストがないので、プロセス全体で効く口を使ってよい。
+    chizu_core::car_place::testing::set_every_home_lot(true);
     let mut world = World::new(0);
     replay(&mut world, &log, BEFORE_JAM);
     let mut busiest = 0;
@@ -42,7 +47,6 @@ fn no_car_stays_on_the_road_for_a_day_in_a_jammed_city() {
             cars.len()
         );
     }
-    // 混雑が起きる街であることも確かめておく。自宅の枠のない世帯（3 割から 4 割）は車を持たないので、
-    // 車線の上の車は自宅の枠を減らす前（400 台以上）より少ない。
-    assert!(busiest >= 150, "混雑が起きなかった {busiest}");
+    // 混雑が起きる街であることも確かめておく。
+    assert!(busiest >= 400, "混雑が起きなかった {busiest}");
 }

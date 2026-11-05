@@ -51,6 +51,17 @@ pub mod testing {
     pub fn set_home_spaces_limit(limit: Option<u64>) {
         HOME_SPACES_LIMIT.with(|l| l.set(limit));
     }
+
+    /// 立てると、住宅はどれも世帯の数だけ自宅の枠を持つ（自宅の枠を減らす前の台数）。駐車場の台数は
+    /// rayon のスレッドでも求めるので、スレッドごとではなくプロセス全体で効く。同じプロセスでほかのテストと
+    /// 並べて回さないテストだけが使う。
+    pub(crate) static EVERY_HOME_LOT: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    /// [`EVERY_HOME_LOT`] を決める。建物の台数が変わるので、街を作る前に呼ぶ。
+    pub fn set_every_home_lot(on: bool) {
+        EVERY_HOME_LOT.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// 世帯の車を置く枠。

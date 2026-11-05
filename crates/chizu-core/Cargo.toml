@@ -22,4 +22,6 @@ smallvec = { version = "1.15", features = ["serde"] }
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
 
 [dev-dependencies]
+# このクレートの結合テスト（tests/）も、test-util の口を使う。
+chizu-core = { path = ".", features = ["test-util"] }
 proptest = "1.12.0"

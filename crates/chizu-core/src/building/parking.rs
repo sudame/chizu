@@ -56,6 +56,17 @@ const SURFACE_SHARE: u64 = 3;
 /// これ以下のマスの建物は、道路に面した側の帯を平面の駐車場にする。
 const STRIP_MAX_TILES: u64 = 2;
 
+/// テストが、住宅のどれにも世帯の数だけ自宅の枠を持たせているか（`car_place::testing::set_every_home_lot`）。
+#[cfg(any(test, feature = "test-util"))]
+fn every_home_lot() -> bool {
+    crate::car_place::testing::EVERY_HOME_LOT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(any(test, feature = "test-util")))]
+fn every_home_lot() -> bool {
+    false
+}
+
 /// 敷地を切り欠いて作る、平面の駐車場の形。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParkingCut {
@@ -225,6 +236,7 @@ impl Building {
     /// [`APARTMENT_HOME_LOTS`] 倍である。商業と工業は職場の数、オフィスは職場の数の 0.5 倍で、端数は切り上げる。
     fn parking_needed(&self, seed: u64) -> u64 {
         let (base, (num, den)) = match self.zone.kind() {
+            ZoneKind::Residential if every_home_lot() => (self.households(), (1, 1)),
             ZoneKind::Residential if self.level > 2 => (self.households(), APARTMENT_HOME_LOTS),
             ZoneKind::Residential if !self.has_home_lot(seed) => (0, (1, 1)),
             ZoneKind::Residential => (self.households(), (1, 1)),
