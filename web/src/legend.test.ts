@@ -13,7 +13,7 @@ import {
 describe("凡例", () => {
   test("区画・建物・印・施設・道路・移動体の順に並ぶ。交通は主題図の凡例に出す", () => {
     const sections = legendSections();
-    expect(sections.map((s) => s.items.length)).toEqual([5, 4, 2, 4, 4, 2]);
+    expect(sections.map((s) => s.items.length)).toEqual([5, 5, 2, 4, 4, 2]);
     expect(sections[0]?.items.map((i) => i.label)).toEqual([
       "住宅（低密度）",
       "住宅（高密度）",
@@ -59,9 +59,23 @@ describe("凡例", () => {
 
   test("建物は区画と同じ順で、建物の色を縁の色で囲んで示す", () => {
     const buildings = legendSections()[1]?.items ?? [];
-    expect(buildings.map((i) => i.label)).toEqual(["住宅", "商業", "工業", "オフィス"]);
-    expect(buildings[1]?.color).toBe(cssColor(buildingColor(2)));
-    expect(buildings[1]?.border).toBe(cssColor(buildingEdgeColor(2)));
+    expect(buildings.map((i) => i.label)).toEqual([
+      "住宅（低密度）",
+      "住宅（高密度）",
+      "商業",
+      "工業",
+      "オフィス",
+    ]);
+    expect(buildings[0]?.color).toBe(cssColor(buildingColor(5)));
+    expect(buildings[0]?.border).toBe(cssColor(buildingEdgeColor(5)));
+    expect(buildings[2]?.color).toBe(cssColor(buildingColor(2)));
+    expect(buildings[2]?.border).toBe(cssColor(buildingEdgeColor(2)));
+  });
+
+  test("建物の凡例の低密度は、高密度と違う色で示す", () => {
+    const buildings = legendSections()[1]?.items ?? [];
+    expect(buildings[0]?.color).not.toBe(buildings[1]?.color);
+    expect(buildings[0]?.border).not.toBe(buildings[1]?.border);
   });
 
   test("区画は地面の色に、建物の縁の色を添える", () => {

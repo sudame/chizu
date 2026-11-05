@@ -544,22 +544,42 @@ mod car_place_tests {
     #[test]
     fn houses_that_become_apartments_take_back_home_places() {
         let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
-        // 3 マス以上の段階 2 の戸建てで、段階 3 の台数より多く停めてあるか押さえてあり、家へ向かう車のあるもの。
+        // 3 マス以上の段階 2 の戸建てで、段階 3 の台数より多く停めてあるか押さえてあり、段階 3 で枠を返す世帯の
+        // 車が、その建物へ向かっているもの。枠を返すのは、自宅の枠を持つ世帯のうち、ID の順で段階 3 の台数を
+        // 超える分である。
         let pick = |w: &World| {
             w.buildings().iter().find_map(|(id, b)| {
                 let mut up = *b;
                 up.level = 3;
+                let spaces = up.parking_spaces(w.seed());
                 let lot = w.trips().lot(id);
-                let heading = w
-                    .trips()
-                    .iter()
-                    .any(|(_, t)| t.parking_lot() == Some(LotId::Building(id)));
-                (b.zone == crate::command::Zone::Residential
+                if !(b.zone == crate::command::Zone::Residential
                     && b.level == 2
                     && b.tile_count() >= 3
-                    && heading
-                    && u64::from(lot.parked + lot.reserved) > up.parking_spaces(w.seed()))
-                .then_some(id)
+                    && u64::from(lot.parked + lot.reserved) > spaces)
+                {
+                    return None;
+                }
+                let mut holders: Vec<_> = w
+                    .car_places()
+                    .iter()
+                    .filter(|(h, place)| {
+                        *place == CarPlace::Home && w.population().home(*h).flatten() == Some(id)
+                    })
+                    .map(|(h, _)| h)
+                    .collect();
+                holders.sort_unstable();
+                let skip = usize::try_from(spaces).unwrap_or(usize::MAX);
+                let heading = holders.into_iter().skip(skip).any(|h| {
+                    matches!(
+                        w.trips().household_car(h),
+                        Some(HouseholdCar::InUse(t))
+                            if w.trips().iter().any(|(tid, trip)| {
+                                tid == t && trip.parking_lot() == Some(LotId::Building(id))
+                            })
+                    )
+                });
+                heading.then_some(id)
             })
         };
         let mut found = None;
@@ -567,7 +587,7 @@ mod car_place_tests {
             w.step();
             found = pick(&w);
         }
-        let id = found.expect("段階 3 の台数より多く使われている戸建てがない");
+        let id = found.expect("枠を返す世帯の車が家へ向かっている戸建てがない");
         w.buildings.get_mut(id).unwrap().level = 3;
         w.assign_car_places();
         let spaces = w.buildings().parking_spaces(id);
