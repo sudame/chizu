@@ -125,7 +125,7 @@ impl World {
             .collect();
         let buildings = &self.buildings;
         let lost = self.car_places.assign_homes(homes, |b| {
-            let spaces = buildings.get(b).map_or(0, |b| b.parking_spaces());
+            let spaces = buildings.parking_spaces(b);
             home_spaces_limit().map_or(spaces, |limit| spaces.min(limit))
         });
         for h in lost {
@@ -401,9 +401,25 @@ mod car_place_tests {
         out
     }
 
+    /// 建物ごとの、世帯が車をなくしたまま向かっている移動の数（[`crate::movement::Trips::car_dropped`]）。
+    /// この移動は着いても停めずに、押さえた空きを返す。
+    fn dropped(w: &World) -> BTreeMap<BuildingId, u64> {
+        let mut out = BTreeMap::new();
+        for (id, t) in w.trips().iter() {
+            if let Some(b) = t.parking_lot().and_then(LotId::building)
+                && w.trips().car_dropped(id)
+            {
+                *out.entry(b).or_insert(0) += 1;
+            }
+        }
+        out
+    }
+
     /// 枠は家のある世帯だけが持ち、建物の台数を超えない。台数が世帯の数に足りる建物では、どの世帯も枠を持つ。
-    /// 住宅の駐車場に停めてある台数と押さえた台数は、枠を持つ世帯の数を超えない。
+    /// 住宅の駐車場に停めてある台数と押さえた台数は、枠を持つ世帯の数を超えない。ただし、枠をなくした世帯の
+    /// 向かっている車が押さえた空きは、着くまで残る。
     fn check(w: &World) {
+        let dropped = dropped(w);
         let held = holders(w);
         let p = w.population();
         let mut living: BTreeMap<BuildingId, u64> = BTreeMap::new();
@@ -413,7 +429,7 @@ mod car_place_tests {
             }
         }
         for (id, n) in &living {
-            let spaces = w.buildings().get(*id).unwrap().parking_spaces();
+            let spaces = w.buildings().parking_spaces(*id);
             let got = held.get(id).copied().unwrap_or(0);
             assert_eq!(got, (*n).min(spaces), "建物 {id:?} の枠の数");
         }
@@ -422,7 +438,8 @@ mod car_place_tests {
                 continue;
             }
             let lot = w.trips().lot(id);
-            let used = u64::from(lot.parked) + u64::from(lot.reserved);
+            let used = u64::from(lot.parked) + u64::from(lot.reserved)
+                - dropped.get(&id).copied().unwrap_or(0);
             assert!(
                 used <= held.get(&id).copied().unwrap_or(0),
                 "建物 {id:?} に枠より多く停まっている: {lot:?}"
@@ -450,7 +467,7 @@ mod car_place_tests {
             holders(&w).values().sum::<u64>() > 20,
             "枠を持つ世帯が少ない"
         );
-        assert_eq!(w.trips().parking_tally().no_place, 0, "枠のない世帯が出た");
+        // 自宅の駐車場を持たない戸建ての世帯は枠を持たないが、そのほかの世帯はみな枠を持つ（`check`）。
         // 世帯の住む住宅を 1 つ取り壊すと、その世帯は枠をなくし、家でない所（職場など）に停めてあった車も
         // その駐車場から外れる。家の駐車場は建物ごと消える。
         let away = |w: &World| {
@@ -518,6 +535,63 @@ mod car_place_tests {
             );
         }
         check(&w);
+    }
+
+    /// 戸建てが集合住宅に上がって自宅の枠が減ると、ID の大きい世帯から枠を返す。返した世帯の車は、停めてあれば
+    /// 駐車場から外し、家へ向かっていれば着いても停めずに、押さえた空きを返す。
+    #[test]
+    fn houses_that_become_apartments_take_back_home_places() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        // 3 マス以上の段階 2 の戸建てで、段階 3 の台数より多く停めてあるか押さえてあり、家へ向かう車のあるもの。
+        let pick = |w: &World| {
+            w.buildings().iter().find_map(|(id, b)| {
+                let mut up = *b;
+                up.level = 3;
+                let lot = w.trips().lot(id);
+                let heading = w
+                    .trips()
+                    .iter()
+                    .any(|(_, t)| t.parking_lot() == Some(LotId::Building(id)));
+                (b.zone == crate::command::Zone::Residential
+                    && b.level == 2
+                    && b.tile_count() >= 3
+                    && heading
+                    && u64::from(lot.parked + lot.reserved) > up.parking_spaces(w.seed()))
+                .then_some(id)
+            })
+        };
+        let mut found = None;
+        while w.tick.0 < 6 * TICKS_PER_DAY && found.is_none() {
+            w.step();
+            found = pick(&w);
+        }
+        let id = found.expect("段階 3 の台数より多く使われている戸建てがない");
+        w.buildings.get_mut(id).unwrap().level = 3;
+        w.assign_car_places();
+        let spaces = w.buildings().parking_spaces(id);
+        assert_eq!(holders(&w).get(&id).copied().unwrap_or(0), spaces);
+        assert!(
+            dropped(&w).contains_key(&id),
+            "家へ向かう車をなくした世帯がない"
+        );
+        check(&w);
+        // 枠を返した世帯の車は、着いても停めない。向かっている車がみな着けば、台数に収まる。
+        let living = |w: &World, h| w.population().home(h).flatten() == Some(id);
+        for _ in 0..TICKS_PER_DAY {
+            w.step();
+            check(&w);
+            let p = w.population();
+            for h in p.household_ids().filter(|h| living(&w, *h)) {
+                if let Some(HouseholdCar::Parked { lot, .. }) = w.trips().household_car(h) {
+                    assert!(
+                        w.car_places().get(h).is_some(),
+                        "枠のない世帯の車が {lot:?} に停まっている"
+                    );
+                }
+            }
+        }
+        let lot = w.trips().lot(id);
+        assert!(u64::from(lot.parked + lot.reserved) <= w.buildings().parking_spaces(id));
     }
 
     use crate::car_place::testing::HOME_SPACES_LIMIT;

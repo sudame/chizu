@@ -690,12 +690,16 @@ fn observe_gives_people_and_traffic_counts() {
     assert!(n(&time["measured"]) <= n(&time["commuters"]));
     assert!(n(&time["medianMinutes"]) <= n(&time["p90Minutes"]));
     assert!(n(&time["overHour"]) <= n(&time["commuters"]));
-    // いまの台数では、家のある世帯はみな自宅の枠を持ち、枠がなくて歩いた移動もない。
+    // 共同の駐車場のない街では、自宅の枠のない世帯は車を持てず、どの移動も歩く。
     let households = &o["parking"]["households"];
     assert!(n(&households["home"]) > 0, "自宅の枠を持つ世帯がいない");
-    assert!(n(&households["home"]) <= n(&o["population"]["households"]));
-    assert_eq!(n(&households["none"]), 0);
-    assert_eq!(n(&o["parking"]["noPlace"]), 0);
+    assert!(n(&households["none"]) > 0, "自宅の枠のない世帯がいない");
+    assert_eq!(n(&households["shared"]), 0);
+    assert!(n(&households["home"]) + n(&households["none"]) <= n(&o["population"]["households"]));
+    assert!(
+        n(&o["parking"]["noPlace"]) > 0,
+        "枠がなくて歩いた移動がない"
+    );
     let parts = &o["population"]["happinessParts"];
     for k in ["commute", "services", "wealth"] {
         assert!(n(&parts[k]) <= 100, "{k}");

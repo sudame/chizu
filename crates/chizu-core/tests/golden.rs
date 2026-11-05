@@ -1572,7 +1572,7 @@ fn driving_checkpoints_on(log: &CommandLog, seed: u64, ticks: u64) -> (String, u
                 .buildings()
                 .get(id)
                 .expect("消えた建物に駐車場が残った");
-            assert!(u64::from(lot.parked + lot.reserved) <= b.parking_spaces());
+            assert!(u64::from(lot.parked + lot.reserved) <= b.parking_spaces(world.seed()));
             assert_eq!(lot.reserved, heading.remove(&id).unwrap_or(0), "{id:?}");
         }
         assert!(

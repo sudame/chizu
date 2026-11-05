@@ -42,6 +42,7 @@ fn no_car_stays_on_the_road_for_a_day_in_a_jammed_city() {
             cars.len()
         );
     }
-    // 混雑が起きる街であることも確かめておく。
-    assert!(busiest >= 400, "混雑が起きなかった {busiest}");
+    // 混雑が起きる街であることも確かめておく。自宅の枠のない世帯（3 割から 4 割）は車を持たないので、
+    // 車線の上の車は自宅の枠を減らす前（400 台以上）より少ない。
+    assert!(busiest >= 150, "混雑が起きなかった {busiest}");
 }

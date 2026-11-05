@@ -18,8 +18,9 @@ use crate::units::{LaneOffset, Tick};
 mod parking;
 
 pub use parking::{
-    HOUSE_GAP_MM, LANE_FRONTAGE, LANE_MAX_LEVEL, LANE_MIN_DEPTH, LANE_WIDTH_MM, LanePlan,
-    ParkingCut, ParkingLayout, SLOT_DEPTH_MM, SLOT_WIDTH_MM, SLOTS_PER_TILE,
+    APARTMENT_HOME_LOTS, HOUSE_GAP_MM, LANE_FRONTAGE, LANE_MAX_LEVEL, LANE_MIN_DEPTH,
+    LANE_WIDTH_MM, LanePlan, NO_HOME_LOT_ONE_IN, ParkingCut, ParkingLayout, SLOT_DEPTH_MM,
+    SLOT_WIDTH_MM, SLOTS_PER_TILE,
 };
 
 /// 建物の段階の上限。
@@ -115,9 +116,9 @@ impl Building {
         (h >> 32) % 1_000
     }
 
-    /// 駐車場の台数。平面と建物の中の駐車場の台数の和である（[`Building::parking_layout`]）。
-    pub fn parking_spaces(&self) -> u64 {
-        self.parking_layout().total()
+    /// 駐車場の台数。平面と建物の中の駐車場の台数の和である（[`Building::parking_layout`]）。`seed` は街の種である。
+    pub fn parking_spaces(&self, seed: u64) -> u64 {
+        self.parking_layout(seed).total()
     }
 }
 
@@ -149,9 +150,36 @@ pub struct Buildings {
     rows: Vec<Option<Building>>,
     /// `front` の (y, x) で引く索引。行から作り直せるので状態ハッシュには入れない。
     by_front: BTreeSet<(i64, i64, BuildingId)>,
+    /// 街の種。建物の駐車場の台数（[`Building::parking_layout`]）を求めるのに使う。`World` の種を写したもので、
+    /// 状態ハッシュにも書き出しにも入れない。読み戻したときは `World` が写し直す。
+    #[serde(skip)]
+    seed: u64,
 }
 
 impl Buildings {
+    /// 種 `seed` の街の、空の表。
+    pub(crate) fn with_seed(seed: u64) -> Buildings {
+        Buildings {
+            seed,
+            ..Buildings::default()
+        }
+    }
+
+    /// 街の種。
+    pub fn seed(&self) -> u64 {
+        self.seed
+    }
+
+    /// 街の種を写し直す。書き出しから読み戻したあとに使う。
+    pub(crate) fn set_seed(&mut self, seed: u64) {
+        self.seed = seed;
+    }
+
+    /// 建物 `id` の駐車場の台数。建物がなければ 0 である。
+    pub fn parking_spaces(&self, id: BuildingId) -> u64 {
+        self.get(id).map_or(0, |b| b.parking_spaces(self.seed))
+    }
+
     /// `front` が `area` の中にある建物を、`front` の (y, x) の順に返す。
     pub fn fronts_in(&self, area: TileRect) -> impl Iterator<Item = BuildingId> + '_ {
         let (lo, hi) = (

@@ -1044,11 +1044,12 @@ mod tests {
                 })
                 .unwrap();
                 // 私道のある端のマスの真ん中と、そこから外へ向かう向き（間口に沿う向きの符号）
-                let (k, out) = if crate::movement::lot_end(net, b) == crate::movement::LotEnd::Far {
-                    (span, 1)
-                } else {
-                    (0, -1)
-                };
+                let (k, out) =
+                    if crate::movement::lot_end(net, b, w.seed()) == crate::movement::LotEnd::Far {
+                        (span, 1)
+                    } else {
+                        (0, -1)
+                    };
                 let along = |x: i64, y: i64| x * ax + y * ay;
                 let tile_mid = along(
                     (b.front.x + ax * k) * t + t / 2,
@@ -1061,7 +1062,7 @@ mod tests {
                     (outer, outer + 3_000)
                 };
                 for (name, spot) in [
-                    ("lot_spot", crate::movement::lot_spot(net, b)),
+                    ("lot_spot", crate::movement::lot_spot(net, b, w.seed())),
                     ("building_spot", crate::movement::building_spot(net, b)),
                 ] {
                     let p = spot.unwrap().world();

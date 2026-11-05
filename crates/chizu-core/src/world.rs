@@ -297,7 +297,7 @@ impl World {
             network,
             population: Population::default(),
             car_places: CarPlaces::default(),
-            buildings: Buildings::default(),
+            buildings: Buildings::with_seed(seed),
             facilities: Vec::new(),
             supply_dirty: false,
             lots: Default::default(),
@@ -614,6 +614,11 @@ impl World {
 
     pub fn seed(&self) -> u64 {
         self.seed
+    }
+
+    /// 書き出しに入れない、種から写した値を作り直す。書き出しから読み戻したあとに呼ぶ。
+    pub(crate) fn restore_derived(&mut self) {
+        self.buildings.set_seed(self.seed);
     }
 
     /// 次に進める tick。これまでに進めた tick 数でもある。
