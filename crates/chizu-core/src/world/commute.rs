@@ -125,7 +125,8 @@ impl World {
             .collect();
         let buildings = &self.buildings;
         let lost = self.car_places.assign_homes(homes, |b| {
-            buildings.get(b).map_or(0, |b| b.parking_spaces())
+            let spaces = buildings.get(b).map_or(0, |b| b.parking_spaces());
+            home_spaces_limit().map_or(spaces, |limit| spaces.min(limit))
         });
         for h in lost {
             self.trips.forget_car(h);
@@ -312,6 +313,17 @@ mod tests {
     }
 }
 
+/// 建物の自宅の枠の数の上限。テストで自宅の枠が足りない街を作るのに使い、ふつうは `None` である。
+#[cfg(not(test))]
+fn home_spaces_limit() -> Option<u64> {
+    None
+}
+
+#[cfg(test)]
+fn home_spaces_limit() -> Option<u64> {
+    car_place_tests::HOME_SPACES_LIMIT.with(std::cell::Cell::get)
+}
+
 #[cfg(test)]
 mod car_tests {
     use super::CAR_OWNERSHIP_PERCENT;
@@ -337,7 +349,11 @@ mod car_tests {
 mod car_place_tests {
     use std::collections::BTreeMap;
 
-    use crate::car_place::CarPlace;
+    use crate::car_place::{CarPlace, SHARED_LOT_RADIUS};
+    use crate::command::ServiceKind;
+    use crate::movement::{LotId, SharedLot, shared_facility};
+    use crate::tile::TilePos;
+    use crate::world::ApplyOutcome;
     use crate::clock::TICKS_PER_DAY;
     use crate::command::{Command, ZoneKind};
     use crate::id::BuildingId;
@@ -475,6 +491,119 @@ mod car_place_tests {
             );
         }
         check(&w);
+    }
+
+    thread_local! {
+        /// 建物の自宅の枠の数の上限（[`super::home_spaces_limit`]）。
+        pub(super) static HOME_SPACES_LIMIT: std::cell::Cell<Option<u64>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// 共同の駐車場の枠を借りた世帯を、駐車場の角のマスごとに数える。どの世帯も家から範囲の中の駐車場を借り、
+    /// 貸した枠と外来の台数の和は台数を超えず、駐車場の台数の表と世帯の枠が合う。
+    /// 借りた世帯の車が停まっている台数は、貸した枠の数を超えない。
+    fn check_rented(w: &World) -> BTreeMap<TilePos, u32> {
+        let counts = w.car_places().rented_counts();
+        for (h, place) in w.car_places().iter() {
+            let CarPlace::Shared(c) = place else {
+                continue;
+            };
+            let f = shared_facility(w.facilities(), c).expect("ない駐車場を借りている");
+            let home = w.population().home(h).flatten().expect("家のない世帯が借りている");
+            let home = w.buildings().get(home).unwrap();
+            let (dx, dy) = (home.front.x - f.front.x, home.front.y - f.front.y);
+            let r = SHARED_LOT_RADIUS as i64;
+            assert!(dx * dx + dy * dy <= r * r, "遠い駐車場を借りている");
+        }
+        for f in w.facilities().iter().filter(|f| f.kind.is_parking()) {
+            let c = f.area.min;
+            let lot = w.trips().shared_lot(c);
+            assert_eq!(lot.rented, counts.get(&c).copied().unwrap_or(0), "{c:?}");
+            assert!(lot.rented_parked <= lot.rented, "{c:?}: {lot:?}");
+            assert!(
+                lot.rented + lot.visitors.parked + lot.visitors.reserved
+                    <= f.kind.parking_spaces(),
+                "{c:?}: {lot:?}"
+            );
+        }
+        counts
+    }
+
+    fn place(w: &mut World, kind: ServiceKind, at: (i64, i64)) {
+        let command = Command::PlaceBuilding {
+            kind,
+            at: TilePos::new(at.0, at.1),
+            rotation: 2,
+        };
+        assert_eq!(w.apply(&command), ApplyOutcome::Applied);
+    }
+
+    /// 自宅の枠が足りない街では、枠のない世帯が近くの共同の駐車場を借り、車で出入りする。
+    /// 取り壊すと、借りていた世帯は枠をなくし、停まっていた車も消える。次の決め直しで、ほかの駐車場を借りる。
+    #[test]
+    fn households_without_home_places_rent_shared_lots() {
+        HOME_SPACES_LIMIT.with(|l| l.set(Some(0)));
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        // 住宅の帯（y が 4〜9）の南の道路に面して、平面の駐車場を置く。
+        place(&mut w, ServiceKind::ParkingLot, (-20, 9));
+        let corner = w.facilities().last().unwrap().area.min;
+        let (mut parked, mut driving) = (false, false);
+        while w.tick.0 < 2 * TICKS_PER_DAY {
+            w.step();
+            if w.tick.0 % 30 == 0 {
+                let counts = check_rented(&w);
+                assert!(counts.get(&corner).copied().unwrap_or(0) <= 12);
+                for (h, _) in w.car_places().iter() {
+                    match w.trips().household_car(h) {
+                        Some(HouseholdCar::Parked { lot, .. }) => {
+                            parked |= lot == LotId::Rented(corner);
+                        }
+                        Some(HouseholdCar::InUse(_)) => driving = true,
+                        None => {}
+                    }
+                }
+            }
+        }
+        let counts = check_rented(&w);
+        assert_eq!(counts.get(&corner), Some(&12), "枠がすべて借りられていない");
+        assert!(
+            w.car_places().iter().all(|(_, p)| p != CarPlace::Home),
+            "自宅の枠を持つ世帯がいる"
+        );
+        assert!(parked, "借りた枠に停まった車がない");
+        assert!(driving, "借りた世帯の車が走っていない");
+        assert!(w.trips().parking_tally().no_place > 0, "枠のない世帯が出ない");
+        // 状態の書き出しと読み戻しで、借りた枠と駐車場の台数が残る。
+        let back = World::from_snapshot(&w.to_snapshot()).unwrap();
+        assert_eq!(back.state_hash(), w.state_hash());
+        assert_eq!(back.car_places(), w.car_places());
+        // 取り壊すと、借りていた世帯は枠をなくし、停まっていた車も消える。
+        let renters: Vec<_> = w.car_places().iter().map(|(h, _)| h).collect();
+        let area = w.facilities().last().unwrap().area;
+        assert_eq!(w.apply(&Command::Bulldoze { area }), ApplyOutcome::Applied);
+        assert!(w.car_places().iter().next().is_none());
+        assert_eq!(w.trips().shared_lot(corner), SharedLot::default());
+        for h in renters {
+            assert!(
+                !matches!(
+                    w.trips().household_car(h),
+                    Some(HouseholdCar::Parked { lot, .. }) if lot.shared_corner() == Some(corner)
+                ),
+                "取り壊した駐車場に車が残っている"
+            );
+        }
+        // 駐車場ビルを置くと、次の決め直しで借りる。
+        place(&mut w, ServiceKind::ParkingGarage, (-20, 9));
+        let garage = w.facilities().last().unwrap().area.min;
+        for _ in 0..TICKS_PER_DAY {
+            w.step();
+        }
+        let counts = check_rented(&w);
+        assert!(
+            counts.get(&garage).copied().unwrap_or(0) > 12,
+            "駐車場ビルを借りた世帯が少ない: {counts:?}"
+        );
+        HOME_SPACES_LIMIT.with(|l| l.set(None));
     }
 }
 

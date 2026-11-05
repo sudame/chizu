@@ -237,4 +237,40 @@ mod tests {
         assert_eq!(lost, vec![h(2), h(3)]);
         assert_eq!(homes(&p), vec![1]);
     }
+
+    /// 借りている世帯は、家があるかぎり借りた枠を持ち続ける。空いた自宅の枠は、枠のない世帯に先に配り、
+    /// 余れば借りている世帯に配る。自宅の枠に移った世帯は、借りた枠を返す。
+    #[test]
+    fn renters_keep_their_space_and_get_a_home_place_after_those_without() {
+        let mut p = CarPlaces::default();
+        let corner = TilePos::new(4, 5);
+        let all = [(h(1), Some(b(1))), (h(2), Some(b(1))), (h(3), Some(b(1)))];
+        p.rent(h(1), corner);
+        assert!(p.assign_homes(all, |_| 0).is_empty());
+        assert_eq!(p.get(h(1)), Some(CarPlace::Shared(corner)));
+        assert_eq!(p.rented_counts(), BTreeMap::from([(corner, 1)]));
+        let lost = p.assign_homes(all, |_| 2);
+        assert!(lost.is_empty());
+        assert_eq!(p.get(h(1)), Some(CarPlace::Shared(corner)));
+        assert_eq!((p.get(h(2)), p.get(h(3))), (Some(CarPlace::Home), Some(CarPlace::Home)));
+        let lost = p.assign_homes(all, |_| 3);
+        assert_eq!(lost, vec![h(1)]);
+        assert_eq!(p.get(h(1)), Some(CarPlace::Home));
+        assert!(p.rented_counts().is_empty());
+        // 家をなくした世帯は、借りた枠もなくす。
+        p.rent(h(4), corner);
+        let lost = p.assign_homes([(h(4), None)], |_| 3);
+        assert_eq!(lost, vec![h(1), h(2), h(3), h(4)]);
+        assert!(p.iter().next().is_none());
+    }
+
+    #[test]
+    fn the_fee_cap_rises_with_savings() {
+        let full = crate::happiness::SAVINGS_FOR_FULL_BONUS;
+        assert_eq!(fee_cap(Money(0)), BASE_SHARED_LOT_FEE);
+        assert_eq!(fee_cap(Money(full.0 / 2)), 15);
+        assert_eq!(fee_cap(full), 20);
+        assert_eq!(fee_cap(Money(full.0 * 3)), 20);
+        assert!(SHARED_LOT_FEE <= fee_cap(Money(0)));
+    }
 }
