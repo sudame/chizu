@@ -55,11 +55,13 @@ pub struct ScheduleState {
     pub depart_at: Option<Tick>,
 }
 
-/// 幸福度の 3 つの要素。重みを付けて足すのは世帯の属性が要るので、ここでは要素の点数だけを持つ。
+/// 幸福度の 4 つの要素。重みを付けて足すのは世帯の属性が要るので、ここでは要素の点数だけを持つ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HappinessParts {
     pub commute: u8,
     pub services: u8,
+    /// 車を置く枠を持てたか、借りた共同の駐車場が遠くないか、料金が高くないか。
+    pub parking: u8,
     pub wealth: u8,
 }
 
@@ -67,6 +69,7 @@ impl HappinessParts {
     pub const NEUTRAL: HappinessParts = HappinessParts {
         commute: HAPPINESS_MAX / 2,
         services: HAPPINESS_MAX / 2,
+        parking: HAPPINESS_MAX / 2,
         wealth: HAPPINESS_MAX / 2,
     };
 }
@@ -424,7 +427,7 @@ impl StateHash for ScheduleState {
 
 impl StateHash for HappinessParts {
     fn write_state(&self, h: &mut StateHasher) {
-        h.write(&[self.commute, self.services, self.wealth]);
+        h.write(&[self.commute, self.services, self.parking, self.wealth]);
     }
 }
 

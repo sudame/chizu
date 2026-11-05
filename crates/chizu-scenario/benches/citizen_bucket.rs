@@ -22,6 +22,8 @@ fn citizen_bucket(c: &mut Criterion) {
     let tax_permille = ZoneKind::ALL.map(|z| city.tax_permille(z));
     let mut p = city.population().clone();
     let buildings = city.buildings();
+    let (car_places, facilities, parking_fee) =
+        (city.car_places(), city.facilities(), city.parking_fee());
     let mut tick = city.tick();
     group.bench_function(BenchmarkId::new("standard", "city_100k"), |b| {
         b.iter(|| {
@@ -32,6 +34,9 @@ fn citizen_bucket(c: &mut Criterion) {
                     population,
                     buildings,
                     tax_permille,
+                    car_places,
+                    facilities,
+                    parking_fee,
                 };
                 update_citizen(&ctx, id, row)
             });

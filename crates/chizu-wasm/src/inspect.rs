@@ -13,8 +13,10 @@ pub struct Residents {
     pub count: u64,
     /// 住民の幸福度の平均。
     pub happiness: u8,
-    /// 幸福度の 3 つの要素（通勤、生活サービス、暮らし向き）の平均。
+    /// 幸福度の要素のうち、通勤、生活サービス、暮らし向きの平均。
     pub parts: [u8; 3],
+    /// 幸福度の要素のうち、駐車場の平均。
+    pub parking: u8,
     /// 職場のある住民の通勤の所要時間の平均を、時計の秒にしたもの。幸福度の通勤の点と同じく、測った通勤の時間を
     /// 均した値で、まだ測っていない住民は直線距離からの見積もりを使う（[`commute_time`]）。移動の 1 秒（1 tick）は
     /// 時計の 12 秒にあたるので、[`GAME_SECONDS_PER_TICK`] を掛ける。observe の `commute.time` と同じ物差しである。
@@ -195,6 +197,7 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
     info.capacity = b.households();
     let mut count = 0u64;
     let mut sums = [0u64; 3];
+    let mut parking = 0u64;
     let mut happiness = 0u64;
     let (mut commute_total, mut commuters) = (0u64, 0u64);
     let mut places = CarPlaceInfo {
@@ -223,6 +226,7 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
             for (sum, v) in sums.iter_mut().zip([h.commute, h.services, h.wealth]) {
                 *sum += u64::from(v);
             }
+            parking += u64::from(h.parking);
             if let Some(work) = row.workplace.and_then(|w| buildings.get(w)) {
                 commute_total += commute_time(&row, b, work);
                 commuters += 1;
@@ -235,6 +239,7 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
             count,
             happiness: (happiness / count) as u8,
             parts: sums.map(|s| (s / count) as u8),
+            parking: (parking / count) as u8,
             commute_seconds: (commuters > 0)
                 .then(|| commute_total / commuters * u64::from(GAME_SECONDS_PER_TICK)),
         });
@@ -243,13 +248,14 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
 }
 
 /// 画面に渡す数の個数。
-pub const INSPECT_LENGTH: usize = 19;
+pub const INSPECT_LENGTH: usize = 20;
 
 /// 数に直す。要素がないものは -1 にする。なければ空の配列。
 ///
 /// 建物：`[1, 区画の種類, 段階, 電気, 水道, 上限, 埋まっている数, 住民の数, 幸福度, 通勤の点数,
 /// 生活サービスの点数, 暮らし向きの点数, 通勤の所要時間（時計の秒）, 自宅の枠の数, 自宅の枠を持つ世帯,
-/// 共同の駐車場の枠を借りている世帯, 枠を持たない世帯]`。最後の 4 つは住宅だけで、ほかは -1 である。
+/// 共同の駐車場の枠を借りている世帯, 枠を持たない世帯, 駐車場の点数]`。自宅の枠の数から枠を持たない世帯までの 4 つは
+/// 住宅だけで、ほかは -1 である。駐車場の点数は、住民のいる住宅だけで、ほかは -1 である。
 /// 施設：`[2, 施設の種類, 供給量, 1 日の維持費, 台数, 貸した枠, 停まっている台数, 外来の車, -1, ...]`。
 /// 台数からあとの 4 つは共同の駐車場だけで、ほかの施設は -1 である。
 /// どちらも最後の 2 つは識別子の a と b で、建物なら ID の添え字と世代、施設なら min のマスの x と y である。
@@ -299,6 +305,7 @@ pub fn encode(found: Option<Found>) -> Vec<f64> {
                 if let Some(s) = r.commute_seconds {
                     out[12] = s as f64;
                 }
+                out[17] = f64::from(r.parking);
             } else if b.zone.kind() == ZoneKind::Residential {
                 out[7] = 0.0;
             }
@@ -525,6 +532,11 @@ mod tests {
         assert_eq!(encoded[8], f64::from(r.happiness));
         assert_eq!(encoded[9], f64::from(r.parts[0]));
         assert_eq!(encoded[10], f64::from(r.parts[1]));
+        assert_eq!(
+            u64::from(r.parking),
+            mean(&|c| u64::from(c.happiness.parking))
+        );
+        assert_eq!(encoded[17], f64::from(r.parking));
         assert_eq!(encoded[12], r.commute_seconds.unwrap() as f64);
     }
 

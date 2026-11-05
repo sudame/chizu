@@ -9,17 +9,21 @@ import {
   parseOverview,
 } from "./overview.ts";
 
-// 人口、幸福度、通勤、生活サービス、暮らし向き、段階、次の人口、いまの枠、次の枠
+// 区画ごとの数（4 種類 × 3）。駐車場の点数はそのあとにある
+const blocks = Array<number>(12).fill(0);
+
+// 人口、幸福度、通勤、生活サービス、暮らし向き、段階、次の人口、いまの枠、次の枠、区画ごとの数、駐車場
 const at = (population: number, milestone: number, slots: number) =>
-  parseOverview([population, 64, 80, 90, 41, milestone, 600, slots, slots + 4]);
+  parseOverview([population, 64, 80, 90, 41, milestone, 600, slots, slots + 4, ...blocks, 70]);
 
 describe("overview", () => {
   test("overview の並びを読む", () => {
-    expect(parseOverview([300, 64, 80, 90, 41, 1, 600, 9, 13])).toEqual({
+    expect(parseOverview([300, 64, 80, 90, 41, 1, 600, 9, 13, ...blocks, 70])).toEqual({
       population: 300,
       happiness: 64,
       commute: 80,
       services: 90,
+      parking: 70,
       wealth: 41,
       milestone: 1,
       nextPopulation: 600,
@@ -52,10 +56,11 @@ describe("overview", () => {
     );
   });
 
-  test("幸福度の内訳は通勤・生活サービス・暮らし向きの順", () => {
+  test("幸福度の内訳は通勤・生活サービス・駐車場・暮らし向きの順", () => {
     expect(happinessParts(at(0, 0, 6)).map((p) => p.text)).toEqual([
       "通勤 80 / 100",
       "生活サービス 90 / 100",
+      "駐車場 70 / 100",
       "暮らし向き 41 / 100",
     ]);
   });

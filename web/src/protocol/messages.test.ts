@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import { CITY_STATS_LENGTH } from "./city-stats.ts";
-import { CHUNK_AREA, isWorkerToMain } from "./messages.ts";
+import { CHUNK_AREA, isWorkerToMain, OVERVIEW_LENGTH } from "./messages.ts";
 
 describe("isWorkerToMain", () => {
   const ready = {
@@ -75,7 +75,7 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ ...buildings, lots: undefined })).toBe(false);
     const overview = {
       kind: "overview",
-      overview: Array.from({ length: 21 }, (_, i) => i),
+      overview: Array.from({ length: OVERVIEW_LENGTH }, (_, i) => i),
       stalls: [40, 12, 3],
       isolated: [10, -59, 1],
       lotShortage: [0, 1, 0, 0],
@@ -105,7 +105,7 @@ describe("isWorkerToMain", () => {
     expect(
       isWorkerToMain({
         ...overview,
-        overview: Array.from({ length: 21 }, (_, i) => (i === 8 ? "8" : i)),
+        overview: Array.from({ length: OVERVIEW_LENGTH }, (_, i) => (i === 8 ? "8" : i)),
       }),
     ).toBe(false);
     expect(isWorkerToMain({ kind: "outcome", id: 3, seq: 1, outcome: "Denied", reason: "x" })).toBe(

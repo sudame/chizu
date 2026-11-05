@@ -309,7 +309,9 @@ mod tests {
             w.apply(&Command::SetParkingFee { fee: max }),
             ApplyOutcome::Applied
         );
-        assert!(i64::from(max) > fee_cap(crate::happiness::SAVINGS_FOR_FULL_BONUS));
+        // 越してくる世帯の蓄えは SAVINGS_FOR_FULL_BONUS より少ないので、範囲の上限の料金は誰も払えない
+        let richest = Money(crate::happiness::SAVINGS_FOR_FULL_BONUS.0 - 1);
+        assert!(i64::from(max) > fee_cap(richest));
         assert_eq!(renters(&w), 12, "見直しを待たずに枠を返した");
         // 上限を超えた世帯は、枠を返すまでも料金を払わない
         assert_eq!(w.finances().parking_fees, Money::ZERO);
@@ -490,5 +492,84 @@ mod tests {
         assert_eq!(areas[0].center(), TilePos::new(4, 4));
         assert_eq!(carless_areas(&carless, 2).len(), 2);
         assert!(carless_areas(&[], 10).is_empty());
+    }
+
+    /// 自宅の枠を持たない、家のある住民ごとの、借りているかと駐車場の点数。点数はいまの状態から求める。
+    fn parking_scores(w: &World) -> BTreeMap<crate::id::CitizenId, (bool, u8)> {
+        let ctx = crate::happiness::CitizenContext {
+            seed: w.seed,
+            tick: w.tick,
+            population: &w.population,
+            buildings: &w.buildings,
+            tax_permille: w.tax_permille,
+            car_places: &w.car_places,
+            facilities: &w.facilities,
+            parking_fee: w.parking_fee,
+        };
+        let p = w.population();
+        p.citizen_ids()
+            .filter_map(|id| {
+                let row = p.citizen(id)?;
+                w.buildings().get(p.home(row.household).flatten()?)?;
+                let renting = match w.car_places().get(row.household) {
+                    Some(crate::car_place::CarPlace::Shared(_)) => true,
+                    None => false,
+                    Some(crate::car_place::CarPlace::Home) => return None,
+                };
+                let score = crate::happiness::parts_of(&ctx, &row).parking;
+                Some((id, (renting, score)))
+            })
+            .collect()
+    }
+
+    /// 車を持てない世帯の住民は駐車場の点が 30 で、共同の駐車場を借りると上がる。料金を基準より上げると、
+    /// 借りている住民の点が下がる。
+    #[test]
+    fn the_parking_score_follows_the_place_and_the_fee() {
+        use crate::happiness::PARKING_CARLESS;
+        set_home_spaces_limit(Some(0));
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run(&mut w, TICKS_PER_DAY);
+        let before = parking_scores(&w);
+        assert!(!before.is_empty());
+        assert!(before.values().all(|(r, s)| !r && *s == PARKING_CARLESS));
+
+        let command = Command::PlaceBuilding {
+            kind: ServiceKind::ParkingLot,
+            at: TilePos::new(-20, 9),
+            rotation: 2,
+        };
+        assert_eq!(w.apply(&command), ApplyOutcome::Applied);
+        let rented = parking_scores(&w);
+        let renting: Vec<u8> = rented
+            .values()
+            .filter(|(r, _)| *r)
+            .map(|(_, s)| *s)
+            .collect();
+        assert!(!renting.is_empty(), "借りた世帯の住民がいない");
+        assert!(
+            renting.iter().all(|s| *s > PARKING_CARLESS && *s <= 100),
+            "{renting:?}"
+        );
+        assert!(
+            rented
+                .values()
+                .filter(|(r, _)| !r)
+                .all(|(_, s)| *s == PARKING_CARLESS),
+            "車を持てない住民の点が 30 でない"
+        );
+
+        // 料金を上げても見直しまでは枠を返さないので、同じ住民が借りたまま点だけが下がる
+        assert_eq!(
+            w.apply(&Command::SetParkingFee { fee: 20 }),
+            ApplyOutcome::Applied
+        );
+        let raised = parking_scores(&w);
+        for (id, (r, was)) in rented.iter().filter(|(_, (r, _))| *r) {
+            let (still, now) = raised[id];
+            assert!(still && *r);
+            assert!(now < *was, "料金を上げても {id:?} の点が {was} から {now}");
+        }
+        set_home_spaces_limit(None);
     }
 }

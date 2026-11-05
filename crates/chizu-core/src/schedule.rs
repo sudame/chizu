@@ -273,7 +273,7 @@ mod tests {
         run(&mut p, 128);
         assert_eq!(
             crate::state_hash::state_hash_of(&p),
-            4_457_776_999_754_050_528
+            11_644_812_530_641_750_914
         );
     }
 

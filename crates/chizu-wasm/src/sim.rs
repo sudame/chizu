@@ -18,7 +18,11 @@ use chizu_core::{
 use crate::snapshot::{Header, Mover, TripleBuffer};
 
 /// [`Sim::overview`] が返す数のうち、固定の並びの個数。そのあとに止まっている道路網の並びが続く。画面の側の `OVERVIEW_LENGTH` と合わせる。
-pub const OVERVIEW_LENGTH: usize = 21;
+pub const OVERVIEW_LENGTH: usize = 22;
+
+/// [`Sim::overview`] のうち、駐車場の点数の平均の位置。固定の並びの最後である。
+#[cfg(test)]
+const PARKING_AT: usize = OVERVIEW_LENGTH - 1;
 
 /// [`Sim::carless`] が返す数のうち、固定の並びの個数。そのあとに世帯の多い区切りの並びが続く。画面の側の `CARLESS_FIXED` と合わせる。
 pub const CARLESS_FIXED: usize = 6;
@@ -760,6 +764,7 @@ impl Sim {
     /// 次の段階に届く人口、いまの段階までで買える枠の数、次の段階で買える枠の数。
     /// そのあとに、住宅・商業・工業・オフィスの順で、区画ごとに
     /// 電気か水道の余裕がなくて新築が止まっている間口の数、そのうち電気、水道の余裕がない間口の数を並べる。
+    /// 最後に、駐車場の点数の平均を置く（あとから足した要素なので、ほかの要素の位置を変えないよう末尾にした）。
     /// 建物の表が変わらなくても動く値なので、街の数字（[`Sim::city_stats`]）とは別に返す。
     pub fn overview(&self) -> Vec<f64> {
         let (happiness, parts) = self.world.happiness_summary();
@@ -779,6 +784,7 @@ impl Sim {
         for b in blocks {
             out.extend([b.blocked, b.no_power, b.no_water].map(|v| v as f64));
         }
+        out.push(f64::from(parts.parking));
         // 最初の [`OVERVIEW_LENGTH`] 個のあとに、新築が止まっている道路網ごとの `[x, y, 足りない資源]` を並べる。
         // `x, y` は網の中で止まっている間口のうち座標が最小のマス、足りない資源は電気が 1、水道が 2 の和である。
         // 網は中核が決めた順に並ぶ。
@@ -1151,7 +1157,7 @@ mod tests {
         let [blocked, no_power, no_water] = [o[9], o[10], o[11]];
         assert!(blocked > 0.0, "{o:?}");
         assert_eq!([no_power, no_water], [blocked, blocked], "{o:?}");
-        assert!(o[12..OVERVIEW_LENGTH].iter().all(|v| *v == 0.0), "{o:?}");
+        assert!(o[12..PARKING_AT].iter().all(|v| *v == 0.0), "{o:?}");
         // 発電所だけなら水道だけが、浄水場だけなら電気だけが足りない
         let place = |sim: &mut Sim, kind, x| {
             sim.submit(Command::PlaceBuilding {
@@ -1311,7 +1317,10 @@ mod tests {
         assert_eq!(o[6], 250.0);
         assert_eq!(o[7], 6.0);
         assert_eq!(o[8], 9.0);
-        assert!(o[9..].iter().all(|v| *v == 0.0));
+        assert!(o[9..PARKING_AT].iter().all(|v| *v == 0.0));
+        // 駐車場の点数は、ほかの要素と同じく中立の値から始まる
+        assert_eq!(o[PARKING_AT], 50.0);
+        assert!(o[OVERVIEW_LENGTH..].is_empty());
     }
 
     #[test]

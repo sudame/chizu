@@ -6,9 +6,10 @@ export type Overview = {
   population: number;
   /** 家のある住民の幸福度の平均（0〜100）。 */
   happiness: number;
-  /** 幸福度の 3 つの要素の平均（0〜100）。 */
+  /** 幸福度の 4 つの要素の平均（0〜100）。 */
   commute: number;
   services: number;
+  parking: number;
   wealth: number;
   /** 届いた段階。0 ならまだどこにも届いていない。 */
   milestone: number;
@@ -27,6 +28,8 @@ export function parseOverview(values: number[]): Overview {
     commute: at(2),
     services: at(3),
     wealth: at(4),
+    // 駐車場はあとから足した要素で、区画ごとの数のあと（固定の並びの最後）にある
+    parking: at(21),
     milestone: at(5),
     nextPopulation: at(6),
     slots: at(7),
@@ -63,6 +66,7 @@ export function happinessParts(o: Overview): { label: string; value: number; tex
   return [
     { label: "通勤", value: o.commute },
     { label: "生活サービス", value: o.services },
+    { label: "駐車場", value: o.parking },
     { label: "暮らし向き", value: o.wealth },
   ].map((p) => ({ ...p, text: `${p.label} ${n(p.value)} / ${HAPPINESS_FULL}` }));
 }

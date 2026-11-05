@@ -1,15 +1,17 @@
 //! 住民の幸福度。
 //!
-//! 住民ごとに通勤・生活サービス・暮らし向きの 3 つの点数（`0..=HAPPINESS_MAX`）を持ち、組ごとの更新で
-//! [`update_citizen`] が書き直す。3 つを重みを付けて足し、生活サービスに応じた上限で抑えたものを幸福度とする
+//! 住民ごとに通勤・生活サービス・駐車場・暮らし向きの 4 つの点数（`0..=HAPPINESS_MAX`）を持ち、組ごとの更新で
+//! [`update_citizen`] が書き直す。4 つを重みを付けて足し、生活サービスに応じた上限で抑えたものを幸福度とする
 //! （[`total`]）。
 //! - 通勤：家を出てから職場に着くまでにかかった時間を均した値（[`CitizenRow::commute`]）。歩きも車も、
 //!   待ちや渋滞を含めて同じ物差しで測る。いまの家と職場でまだ着いたことがなければ、[`commute_seconds`] で
 //!   直線距離から見積もる。
 //! - 生活サービス：家に電気と水道が届いているか。
+//! - 駐車場：世帯が車を置く枠を持てたか、借りた共同の駐車場が遠くないか、料金が高くないか（[`parking_score`]）。
 //! - 暮らし向き：職があるか（働く年齢でなければ問わない）、世帯の蓄え、住宅の税率。
 
 use crate::building::{Building, Buildings};
+use crate::car_place::{BASE_SHARED_LOT_FEE, CarPlace, CarPlaces, fee_cap};
 use crate::citizens::{
     CitizenChange, CitizenRow, HAPPINESS_MAX, HappinessParts, Population, WORKING_AGES,
 };
@@ -17,6 +19,8 @@ use crate::command::ZoneKind;
 use crate::id::CitizenId;
 use crate::network::TILE_MM;
 use crate::round;
+use crate::service::Facility;
+use crate::tile::TilePos;
 use crate::units::{Money, Tick};
 
 /// 直線距離で見積もるときの、家から職場までの速さ（mm/秒）。道なりの遠回り、歩き、待ち、渋滞を込みにした値で、
@@ -50,8 +54,21 @@ pub const SAVINGS_BONUS_MAX: i64 = 40;
 /// 暮らし向きの点数に [`SAVINGS_BONUS_MAX`] を足す蓄え。
 pub const SAVINGS_FOR_FULL_BONUS: Money = Money(100_000);
 
-/// 幸福度を足すときの、通勤・生活サービス・暮らし向きの重み。
-pub const WEIGHTS: [u64; 3] = [1, 1, 3];
+/// 幸福度を足すときの、通勤・生活サービス・駐車場・暮らし向きの重み。
+pub const WEIGHTS: [u64; 4] = [1, 1, 1, 3];
+
+/// 共同の駐車場を借りたいのに枠がない（車を持てない）世帯の駐車場の点数。0 にしないのは、歩くことで
+/// 通勤の点がすでに下がるためである。
+pub const PARKING_CARLESS: u8 = 30;
+
+/// 借りた共同の駐車場がこのマス数より近ければ、遠さで点数を下げない。家の出入口のマスから駐車場の正面のマスまでの直線である。
+pub const PARKING_NEAR_TILES: u64 = 8;
+
+/// 借りた共同の駐車場が借りる範囲の端（[`crate::car_place::SHARED_LOT_RADIUS`]）にあるときに下げる点数。
+pub const PARKING_FAR_PENALTY: u64 = 40;
+
+/// 料金が世帯の払える上限（[`fee_cap`]）に届いたときに下げる点数。
+pub const PARKING_FEE_PENALTY: u64 = 30;
 
 /// 電気も水道も届かない住民の幸福度の上限。出ていく境目（[`crate::world::people::LEAVE_BELOW`]）より低くしてある。
 pub const SERVICELESS_CAP: u8 = 40;
@@ -64,6 +81,12 @@ pub struct CitizenContext<'a> {
     pub buildings: &'a Buildings,
     /// 区画の種類ごとの税率（‰）。添え字は [`ZoneKind::index`]。
     pub tax_permille: [u16; 4],
+    /// 世帯ごとの車を置く枠。
+    pub car_places: &'a CarPlaces,
+    /// 置いてある施設。借りた共同の駐車場の正面のマスを引く。
+    pub facilities: &'a [Facility],
+    /// 共同の駐車場の料金（1 日）。
+    pub parking_fee: u16,
 }
 
 /// 家から職場までの所要時間（秒）の見積もり。まだ通勤していない住民に使う。出入口のマスの直線距離を [`STRAIGHT_LINE_MM_PER_SECOND`] で割る。
@@ -111,12 +134,62 @@ pub fn wealth_score(age: u8, employed: bool, savings: Money, tax_permille: u16) 
     (base + bonus + shift).clamp(0, i64::from(HAPPINESS_MAX)) as u8
 }
 
-/// 3 つの点数を [`WEIGHTS`] で重みを付けて平均した幸福度（`0..=HAPPINESS_MAX`）。
+/// 借りた共同の駐車場の遠さで下げる点数。家の出入口のマス `home` から駐車場の正面のマス `lot` までの直線が
+/// [`PARKING_NEAR_TILES`] までは 0 で、借りる範囲の端で [`PARKING_FAR_PENALTY`] になるまで一様に増やす。
+pub fn parking_far_penalty(home: TilePos, lot: TilePos) -> u64 {
+    let d = |p: i64, q: i64| u128::from(p.abs_diff(q));
+    let (dx, dy) = (d(home.x, lot.x), d(home.y, lot.y));
+    let tiles = u64::try_from((dx * dx + dy * dy).isqrt()).unwrap_or(u64::MAX);
+    let radius = crate::car_place::SHARED_LOT_RADIUS;
+    let over = tiles.saturating_sub(PARKING_NEAR_TILES);
+    let span = radius - PARKING_NEAR_TILES;
+    over.min(span) * PARKING_FAR_PENALTY / span
+}
+
+/// 共同の駐車場の料金の高さで下げる点数。料金 `fee` が基準の料金（[`BASE_SHARED_LOT_FEE`]）以下なら 0 で、
+/// 蓄え `savings` の世帯が払える上限（[`fee_cap`]）で [`PARKING_FEE_PENALTY`] になるまで一様に増やす。
+/// 上限を超えた世帯は 1 日 1 回の見直しで枠を返すが、それまでは上限と同じだけ下げる。
+pub fn parking_fee_penalty(fee: u16, savings: Money) -> u64 {
+    let over = (i64::from(fee) - BASE_SHARED_LOT_FEE).max(0);
+    if over == 0 {
+        return 0;
+    }
+    let span = fee_cap(savings) - BASE_SHARED_LOT_FEE;
+    if span <= 0 || over >= span {
+        return PARKING_FEE_PENALTY;
+    }
+    u64::try_from(over).expect("正の値") * PARKING_FEE_PENALTY
+        / u64::try_from(span).expect("正の値")
+}
+
+/// 駐車場の点数。自宅の枠があれば満点、共同の駐車場を借りていれば満点から遠さと高さを引き、
+/// 枠がなければ（車を持てなければ） [`PARKING_CARLESS`] である。`place` は世帯の枠、`home` は家の出入口のマス、
+/// `lot` は借りた共同の駐車場の正面のマス（借りていなければ `None`）である。
+pub fn parking_score(
+    place: Option<CarPlace>,
+    home: TilePos,
+    lot: Option<TilePos>,
+    fee: u16,
+    savings: Money,
+) -> u8 {
+    match place {
+        Some(CarPlace::Home) => HAPPINESS_MAX,
+        Some(CarPlace::Shared(_)) => {
+            // 借りた駐車場は取り壊すと枠も返すので、`lot` はいつもある。なければ遠さは数えない。
+            let far = lot.map_or(0, |l| parking_far_penalty(home, l));
+            let down = far + parking_fee_penalty(fee, savings);
+            u64::from(HAPPINESS_MAX).saturating_sub(down) as u8
+        }
+        None => PARKING_CARLESS,
+    }
+}
+
+/// 4 つの点数を [`WEIGHTS`] で重みを付けて平均した幸福度（`0..=HAPPINESS_MAX`）。
 ///
 /// 生活サービスの点数に応じて上限を設け、0 点なら [`SERVICELESS_CAP`]、満点なら上限なしとし、そのあいだは
 /// 一様に上げる。重みを付けて足すだけでは、電気も水道もない街でも職のある世帯が出ていかないためである。
 pub fn total(h: HappinessParts) -> u8 {
-    let parts = [h.commute, h.services, h.wealth];
+    let parts = [h.commute, h.services, h.parking, h.wealth];
     let sum: u64 = parts
         .iter()
         .zip(WEIGHTS)
@@ -128,17 +201,18 @@ pub fn total(h: HappinessParts) -> u8 {
     (sum / WEIGHTS.iter().sum::<u64>()).min(cap) as u8
 }
 
-/// 職を得て、電気と水道の届く家に住み、通勤が短い、蓄えが上限の半分の働く年齢の人が越してきたときの幸福度。
+/// 職を得て、電気と水道の届く家に住み、通勤が短く、自宅の枠がある、蓄えが上限の半分の働く年齢の人が越してきたときの幸福度。
 /// 移住する人は、この見込みで街を選ぶ。いまは住宅の税率だけで決まる。
 pub fn newcomer_happiness(tax_permille: u16) -> u8 {
     total(HappinessParts {
         commute: HAPPINESS_MAX,
         services: HAPPINESS_MAX,
+        parking: HAPPINESS_MAX,
         wealth: wealth_score(30, true, Money(SAVINGS_FOR_FULL_BONUS.0 / 2), tax_permille),
     })
 }
 
-/// 住民 1 人の 3 つの点数。
+/// 住民 1 人の 4 つの点数。
 pub fn parts_of(ctx: &CitizenContext, row: &CitizenRow) -> HappinessParts {
     let home = ctx
         .population
@@ -159,9 +233,23 @@ pub fn parts_of(ctx: &CitizenContext, row: &CitizenRow) -> HappinessParts {
         .population
         .household_money(row.household)
         .unwrap_or(Money::ZERO);
+    // 家のない世帯は車を持てない世帯に数えないので、駐車場の点は満点にする。
+    let parking = home.map_or(HAPPINESS_MAX, |b| {
+        let place = ctx.car_places.get(row.household);
+        let lot = match place {
+            Some(CarPlace::Shared(corner)) => ctx
+                .facilities
+                .iter()
+                .find(|f| f.kind.is_parking() && f.area.min == corner)
+                .map(|f| f.front),
+            _ => None,
+        };
+        parking_score(place, b.front, lot, ctx.parking_fee, savings)
+    });
     HappinessParts {
         commute,
         services,
+        parking,
         wealth: wealth_score(row.age, work.is_some(), savings, tax),
     }
 }
@@ -209,25 +297,76 @@ mod tests {
 
     #[test]
     fn newcomers_expect_less_under_a_high_tax() {
-        assert_eq!(newcomer_happiness(100), 88);
-        assert_eq!(newcomer_happiness(200), 52);
-        assert_eq!(newcomer_happiness(300), 40);
+        assert_eq!(newcomer_happiness(100), 90);
+        assert_eq!(newcomer_happiness(200), 60);
+        assert_eq!(newcomer_happiness(300), 50);
     }
 
     #[test]
     fn total_weights_wealth_most() {
-        let h = |commute, services, wealth| HappinessParts {
+        let h = |commute, services, parking, wealth| HappinessParts {
             commute,
             services,
+            parking,
             wealth,
         };
-        assert_eq!(total(h(100, 100, 100)), 100);
-        assert_eq!(total(h(100, 100, 0)), 40);
-        assert_eq!(total(h(0, 100, 100)), 80);
+        assert_eq!(total(h(100, 100, 100, 100)), 100);
+        assert_eq!(total(h(100, 100, 100, 0)), 50);
+        assert_eq!(total(h(0, 100, 100, 100)), 83);
+        // 駐車場だけで下がるのは、通勤と同じく最大で 6 分の 1 である。
+        assert_eq!(total(h(100, 100, 0, 100)), 83);
+        assert_eq!(total(h(100, 100, PARKING_CARLESS, 100)), 88);
         // 生活サービスが 0 点なら 40 点、50 点なら 70 点が上限になる。
-        assert_eq!(total(h(100, 0, 100)), 40);
-        assert_eq!(total(h(100, 50, 100)), 70);
-        assert_eq!(total(h(0, 50, 0)), 10);
+        assert_eq!(total(h(100, 0, 100, 100)), 40);
+        assert_eq!(total(h(100, 50, 100, 100)), 70);
+        assert_eq!(total(h(0, 50, 0, 0)), 8);
         assert_eq!(total(HappinessParts::NEUTRAL), 50);
+    }
+
+    #[test]
+    fn the_far_penalty_grows_from_near_to_the_edge_of_the_range() {
+        let home = TilePos::new(0, 0);
+        assert_eq!(parking_far_penalty(home, home), 0);
+        assert_eq!(parking_far_penalty(home, TilePos::new(8, 0)), 0);
+        assert_eq!(parking_far_penalty(home, TilePos::new(-20, 0)), 20);
+        assert_eq!(parking_far_penalty(home, TilePos::new(0, 32)), 40);
+        assert_eq!(parking_far_penalty(home, TilePos::new(100, 100)), 40);
+        // 斜めは直線の距離で測る（6・8・10 の直角三角形）
+        assert_eq!(parking_far_penalty(home, TilePos::new(12, 16)), 20);
+    }
+
+    #[test]
+    fn the_fee_penalty_reaches_its_max_at_the_cap() {
+        let half = Money(SAVINGS_FOR_FULL_BONUS.0 / 2);
+        let cap = fee_cap(half);
+        assert_eq!(parking_fee_penalty(0, half), 0);
+        assert_eq!(parking_fee_penalty(10, half), 0);
+        assert_eq!(parking_fee_penalty(cap as u16, half), 30);
+        assert_eq!(parking_fee_penalty(50, half), 30);
+        // 基準の料金と上限のあいだでは一様に増える
+        let mid = (10 + cap) / 2;
+        assert_eq!(parking_fee_penalty(mid as u16, half), 15);
+        // 蓄えの多い世帯ほど、同じ料金で下がる点が小さい
+        assert!(parking_fee_penalty(20, Money(90_000)) < parking_fee_penalty(20, Money(10_000)));
+        // 蓄えのない世帯は基準の料金までしか払えず、それを超えれば上限と同じだけ下げる
+        assert_eq!(parking_fee_penalty(11, Money::ZERO), 30);
+    }
+
+    #[test]
+    fn the_parking_score_follows_the_place() {
+        let home = TilePos::new(0, 0);
+        let lot = Some(TilePos::new(20, 0));
+        let half = Money(SAVINGS_FOR_FULL_BONUS.0 / 2);
+        let shared = Some(CarPlace::Shared(TilePos::new(19, 0)));
+        assert_eq!(
+            parking_score(Some(CarPlace::Home), home, None, 50, half),
+            100
+        );
+        assert_eq!(parking_score(None, home, None, 10, half), PARKING_CARLESS);
+        assert_eq!(parking_score(shared, home, lot, 10, half), 80);
+        assert_eq!(parking_score(shared, home, lot, 50, half), 50);
+        // 範囲の端で上限の料金なら、車を持てない世帯と同じ点になる
+        let edge = Some(TilePos::new(32, 0));
+        assert_eq!(parking_score(shared, home, edge, 50, half), PARKING_CARLESS);
     }
 }

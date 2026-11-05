@@ -11,7 +11,7 @@ import {
 } from "./protocol/messages.ts";
 
 /** chizu-wasm の inspect が返す数の個数。 */
-export const INSPECT_LENGTH = 19;
+export const INSPECT_LENGTH = 20;
 
 /** 幸福度とその要素の満点。chizu-core の HAPPINESS_MAX と同じ。 */
 export const HAPPINESS_MAX = 100;
@@ -22,6 +22,7 @@ export type ResidentsInfo = {
   happiness: number;
   commute: number;
   services: number;
+  parking: number;
   wealth: number;
   /** 通勤の所要時間の平均（時計の秒）。職場のある住民がいなければ null。 */
   commuteSeconds: number | null;
@@ -138,6 +139,7 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
           happiness: at(8),
           commute: at(9),
           services: at(10),
+          parking: at(17),
           wealth: at(11),
           commuteSeconds: at(12) >= 0 ? at(12) : null,
         }
@@ -220,6 +222,7 @@ export function describeInspect(view: InspectView): InspectText {
       { label: "幸福度", value: `${r.happiness} / ${HAPPINESS_MAX}` },
       { label: "　通勤", value: String(r.commute) },
       { label: "　生活サービス", value: String(r.services) },
+      { label: "　駐車場", value: String(r.parking) },
       { label: "　暮らし向き", value: String(r.wealth) },
     );
   }
