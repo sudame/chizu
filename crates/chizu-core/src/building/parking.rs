@@ -473,7 +473,9 @@ mod tests {
                                     assert_eq!(slots, l.surface, "{at}");
                                     assert!(slots <= frontage * SLOTS_PER_TILE, "{at}");
                                 }
-                                ParkingCut::Lane { .. } => panic!("通りに面した建物が私道を持つ：{at}"),
+                                ParkingCut::Lane { .. } => {
+                                    panic!("通りに面した建物が私道を持つ：{at}")
+                                }
                                 Side { columns, tiles } => {
                                     assert!(b.tile_count() >= 3, "{at}");
                                     assert!(tiles * 3 <= b.tile_count(), "{at}");
@@ -549,7 +551,12 @@ mod tests {
                         assert_eq!(plan.houses, b.households(), "{at}");
                         assert_eq!(l.surface, plan.houses, "{at}");
                         assert_eq!(l.indoor, 0, "{at}");
-                        assert_eq!(l.cut, ParkingCut::Lane { houses: plan.houses });
+                        assert_eq!(
+                            l.cut,
+                            ParkingCut::Lane {
+                                houses: plan.houses
+                            }
+                        );
                         assert!(plan.houses >= 2, "奥に家がない：{at}");
                         let depth_mm = depth.unsigned_abs() * TILE_MM as u64;
                         let (hu0, hu1) = plan.house_u();

@@ -965,7 +965,10 @@ mod tests {
             }
         }
         assert!(lanes > 0, "私道の敷地が建たない");
-        assert!(lanes < eligible, "私道の敷地にしない建物がない：{lanes}/{eligible}");
+        assert!(
+            lanes < eligible,
+            "私道の敷地にしない建物がない：{lanes}/{eligible}"
+        );
     }
 
     #[test]

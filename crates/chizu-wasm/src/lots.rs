@@ -98,9 +98,7 @@ pub fn lot_shape(net: &Network, b: &Building) -> Option<LotShape> {
             for p in 0..plan.houses {
                 let (hv0, hv1) = plan.house_v(p);
                 let (sv0, sv1) = plan.slot_v(p);
-                shape
-                    .houses
-                    .push(rect(mm(hu0), mm(hv0), mm(hu1), mm(hv1)));
+                shape.houses.push(rect(mm(hu0), mm(hv0), mm(hu1), mm(hv1)));
                 let slot = rect(mm(su0), mm(sv0), mm(su1), mm(sv1));
                 shape.faces.push(slot);
                 shape.strips.push(Strip {
@@ -627,7 +625,11 @@ mod tests {
         for depth in 4..=6_i64 {
             for toward in [(0, -1), (0, 1), (1, 0), (-1, 0)] {
                 for level in [1, 2] {
-                    let size = if toward.0 == 0 { (2, depth) } else { (depth, 2) };
+                    let size = if toward.0 == 0 {
+                        (2, depth)
+                    } else {
+                        (depth, 2)
+                    };
                     let mut b = variant(template, ZoneKind::Residential, size, toward, level);
                     b.form = chizu_core::building::LotForm::Lane;
                     let at = format!("2×{depth} {toward:?} 段階 {level}");
@@ -672,7 +674,8 @@ mod tests {
                             || (s.rect[1] - lane[3]).abs() < 1e-9
                             || (s.rect[3] - lane[1]).abs() < 1e-9;
                         assert!(touches, "{at} 枠が私道に接しない");
-                        let (cx, cy) = ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
+                        let (cx, cy) =
+                            ((s.rect[0] + s.rect[2]) / 2.0, (s.rect[1] + s.rect[3]) / 2.0);
                         let (lx, ly) = ((lane[0] + lane[2]) / 2.0, (lane[1] + lane[3]) / 2.0);
                         let toward_lane = if s.open.0 != 0 {
                             (lx - cx) * s.open.0 as f64
