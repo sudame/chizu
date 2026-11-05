@@ -11,9 +11,9 @@ use crate::car_place::{CarPlace, CarPlaces, SHARED_LOT_FEE, SHARED_LOT_RADIUS, f
 use crate::citizens::Activity;
 use crate::id::{CitizenId, HouseholdId, TripId};
 use crate::movement::{CommuteRequest, Commuter, LotId};
+use crate::rng::{RngPurpose, mix_words};
 use crate::tile::TilePos;
 use crate::units::Money;
-use crate::rng::{RngPurpose, mix_words};
 
 /// 車を持つ世帯の割合（百分率）。
 pub const CAR_OWNERSHIP_PERCENT: u64 = 70;
@@ -350,14 +350,14 @@ mod car_place_tests {
     use std::collections::BTreeMap;
 
     use crate::car_place::{CarPlace, SHARED_LOT_RADIUS};
-    use crate::command::ServiceKind;
-    use crate::movement::{LotId, SharedLot, shared_facility};
-    use crate::tile::TilePos;
-    use crate::world::ApplyOutcome;
     use crate::clock::TICKS_PER_DAY;
+    use crate::command::ServiceKind;
     use crate::command::{Command, ZoneKind};
     use crate::id::BuildingId;
     use crate::movement::HouseholdCar;
+    use crate::movement::{LotId, SharedLot, shared_facility};
+    use crate::tile::TilePos;
+    use crate::world::ApplyOutcome;
     use crate::world::World;
     use crate::world::people::tests::city;
 
@@ -433,7 +433,9 @@ mod car_place_tests {
             w.car_places().iter().find_map(|(h, _)| {
                 let home = p.home(h).flatten()?;
                 match w.trips().household_car(h) {
-                    Some(HouseholdCar::Parked { lot, .. }) if lot != crate::movement::LotId::Building(home) => {
+                    Some(HouseholdCar::Parked { lot, .. })
+                        if lot != crate::movement::LotId::Building(home) =>
+                    {
                         Some(home)
                     }
                     _ => None,
@@ -509,7 +511,11 @@ mod car_place_tests {
                 continue;
             };
             let f = shared_facility(w.facilities(), c).expect("ない駐車場を借りている");
-            let home = w.population().home(h).flatten().expect("家のない世帯が借りている");
+            let home = w
+                .population()
+                .home(h)
+                .flatten()
+                .expect("家のない世帯が借りている");
             let home = w.buildings().get(home).unwrap();
             let (dx, dy) = (home.front.x - f.front.x, home.front.y - f.front.y);
             let r = SHARED_LOT_RADIUS as i64;
@@ -521,8 +527,7 @@ mod car_place_tests {
             assert_eq!(lot.rented, counts.get(&c).copied().unwrap_or(0), "{c:?}");
             assert!(lot.rented_parked <= lot.rented, "{c:?}: {lot:?}");
             assert!(
-                lot.rented + lot.visitors.parked + lot.visitors.reserved
-                    <= f.kind.parking_spaces(),
+                lot.rented + lot.visitors.parked + lot.visitors.reserved <= f.kind.parking_spaces(),
                 "{c:?}: {lot:?}"
             );
         }
@@ -572,7 +577,10 @@ mod car_place_tests {
         );
         assert!(parked, "借りた枠に停まった車がない");
         assert!(driving, "借りた世帯の車が走っていない");
-        assert!(w.trips().parking_tally().no_place > 0, "枠のない世帯が出ない");
+        assert!(
+            w.trips().parking_tally().no_place > 0,
+            "枠のない世帯が出ない"
+        );
         // 状態の書き出しと読み戻しで、借りた枠と駐車場の台数が残る。
         let back = World::from_snapshot(&w.to_snapshot()).unwrap();
         assert_eq!(back.state_hash(), w.state_hash());

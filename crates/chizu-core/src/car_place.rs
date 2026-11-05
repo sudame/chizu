@@ -252,7 +252,10 @@ mod tests {
         let lost = p.assign_homes(all, |_| 2);
         assert!(lost.is_empty());
         assert_eq!(p.get(h(1)), Some(CarPlace::Shared(corner)));
-        assert_eq!((p.get(h(2)), p.get(h(3))), (Some(CarPlace::Home), Some(CarPlace::Home)));
+        assert_eq!(
+            (p.get(h(2)), p.get(h(3))),
+            (Some(CarPlace::Home), Some(CarPlace::Home))
+        );
         let lost = p.assign_homes(all, |_| 3);
         assert_eq!(lost, vec![h(1)]);
         assert_eq!(p.get(h(1)), Some(CarPlace::Home));

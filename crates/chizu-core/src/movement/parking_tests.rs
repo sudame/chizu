@@ -6,8 +6,8 @@ use crate::command::{RoadKind, ZoneKind};
 use crate::id::BuildingId;
 use crate::network::{Dir, Line};
 use crate::rng::{RngPurpose, rng};
-use crate::state_hash::state_hash_of;
 use crate::service::Facility;
+use crate::state_hash::state_hash_of;
 use crate::tile::TileRect;
 
 /// 東西の道路と、その北側に並べた 1 マスの建物。
@@ -1194,17 +1194,26 @@ fn a_car_left_away_from_home_returns_when_its_driver_changes_jobs() {
     let h = Household { home };
     h.park(&mut s, 0, (home, work));
     // ほかの住民の分では戻さない。
-    s.trips
-        .return_car(Household::ID, Household::citizen(1), Some(LotId::Building(home)));
+    s.trips.return_car(
+        Household::ID,
+        Household::citizen(1),
+        Some(LotId::Building(home)),
+    );
     assert_eq!(lot(&s, work), (1, 0));
-    s.trips
-        .return_car(Household::ID, Household::citizen(0), Some(LotId::Building(home)));
+    s.trips.return_car(
+        Household::ID,
+        Household::citizen(0),
+        Some(LotId::Building(home)),
+    );
     assert_eq!(s.trips.household_car(Household::ID), None);
     assert_eq!(lot(&s, work), (0, 0));
     // 家に停めた車は戻さない。
     h.park(&mut s, 0, (work, home));
-    s.trips
-        .return_car(Household::ID, Household::citizen(0), Some(LotId::Building(home)));
+    s.trips.return_car(
+        Household::ID,
+        Household::citizen(0),
+        Some(LotId::Building(home)),
+    );
     assert_eq!(lot(&s, home), (1, 0));
 }
 
@@ -1407,9 +1416,7 @@ fn a_renter_walks_between_home_and_the_rented_space() {
         };
         let (net, router) = (&s.net, &mut s.router);
         let sites = (&s.buildings, facilities.as_slice());
-        s.trips
-            .start_commutes(net, router, sites, &[r], Tick::ZERO)[0]
-            .expect("移動を作れない")
+        s.trips.start_commutes(net, router, sites, &[r], Tick::ZERO)[0].expect("移動を作れない")
     };
     // 車がまだどこにもなくても、家から出るときは借りた枠まで歩いて乗る。
     let out = start(&mut s, (home, work));

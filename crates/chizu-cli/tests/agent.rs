@@ -507,7 +507,9 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
         "{map}"
     );
     let o = json(&cli(&["agent", "observe", d]));
-    let lots = o["parking"]["sharedLots"].as_array().expect("sharedLots がない");
+    let lots = o["parking"]["sharedLots"]
+        .as_array()
+        .expect("sharedLots がない");
     assert_eq!(lots.len(), 2, "{lots:?}");
     assert_eq!(lots[0]["kind"], "ParkingLot");
     assert_eq!(lots[0]["at"], serde_json::json!([17, 1]));
@@ -516,7 +518,13 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
     assert_eq!(lots[1]["at"], serde_json::json!([9, -4]));
     assert_eq!(lots[1]["spaces"], 240);
     for lot in lots {
-        for k in ["rented", "parked", "rentedParked", "visitorParked", "visitorReserved"] {
+        for k in [
+            "rented",
+            "parked",
+            "rentedParked",
+            "visitorParked",
+            "visitorReserved",
+        ] {
             assert_eq!(lot[k], 0, "{k}");
         }
     }

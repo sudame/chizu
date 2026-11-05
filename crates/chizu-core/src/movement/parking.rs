@@ -400,8 +400,11 @@ impl Parking {
                 if there {
                     self.update_shared(c, |s| {
                         s.visitors.reserved -= 1;
-                        s.visitors.parked =
-                            s.visitors.parked.checked_add(1).expect("停めた台数があふれた");
+                        s.visitors.parked = s
+                            .visitors
+                            .parked
+                            .checked_add(1)
+                            .expect("停めた台数があふれた");
                     });
                 }
                 there
@@ -411,7 +414,10 @@ impl Parking {
                 let there = self.shared_lot(c).rented > 0;
                 if there {
                     self.update_shared(c, |s| {
-                        s.rented_parked = s.rented_parked.checked_add(1).expect("停めた台数があふれた");
+                        s.rented_parked = s
+                            .rented_parked
+                            .checked_add(1)
+                            .expect("停めた台数があふれた");
                     });
                 }
                 there
@@ -1027,12 +1033,9 @@ impl Trips {
     ) -> Option<TripId> {
         router.sync(net);
         // 近い順に試し、車でも歩いても行ける最初の駐車場にする。
-        let candidates = self.parking.candidates(
-            (buildings, facilities),
-            (to, buildings.get(to)?),
-            own,
-            home,
-        );
+        let candidates =
+            self.parking
+                .candidates((buildings, facilities), (to, buildings.get(to)?), own, home);
         if candidates.is_empty() {
             self.parking_tally.lots_full = self.parking_tally.lots_full.saturating_add(1);
             self.lot_misses.add(to, now.0 / TICKS_PER_DAY, |m| {

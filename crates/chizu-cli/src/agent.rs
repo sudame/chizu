@@ -28,8 +28,8 @@ use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarPlace, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
     CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic, DenyReason, GameTime,
     HappinessParts, Heading, Line, LotMisses, MigrationOutlook, NodeControl, NodeId, ParkingTally,
-    Rescues, ServiceKind, SharedLot, TICKS_PER_DAY, TILE_MM, TilePos, TileRect, Traffic, World, ZoneKind,
-    replay,
+    Rescues, ServiceKind, SharedLot, TICKS_PER_DAY, TILE_MM, TilePos, TileRect, Traffic, World,
+    ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
