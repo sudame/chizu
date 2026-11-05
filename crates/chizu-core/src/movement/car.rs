@@ -307,14 +307,14 @@ impl Tail {
 
     /// 最後尾が `need` より先まで進んでいそうか。最後尾が交差点を抜けていく車（`leaving`）なら、入る車が抜けきる所に
     /// 着くまでの `ticks` tick のあいだ同じ速さで進むとみなす。ただし、その前の車が同じ速さで進んだ所から車間を
-    /// 空けた所までしか進まない。そうでなければ `base` tick のあいだ進むとみなす。交差点を抜けていく車の後ろに
+    /// 空けた所と、その車線の停止線 `stop` までしか進まない。そうでなければ `base` tick のあいだ進むとみなす。交差点を抜けていく車の後ろに
     /// 続く車を、前の車が交差点を抜けきるまで待たせないためである。
-    fn roomy(&self, base: i64, ticks: i64, leaving: bool, need: i64) -> bool {
+    fn roomy(&self, base: i64, ticks: i64, leaving: bool, stop: i64, need: i64) -> bool {
         let (at, v) = self.last;
         if !leaving {
             return at + v * base >= need;
         }
-        let mut reach = at + v * ticks;
+        let mut reach = (at + v * ticks).min(stop);
         if let Some((a, w)) = self.next {
             reach = reach.min(a + w * ticks - i64::from(SPACING));
         }
@@ -915,9 +915,10 @@ fn exit_lane(
         i64::from(t.link_len.0) - i64::from(t.offset.0) + i64::from(clear_line(net, next).0),
     );
     let clear = i64::from(clear_line(net, next).0);
+    let stop = i64::from(stop_line(net, next).0);
     let room = |l: &LaneId| {
         st.last(*l)
-            .is_none_or(|(at, _)| st.tails[l].roomy(1, ticks, at < clear, need))
+            .is_none_or(|(at, _)| st.tails[l].roomy(1, ticks, at < clear, stop, need))
     };
     let to_lane = junction_lane(net, conn, st, t, node, next, after, room);
     (to_lane, room(&to_lane))
@@ -1209,10 +1210,11 @@ pub(super) fn step(
                 + i64::from(clear_line(net, next).0);
             let ticks = ticks_to(net, t, left);
             let clear = i64::from(clear_line(net, next).0);
+            let stop = i64::from(stop_line(net, next).0);
             // 最後尾が交差点を抜けていく車かは、この tick に動く前の位置で決め、`exit_lane` と同じ見込みにする。
             if last.get(&lane).is_some_and(|tail| {
                 let (r, v) = tail.last;
-                !tail.roomy(0, ticks, r - v < clear, need)
+                !tail.roomy(0, ticks, r - v < clear, stop, need)
             }) {
                 (t.offset, t.speed) = (LaneOffset(line), MmPerTick::ZERO);
                 continue;
