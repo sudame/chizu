@@ -68,7 +68,7 @@ pub const SPAWN_PER_DEMAND: i64 = 8;
 pub const MAX_SPAWN_PER_ZONE: u32 = 16;
 
 /// 私道の敷地にできる大きさの住宅のうち、私道の敷地にする割合（%）。形は `docs/design.md` の 3.7 にある。
-pub const LANE_PERCENT: u32 = 50;
+pub const LANE_PERCENT: u32 = 70;
 
 /// 段階が 1 つ上がるまでの時間（tick）。
 pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;

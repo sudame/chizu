@@ -492,7 +492,7 @@ mod tests {
         assert!(records > 0);
     }
 
-    /// 実際に建った建物を雛形にして、大きさと向きと段階を変えた建物。出入口はそのままなので、形だけを確かめる。
+    /// 実際に建った建物を雛形にして、大きさと向きと段階を変えた、通りに面した建物。出入口はそのままなので、形だけを確かめる。
     fn variant(
         template: &Building,
         zone: ZoneKind,
@@ -501,6 +501,7 @@ mod tests {
         level: u8,
     ) -> Building {
         let mut b = *template;
+        b.form = chizu_core::building::LotForm::Street;
         b.zone = zone;
         b.level = level;
         b.toward_road = toward;
