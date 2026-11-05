@@ -669,6 +669,61 @@ pub(crate) mod tests {
         }
     }
 
+    /// 職場へ向かっているあいだに職場が変わったら、着いても前の職場までの時間を通勤の時間にしない。
+    #[test]
+    fn a_trip_to_a_former_workplace_does_not_record_the_commute() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 1);
+        let on_the_way = |w: &World| {
+            let p = w.population();
+            p.citizen_ids().find_map(|id| {
+                let row = p.citizen(id)?;
+                let trip = row.trip?;
+                let to_work = w.trips().commuter(trip)?.to == Activity::Work;
+                (to_work && row.commute.is_some()).then_some((id, trip, row.workplace?))
+            })
+        };
+        let mut found = None;
+        for _ in 0..TICKS_PER_DAY {
+            found = on_the_way(&w);
+            if found.is_some() {
+                break;
+            }
+            w.step();
+        }
+        let (id, trip, old) = found.expect("通勤の時間を持ち、職場へ向かっている住民がいない");
+        let other = w
+            .buildings()
+            .iter()
+            .find(|(b, x)| *b != old && x.zone == ZoneKind::Industrial)
+            .map(|(b, _)| b)
+            .expect("ほかの職場がない");
+        // update_jobs と同じく、職場を変えて予定を立て直す。
+        w.set_workplace(id, Some(other));
+        let at = w.next_leave_home(id, other);
+        w.population.set_schedule(
+            id,
+            ScheduleState {
+                next: Activity::Work,
+                depart_at: Some(at),
+            },
+        );
+        assert_eq!(w.population().citizen(id).unwrap().commute, None);
+        for _ in 0..TICKS_PER_DAY {
+            if w.trips().get(trip).is_none() {
+                break;
+            }
+            w.step();
+        }
+        assert!(w.trips().get(trip).is_none(), "移動が終わらない");
+        // 途中で消えて終わった移動でも通ってしまわないよう、着いたことを確かめる。
+        assert!(
+            w.trips().finished(trip).is_some_and(|f| f.reached),
+            "前の職場へ着いて終わっていない"
+        );
+        assert_eq!(w.population().citizen(id).unwrap().commute, None);
+    }
+
     /// 職場に車を停めた住民が職を失うと、その車は職場に残らず、どこにもないものに戻る。
     /// 残すと、働かない本人は職場へ行かないので、世帯のほかの人も車を使えないままになる。
     #[test]

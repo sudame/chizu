@@ -16,7 +16,7 @@ export type ResidentsInfo = {
   commute: number;
   services: number;
   wealth: number;
-  /** 通勤の所要時間（秒）の平均。職場のある住民がいなければ null。 */
+  /** 通勤の所要時間の平均（時計の秒）。職場のある住民がいなければ null。 */
   commuteSeconds: number | null;
 };
 

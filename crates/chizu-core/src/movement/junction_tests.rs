@@ -506,6 +506,7 @@ fn a_car_that_waits_past_the_rescue_walks_instead() {
         assert!(!car::given_up(t));
         t.stalled = junction::RESCUE + 1;
         assert!(car::given_up(t));
+        t.departed = Tick(77);
     }
     let mut ended = Vec::new();
     c.trips
@@ -513,6 +514,8 @@ fn a_car_that_waits_past_the_rescue_walks_instead() {
     assert!(ended.is_empty());
     let t = c.trips.get(id).unwrap();
     assert_eq!(t.mode(), LaneMode::Sidewalk);
+    // 歩きに切り替えても、通勤の時間は家を出たときから数える。
+    assert_eq!(t.departed(), Tick(77));
     assert!(!car::given_up(t));
     assert_eq!(c.trips.rescues().walked_instead, 1);
     assert_eq!(c.trips.rescues().teleported, 0);

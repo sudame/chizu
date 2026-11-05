@@ -3,8 +3,9 @@
 //! 住民ごとに通勤・生活サービス・暮らし向きの 3 つの点数（`0..=HAPPINESS_MAX`）を持ち、組ごとの更新で
 //! [`update_citizen`] が書き直す。3 つを重みを付けて足し、生活サービスに応じた上限で抑えたものを幸福度とする
 //! （[`total`]）。
-//! - 通勤：家から職場までの所要時間。いまは移動がないので、[`commute_seconds`] で直線距離から見積もる。
-//!   移動の実時間が測れるようになったら、この関数を差し替える。
+//! - 通勤：家を出てから職場に着くまでにかかった時間を均した値（[`CitizenRow::commute`]）。歩きも車も、
+//!   待ちや渋滞を含めて同じ物差しで測る。いまの家と職場でまだ着いたことがなければ、[`commute_seconds`] で
+//!   直線距離から見積もる。
 //! - 生活サービス：家に電気と水道が届いているか。
 //! - 暮らし向き：職があるか（働く年齢でなければ問わない）、世帯の蓄え、住宅の税率。
 
@@ -18,14 +19,17 @@ use crate::network::TILE_MM;
 use crate::round;
 use crate::units::{Money, Tick};
 
-/// 直線距離で見積もるときの、家から職場までの速さ（mm/秒）。道なりの遠回りと待ち時間を込みにした値である。
-pub const STRAIGHT_LINE_MM_PER_SECOND: u64 = 6_000;
+/// 直線距離で見積もるときの、家から職場までの速さ（mm/秒）。道なりの遠回り、歩き、待ち、渋滞を込みにした値で、
+/// 測った街の住民ごとの「直線距離 ÷ 測った通勤の時間」の中央値に合わせてある（`docs/design.md` の 1.6）。
+pub const STRAIGHT_LINE_MM_PER_SECOND: u64 = 1_000;
 
-/// この時間（秒）までの通勤は満点にする。
+/// この時間（移動の秒）までの通勤は満点にする。時計では 60 分にあたる（1 tick が移動の 1 秒、時計の 12 秒）。
+/// 測った街では、混んでいない街の通勤の中央値がこのあたりにある（`docs/design.md` の 1.6）。
 pub const COMMUTE_FULL_SECONDS: u64 = 300;
 
-/// この時間（秒）以上の通勤は 0 点にする。
-pub const COMMUTE_ZERO_SECONDS: u64 = 3_600;
+/// この時間（移動の秒）以上の通勤は 0 点にする。時計では 3 時間にあたり、2 時間で半分になる。
+/// 混んだ街では、通勤の長い 1 割の人がこのあたりにいる。
+pub const COMMUTE_ZERO_SECONDS: u64 = 900;
 
 /// 暮らし向きの基準になる住宅の税率（‰）。これより高いと点数が下がり、低いと上がる。
 pub const REFERENCE_TAX_PERMILLE: i64 = 100;
@@ -62,13 +66,20 @@ pub struct CitizenContext<'a> {
     pub tax_permille: [u16; 4],
 }
 
-/// 家から職場までの所要時間（秒）の見積もり。出入口のマスの直線距離を [`STRAIGHT_LINE_MM_PER_SECOND`] で割る。
+/// 家から職場までの所要時間（秒）の見積もり。まだ通勤していない住民に使う。出入口のマスの直線距離を [`STRAIGHT_LINE_MM_PER_SECOND`] で割る。
 pub fn commute_seconds(home: &Building, work: &Building) -> u64 {
     let dx = u128::from(home.front.x.abs_diff(work.front.x));
     let dy = u128::from(home.front.y.abs_diff(work.front.y));
     let tiles = (dx * dx + dy * dy).isqrt();
     let mm = tiles * u128::from(TILE_MM.unsigned_abs());
     u64::try_from(mm / u128::from(STRAIGHT_LINE_MM_PER_SECOND)).unwrap_or(u64::MAX)
+}
+
+/// 住民 `row` の通勤の時間（移動の秒）。測った値を均したものがあればそれを、なければ [`commute_seconds`] の
+/// 見積もりを使う。`home` と `work` は、その住民の家と職場である。
+pub fn commute_time(row: &CitizenRow, home: &Building, work: &Building) -> u64 {
+    row.commute
+        .map_or_else(|| commute_seconds(home, work), u64::from)
 }
 
 /// 通勤の点数。[`COMMUTE_FULL_SECONDS`] までは満点で、[`COMMUTE_ZERO_SECONDS`] で 0 点になるまで一様に下がる。
@@ -136,7 +147,7 @@ pub fn parts_of(ctx: &CitizenContext, row: &CitizenRow) -> HappinessParts {
         .and_then(|b| ctx.buildings.get(b));
     let work = row.workplace.and_then(|b| ctx.buildings.get(b));
     let commute = match (home, work) {
-        (Some(h), Some(w)) => commute_score(commute_seconds(h, w)),
+        (Some(h), Some(w)) => commute_score(commute_time(row, h, w)),
         _ => HAPPINESS_MAX,
     };
     let half = HAPPINESS_MAX / 2;
@@ -176,7 +187,7 @@ mod tests {
     fn commute_score_falls_between_the_limits() {
         assert_eq!(commute_score(0), 100);
         assert_eq!(commute_score(COMMUTE_FULL_SECONDS), 100);
-        assert_eq!(commute_score(1_950), 50);
+        assert_eq!(commute_score(600), 50);
         assert_eq!(commute_score(COMMUTE_ZERO_SECONDS), 0);
         assert_eq!(commute_score(u64::MAX), 0);
     }

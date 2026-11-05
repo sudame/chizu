@@ -19,7 +19,7 @@ describe("parseInspect", () => {
   });
 
   it("住宅を読む", () => {
-    expect(parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 330, 5, 2])).toEqual({
+    expect(parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 5, 2])).toEqual({
       kind: "building",
       target: [1, 5, 2],
       zone: "Residential",
@@ -34,7 +34,7 @@ describe("parseInspect", () => {
         commute: 80,
         services: 50,
         wealth: 55,
-        commuteSeconds: 330,
+        commuteSeconds: 3960,
       },
     });
   });
@@ -71,7 +71,7 @@ describe("parseInspect", () => {
 
 describe("describeInspect", () => {
   it("住宅の世帯、住民、幸福度とその要素、電気と水道、通勤を出す", () => {
-    const view = parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 330, 5, 2]);
+    const view = parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 5, 2]);
     expect(view).not.toBeNull();
     const text = describeInspect(view as NonNullable<typeof view>);
     expect(text.title).toBe("住宅（段階 2）");
@@ -84,7 +84,7 @@ describe("describeInspect", () => {
       { label: "　暮らし向き", value: "55" },
       { label: "電気", value: "届いている" },
       { label: "水道", value: "届いていない" },
-      { label: "通勤の所要時間", value: "約 6 分" },
+      { label: "通勤の所要時間", value: "約 66 分" },
     ]);
   });
 

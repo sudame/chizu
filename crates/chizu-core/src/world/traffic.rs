@@ -152,6 +152,22 @@ pub struct CommuteDistances {
     pub from_1km: u64,
 }
 
+/// 幸福度の通勤の点に使う、通勤の時間の分布。職のある住民の、測った通勤の時間を均した値で数える。
+/// まだ測っていない住民は、幸福度と同じく直線距離からの見積もりで数える。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommuteTimes {
+    /// 職があり、家と職場の建物がある住民の数。
+    pub commuters: u64,
+    /// そのうち、いまの家と職場で通勤の時間を測った住民の数。
+    pub measured: u64,
+    /// 時間（移動の秒）の中央値。通勤する住民がいなければ `None`。
+    pub median_seconds: Option<u64>,
+    /// 時間（移動の秒）の、長いほうから 1 割の境目。通勤する住民がいなければ `None`。
+    pub p90_seconds: Option<u64>,
+    /// 通勤の点が満点より下がる（[`crate::happiness::COMMUTE_FULL_SECONDS`] を超える）住民の数。
+    pub over_full: u64,
+}
+
 /// 住民の居場所ごとの人数。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CitizenPlaces {
@@ -257,6 +273,37 @@ impl World {
             }
         }
         out
+    }
+
+    /// 通勤の時間の分布。状態は変えず、状態ハッシュにも入れない。
+    pub fn commute_times(&self) -> CommuteTimes {
+        let p = &self.population;
+        let mut seconds = Vec::new();
+        let mut measured = 0;
+        for id in p.citizen_ids() {
+            let row = p.citizen(id).expect("いる住民の行がない");
+            let home = p
+                .home(row.household)
+                .flatten()
+                .and_then(|h| self.buildings.get(h));
+            let work = row.workplace.and_then(|w| self.buildings.get(w));
+            if let (Some(h), Some(w)) = (home, work) {
+                seconds.push(crate::happiness::commute_time(&row, h, w));
+                measured += u64::from(row.commute.is_some());
+            }
+        }
+        seconds.sort_unstable();
+        let n = seconds.len();
+        CommuteTimes {
+            commuters: n as u64,
+            measured,
+            median_seconds: seconds.get(n / 2).copied(),
+            p90_seconds: seconds.get(n * 9 / 10).copied(),
+            over_full: seconds
+                .iter()
+                .filter(|s| **s > crate::happiness::COMMUTE_FULL_SECONDS)
+                .count() as u64,
+        }
     }
 
     /// 住民の居場所ごとの人数。状態は変えない。
