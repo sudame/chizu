@@ -172,7 +172,7 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
     let pop = world.population();
     let b = buildings.get(id)?;
     let mut info = BuildingInfo {
-        zone: b.zone,
+        zone: b.zone.kind(),
         level: b.level,
         power: b.supply.power,
         water: b.supply.water,
@@ -181,8 +181,8 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
         residents: None,
         car_places: None,
     };
-    if b.zone != ZoneKind::Residential {
-        info.capacity = b.workplaces_at(world.tax_permille(b.zone));
+    if b.zone.kind() != ZoneKind::Residential {
+        info.capacity = b.workplaces_at(world.tax_permille(b.zone.kind()));
         // 税率を上げた直後は、職の割り当て直しまで勤め人が枠を超えている。枠で頭打ちにして出す。
         info.occupied = (pop
             .citizen_ids()
@@ -319,7 +319,7 @@ mod tests {
     use super::*;
     use crate::sim::Sim;
     use chizu_core::world::growth::GROWTH_INTERVAL;
-    use chizu_core::{CitizenRow, Command, RoadKind, ServiceKind, TICKS_PER_DAY};
+    use chizu_core::{CitizenRow, Command, RoadKind, ServiceKind, TICKS_PER_DAY, Zone};
 
     fn road(from: (i64, i64), to: (i64, i64)) -> Command {
         Command::BuildRoad {
@@ -332,7 +332,7 @@ mod tests {
     fn paint(sim: &mut Sim, x: (i64, i64), zone: ZoneKind) {
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(x.0, 11), TilePos::new(x.1, 15)),
-            zone: Some(zone),
+            zone: Some(Zone::from(zone)),
         })
         .unwrap();
     }
@@ -398,7 +398,7 @@ mod tests {
         world
             .buildings()
             .iter()
-            .filter(|(_, b)| b.zone == ZoneKind::Residential)
+            .filter(|(_, b)| b.zone == Zone::Residential)
             .map(|(id, _)| id)
             .collect()
     }
@@ -543,7 +543,7 @@ mod tests {
         let (id, _) = world
             .buildings()
             .iter()
-            .find(|(_, b)| b.zone == ZoneKind::Commercial)
+            .find(|(_, b)| b.zone == Zone::Commercial)
             .expect("商業が建たない");
         let (_, info) = building(world, area_min(world, id));
         let workers = pop

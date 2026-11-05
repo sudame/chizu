@@ -5,7 +5,7 @@
 
 use chizu_core::car_place::testing::set_home_spaces_limit;
 use chizu_core::world::growth::GROWTH_INTERVAL;
-use chizu_core::{Command, RoadKind, ServiceKind, TICKS_PER_DAY, TilePos, TileRect, ZoneKind};
+use chizu_core::{Command, RoadKind, ServiceKind, TICKS_PER_DAY, TilePos, TileRect, Zone};
 
 use crate::sim::Sim;
 
@@ -56,7 +56,7 @@ pub fn carless_town(days: u64) -> (Sim, NoHomePlaces) {
     }
     sim.submit(Command::PaintZone {
         area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 15)),
-        zone: Some(ZoneKind::Residential),
+        zone: Some(Zone::Residential),
     })
     .unwrap();
     sim.advance(GROWTH_INTERVAL as u32 + 1);

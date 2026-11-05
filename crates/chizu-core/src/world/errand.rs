@@ -162,7 +162,7 @@ impl World {
                 .fronts_in(area)
                 .filter_map(|id| {
                     let b = self.buildings.get(id)?;
-                    (b.zone == ZoneKind::Commercial).then_some((id, b.front))
+                    (b.zone.kind() == ZoneKind::Commercial).then_some((id, b.front))
                 })
                 .collect();
             if !shops.is_empty() {

@@ -8,7 +8,7 @@ use chizu_core::world::growth::GROWTH_INTERVAL;
 use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, Command, Money, RoadKind, ServiceKind, TICKS_PER_DAY, TilePos, TileRect, World,
-    ZoneKind,
+    Zone,
 };
 
 /// 建物の自宅の枠を 0 にしているあいだ持つ。落とすと元に戻す。
@@ -65,7 +65,7 @@ pub fn carless_world(days: u64) -> (World, NoHomePlaces) {
         &mut w,
         Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 15)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         },
     );
     run(&mut w, GROWTH_INTERVAL + 1 + days * TICKS_PER_DAY);

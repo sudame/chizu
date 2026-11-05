@@ -198,8 +198,9 @@ impl Sim {
             if layer.occupancy[i] == TileUse::Building {
                 *tile |= TILE_BUILDING;
             }
+            // 画面はまだ低密度の住宅を見分けないので、`ZoneKind` の値で送り、高密度の住宅と同じに描かせる。
             if let Some(zone) = layer.zone[i] {
-                *tile |= (zone as u8) << TILE_ZONE_SHIFT;
+                *tile |= (zone.kind() as u8) << TILE_ZONE_SHIFT;
             }
             let zonable = near.as_ref().is_some_and(|n| n[i]) && !road && *tile & TILE_WATER == 0;
             if zonable {
@@ -477,14 +478,14 @@ impl Sim {
     }
 
     /// 建物を、1 つにつき `[min の x, min の y, max の x, max の y, 区画の種類, 段階, 供給]` の 7 つの数で返す。
-    /// 区画の種類は `ZoneKind` の値、供給は電気が届いていれば 1、水道が届いていれば 2 を足した値である。
+    /// 区画の種類は `ZoneKind` の値（低密度の住宅も住宅の値）、供給は電気が届いていれば 1、水道が届いていれば 2 を足した値である。
     pub fn buildings(&self) -> Vec<f64> {
         let mut out = Vec::new();
         for (_, b) in self.world.buildings().iter() {
             let a = b.area;
             out.extend([a.min.x, a.min.y, a.max.x, a.max.y].map(|v| v as f64));
             let supply = u8::from(b.supply.power) + 2 * u8::from(b.supply.water);
-            out.extend([b.zone as u8, b.level, supply].map(f64::from));
+            out.extend([b.zone.kind() as u8, b.level, supply].map(f64::from));
         }
         out
     }
@@ -679,7 +680,7 @@ impl Sim {
                 out.extend([
                     b.area.min.x as f64,
                     b.area.min.y as f64,
-                    b.zone.index() as f64,
+                    b.zone.kind().index() as f64,
                     f64::from(full),
                 ]);
             }
@@ -876,7 +877,7 @@ fn encode_terrain(terrain: &TerrainTiles) -> Vec<u8> {
 mod tests {
     use super::*;
     use chizu_core::command::MAX_TAX_PERMILLE;
-    use chizu_core::{Chunk, RoadKind, SimSpeed, ZoneKind};
+    use chizu_core::{Chunk, RoadKind, SimSpeed, Zone, ZoneKind};
 
     fn has_water(sim: &Sim, coord: ChunkCoord) -> bool {
         sim.chunk_tiles(coord).iter().any(|t| t & TILE_WATER != 0)
@@ -1034,7 +1035,7 @@ mod tests {
         sim.submit(road((10, 10), (30, 10))).unwrap();
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
         .unwrap();
         let version = sim.buildings_version();
@@ -1120,7 +1121,7 @@ mod tests {
         sim.submit(road((10, 10), (30, 10))).unwrap();
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
         .unwrap();
         sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
@@ -1153,7 +1154,7 @@ mod tests {
         sim.submit(road((10, 10), (30, 10))).unwrap();
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
         .unwrap();
         sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
@@ -1200,7 +1201,7 @@ mod tests {
         }
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
         .unwrap();
         // 主の網には浄水場だけを置くので、電気が足りない
@@ -1263,7 +1264,7 @@ mod tests {
         sim.submit(road((10, 10), (30, 10))).unwrap();
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
         .unwrap();
         sim.submit(Command::PlaceBuilding {
@@ -1350,7 +1351,7 @@ mod tests {
         }
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
         .unwrap();
         // 建つ、供給が届く、段階が上がって需要が増える、を 1 tick ずつ確かめる
@@ -1378,7 +1379,7 @@ mod tests {
         sim.submit(road((10, 10), (30, 10))).unwrap();
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
         .unwrap();
         let fresh = |sim: &Sim| sim.buildings_hash();
@@ -1419,7 +1420,7 @@ mod tests {
         let before = sim.chunk_tiles_version(origin);
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(12, 11), TilePos::new(14, 12)),
-            zone: Some(ZoneKind::Commercial),
+            zone: Some(Zone::Commercial),
         })
         .unwrap();
         assert_eq!(
@@ -1433,6 +1434,24 @@ mod tests {
         sim.submit(road((60, 30), (60, 40))).unwrap();
         assert_ne!(sim.chunk_tiles_version(east), east_before);
         assert_ne!(sim.chunk_tiles(east)[30 * CHUNK_SIDE] & TILE_ZONABLE, 0);
+    }
+
+    /// 画面はまだ低密度の住宅を見分けないので、低密度のマスは住宅の値で送り、高密度と同じに描かせる。
+    #[test]
+    fn low_density_tiles_go_to_the_screen_as_residential() {
+        let mut sim = Sim::new(0);
+        let origin = ChunkCoord::new(0, 0);
+        sim.submit(road((10, 10), (20, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(12, 11), TilePos::new(14, 12)),
+            zone: Some(Zone::ResidentialLow),
+        })
+        .unwrap();
+        let tile = sim.chunk_tiles(origin)[12 * CHUNK_SIDE + 13];
+        assert_eq!(
+            (tile >> TILE_ZONE_SHIFT) & TILE_ZONE_MASK,
+            ZoneKind::Residential as u8
+        );
     }
 
     #[test]

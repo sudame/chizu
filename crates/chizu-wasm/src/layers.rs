@@ -440,7 +440,7 @@ mod tests {
     use super::*;
     use chizu_core::ServiceKind;
     use chizu_core::world::growth::GROWTH_INTERVAL;
-    use chizu_core::{ApplyOutcome, Command, RoadKind, TileRect, ZoneKind};
+    use chizu_core::{ApplyOutcome, Command, RoadKind, TileRect, Zone, ZoneKind};
 
     fn value_at(cache: &mut LayerCache, sim: &Sim, layer: &DataLayer, t: TilePos) -> u8 {
         let c = t.chunk().unwrap();
@@ -460,7 +460,7 @@ mod tests {
         .unwrap();
         sim.submit(Command::PaintZone {
             area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
-            zone: Some(ZoneKind::Residential),
+            zone: Some(Zone::Residential),
         })
         .unwrap();
         sim.advance(GROWTH_INTERVAL as u32 + 1);
@@ -589,7 +589,7 @@ mod tests {
             sim.submit(road((10, y), (30, y))).unwrap();
             sim.submit(Command::PaintZone {
                 area: TileRect::from_corners(TilePos::new(10, y + 1), TilePos::new(25, y + 4)),
-                zone: Some(zone),
+                zone: Some(Zone::from(zone)),
             })
             .unwrap();
         }

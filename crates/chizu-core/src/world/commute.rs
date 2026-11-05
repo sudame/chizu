@@ -418,7 +418,7 @@ mod car_place_tests {
             assert_eq!(got, (*n).min(spaces), "建物 {id:?} の枠の数");
         }
         for (id, b) in w.buildings().iter() {
-            if b.zone != ZoneKind::Residential {
+            if b.zone.kind() != ZoneKind::Residential {
                 continue;
             }
             let lot = w.trips().lot(id);
@@ -442,7 +442,7 @@ mod car_place_tests {
                 leveled |= w
                     .buildings()
                     .iter()
-                    .any(|(_, b)| b.zone == ZoneKind::Residential && b.level > 1);
+                    .any(|(_, b)| b.zone.kind() == ZoneKind::Residential && b.level > 1);
             }
         }
         assert!(leveled, "段階の上がった住宅がない");

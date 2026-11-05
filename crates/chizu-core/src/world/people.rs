@@ -179,7 +179,7 @@ impl World {
             }
             if let Some(b) = row.workplace.and_then(|w| self.buildings.get(w)) {
                 s.employed += 1;
-                s.filled[b.zone.index()] += 1;
+                s.filled[b.zone.kind().index()] += 1;
             }
         }
         s.happiness = match housed {
@@ -323,7 +323,7 @@ impl World {
 
     /// 職場 `workplace` の勤務の時間帯。職場の建物が見つからなければオフィスと同じにする。
     fn shift_at(&self, workplace: BuildingId) -> Shift {
-        let zone = self.buildings.get(workplace).map(|b| b.zone);
+        let zone = self.buildings.get(workplace).map(|b| b.zone.kind());
         Shift::of(zone.unwrap_or(ZoneKind::Office))
     }
 
@@ -390,7 +390,7 @@ impl World {
         }
         self.buildings
             .iter()
-            .filter(|(_, b)| b.zone == ZoneKind::Residential)
+            .filter(|(_, b)| b.zone.kind() == ZoneKind::Residential)
             .filter(|(_, b)| {
                 comps
                     .of_link(&self.network, b.entrance)
@@ -611,7 +611,7 @@ impl World {
 pub(crate) mod tests {
     use super::*;
     use crate::building::demand;
-    use crate::command::{Command, RoadKind, ServiceKind};
+    use crate::command::{Command, RoadKind, ServiceKind, Zone};
     use crate::tile::{TilePos, TileRect};
     use crate::world::ApplyOutcome;
 
@@ -672,7 +672,13 @@ pub(crate) mod tests {
         for (i, (y0, y1)) in bands.into_iter().enumerate() {
             let area = TileRect::from_corners(TilePos::new(-59, y0), TilePos::new(19, y1));
             let zone = Some(zones[i % zones.len()]);
-            apply(&mut w, Command::PaintZone { area, zone });
+            apply(
+                &mut w,
+                Command::PaintZone {
+                    area,
+                    zone: zone.map(Zone::from),
+                },
+            );
         }
         w
     }
@@ -709,7 +715,7 @@ pub(crate) mod tests {
         let other = w
             .buildings()
             .iter()
-            .find(|(b, x)| *b != old && x.zone == ZoneKind::Industrial)
+            .find(|(b, x)| *b != old && x.zone.kind() == ZoneKind::Industrial)
             .map(|(b, _)| b)
             .expect("ほかの職場がない");
         // update_jobs と同じく、職場を変えて予定を立て直す。
@@ -840,7 +846,7 @@ pub(crate) mod tests {
         for h in p.household_ids() {
             let home = p.home(h).flatten().expect("家のない世帯がいる");
             let b = w.buildings().get(home).expect("消えた家に住んでいる");
-            assert_eq!(b.zone, ZoneKind::Residential);
+            assert_eq!(b.zone, Zone::Residential);
         }
         let stats = w.city_stats();
         assert!(stats.employed > 0, "誰も働いていない");
@@ -952,7 +958,7 @@ pub(crate) mod tests {
         let day_start = w.tick().0;
         let works_here = |w: &World, r: &crate::citizens::CitizenRow| {
             let b = r.workplace.and_then(|b| w.buildings().get(b));
-            b.is_some_and(|b| b.zone == work)
+            b.is_some_and(|b| b.zone == Zone::from(work))
         };
         let p = w.population();
         let morning: Vec<u64> = p
@@ -1436,7 +1442,7 @@ pub(crate) mod tests {
         let open: Vec<TilePos> = b
             .iter()
             .filter(|(id, x)| {
-                x.workplaces_at(tax[x.zone.index()]) > workers.get(id).copied().unwrap_or(0)
+                x.workplaces_at(tax[x.zone.kind().index()]) > workers.get(id).copied().unwrap_or(0)
             })
             .map(|(_, x)| x.front)
             .collect();
@@ -1488,7 +1494,13 @@ pub(crate) mod tests {
         for (y0, y1) in [(17, 21), (23, 27)] {
             let area = TileRect::from_corners(TilePos::new(-59, y0), TilePos::new(19, y1));
             let zone = Some(ZoneKind::Industrial);
-            apply(&mut w, Command::PaintZone { area, zone });
+            apply(
+                &mut w,
+                Command::PaintZone {
+                    area,
+                    zone: zone.map(Zone::from),
+                },
+            );
         }
         run_days(&mut w, 8);
         // 前から勤めていて、家も同じままの住民の通勤の距離の合計。
@@ -1515,7 +1527,13 @@ pub(crate) mod tests {
         for (y0, y1) in [(17, 21), (23, 27)] {
             let area = TileRect::from_corners(TilePos::new(-59, y0), TilePos::new(19, y1));
             let zone = Some(ZoneKind::Industrial);
-            apply(&mut w, Command::PaintZone { area, zone });
+            apply(
+                &mut w,
+                Command::PaintZone {
+                    area,
+                    zone: zone.map(Zone::from),
+                },
+            );
         }
         w
     }
@@ -1619,7 +1637,8 @@ pub(crate) mod tests {
                         .depart_at
                         .expect("乗り換えた住民に出発の時刻がない");
                     assert!(new > now && day(new) == day(now), "その日の出勤を飛ばした");
-                    let shift = |b: BuildingId| Shift::of(w.buildings().get(b).unwrap().zone);
+                    let shift =
+                        |b: BuildingId| Shift::of(w.buildings().get(b).unwrap().zone.kind());
                     if shift(from) == shift(to) {
                         assert_eq!(new, t, "同じ勤務帯なのに出発の時刻が変わった");
                     } else if new != t {

@@ -34,7 +34,7 @@
 //! |---|---|---|
 //! | 1 | `BuildRoad` | from `TilePos`、to `TilePos`、kind `u8` |
 //! | 2 | `Bulldoze` | area `TileRect` |
-//! | 3 | `PaintZone` | area `TileRect`、zone `u8`（0 は区画を消す） |
+//! | 3 | `PaintZone` | area `TileRect`、zone `u8`（0 は区画を消す。1〜5 は `Zone` の値） |
 //! | 4 | `PlaceBuilding` | kind `u8`、at `TilePos`、rotation `u8` |
 //! | 5 | `SetSignal` | index `u32`、generation `u16`、on `u8`（0 か 1） |
 //! | 6 | `BuyChunk` | cx `i32`、cy `i32` |
@@ -44,12 +44,13 @@
 //! | 10 | `SetCrosswalk` | index `u32`、generation `u16`、arm `u8`（`Heading` の値）、on `u8`（0 か 1） |
 //!
 //! 形式を変えるときは版を上げる。種類の番号は使い回さない。種類を足すだけなら、古い記録はそのまま
-//! 読めるので版は上げない。
+//! 読めるので版は上げない。`PaintZone` の区画に低密度の住宅（5）を足したときも、同じ理由で版を上げていない。
+//! 1 は前から住宅で、いまは高密度の住宅と読む。
 
 use core::fmt;
 
 use crate::command::{
-    Command, Heading, InvalidCommand, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind,
+    Command, Heading, InvalidCommand, NodeId, RoadKind, ServiceKind, SimSpeed, Zone, ZoneKind,
 };
 use crate::tile::{ChunkCoord, TilePos, TileRect};
 use crate::units::Tick;
@@ -456,7 +457,7 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
             area: r.rect()?,
             zone: match r.u8()? {
                 0 => None,
-                code => Some(r.check_code("ZoneKind", ZoneKind::from_code(code))?),
+                code => Some(r.check_code("Zone", Zone::from_code(code))?),
             },
         },
         4 => Command::PlaceBuilding {
@@ -571,7 +572,7 @@ mod tests {
             },
             Command::PaintZone {
                 area: TileRect::from_corners(TilePos::new(0, 0), TilePos::new(3, 3)),
-                zone: Some(ZoneKind::Industrial),
+                zone: Some(Zone::Industrial),
             },
             Command::PaintZone {
                 area: TileRect::from_corners(TilePos::new(1, 1), TilePos::new(2, 2)),
@@ -925,6 +926,25 @@ mod tests {
         }
     }
 
+    /// 低密度の住宅の塗りは、区画の番号 5 として書き、同じ版のまま読み戻せる。6 以上は断る。
+    #[test]
+    fn low_density_paint_roundtrips_as_code_five() {
+        let area = TileRect::from_corners(TilePos::new(4, 4), TilePos::new(9, 6));
+        let paint = Command::PaintZone {
+            area,
+            zone: Some(Zone::ResidentialLow),
+        };
+        let mut log = CommandLog::new();
+        log.record(Tick(3), paint).unwrap();
+        let bytes = log.encode();
+        assert_eq!(*bytes.last().unwrap(), 5);
+        let back = CommandLog::decode(&bytes).unwrap();
+        assert_eq!(back.entries()[0].command, paint);
+        let mut bad = bytes.clone();
+        *bad.last_mut().unwrap() = 6;
+        assert!(CommandLog::decode(&bad).is_err());
+    }
+
     #[test]
     fn replay_in_pieces_matches_replay_in_one_go() {
         let log = sample_log();
@@ -977,6 +997,7 @@ mod tests {
             any::<i32>(),
         ];
         let zone = proptest::sample::select(ZoneKind::ALL.to_vec());
+        let paint_zone = proptest::sample::select(Zone::ALL.to_vec());
         prop_oneof![
             (
                 coord.clone(),
@@ -994,7 +1015,7 @@ mod tests {
                     kind: RoadKind::from_code(k).unwrap(),
                 }),
             rect.clone().prop_map(|area| Command::Bulldoze { area }),
-            (small_rect, proptest::option::of(zone.clone()))
+            (small_rect, proptest::option::of(paint_zone))
                 .prop_map(|(area, zone)| Command::PaintZone { area, zone }),
             (1_u8..=4, tile, any::<u8>()).prop_map(|(k, at, rotation)| Command::PlaceBuilding {
                 kind: ServiceKind::from_code(k).unwrap(),

@@ -8,7 +8,7 @@ use chizu_core::movement::{lane_tiles, lot_tiles};
 use chizu_core::network::{NodeControl, SegmentKind};
 use chizu_core::tile::local_index;
 use chizu_core::{
-    CHUNK_SIDE, Congestion, ServiceKind, TilePos, TileRect, World, ZoneKind, is_water,
+    CHUNK_SIDE, Congestion, ServiceKind, TilePos, TileRect, World, Zone, ZoneKind, is_water,
 };
 
 /// 1 回の出力に載せる文字（セル）の数の上限。始めに買ってある 192×192 マスが、縮尺 2 でちょうど収まる。
@@ -30,9 +30,9 @@ pub const LEGEND: &str = "\
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
   =        私道の通るマス（私道の敷地の住宅の、端の列。私道の脇の枠もこの列にある。駐車場と建物より先に出す）
   p        建物の駐車場に切り欠いたマス（建物より先に出す。前面の帯のように 1 マスの一部だけの切り欠きも p にする）
-  * ^ %    電気か水が届いていない建物（* 電気だけ、^ 水だけ、% 両方。R C I O の代わりに出す）
-  R C I O  建物（住宅、商業、工業、オフィスの区画に建っている。電気も水も届いている）
-  r c i o  建物のない区画（同じ並び）
+  * ^ %    電気か水が届いていない建物（* 電気だけ、^ 水だけ、% 両方。R D C I O の代わりに出す）
+  R D C I O  建物（住宅（高密度）、住宅（低密度）、商業、工業、オフィスの区画に建っている。電気も水も届いている）
+  r d c i o  建物のない区画（同じ並び）
   ~        水辺（海か川）
   ,        買っていない土地
   .        買った土地の空きマス（標高はいまどこも 0 の平らな地図なので出さない）";
@@ -43,7 +43,7 @@ const PARKING_FACILITY_LEGEND_LINE: &str =
 
 /// 駐車場の層で、凡例の先頭に足す行。
 const PARKING_LEGEND_LINES: &str = "\
-  ! 車を持てない世帯のいる住宅（R の代わりに出す。電気か水が届いていない印より先に出す）
+  ! 車を持てない世帯のいる住宅（R と D の代わりに出す。電気か水が届いていない印より先に出す）
   - + # X  共同の駐車場の埋まり具合（- 借りられた枠と外来の車が台数の半分に満たない、+ 半分以上、# 8 割以上、X 満車。L G の代わりに出す）";
 
 /// 凡例の「H 1 2 3」の行の代わりに出す、交通の層の道路の凡例。
@@ -112,7 +112,7 @@ struct Cell {
     removed: bool,
     /// 道路の最大の種類。0 は道路なし。
     road: u8,
-    building: [u32; 4],
+    building: [u32; Zone::ALL.len()],
     /// 駐車場に切り欠いたマスの数（1 マスの一部だけの帯も 1 と数える）。
     lot: u32,
     /// 私道の通るマスの数。
@@ -121,7 +121,7 @@ struct Cell {
     unpowered: u32,
     /// 水が届いていない建物のマスの数。
     dry: u32,
-    zone: [u32; 4],
+    zone: [u32; Zone::ALL.len()],
     /// 水辺と買った土地は、全部のマスではなく見本のマスで数える。
     samples: u32,
     wet: u32,
@@ -138,13 +138,19 @@ fn argmax<const N: usize>(counts: &[u32; N]) -> Option<usize> {
     best
 }
 
-fn zone_letter(z: ZoneKind) -> char {
+fn zone_letter(z: Zone) -> char {
     match z {
-        ZoneKind::Residential => 'R',
-        ZoneKind::Commercial => 'C',
-        ZoneKind::Industrial => 'I',
-        ZoneKind::Office => 'O',
+        Zone::Residential => 'R',
+        Zone::ResidentialLow => 'D',
+        Zone::Commercial => 'C',
+        Zone::Industrial => 'I',
+        Zone::Office => 'O',
     }
+}
+
+/// [`Zone::ALL`] の中での位置。
+fn zone_slot(z: Zone) -> usize {
+    usize::from(z as u8 - 1)
 }
 
 fn facility_letter(k: ServiceKind) -> char {
@@ -192,18 +198,18 @@ impl Cell {
         }
         if let Some(i) = argmax(&self.building) {
             // 電気か水が届いていない建物は、区画の種類より先にそれを出す。
-            if i == ZoneKind::Residential.index() && self.carless > 0 {
+            if Zone::ALL[i].kind() == ZoneKind::Residential && self.carless > 0 {
                 return '!';
             }
             return match (self.unpowered > 0, self.dry > 0) {
                 (true, true) => '%',
                 (true, false) => '*',
                 (false, true) => '^',
-                (false, false) => zone_letter(ZoneKind::ALL[i]),
+                (false, false) => zone_letter(Zone::ALL[i]),
             };
         }
         if let Some(i) = argmax(&self.zone) {
-            return zone_letter(ZoneKind::ALL[i]).to_ascii_lowercase();
+            return zone_letter(Zone::ALL[i]).to_ascii_lowercase();
         }
         if self.wet * 2 >= self.samples {
             '~'
@@ -369,13 +375,13 @@ pub fn render(
         grid.each_tile_in(area, |cell, t| {
             let (lx, ly) = t.local();
             if let Some(z) = tiles.zone[local_index(lx, ly)] {
-                cell.zone[z.index()] += 1;
+                cell.zone[zone_slot(z)] += 1;
             }
         });
     }
     for (_, b) in world.buildings().iter() {
         grid.each_tile_in(b.area, |cell, _| {
-            cell.building[b.zone.index()] += 1;
+            cell.building[zone_slot(b.zone)] += 1;
             cell.unpowered += u32::from(!b.supply.power);
             cell.dry += u32::from(!b.supply.water);
         });

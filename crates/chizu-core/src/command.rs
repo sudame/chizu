@@ -72,6 +72,91 @@ impl ZoneKind {
     }
 }
 
+/// 低密度の住宅が上がれる段階の上限。戸建ての段階（1〜2）で止め、集合住宅には上がらない。
+pub const LOW_DENSITY_MAX_LEVEL: u8 = 2;
+
+/// 塗る区画の種類。マスと建物はこれを持つ。税率、需要、職場、街の数字の表は [`ZoneKind`] で引く。
+///
+/// 番号と並びは [`ZoneKind`] とそろえ、低密度の住宅を最後に足した。低密度を塗らない街では、
+/// 状態ハッシュもスナップショットのバイト列も、`ZoneKind` で持っていたときと変わらない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum Zone {
+    /// 高密度の住宅。段階 5 まで上がる。
+    Residential = 1,
+    Commercial = 2,
+    Industrial = 3,
+    Office = 4,
+    /// 低密度の住宅。一軒家と私道の敷地が建ち、段階 [`LOW_DENSITY_MAX_LEVEL`] で止まる。
+    ResidentialLow = 5,
+}
+
+/// 区画の密度。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Density {
+    Low,
+    High,
+}
+
+impl Zone {
+    pub const ALL: [Zone; 5] = [
+        Zone::Residential,
+        Zone::Commercial,
+        Zone::Industrial,
+        Zone::Office,
+        Zone::ResidentialLow,
+    ];
+
+    pub fn from_code(code: u8) -> Option<Zone> {
+        match code {
+            1 => Some(Zone::Residential),
+            2 => Some(Zone::Commercial),
+            3 => Some(Zone::Industrial),
+            4 => Some(Zone::Office),
+            5 => Some(Zone::ResidentialLow),
+            _ => None,
+        }
+    }
+
+    /// 税、需要、職場、街の数字で使う大きな種類。住宅の 2 つは [`ZoneKind::Residential`] である。
+    pub fn kind(self) -> ZoneKind {
+        match self {
+            Zone::Residential | Zone::ResidentialLow => ZoneKind::Residential,
+            Zone::Commercial => ZoneKind::Commercial,
+            Zone::Industrial => ZoneKind::Industrial,
+            Zone::Office => ZoneKind::Office,
+        }
+    }
+
+    /// 密度。低密度の住宅だけが [`Density::Low`] である。
+    pub fn density(self) -> Density {
+        match self {
+            Zone::ResidentialLow => Density::Low,
+            Zone::Residential | Zone::Commercial | Zone::Industrial | Zone::Office => Density::High,
+        }
+    }
+
+    /// 上がれる段階の上限。
+    pub fn max_level(self) -> u8 {
+        match self.density() {
+            Density::Low => LOW_DENSITY_MAX_LEVEL,
+            Density::High => crate::building::MAX_LEVEL,
+        }
+    }
+}
+
+impl From<ZoneKind> for Zone {
+    /// 大きな種類の区画。住宅は高密度になる。
+    fn from(kind: ZoneKind) -> Zone {
+        match kind {
+            ZoneKind::Residential => Zone::Residential,
+            ZoneKind::Commercial => Zone::Commercial,
+            ZoneKind::Industrial => Zone::Industrial,
+            ZoneKind::Office => Zone::Office,
+        }
+    }
+}
+
 /// プレイヤーが置く公共の建物の種類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
@@ -204,7 +289,7 @@ pub enum Command {
     /// 長方形の中の、塗れるマスに区画を塗る。`zone` が `None` なら区画を消す。
     PaintZone {
         area: TileRect,
-        zone: Option<ZoneKind>,
+        zone: Option<Zone>,
     },
     /// 公共の施設を置く。`at` は道路に面する角のマスで、`rotation` は 0〜3 で
     /// `at` から道路へ向かう向き（上、右、下、左）を表す。敷地は `at` から道路と反対へ延びる。
@@ -419,7 +504,7 @@ mod tests {
         let paint = |area| {
             Command::PaintZone {
                 area,
-                zone: Some(zone),
+                zone: Some(Zone::from(zone)),
             }
             .validate()
         };

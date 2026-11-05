@@ -2,7 +2,7 @@ use super::parking::MissTable;
 use super::*;
 use crate::building::{Building, Buildings, ParkingCut};
 use crate::car_place::CarPlace;
-use crate::command::{RoadKind, ZoneKind};
+use crate::command::{RoadKind, Zone, ZoneKind};
 use crate::id::BuildingId;
 use crate::network::{Dir, Line};
 use crate::rng::{RngPurpose, rng};
@@ -41,7 +41,7 @@ impl Street {
                 let east = net.segment_line(segment).unwrap().end().x;
                 let entrance_at = LaneOffset(u32::try_from(east - x).unwrap() * 8_000);
                 buildings.insert(Building {
-                    zone: ZoneKind::Commercial,
+                    zone: Zone::Commercial,
                     area: TileRect::from_corners(front, front),
                     front,
                     toward_road: (0, 1),
@@ -677,7 +677,7 @@ fn wide(net: &Network, zone: ZoneKind, front_x: i64, (w, h): (i64, i64), level: 
     let segment = net.segments_through(TilePos::new(front_x, 0))[0];
     let east = net.segment_line(segment).unwrap().end().x;
     Building {
-        zone,
+        zone: Zone::from(zone),
         area: TileRect::from_corners(front, TilePos::new(front_x - (w - 1), -h)),
         front,
         toward_road: (0, 1),

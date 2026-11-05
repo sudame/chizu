@@ -31,7 +31,10 @@ pub use citizens::{
     Activity, CitizenChange, CitizenRow, HappinessParts, Population, ScheduleState,
 };
 pub use clock::{GameTime, TICKS_PER_DAY};
-pub use command::{Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, ZoneKind};
+pub use command::{
+    Command, Density, Heading, LOW_DENSITY_MAX_LEVEL, NodeId, RoadKind, ServiceKind, SimSpeed,
+    Zone, ZoneKind,
+};
 pub use id::{BuildingId, CitizenId, HouseholdId, TripId};
 pub use movement::{
     CarPath, Congestion, CurbWait, DailyLotMisses, HouseholdCar, LotId, LotMisses, Mover, Noted,

@@ -6,7 +6,7 @@
 use core::fmt;
 
 use chizu_core::{
-    ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect,
+    ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, Zone,
     ZoneKind,
 };
 
@@ -121,10 +121,10 @@ pub fn parse(
         "PaintZone" => {
             let zone = match field("zone") {
                 Field::Text(t) => match t.as_str() {
-                    "Residential" => Some(ZoneKind::Residential),
-                    "Commercial" => Some(ZoneKind::Commercial),
-                    "Industrial" => Some(ZoneKind::Industrial),
-                    "Office" => Some(ZoneKind::Office),
+                    "Residential" => Some(Zone::Residential),
+                    "Commercial" => Some(Zone::Commercial),
+                    "Industrial" => Some(Zone::Industrial),
+                    "Office" => Some(Zone::Office),
                     "Clear" => None,
                     _ => return Err(InputError::BadZone),
                 },
@@ -444,7 +444,7 @@ mod tests {
             paint(Field::Text("Office".into())),
             Ok(Command::PaintZone {
                 area,
-                zone: Some(ZoneKind::Office)
+                zone: Some(Zone::Office)
             })
         );
         assert_eq!(
