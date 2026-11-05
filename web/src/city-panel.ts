@@ -7,6 +7,13 @@ import {
   validCityStats,
   ZONE_COUNT,
 } from "./protocol/city-stats.ts";
+import {
+  formatTimeUntilOut,
+  type HeadroomSample,
+  type HeadroomTrend,
+  headroomTrend,
+  pushHeadroomSample,
+} from "./utility-trend.ts";
 
 /** chizu-wasm の city_stats を読んだもの。 */
 export type CityStats = {
@@ -40,6 +47,9 @@ export type CityStats = {
   powerPeople: number;
   waterPeople: number;
   peopleKnown: boolean;
+  /** 発電所 1 基と浄水場 1 基で増える住民の数。peopleKnown が偽のときは使わない。 */
+  powerFacilityPeople: number;
+  waterFacilityPeople: number;
   /** 住宅・商業・工業・オフィスの順の、需要の内訳。寄与の合計がその区画の需要である。 */
   demandFactors: DemandFactor[][];
 };
@@ -93,6 +103,8 @@ export function parseCityStats(stats: number[]): CityStats {
     powerPeople: at(21),
     waterPeople: at(22),
     peopleKnown: at(23) === 1,
+    powerFacilityPeople: at(24),
+    waterFacilityPeople: at(25),
   };
 }
 
@@ -145,6 +157,62 @@ export function formatUtilities(stats: CityStats): string {
   const others = (count: number) => (count > 0 ? `（ほかの網 ${n(count)}）` : "");
   const people = (v: number) => (stats.peopleKnown ? `（${formatPeople(v)}）` : "");
   return `電気 ${n(m.power)} / 需要 ${n(m.demand)}${people(stats.powerPeople)}${others(m.powerOthers)}・水道 ${n(m.water)} / 需要 ${n(m.demand)}${people(stats.waterPeople)}${others(m.waterOthers)}`;
+}
+
+/** 電気と水道の、いまの余りの減り方。 */
+export type UtilityTrends = { power: HeadroomTrend | null; water: HeadroomTrend | null };
+
+/**
+ * 電気と水道の、余りの減り方の手がかり。余りが減っているときだけ、
+ * 施設 1 基で増える人数と、このペースで足りなくなるまでの時間（時計の時間）を、種類ごとに 1 行返す。減っていないときは空。
+ */
+export function utilityTrendHints(stats: CityStats, trends: UtilityTrends): string[] {
+  if (!stats.peopleKnown) {
+    return [];
+  }
+  const hints: string[] = [];
+  const add = (name: string, facility: string, onePeople: number, trend: HeadroomTrend | null) => {
+    if (trend?.kind !== "shrinking" || onePeople <= 0) {
+      return;
+    }
+    // 余りの人数と同じく、10 人の位に切り捨てて「約」を付ける
+    const each = (onePeople >= 100 ? Math.floor(onePeople / 10) * 10 : onePeople).toLocaleString(
+      "ja-JP",
+    );
+    hints.push(
+      `${name}：${facility} 1 基で 約 ${each} 人分。このペースだと ${formatTimeUntilOut(trend.ticksUntilOut)}足りなくなる`,
+    );
+  };
+  add("電気", "発電所", stats.powerFacilityPeople, trends.power);
+  add("水道", "浄水場", stats.waterFacilityPeople, trends.water);
+  return hints;
+}
+
+/** 電気と水道の余りの人数の控え。renderCityStats が足していく。 */
+let powerSeries: HeadroomSample[] = [];
+let waterSeries: HeadroomSample[] = [];
+
+/** 控えを捨てる。 */
+export function resetUtilityTrends(): void {
+  powerSeries = [];
+  waterSeries = [];
+}
+
+/**
+ * 控えに足して、いまの減り方を返す。人数が決まらないときは控えを捨てる。
+ * tick は Worker の tick である。
+ */
+export function trackUtilityTrends(stats: CityStats, tick: number): UtilityTrends {
+  if (!stats.peopleKnown) {
+    resetUtilityTrends();
+    return { power: null, water: null };
+  }
+  powerSeries = pushHeadroomSample(powerSeries, tick, stats.powerPeople);
+  waterSeries = pushHeadroomSample(waterSeries, tick, stats.waterPeople);
+  return {
+    power: headroomTrend(powerSeries, tick, stats.powerPeople),
+    water: headroomTrend(waterSeries, tick, stats.waterPeople),
+  };
 }
 
 /**
@@ -387,7 +455,7 @@ export function utilityNotices(stats: CityStats, unsupplied: number): Notice[] {
   ];
 }
 
-export function renderCityStats(stats: CityStats, unsupplied = 0): void {
+export function renderCityStats(stats: CityStats, unsupplied = 0, tick = 0): void {
   latestStats = stats;
   renderFactors();
   const numbers = document.querySelector<HTMLElement>("#city-numbers");
@@ -402,6 +470,12 @@ export function renderCityStats(stats: CityStats, unsupplied = 0): void {
   }
   const shortage = utilityShortage(stats, unsupplied);
   utilities?.classList.toggle("short", shortage !== null);
+  const hints = utilityTrendHints(stats, trackUtilityTrends(stats, tick));
+  const hintBox = document.querySelector<HTMLElement>("#city-utility-hints");
+  if (hintBox !== null) {
+    hintBox.textContent = hints.join("\n");
+    hintBox.hidden = hints.length === 0;
+  }
   const layouts = demandBars(stats);
   document.querySelectorAll<HTMLElement>("#demand .bar").forEach((bar, i) => {
     const layout = layouts[i];

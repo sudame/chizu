@@ -1,6 +1,7 @@
 // 画面の側の保存と読み込み。起動したときに続きから始めるか新しく始めるかを選ばせ、
 // Worker から届いた保存データを IndexedDB に書く。手動保存の欄もここで作る。
 
+import { resetUtilityTrends } from "../city-panel.ts";
 import {
   describeSave,
   isSaveFromWorker,
@@ -313,6 +314,8 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
         break;
       case "save:started": {
         startDialog.close();
+        // 別の街になるので、余りの減り方の控えは捨てる
+        resetUtilityTrends();
         saveButton.disabled = !storage;
         const loaded = message.loaded;
         if (loaded !== null && loading !== null) {

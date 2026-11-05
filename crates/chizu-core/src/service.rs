@@ -184,6 +184,60 @@ pub fn headroom_people(headroom: i128, total_demand: u64, citizens: u64) -> Opti
     Some((headroom * i128::from(citizens)).div_euclid(i128::from(total_demand)))
 }
 
+/// 施設 1 基で増える住民の数。読み取り用で、状態には入れない。
+///
+/// 施設 1 基の供給量（[`ServiceKind::capacity`]）を、[`headroom_people`] と同じ 1 人あたりの需要で割る。
+/// 式は `capacity × citizens ÷ total_demand` で、小数は切り捨てる。人口か需要の合計が 0 のときは `None`。
+pub fn facility_people(kind: ServiceKind, total_demand: u64, citizens: u64) -> Option<u64> {
+    let people = headroom_people(i128::from(kind.capacity()), total_demand, citizens)?;
+    Some(u64::try_from(people).expect("供給量は正なので人数は負にならない"))
+}
+
+/// 余りの人数（[`headroom_people`]）が、このペースでどう動くか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeadroomTrend {
+    /// すでに足りない（余りが負）。
+    Short,
+    /// 余りが減っていない（増えたか、同じ）。`per_day` は 1 日あたりの増え（0 以上）。
+    NotShrinking { per_day: i128 },
+    /// 余りが減っている。`drop_per_day` は 1 日あたりの減り（正）、
+    /// `ticks_until_out` は同じ減り方が続くとして、余りが 0 を割るまでの tick の数。
+    Shrinking {
+        drop_per_day: i128,
+        ticks_until_out: u64,
+    },
+}
+
+/// 減り方を求めるのに要る最短の間隔（tick）。ゲーム内の 1 時間である。これより短いと、人口の端数の揺れが減りに見えてしまう。
+pub const MIN_TREND_TICKS: u64 = crate::clock::TICKS_PER_DAY / 24;
+
+/// `elapsed_ticks` 前の余りの人数 `before` と、いまの `now` から、このペースの先を見積もる。読み取り用で、状態には入れない。
+///
+/// 経過が [`MIN_TREND_TICKS`] に満たないときは `None`。
+/// 減りは `(before - now) × TICKS_PER_DAY ÷ elapsed_ticks`（1 日あたり、小数は切り捨て）、
+/// 尽きるまでは `now × elapsed_ticks ÷ (before - now)`（tick、小数は切り捨て）で、どちらも整数で求める。
+pub fn headroom_trend(before: i128, now: i128, elapsed_ticks: u64) -> Option<HeadroomTrend> {
+    if elapsed_ticks < MIN_TREND_TICKS {
+        return None;
+    }
+    if now < 0 {
+        return Some(HeadroomTrend::Short);
+    }
+    let elapsed = i128::from(elapsed_ticks);
+    let day = i128::from(crate::clock::TICKS_PER_DAY);
+    let drop = before - now;
+    if drop <= 0 {
+        return Some(HeadroomTrend::NotShrinking {
+            per_day: -drop * day / elapsed,
+        });
+    }
+    let ticks = now * elapsed / drop;
+    Some(HeadroomTrend::Shrinking {
+        drop_per_day: drop * day / elapsed,
+        ticks_until_out: u64::try_from(ticks).unwrap_or(u64::MAX),
+    })
+}
+
 /// 道路網の連結成分ごとの、電気と水道の釣り合い。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SupplyBalance {
@@ -572,7 +626,89 @@ pub fn supply_balance(
 
 #[cfg(test)]
 mod tests {
-    use super::headroom_people;
+    use super::{HeadroomTrend, MIN_TREND_TICKS, facility_people, headroom_people, headroom_trend};
+    use crate::clock::TICKS_PER_DAY;
+    use crate::command::ServiceKind;
+
+    #[test]
+    fn one_facility_is_its_capacity_divided_by_demand_per_citizen() {
+        // 需要の合計 2,300 を 1,000 人で使う街（1 人あたり 2.3）。発電所 3,600 は 1,565 人分、浄水場はその分だけ。
+        assert_eq!(
+            facility_people(ServiceKind::PowerPlant, 2300, 1000),
+            Some(3600 * 1000 / 2300)
+        );
+        assert_eq!(
+            facility_people(ServiceKind::WaterPump, 2300, 1000),
+            Some(ServiceKind::WaterPump.capacity() * 1000 / 2300)
+        );
+        // 余りの人数と同じ式で、供給量を余りとして渡した値に等しい
+        let cap = i128::from(ServiceKind::PowerPlant.capacity());
+        assert_eq!(
+            facility_people(ServiceKind::PowerPlant, 2300, 1000).map(i128::from),
+            headroom_people(cap, 2300, 1000)
+        );
+        assert_eq!(facility_people(ServiceKind::PowerPlant, 2300, 0), None);
+        assert_eq!(facility_people(ServiceKind::PowerPlant, 0, 1000), None);
+    }
+
+    #[test]
+    fn shrinking_headroom_gives_time_until_out() {
+        // 1 日（7,200 tick）で 1,500 人分から 1,000 人分へ減った。1 日あたり 500 人分の減りで、あと 2 日で尽きる。
+        assert_eq!(
+            headroom_trend(1500, 1000, TICKS_PER_DAY),
+            Some(HeadroomTrend::Shrinking {
+                drop_per_day: 500,
+                ticks_until_out: 2 * TICKS_PER_DAY,
+            })
+        );
+        // 半日で同じだけ減ったなら、1 日あたりは 1,000 人分で、あと 1 日で尽きる
+        assert_eq!(
+            headroom_trend(1500, 1000, TICKS_PER_DAY / 2),
+            Some(HeadroomTrend::Shrinking {
+                drop_per_day: 1000,
+                ticks_until_out: TICKS_PER_DAY,
+            })
+        );
+    }
+
+    #[test]
+    fn growing_or_flat_headroom_does_not_run_out() {
+        assert_eq!(
+            headroom_trend(1000, 1500, TICKS_PER_DAY),
+            Some(HeadroomTrend::NotShrinking { per_day: 500 })
+        );
+        assert_eq!(
+            headroom_trend(1000, 1000, TICKS_PER_DAY),
+            Some(HeadroomTrend::NotShrinking { per_day: 0 })
+        );
+    }
+
+    #[test]
+    fn a_shortage_is_short_whatever_the_slope() {
+        assert_eq!(
+            headroom_trend(500, -10, TICKS_PER_DAY),
+            Some(HeadroomTrend::Short)
+        );
+        assert_eq!(
+            headroom_trend(-500, -10, TICKS_PER_DAY),
+            Some(HeadroomTrend::Short)
+        );
+        // 0 ちょうどは、まだ足りなくはない。減っていれば、すぐ尽きる
+        assert_eq!(
+            headroom_trend(100, 0, TICKS_PER_DAY),
+            Some(HeadroomTrend::Shrinking {
+                drop_per_day: 100,
+                ticks_until_out: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn too_short_a_span_has_no_trend() {
+        assert_eq!(headroom_trend(1500, 1000, MIN_TREND_TICKS - 1), None);
+        assert_eq!(headroom_trend(1500, 1000, 0), None);
+        assert!(headroom_trend(1500, 1000, MIN_TREND_TICKS).is_some());
+    }
 
     #[test]
     fn headroom_is_divided_by_demand_per_citizen() {

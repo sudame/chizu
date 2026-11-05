@@ -246,6 +246,8 @@ export type WorkerToMain =
       facilities: Float64Array;
       lots: Float64Array;
       stats: number[];
+      /** stats を求めた時点の Worker の tick。余りの減り方の控えに使う。 */
+      tick: number;
     }
   /**
    * 駐車場に停まっている車の台数。chizu-wasm の parked で、Worker がおよそ 1 秒に 1 回、前と違うときだけ送る。
@@ -283,7 +285,7 @@ export type WorkerToMain =
    * 街の数字だけの送り直し。需要は税率、幸福度、人口、職のない住民で、建物の表が変わらなくても動くため、
    * Worker が一定の間隔で確かめ、前と数が違うときだけ送る。stats は buildings と同じ並びである。
    */
-  | { kind: "cityStats"; stats: number[] }
+  | { kind: "cityStats"; stats: number[]; tick: number }
   /** dev-spawn-walks で出せた人数。 */
   | { kind: "dev-spawned"; count: number }
   | { kind: "error"; message: string };
@@ -355,6 +357,7 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.buildings instanceof Float64Array &&
         v.buildings.length % BUILDING_STRIDE === 0 &&
         Array.isArray(v.stats) &&
+        typeof v.tick === "number" &&
         v.facilities instanceof Float64Array &&
         v.facilities.length % FACILITY_STRIDE === 0 &&
         v.lots instanceof Float64Array &&
@@ -366,6 +369,7 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       return v.data instanceof Float64Array && v.data.length % PARKED_STRIDE === 0;
     case "cityStats":
       return (
+        typeof v.tick === "number" &&
         Array.isArray(v.stats) &&
         v.stats.every((x) => typeof x === "number") &&
         validCityStats(v.stats)

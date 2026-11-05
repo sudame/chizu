@@ -1212,7 +1212,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     labels.setBuildings(message.buildings, message.facilities);
     const stats = parseCityStats(message.stats);
     unsupplied = unsuppliedCount(message.buildings);
-    renderCityStats(stats, unsupplied);
+    renderCityStats(stats, unsupplied, message.tick);
     noticeCenter.set("utility", utilityNotices(stats, unsupplied));
     demand = [...stats.demand];
     updateDemandTheme();
@@ -1235,7 +1235,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "cityStats") {
     // 建物の表が変わらないまま動いた需要と内訳
     const stats = parseCityStats(message.stats);
-    renderCityStats(stats, unsupplied);
+    renderCityStats(stats, unsupplied, message.tick);
     noticeCenter.set("utility", utilityNotices(stats, unsupplied));
     demand = [...stats.demand];
     updateDemandTheme();
