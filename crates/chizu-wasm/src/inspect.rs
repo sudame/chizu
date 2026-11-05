@@ -198,7 +198,7 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
     let mut happiness = 0u64;
     let (mut commute_total, mut commuters) = (0u64, 0u64);
     let mut places = CarPlaceInfo {
-        home_spaces: b.parking_spaces(),
+        home_spaces: b.parking_spaces(world.seed()),
         home: 0,
         shared: 0,
         none: 0,
@@ -634,7 +634,7 @@ mod tests {
         let at = area_min(world, id);
         let (_, info) = building(world, at);
         let places = info.car_places.expect("住宅の枠の様子がない");
-        let spaces = world.buildings().get(id).unwrap().parking_spaces();
+        let spaces = world.buildings().parking_spaces(id);
         assert!(info.occupied > 0 && spaces > 0);
         assert_eq!(
             places.home_spaces, spaces,

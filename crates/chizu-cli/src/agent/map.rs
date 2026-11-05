@@ -387,7 +387,7 @@ pub fn render(
         });
     }
     for (_, b) in world.buildings().iter() {
-        for t in lot_tiles(world.network(), b) {
+        for t in lot_tiles(world.network(), b, world.seed()) {
             if let Some(cell) = grid.cell_mut(t) {
                 cell.lot += 1;
             }
@@ -648,7 +648,7 @@ mod tests {
         let mut lots = 0;
         let mut bodies = 0;
         for (_, b) in world.buildings().iter().take(60) {
-            let cut = lot_tiles(net, b);
+            let cut = lot_tiles(net, b, world.seed());
             let rect = b.area;
             let text = render(&world, rect, 1, MapLayer::Terrain).unwrap();
             let rows: Vec<&str> = text

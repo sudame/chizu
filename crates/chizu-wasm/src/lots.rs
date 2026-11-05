@@ -44,9 +44,10 @@ pub struct LotShape {
     pub houses: Vec<Rect>,
 }
 
-/// 建物の駐車場の切り欠いた形。切り欠かない建物（斜めの道路に面した建物）は `None`。
-pub fn lot_shape(net: &Network, b: &Building) -> Option<LotShape> {
-    let layout = b.parking_layout();
+/// 建物の駐車場の切り欠いた形。切り欠かない建物（斜めの道路に面した建物と、自宅の駐車場を持たない家）は `None`。
+/// `seed` は街の種である。
+pub fn lot_shape(net: &Network, b: &Building, seed: u64) -> Option<LotShape> {
+    let layout = b.parking_layout(seed);
     if layout.cut == ParkingCut::None {
         return None;
     }
@@ -57,7 +58,7 @@ pub fn lot_shape(net: &Network, b: &Building) -> Option<LotShape> {
     let (frontage, depth) = if tx == 0 { (w, h) } else { (h, w) };
     let frontage = frontage as f64;
     let depth = depth as f64;
-    let far = lot_end(net, b) == LotEnd::Far;
+    let far = lot_end(net, b, seed) == LotEnd::Far;
     // 間口に沿う向きの座標 u は `front` の辺を 0、道路に直角な座標 v は道路に面した辺を 0 として、建物の中へ増える。
     // 切り欠きは u の小さい端に置いて作り、`Far` ならそこで u を折り返す。
     let (cx, cy) = (b.front.x as f64 + 0.5, b.front.y as f64 + 0.5);
@@ -164,13 +165,18 @@ pub fn lot_shape(net: &Network, b: &Building) -> Option<LotShape> {
 /// `[建物の min の x, min の y, 平面の台数, 建物の中の台数, 長方形の数, 枠の並びの数, 私道の数, 家の数,`
 /// `長方形ごとに x0, y0, x1, y1, 枠の並びごとに x0, y0, x1, y1, 向きの x, 向きの y, 枠の数,`
 /// `私道ごとに x0, y0, x1, y1, 家ごとに x0, y0, x1, y1]`。
-pub fn encode<'a>(net: &Network, buildings: impl Iterator<Item = &'a Building>) -> Vec<f64> {
+/// `seed` は街の種である。
+pub fn encode<'a>(
+    net: &Network,
+    seed: u64,
+    buildings: impl Iterator<Item = &'a Building>,
+) -> Vec<f64> {
     let mut out = Vec::new();
     for b in buildings {
-        let Some(shape) = lot_shape(net, b) else {
+        let Some(shape) = lot_shape(net, b, seed) else {
             continue;
         };
-        let layout = b.parking_layout();
+        let layout = b.parking_layout(seed);
         out.extend([
             b.area.min.x as f64,
             b.area.min.y as f64,
@@ -210,7 +216,7 @@ pub fn encode_parked(world: &World) -> Vec<f64> {
         let Some(b) = world.buildings().get(id) else {
             continue;
         };
-        let layout = b.parking_layout();
+        let layout = b.parking_layout(world.seed());
         if layout.surface + layout.indoor == 0 {
             continue;
         }
@@ -291,8 +297,8 @@ mod tests {
             let world = sim.world();
             let net = world.network();
             for (_, b) in world.buildings().iter() {
-                let layout = b.parking_layout();
-                let Some(shape) = lot_shape(net, b) else {
+                let layout = b.parking_layout(world.seed());
+                let Some(shape) = lot_shape(net, b, world.seed()) else {
                     assert_eq!(layout.cut, ParkingCut::None);
                     continue;
                 };
@@ -322,7 +328,7 @@ mod tests {
                 let map_tiles = if is_lane {
                     chizu_core::movement::lane_tiles(net, b)
                 } else {
-                    chizu_core::movement::lot_tiles(net, b)
+                    chizu_core::movement::lot_tiles(net, b, world.seed())
                 };
                 let mut tiles: Vec<(i64, i64)> = map_tiles.iter().map(|t| (t.x, t.y)).collect();
                 tiles.sort_unstable();
@@ -350,7 +356,9 @@ mod tests {
                 };
                 assert!((area(&shape) - expect).abs() < 1e-9, "{zone:?} {b:?}");
                 // 出入りの位置は、切り欠いた所の道路に面した辺の上にある。道路の側の辺の外で、辺の範囲の中に取る
-                let spot = lot_spot(net, b).expect("出入りの位置がない").world();
+                let spot = lot_spot(net, b, world.seed())
+                    .expect("出入りの位置がない")
+                    .world();
                 let (px, py) = (
                     spot.x.0 as f64 / TILE_MM as f64,
                     spot.y.0 as f64 / TILE_MM as f64,
@@ -442,17 +450,17 @@ mod tests {
         let mut far = 0;
         let mut front = 0;
         for (_, b) in world.buildings().iter() {
-            let Some(shape) = lot_shape(net, b) else {
+            let Some(shape) = lot_shape(net, b, world.seed()) else {
                 continue;
             };
-            if !matches!(b.parking_layout().cut, ParkingCut::Side { .. }) {
+            if !matches!(b.parking_layout(world.seed()).cut, ParkingCut::Side { .. }) {
                 continue;
             }
             // 道路は南にあり、間口は東西に並ぶ。切り欠きの端は、中核の選んだ端の外側の辺に接する
             let min = shape.faces.iter().map(|f| f[0]).fold(f64::MAX, f64::min);
             let max = shape.faces.iter().map(|f| f[2]).fold(f64::MIN, f64::max);
             let (lo, hi) = (b.area.min.x as f64, b.area.max.x as f64 + 1.0);
-            match lot_end(net, b) {
+            match lot_end(net, b, world.seed()) {
                 LotEnd::Front => {
                     front += 1;
                     let end_x = if b.toward_road.1 > 0 { hi } else { lo };
@@ -487,7 +495,7 @@ mod tests {
         );
         let world = sim.world();
         let net = world.network();
-        let data = encode(net, world.buildings().iter().map(|(_, b)| b));
+        let data = encode(net, world.seed(), world.buildings().iter().map(|(_, b)| b));
         let mut i = 0;
         let mut records = 0;
         while i < data.len() {
@@ -501,7 +509,7 @@ mod tests {
         let cut = world
             .buildings()
             .iter()
-            .filter(|(_, b)| b.parking_layout().cut != ParkingCut::None)
+            .filter(|(_, b)| b.parking_layout(world.seed()).cut != ParkingCut::None)
             .count();
         assert_eq!(records, cut);
         assert!(records > 0);
@@ -562,11 +570,12 @@ mod tests {
                     for toward in [(0, -1), (0, 1), (1, 0), (-1, 0), (1, 1)] {
                         for level in [1, 3, 5] {
                             let b = variant(template, zone, (w, h), toward, level);
-                            let layout = b.parking_layout();
+                            let layout = b.parking_layout(sim.world().seed());
                             let at = format!("{zone:?} {w}×{h} {toward:?} 段階 {level}");
-                            let Some(shape) = lot_shape(net, &b) else {
+                            let Some(shape) = lot_shape(net, &b, sim.world().seed()) else {
+                                // 切り欠かないのは、斜めの道路に面した建物と、自宅の駐車場を持たない家だけである。
                                 assert_eq!(layout.cut, ParkingCut::None, "{at}");
-                                assert_eq!(toward, (1, 1), "{at}");
+                                assert!(toward == (1, 1) || layout.total() == 0, "{at}");
                                 continue;
                             };
                             let site = [
@@ -650,7 +659,8 @@ mod tests {
                     let mut b = variant(template, ZoneKind::Residential, size, toward, level);
                     b.form = chizu_core::building::LotForm::Lane;
                     let at = format!("2×{depth} {toward:?} 段階 {level}");
-                    let shape = lot_shape(net, &b).expect("私道の敷地に形がない");
+                    let shape =
+                        lot_shape(net, &b, sim.world().seed()).expect("私道の敷地に形がない");
                     let site = [
                         b.area.min.x as f64,
                         b.area.min.y as f64,
@@ -711,11 +721,11 @@ mod tests {
     #[test]
     fn encode_parked_lists_parked_cars_by_building_key() {
         use chizu_core::{CommandLog, World, replay};
-        // 人が遊んだ街（種 0）。途中まで再生すると、車が駐車場に停まっている
+        // 人が遊んだ街（種 0）。14 日目の昼まで再生すると、職場の建物の中の駐車場にも車が停まっている
         let log = CommandLog::decode(include_bytes!("../tests/fixtures/town.rec"))
             .expect("記録が読めない");
         let mut world = World::new(0);
-        replay(&mut world, &log, 100_000);
+        replay(&mut world, &log, 104_400);
         let data = encode_parked(&world);
         assert!(!data.is_empty(), "停めてある車が1台もない");
         assert_eq!(data.len() % 4, 0);
@@ -727,7 +737,7 @@ mod tests {
                 .iter()
                 .find(|(_, b)| b.area.min.x as f64 == rec[0] && b.area.min.y as f64 == rec[1])
                 .expect("鍵の建物がない");
-            let layout = b.parking_layout();
+            let layout = b.parking_layout(world.seed());
             assert!(layout.surface + layout.indoor > 0);
             let parked = u64::from(world.trips().lot(id).parked);
             assert_eq!(rec[2], parked as f64);

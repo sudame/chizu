@@ -494,6 +494,7 @@ impl Sim {
     pub fn lots(&self) -> Vec<f64> {
         crate::lots::encode(
             self.world.network(),
+            self.world.seed(),
             self.world.buildings().iter().map(|(_, b)| b),
         )
     }

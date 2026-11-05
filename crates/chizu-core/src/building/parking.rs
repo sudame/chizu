@@ -3,15 +3,23 @@
 //! どちらも建物の種類、マスの数、段階、道路に面した向きから決まる純粋な関数で、状態には持たない。
 //! 決め方は `docs/design.md` の 3.6「台数の決め方」と「敷地の切り欠き方」にある。
 //!
-//! 1. 要る台数を、住宅なら世帯の数、それ以外なら職場の数（税で減らす前）から決める。
-//! 2. 要る台数を、敷地を切り欠いた平面の駐車場と、建物の中（地下か立体）の駐車場に分ける。
-//!    集合住宅（住宅の段階 3〜5）は、平面には世帯の数の 0.7 倍までしか持たず、残りを建物の中に持つ。
+//! 1. 要る台数を、住宅なら世帯の数、それ以外なら職場の数（税で減らす前）から決める。住宅の台数は自宅の枠の数で、
+//!    1〜2 マスの戸建ての 3 軒に 1 軒は持たず、集合住宅（住宅の段階 3〜5）は世帯の数の 0.5 倍にする
+//!    （`docs/design.md` の 3.7「1. 自宅の枠を持たない家」）。
+//! 2. 要る台数を、敷地を切り欠いた平面の駐車場と、建物の中（地下か立体）の駐車場に分ける。平面に入る分を先に平面に置く。
 //!
 //! 私道の敷地（`LotForm::Lane`）は、私道の脇に世帯ごとの家と枠を並べる。形は `docs/design.md` の 3.8 にある。
 
 use super::{Building, LotForm};
 use crate::command::ZoneKind;
 use crate::network::TILE_MM;
+use crate::rng::{RngPurpose, mix_words};
+
+/// 1〜2 マスの戸建てのうち、自宅の駐車場を持たない家の割合。この数の家に 1 軒は持たない。
+pub const NO_HOME_LOT_ONE_IN: u64 = 3;
+
+/// 集合住宅（住宅の段階 3〜5）の自宅の枠の、世帯の数に掛ける割合（分子と分母）。端数は切り上げる。
+pub const APARTMENT_HOME_LOTS: (u64, u64) = (5, 10);
 
 /// 平面の駐車場の、1 マスに並ぶ枠の数。枠は 2.5m × 5m で、8m の幅に 3 つ並ぶ。
 pub const SLOTS_PER_TILE: u64 = 3;
@@ -47,6 +55,17 @@ const SURFACE_SHARE: u64 = 3;
 
 /// これ以下のマスの建物は、道路に面した側の帯を平面の駐車場にする。
 const STRIP_MAX_TILES: u64 = 2;
+
+/// テストが、住宅のどれにも世帯の数だけ自宅の枠を持たせているか（`car_place::testing::set_every_home_lot`）。
+#[cfg(any(test, feature = "test-util"))]
+fn every_home_lot() -> bool {
+    crate::car_place::testing::EVERY_HOME_LOT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(any(test, feature = "test-util")))]
+fn every_home_lot() -> bool {
+    false
+}
 
 /// 敷地を切り欠いて作る、平面の駐車場の形。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,10 +149,9 @@ impl ParkingLayout {
 }
 
 impl Building {
-    /// 駐車場の配置。
-    pub fn parking_layout(&self) -> ParkingLayout {
-        let needed = self.parking_needed();
-        let surface_wanted = self.surface_wanted(needed);
+    /// 駐車場の配置。`seed` は街の種で、自宅の駐車場を持たない戸建てを決めるのに使う（[`Building::has_home_lot`]）。
+    pub fn parking_layout(&self, seed: u64) -> ParkingLayout {
+        let needed = self.parking_needed(seed);
         let (dx, dy) = self.toward_road;
         let tiles = self.tile_count();
         let w = self.area.max.x.abs_diff(self.area.min.x) + 1;
@@ -155,10 +173,10 @@ impl Building {
         let (surface, cut) = if diagonal {
             (0, ParkingCut::None)
         } else if tiles <= STRIP_MAX_TILES {
-            let slots = surface_wanted.min(frontage * SLOTS_PER_TILE);
+            let slots = needed.min(frontage * SLOTS_PER_TILE);
             (slots, ParkingCut::FrontStrip { slots })
         } else {
-            let slots = surface_wanted.min(tiles / SURFACE_SHARE * SLOTS_PER_TILE);
+            let slots = needed.min(tiles / SURFACE_SHARE * SLOTS_PER_TILE);
             let cut_tiles = slots.div_ceil(SLOTS_PER_TILE);
             let cut = ParkingCut::Side {
                 columns: cut_tiles.div_ceil(depth),
@@ -214,24 +232,30 @@ impl Building {
         Some(plan)
     }
 
-    /// 要る台数。住宅は世帯の数、商業と工業は職場の数、オフィスは職場の数の 0.5 倍で、端数は切り上げる。
-    fn parking_needed(&self) -> u64 {
-        let (base, num, den) = match self.zone.kind() {
-            ZoneKind::Residential => (self.households(), 1, 1),
-            ZoneKind::Commercial | ZoneKind::Industrial => (self.workplaces(), 1, 1),
-            ZoneKind::Office => (self.workplaces(), 1, 2),
+    /// 要る台数。住宅は自宅の枠の数で、戸建ては世帯の数（自宅の駐車場を持たない家は 0）、集合住宅は世帯の数の
+    /// [`APARTMENT_HOME_LOTS`] 倍である。商業と工業は職場の数、オフィスは職場の数の 0.5 倍で、端数は切り上げる。
+    fn parking_needed(&self, seed: u64) -> u64 {
+        let (base, (num, den)) = match self.zone.kind() {
+            ZoneKind::Residential if every_home_lot() => (self.households(), (1, 1)),
+            ZoneKind::Residential if self.level > 2 => (self.households(), APARTMENT_HOME_LOTS),
+            ZoneKind::Residential if !self.has_home_lot(seed) => (0, (1, 1)),
+            ZoneKind::Residential => (self.households(), (1, 1)),
+            ZoneKind::Commercial | ZoneKind::Industrial => (self.workplaces(), (1, 1)),
+            ZoneKind::Office => (self.workplaces(), (1, 2)),
         };
         (base * num).div_ceil(den)
     }
 
-    /// 要る台数 `needed` のうち、平面の駐車場に持ちたい台数。集合住宅（住宅の段階 3〜5）は世帯の数の
-    /// 0.7 倍（切り上げ）までで、残りは地下の駐車場として建物の中に持つ。ほかの建物は `needed` のまま。
-    fn surface_wanted(&self, needed: u64) -> u64 {
-        if self.zone.kind() == ZoneKind::Residential && self.level > 2 {
-            (self.households() * 7).div_ceil(10)
-        } else {
-            needed
+    /// 戸建て（住宅の段階 1〜2）が自宅の駐車場を持つか。1〜2 マスの戸建ての [`NO_HOME_LOT_ONE_IN`] 軒に 1 軒は持たない。
+    /// どの家にするかは、種と正面のマスから決める。建て直しても、同じ場所の家は同じになる。
+    /// 3 マス以上の戸建てと、住宅でない建物はいつも `true` である。集合住宅の枠の数は世帯の数で決まり、これを見ない。
+    pub fn has_home_lot(&self, seed: u64) -> bool {
+        if self.zone.kind() != ZoneKind::Residential || self.tile_count() > STRIP_MAX_TILES {
+            return true;
         }
+        // 座標は負にもなるので、ビットをそのまま混ぜる。
+        let words = [self.front.x as u64, self.front.y as u64];
+        !mix_words(seed, RngPurpose::HomeParking, &words).is_multiple_of(NO_HOME_LOT_ONE_IN)
     }
 }
 
@@ -243,6 +267,18 @@ mod tests {
     use crate::service::Supply;
     use crate::tile::{TilePos, TileRect};
     use crate::units::{LaneOffset, Tick};
+
+    /// 正面のマスが (0, 0) の 1 マスの戸建てが、自宅の駐車場を持つか（`home_lot`）を満たす、いちばん小さい種。
+    fn seed_where(home_lot: bool) -> u64 {
+        (0..)
+            .find(|s| building(Residential, (1, 1), 1).has_home_lot(*s) == home_lot)
+            .unwrap()
+    }
+
+    /// テストの街の種。[`building`] の戸建てが自宅の駐車場を持つ種にする。
+    fn seed() -> u64 {
+        seed_where(true)
+    }
 
     /// 間口 `w` マス、奥行き `h` マスの建物。道路は南（y の小さい側）にある。
     fn building(zone: ZoneKind, (w, h): (i64, i64), level: u8) -> Building {
@@ -268,7 +304,7 @@ mod tests {
     }
 
     fn layout(zone: ZoneKind, size: (i64, i64), level: u8) -> (u64, u64, u64, ParkingCut) {
-        let l = building(zone, size, level).parking_layout();
+        let l = building(zone, size, level).parking_layout(seed());
         (l.needed, l.surface, l.indoor, l.cut)
     }
 
@@ -318,17 +354,16 @@ mod tests {
                 }
             )
         );
-        // 4×4 の集合住宅の段階 5 は 20 世帯で 20 台。平面は世帯の 0.7 倍の 14 台で、5 マスで、奥行き 4 の列に
-        // 入りきらず 2 列にまたがる。残りの 6 台は地下に持つ。
+        // 4×4 の集合住宅の段階 5 は 20 世帯で、自宅の枠は世帯の 0.5 倍の 10 台。平面に収まり、4 マスを 1 列で切り欠く。
         assert_eq!(
             layout(Residential, (4, 4), 5),
             (
-                20,
-                14,
-                6,
+                10,
+                10,
+                0,
                 Side {
-                    columns: 2,
-                    tiles: 5
+                    columns: 1,
+                    tiles: 4
                 }
             )
         );
@@ -378,7 +413,7 @@ mod tests {
         // 4×3 のオフィスは 4 マスを切り欠く。道路が南なら奥行き 3 で 2 列、東なら奥行き 4 で 1 列になる。
         let mut wide = building(Office, (4, 3), 5);
         assert_eq!(
-            wide.parking_layout().cut,
+            wide.parking_layout(seed()).cut,
             Side {
                 columns: 2,
                 tiles: 4
@@ -386,7 +421,7 @@ mod tests {
         );
         wide.toward_road = (1, 0);
         assert_eq!(
-            wide.parking_layout().cut,
+            wide.parking_layout(seed()).cut,
             Side {
                 columns: 1,
                 tiles: 4
@@ -398,14 +433,14 @@ mod tests {
     fn buildings_on_a_diagonal_road_keep_every_space_indoors() {
         let mut shop = building(Commercial, (2, 2), 3);
         shop.toward_road = (1, -1);
-        let l = shop.parking_layout();
+        let l = shop.parking_layout(seed());
         assert_eq!((l.needed, l.surface, l.indoor), (6, 0, 6));
         assert_eq!(l.cut, ParkingCut::None);
         // 戸建ても、斜めの道路に面すると建物の中の車庫に持つ。台数はほかの戸建てと同じ 1 世帯 1 台。
         for level in [1, 2] {
             let mut house = building(Residential, (2, 2), level);
             house.toward_road = (-1, 1);
-            let l = house.parking_layout();
+            let l = house.parking_layout(seed());
             let households = house.households();
             assert_eq!(
                 (l.needed, l.surface, l.indoor, l.cut),
@@ -418,41 +453,109 @@ mod tests {
     fn low_level_houses_have_no_indoor_parking_unless_on_a_diagonal_road() {
         for size in [(1, 1), (1, 2), (2, 1), (2, 2), (3, 4), (4, 4)] {
             for level in [1, 2] {
-                let l = building(Residential, size, level).parking_layout();
+                let l = building(Residential, size, level).parking_layout(seed());
                 assert_eq!(l.indoor, 0, "{size:?} の段階 {level}");
                 assert_eq!(l.surface, l.needed, "{size:?} の段階 {level}");
             }
         }
         // 段階 3 からは集合住宅で、平面に入りきらない分を建物の中に持つ。
-        let l = building(Residential, (1, 1), 5).parking_layout();
+        let l = building(Residential, (1, 1), 5).parking_layout(seed());
+        assert_eq!((l.needed, l.surface, l.indoor), (1, 1, 0));
+        let l = building(Residential, (1, 2), 5).parking_layout(seed());
         assert_eq!((l.needed, l.surface, l.indoor), (2, 2, 0));
-        let l = building(Residential, (1, 2), 5).parking_layout();
-        assert_eq!((l.needed, l.surface, l.indoor), (3, 3, 0));
         let mut l = building(Residential, (3, 3), 5);
         l.toward_road = (1, 1);
-        let l = l.parking_layout();
-        assert_eq!((l.needed, l.surface, l.indoor), (12, 0, 12));
+        let l = l.parking_layout(seed());
+        assert_eq!((l.needed, l.surface, l.indoor), (6, 0, 6));
     }
 
     #[test]
-    fn apartments_have_a_space_per_household_and_keep_the_surface_lot() {
+    fn apartments_have_half_a_space_per_household_and_fill_the_surface_first() {
         for w in 1..=6_i64 {
             for h in 1..=6_i64 {
                 for road in [(0, -1), (0, 1), (1, 0), (-1, 0), (1, 1)] {
                     for level in 3..=crate::building::MAX_LEVEL {
-                        let mut b = building(Residential, (w, h), level);
-                        b.toward_road = road;
-                        let at = format!("{w}×{h} {road:?} の段階 {level}");
-                        let l = b.parking_layout();
-                        let households = b.households();
-                        assert_eq!(l.needed, households, "{at}");
-                        assert_eq!(l.total(), households, "{at}");
-                        // 平面は世帯の 0.7 倍（切り上げ）までで、足りない分はすべて建物の中に持つ。
-                        assert!(l.surface <= (households * 7).div_ceil(10), "{at}");
+                        for seed in [seed_where(true), seed_where(false)] {
+                            let mut b = building(Residential, (w, h), level);
+                            b.toward_road = road;
+                            let at = format!("{w}×{h} {road:?} の段階 {level} 種 {seed}");
+                            let l = b.parking_layout(seed);
+                            let homes = b.households().div_ceil(2);
+                            assert_eq!(l.needed, homes, "{at}");
+                            assert_eq!(l.total(), homes, "{at}");
+                            // 平面に入る分を先に平面に置き、入らない分だけ建物の中に持つ。
+                            let room = if road.0 != 0 && road.1 != 0 {
+                                0
+                            } else if b.tile_count() <= STRIP_MAX_TILES {
+                                let frontage = if road.0 == 0 { w } else { h };
+                                frontage.unsigned_abs() * SLOTS_PER_TILE
+                            } else {
+                                b.tile_count() / SURFACE_SHARE * SLOTS_PER_TILE
+                            };
+                            assert_eq!(l.surface, homes.min(room), "{at}");
+                        }
                     }
                 }
             }
         }
+        // 区画に建つ大きさ（1 辺 4 マスまで）で縦か横の道路に面していれば、どれも平面に収まる。
+        for w in 1..=4_i64 {
+            for h in 1..=4_i64 {
+                let l = building(Residential, (w, h), 5).parking_layout(seed());
+                assert_eq!(l.indoor, 0, "{w}×{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn one_in_three_small_houses_has_no_home_lot() {
+        // 自宅の駐車場を持たない家は、切り欠かず、台数も 0 である。
+        let none = seed_where(false);
+        for size in [(1, 1), (1, 2), (2, 1)] {
+            for level in [1, 2] {
+                let b = building(Residential, size, level);
+                assert!(!b.has_home_lot(none));
+                let l = b.parking_layout(none);
+                assert_eq!(
+                    (l.needed, l.surface, l.indoor, l.cut),
+                    (0, 0, 0, ParkingCut::None),
+                    "{size:?} の段階 {level}"
+                );
+                // 斜めの道路に面していても、建物の中の車庫を持たない。
+                let mut diagonal = b;
+                diagonal.toward_road = (1, 1);
+                assert_eq!(diagonal.parking_spaces(none), 0, "{size:?} の段階 {level}");
+            }
+        }
+        // 3 マス以上の戸建てと、住宅でない建物は、種によらず駐車場を持つ。
+        for b in [
+            building(Residential, (1, 3), 1),
+            building(Residential, (2, 2), 2),
+            building(Commercial, (1, 1), 1),
+            building(Office, (1, 1), 1),
+            building(Industrial, (2, 1), 1),
+        ] {
+            assert!(b.has_home_lot(none), "{b:?}");
+            assert!(b.parking_spaces(none) > 0, "{b:?}");
+        }
+        // 集合住宅は、種によらず世帯の数の 0.5 倍を持つ。
+        assert_eq!(building(Residential, (1, 1), 3).parking_spaces(none), 1);
+        // 正面のマスごとに決まり、ほぼ 3 軒に 1 軒が持たない。
+        let mut without = 0;
+        for x in -50..50 {
+            for y in -50..50 {
+                let mut b = building(Residential, (1, 1), 1);
+                b.front = TilePos::new(x, y);
+                b.area = TileRect::from_corners(b.front, b.front);
+                let has = b.has_home_lot(7);
+                // 同じマスに建て直した家は、段階や大きさが違っても同じになる。
+                let mut other = building(Residential, (2, 1), 2);
+                other.front = b.front;
+                assert_eq!(other.has_home_lot(7), has);
+                without += u64::from(!has);
+            }
+        }
+        assert!((3_000..3_700).contains(&without), "{without}");
     }
 
     #[test]
@@ -468,8 +571,8 @@ mod tests {
                             let at = format!("{zone:?} {w}×{h} {road:?} の段階 {level}");
                             let (w, h) = (w.unsigned_abs(), h.unsigned_abs());
                             let (frontage, depth) = if road.0 == 0 { (w, h) } else { (h, w) };
-                            let l = b.parking_layout();
-                            assert_eq!(b.parking_spaces(), l.total(), "{at}");
+                            let l = b.parking_layout(seed());
+                            assert_eq!(b.parking_spaces(seed()), l.total(), "{at}");
                             assert_eq!(l.total(), l.needed, "{at}");
                             assert!(l.total() > 0, "{at}");
                             match l.cut {
@@ -501,23 +604,35 @@ mod tests {
     }
 
     #[test]
-    fn spaces_do_not_shrink_when_a_building_levels_up() {
+    fn spaces_shrink_only_when_a_house_becomes_an_apartment() {
         for zone in ZoneKind::ALL {
             for w in 1..=4 {
                 for h in 1..=4 {
                     for road in [(0, -1), (1, 0), (1, 1)] {
-                        let mut prev = 0;
-                        for level in 1..=crate::building::MAX_LEVEL {
-                            let mut b = building(zone, (w, h), level);
-                            b.toward_road = road;
-                            let n = b.parking_spaces();
-                            assert!(n >= prev, "{zone:?} {w}×{h} {road:?} の段階 {level}");
-                            prev = n;
+                        for seed in [seed_where(true), seed_where(false)] {
+                            let mut prev = 0;
+                            for level in 1..=crate::building::MAX_LEVEL {
+                                let mut b = building(zone, (w, h), level);
+                                b.toward_road = road;
+                                let n = b.parking_spaces(seed);
+                                let at =
+                                    format!("{zone:?} {w}×{h} {road:?} の段階 {level} 種 {seed}");
+                                // 戸建てが集合住宅になると、自宅の枠は世帯の数から 0.5 倍に減りうる。
+                                // 減った分の世帯は枠を返す（`CarPlaces::assign_homes`）。
+                                if zone == Residential && level == 3 {
+                                    prev = 0;
+                                }
+                                assert!(n >= prev, "{at}");
+                                prev = n;
+                            }
                         }
                     }
                 }
             }
         }
+        // 4×4 の戸建ての段階 2 は 8 世帯で 8 台、集合住宅の段階 3 は 12 世帯で 6 台になる。
+        assert_eq!(building(Residential, (4, 4), 2).parking_spaces(seed()), 8);
+        assert_eq!(building(Residential, (4, 4), 3).parking_spaces(seed()), 6);
     }
 
     #[test]
@@ -550,14 +665,18 @@ mod tests {
                             && (road.0 == 0 || road.1 == 0);
                         let Some(plan) = b.lane_plan() else {
                             assert!(!eligible, "{at}");
-                            assert_eq!(b.parking_layout(), street.parking_layout(), "{at}");
+                            assert_eq!(
+                                b.parking_layout(seed()),
+                                street.parking_layout(seed()),
+                                "{at}"
+                            );
                             continue;
                         };
                         assert!(eligible, "{at}");
                         seen += 1;
-                        let l = b.parking_layout();
+                        let l = b.parking_layout(seed());
                         // 台数は通りに面した建物と同じで、家ごとに 1 台をすべて平面に持つ
-                        assert_eq!(l.total(), street.parking_layout().total(), "{at}");
+                        assert_eq!(l.total(), street.parking_layout(seed()).total(), "{at}");
                         assert_eq!(plan.houses, b.households(), "{at}");
                         assert_eq!(l.surface, plan.houses, "{at}");
                         assert_eq!(l.indoor, 0, "{at}");

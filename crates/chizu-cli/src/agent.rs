@@ -153,8 +153,9 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  occupiedPermille 停めてある台数と押さえた台数の和の、台数に対する千分率（台数 0 なら null）、
                  parkedPermille 停めてある台数だけの千分率（押さえた分を含まない）、
                  fullLots 満車の駐車場の数。
-                 台数は建物の種類、大きさ、段階から決まる。住宅は世帯の数（段階 3〜5 は平面が世帯の数の 0.7 倍までで、
-                 残りは建物の中）、商業と工業は職場の数、オフィスは職場の数の 0.5 倍（端数は切り上げ）。
+                 台数は建物の種類、大きさ、段階から決まる。住宅は自宅の枠の数で、戸建て（段階 1〜2）は世帯の数
+                 （1〜2 マスの家の 3 軒に 1 軒は 0）、集合住宅（段階 3〜5）は世帯の数の 0.5 倍。商業と工業は職場の数、
+                 オフィスは職場の数の 0.5 倍（端数は切り上げ）。平面に入らない分は建物の中に持つ。
                  住宅の駐車場は、その建物の自宅の枠を持つ世帯の車だけが使う。
                  redirectedCars いま移動中の車のうち、16 マスの中のほかの建物の駐車場か、共同の駐車場の外来の枠へ停めに
                  向かっている車。行き先の建物の駐車場が満車のときのほか、そこへ車か歩きで届かないときも、近くのほかの駐車場に
@@ -1288,7 +1289,7 @@ fn parking(world: &World) -> Value {
     }
     let mut zones: [Zone; 4] = Default::default();
     for (id, b) in world.buildings().iter() {
-        let layout = b.parking_layout();
+        let layout = b.parking_layout(world.seed());
         let lot = world.trips().lot(id);
         let z = &mut zones[b.zone.kind().index()];
         let used = u64::from(lot.parked) + u64::from(lot.reserved);
@@ -1311,7 +1312,7 @@ fn parking(world: &World) -> Value {
                     at: (b.area.min.x, b.area.min.y),
                     zone: b.zone,
                     level: b.level,
-                    spaces: b.parking_spaces(),
+                    spaces: b.parking_spaces(world.seed()),
                     parked: lot.parked,
                     reserved: lot.reserved,
                     today: m.today,
