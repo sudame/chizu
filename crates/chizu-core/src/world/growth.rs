@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
 use crate::building::{
-    Building, DIAGONAL_LOT_SIDE, LANE_FRONTAGE, LANE_MIN_DEPTH, LotForm, MAX_LEVEL, MAX_LOT_SIDE,
-    demand,
+    Building, DIAGONAL_LOT_SIDE, LANE_FRONTAGE, LANE_MAX_LEVEL, LANE_MIN_DEPTH, LotForm, MAX_LEVEL,
+    MAX_LOT_SIDE, demand,
 };
 use crate::chunk::{Layer, TileUse};
 use crate::clock::TICKS_PER_DAY;
@@ -68,7 +68,7 @@ pub const SPAWN_PER_DEMAND: i64 = 8;
 pub const MAX_SPAWN_PER_ZONE: u32 = 16;
 
 /// 私道の敷地にできる大きさの住宅のうち、私道の敷地にする割合（%）。形は `docs/design.md` の 3.8 にある。
-pub const LANE_PERCENT: u32 = 70;
+pub const LANE_PERCENT: u32 = 25;
 
 /// 段階が 1 つ上がるまでの時間（tick）。
 pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;
@@ -486,6 +486,7 @@ impl World {
                 && full
                 && wanted
                 && b.level < MAX_LEVEL
+                && !(b.form == LotForm::Lane && b.level == LANE_MAX_LEVEL)
                 && tick.since(b.leveled_at) >= LEVEL_UP_TICKS
                 && level_room.take(&self.network, b.entrance, b.tile_count())
             {
@@ -1034,6 +1035,63 @@ mod tests {
             }
         }
         assert!(lanes > 0, "私道の敷地が建たない");
+    }
+
+    /// 私道の敷地は段階 2 で止まり、集合住宅に上がらない。ふつうの住宅は、これまでどおり段階 3 以上に上がる。
+    #[test]
+    fn lane_lots_stay_at_low_levels_while_street_homes_grow() {
+        let (mut lane_top, mut street_top, mut lanes) = (0, 0, 0);
+        for seed in [0, 1, 2] {
+            let mut w = served_street_with(seed);
+            run(&mut w, 10 * TICKS_PER_DAY);
+            for (_, b) in w.buildings().iter() {
+                if b.zone != ZoneKind::Residential {
+                    continue;
+                }
+                if b.form == LotForm::Lane {
+                    lanes += 1;
+                    lane_top = lane_top.max(b.level);
+                    assert!(b.level <= LANE_MAX_LEVEL, "{seed} {b:?}");
+                    assert!(b.lane_plan().is_some(), "{seed} {b:?}");
+                } else {
+                    street_top = street_top.max(b.level);
+                }
+            }
+        }
+        assert!(lanes > 0, "私道の敷地が建たない");
+        assert_eq!(lane_top, LANE_MAX_LEVEL, "私道の敷地が段階 2 まで育たない");
+        assert!(
+            street_top > LANE_MAX_LEVEL,
+            "ふつうの住宅が段階 3 に上がらない"
+        );
+    }
+
+    /// 古い保存データにある段階 3 以上の私道の敷地は、ふつうの住宅と同じく上がれる。
+    #[test]
+    fn legacy_lane_lots_above_the_cap_keep_growing() {
+        let mut w = served_street_with(0);
+        run(&mut w, 4 * TICKS_PER_DAY);
+        let before: Vec<(BuildingId, u8)> = w
+            .buildings()
+            .iter()
+            .filter(|(_, b)| {
+                b.zone == ZoneKind::Residential
+                    && b.form == LotForm::Street
+                    && (LANE_MAX_LEVEL + 1..MAX_LEVEL).contains(&b.level)
+            })
+            .map(|(id, b)| (id, b.level))
+            .collect();
+        assert!(!before.is_empty(), "段階 3 以上で上がれる住宅がない");
+        for (id, _) in &before {
+            w.buildings.get_mut(*id).unwrap().form = LotForm::Lane;
+        }
+        run(&mut w, 4 * TICKS_PER_DAY);
+        assert!(
+            before
+                .iter()
+                .any(|(id, level)| w.buildings().get(*id).unwrap().level > *level),
+            "段階 3 以上の私道の敷地が上がらない"
+        );
     }
 
     #[test]
