@@ -295,8 +295,13 @@ impl World {
                     .chance(permille, 1_000)
             })
             .collect();
+        let left = !leaving.is_empty();
         for h in leaving {
             self.remove_household(h);
+        }
+        // 出ていった世帯の枠が空いたので、枠のない世帯に配る。
+        if left {
+            self.assign_car_places();
         }
     }
 

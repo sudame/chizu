@@ -1088,9 +1088,9 @@ fn a_household_without_a_car_place_walks() {
     assert_eq!(lot(&s, work), (0, 0));
 }
 
-/// 住宅の駐車場には、その建物の自宅の枠を持つ世帯の車だけが停まる。家がそこでも、枠がなければ停めない。
+/// 家に帰る移動でも、枠のない世帯は車に乗らない。枠を持つ世帯は、車で帰って自宅の駐車場に停める。
 #[test]
-fn only_households_with_a_home_place_park_at_a_house() {
+fn going_home_without_a_place_walks_and_with_one_parks_at_home() {
     let (mut s, ids) = Street::new(&[0, 30]);
     let (home, work) = (ids[0], ids[1]);
     let h = Household { home };
@@ -1107,6 +1107,27 @@ fn only_households_with_a_home_place_park_at_a_house() {
     let back = h.start(&mut s, &[(0, (work, home))]);
     assert!(Household::drives(&s, back[0]));
     assert_eq!(s.trips.get(back[0]).unwrap().parking_lot(), Some(home));
+}
+
+/// 車で走っているあいだに枠をなくした世帯の車は、着いても駐車場に停めずに消え、押さえた空きも返す。
+#[test]
+fn a_car_dropped_while_driving_does_not_park() {
+    let (mut s, ids) = Street::new(&[0, 30]);
+    let (home, work) = (ids[0], ids[1]);
+    let h = Household { home };
+    h.park(&mut s, 0, (home, work));
+    let back = h.start(&mut s, &[(0, (work, home))]);
+    assert!(Household::drives(&s, back[0]));
+    assert_eq!(
+        s.trips.household_car(Household::ID),
+        Some(HouseholdCar::InUse(back[0]))
+    );
+    s.trips.forget_car(Household::ID);
+    s.run(back[0]);
+    s.trips.take_commuter(back[0]);
+    assert_eq!(lot(&s, home), (0, 0));
+    assert_eq!(lot(&s, work), (0, 0));
+    assert_eq!(s.trips.household_car(Household::ID), None);
 }
 
 #[test]

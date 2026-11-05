@@ -98,6 +98,14 @@ impl Commuters {
         true
     }
 
+    /// 移動 `trip` が世帯の車で向かう通勤で、走っているあいだにその車をなくしたか（[`Trips::forget_car`]）。
+    /// なくした車は、着いても駐車場に停めない。
+    pub(super) fn dropped(&self, trip: TripId) -> bool {
+        self.by_trip
+            .get(&trip)
+            .is_some_and(|c| self.cars.get(&c.household) != Some(&HouseholdCar::InUse(trip)))
+    }
+
     /// 移動 `trip` を覚えていた分を消す。世帯の車を使ったまま停めずに終わったなら、車はどこにもないものとする。
     fn forget_trip(&mut self, trip: TripId) -> Option<Commuter> {
         let c = self.by_trip.remove(&trip)?;
@@ -262,12 +270,10 @@ impl Trips {
         self.commuters.cars.get(&household).copied()
     }
 
-    /// 街を出る世帯や、車を置く枠をなくした世帯の、停めてある車を駐車場から外す。
-    /// 乗っている車は外さない。その移動が終わるか、やめさせたときに片づく。
+    /// 街を出る世帯や、車を置く枠をなくした世帯の車をなくす。停めてある車は駐車場から外す。
+    /// 乗っている車は、その移動が着いても駐車場に停めずに消える（[`Commuters::dropped`]）。
     pub fn forget_car(&mut self, household: HouseholdId) {
-        if let Some(HouseholdCar::Parked { lot, .. }) = self.commuters.cars.get(&household).copied()
-        {
-            self.commuters.cars.remove(&household);
+        if let Some(HouseholdCar::Parked { lot, .. }) = self.commuters.cars.remove(&household) {
             self.parking.unpark(lot);
         }
     }

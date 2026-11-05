@@ -295,18 +295,45 @@ mod car_place_tests {
             "枠を持つ世帯が少ない"
         );
         assert_eq!(w.trips().parking_tally().no_place, 0, "枠のない世帯が出た");
-        // 世帯の住む住宅を 1 つ取り壊すと、その世帯は枠をなくし、停めてあった車も消える。
-        let (gone, b) = w
-            .buildings()
-            .iter()
-            .find(|(id, b)| b.zone == ZoneKind::Residential && holders(&w).contains_key(id))
-            .map(|(id, b)| (id, *b))
-            .expect("世帯の住む住宅がない");
+        // 世帯の住む住宅を 1 つ取り壊すと、その世帯は枠をなくし、家でない所（職場など）に停めてあった車も
+        // その駐車場から外れる。家の駐車場は建物ごと消える。
+        let away = |w: &World| {
+            let p = w.population();
+            w.car_places().iter().find_map(|(h, _)| {
+                let home = p.home(h).flatten()?;
+                match w.trips().household_car(h) {
+                    Some(HouseholdCar::Parked { lot, .. }) if lot != home => Some(home),
+                    _ => None,
+                }
+            })
+        };
+        for _ in 0..TICKS_PER_DAY {
+            if away(&w).is_some() {
+                break;
+            }
+            w.step();
+        }
+        let gone = away(&w).expect("家でない所に停めた車がない");
+        let b = *w.buildings().get(gone).unwrap();
         let lost: Vec<_> = w
             .car_places()
             .iter()
             .map(|(h, _)| h)
             .filter(|h| w.population().home(*h).flatten() == Some(gone))
+            .collect();
+        // 取り壊す家の世帯が、家でない所に停めている車の、駐車場ごとの台数。
+        let mut parked_away: BTreeMap<BuildingId, u32> = BTreeMap::new();
+        for h in &lost {
+            if let Some(HouseholdCar::Parked { lot, .. }) = w.trips().household_car(*h)
+                && lot != gone
+            {
+                *parked_away.entry(lot).or_insert(0) += 1;
+            }
+        }
+        assert!(!parked_away.is_empty());
+        let before: BTreeMap<BuildingId, u32> = parked_away
+            .keys()
+            .map(|lot| (*lot, w.trips().lot(*lot).parked))
             .collect();
         assert_eq!(
             w.apply(&Command::Bulldoze { area: b.area }),
@@ -320,6 +347,13 @@ mod car_place_tests {
                     Some(HouseholdCar::Parked { .. })
                 ),
                 "枠をなくした世帯の車が残っている"
+            );
+        }
+        for (lot, n) in parked_away {
+            assert_eq!(
+                w.trips().lot(lot).parked,
+                before[&lot] - n,
+                "駐車場 {lot:?} の台数が減っていない"
             );
         }
         check(&w);

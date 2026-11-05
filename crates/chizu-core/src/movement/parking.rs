@@ -840,9 +840,13 @@ impl Trips {
                 Then::Walk { lot, to } => {
                     t.then = Then::Arrive;
                     let dest = t.dest;
-                    if self.parking.park(lot) {
-                        let (index, generation) = self.slots.current(i).expect("着いた主体がない");
-                        self.commuters.parked(TripId { index, generation }, lot);
+                    let (index, generation) = self.slots.current(i).expect("着いた主体がない");
+                    let trip = TripId { index, generation };
+                    if self.commuters.dropped(trip) {
+                        // 走っているあいだに世帯が車をなくした。停めずに消し、押さえた空きを返す。
+                        self.parking.release(lot);
+                    } else if self.parking.park(lot) {
+                        self.commuters.parked(trip, lot);
                     }
                     legs[1].push((i, dest, to, Then::Arrive));
                 }
