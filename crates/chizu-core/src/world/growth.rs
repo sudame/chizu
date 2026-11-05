@@ -1147,6 +1147,28 @@ mod tests {
         );
     }
 
+    /// 低密度の街も、同じ種と操作から同じ状態になり、書き出して読み戻しても状態ハッシュとバイト列が変わらない。
+    #[test]
+    fn low_density_towns_are_deterministic_and_round_trip() {
+        let grow = || {
+            let mut w = served_street_of(0, Zone::ResidentialLow);
+            run(&mut w, 4 * TICKS_PER_DAY);
+            w
+        };
+        let (a, b) = (grow(), grow());
+        assert!(
+            a.buildings()
+                .iter()
+                .any(|(_, x)| x.zone == Zone::ResidentialLow && x.lane_plan().is_some()),
+            "低密度の私道の敷地が建たない"
+        );
+        assert_eq!(a.state_hash(), b.state_hash());
+        let bytes = a.to_snapshot();
+        let back = World::from_snapshot(&bytes).unwrap();
+        assert_eq!(back.state_hash(), a.state_hash());
+        assert_eq!(back.to_snapshot(), bytes);
+    }
+
     /// 低密度と高密度の住宅は別の区画で、1 つの建物が両方にまたがらない。
     #[test]
     fn low_and_high_density_do_not_share_a_lot() {
