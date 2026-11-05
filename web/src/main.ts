@@ -19,6 +19,7 @@ import {
 import {
   growthNotices,
   type LotShortageSince,
+  parseCarless,
   parseGrowthBlocks,
   parseIsolated,
   parseParkingShortage,
@@ -106,6 +107,7 @@ import {
   crosswalkCommand,
   MAX_ZONE_SIDE,
   paintZoneCommand,
+  parkingRangeNote,
   parseRoadCostTable,
   parseServiceTable,
   pickCrosswalk,
@@ -114,6 +116,7 @@ import {
   roadCost,
   type ServiceInfo,
   type ServiceProbe,
+  SHARED_LOT_RADIUS,
   screenToTile,
   serviceFootprint,
   signalCommand,
@@ -131,6 +134,7 @@ import {
   type CommandMessage,
   FACILITY_STRIDE,
   type InspectQuery,
+  isParking,
   isWorkerToMain,
   type MainToWorker,
   type Outcome,
@@ -138,6 +142,7 @@ import {
   SEGMENT_STRIDE,
   type ServiceName,
   SIGNAL_STRIDE,
+  serviceCode,
   type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
@@ -593,6 +598,8 @@ const zoneArea = (zone: ZoneName): { fill: Color; edge: Color } => {
 };
 // 縁の太さと、破線の周期（画面のピクセル）
 const AREA_EDGE_PX = 1.5;
+// 共同の駐車場の届く範囲の円の塗りの濃さ
+const PARKING_RANGE_FILL_ALPHA = 0.12;
 const BUY_EDGE_PX = 2;
 const DASH_PX = 8;
 
@@ -624,8 +631,16 @@ let services: Record<ServiceName, ServiceInfo> | null = null;
 // 施設の向き。近くの道路に向くよう自動で決め、R キーで回すと手で決めた向きを使う
 let manualRotation: number | null = null;
 // 施設を置けるかの、中核の答え。カーソルのマスが変わるたびに Worker に問い合わせる
-let probe: { service: ServiceName; x: number; y: number; results: ServiceProbe } | null = null;
+let probe: {
+  service: ServiceName;
+  x: number;
+  y: number;
+  results: ServiceProbe;
+  carless: number;
+} | null = null;
 let probeSent = "";
+// 最後に問い合わせた tick。カーソルが動かなくても、街の数字が届いたときに共同の駐車場の円の中の数を問い合わせ直す
+let probeAskedTick = 0;
 let money = 0;
 // 空き区画がない状態が続いた長さは、Worker の tick で数える（描画は背景のタブで止まる）
 let lotShortageSince: LotShortageSince = [];
@@ -734,10 +749,29 @@ function updatePreview(): void {
     const choice = serviceChoice(tool.service, cursor);
     const { min, max } = serviceFootprint(cursor, choice.rotation, info.width, info.depth);
     geometry = new Geometry(min);
-    const base = facilityCircleColor(tool.service === "PowerPlant" ? 1 : 2);
+    const base = facilityCircleColor(serviceCode(tool.service));
     const color: Color = choice.placeable ? [base[0], base[1], base[2], 0.7] : PREVIEW_BAD_COLOR;
+    const parking = isParking(tool.service);
+    if (parking) {
+      // 借りる世帯を探す範囲を、施設の丸の色の円で見せる。カーソルのマスの真ん中から測る
+      geometry.circle(
+        cursor.x + 0.5,
+        cursor.y + 0.5,
+        SHARED_LOT_RADIUS,
+        [base[0], base[1], base[2], PARKING_RANGE_FILL_ALPHA],
+        [base[0], base[1], base[2], 1],
+        AREA_EDGE_PX,
+      );
+    }
     geometry.rect(min, max, color);
-    const cost = `費用 ${info.cost.toLocaleString("ja-JP")}・R で回す`;
+    let cost = `費用 ${info.cost.toLocaleString("ja-JP")}・R で回す`;
+    if (parking) {
+      const fresh = probe?.service === tool.service && probe.x === cursor.x && probe.y === cursor.y;
+      const carless = fresh && probe !== null ? probe.carless : null;
+      cost = `${parkingRangeNote(carless, info.spaces)}・${cost}`;
+      // test:wasm が読む
+      mapCanvas.dataset.parkingCarless = String(carless ?? "");
+    }
     infoText = choice.placeable ? cost : `置けない：${choice.reason}・${cost}`;
     // test:wasm が読む
     mapCanvas.dataset.serviceRotation = String(choice.rotation);
@@ -809,10 +843,26 @@ function roadAt(at: Tile): { from: Tile; to: Tile } {
   return roadEndpoints(roadIndex, roadStart, at, noSnap);
 }
 
+/** 同じマスへの問い合わせを、これだけの tick が空くまで繰り返さない（移住を見る間隔と同じ）。 */
+const PROBE_REFRESH_TICKS = 60;
+let latestProbeTick = 0;
+
+/** 街の数字が届いたとき、共同の駐車場の道具が同じマスに出していた円の中の数を、間隔を空けて問い合わせ直す。 */
+function refreshProbe(tick: number): void {
+  latestProbeTick = tick;
+  if (tool.kind === "service" && isParking(tool.service) && cursor !== null) {
+    if (tick - probeAskedTick >= PROBE_REFRESH_TICKS) {
+      probeSent = "";
+      updatePreview();
+    }
+  }
+}
+
 function requestProbe(service: ServiceName, at: Tile): void {
   const key = `${service},${at.x},${at.y}`;
   if (key !== probeSent) {
     probeSent = key;
+    probeAskedTick = latestProbeTick;
     send({ kind: "probe-service", service, x: at.x, y: at.y });
   }
 }
@@ -1235,6 +1285,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "cityStats") {
     // 建物の表が変わらないまま動いた需要と内訳
     const stats = parseCityStats(message.stats);
+    refreshProbe(message.tick);
     renderCityStats(stats, unsupplied, message.tick);
     noticeCenter.set("utility", utilityNotices(stats, unsupplied));
     demand = [...stats.demand];
@@ -1252,6 +1303,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     renderOverview(parseOverview(message.overview));
     lotShortageSince = trackLotShortage(lotShortageSince, message.lotShortage, message.tick);
     latestTick = message.tick;
+    refreshProbe(message.tick);
     noticeCenter.set(
       "growth",
       growthNotices(
@@ -1260,6 +1312,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
         parseIsolated(message.isolated),
         persistedLotShortage(lotShortageSince, message.tick),
         parseParkingShortage(message.parkingShortage),
+        parseCarless(message.carless),
       ),
     );
     return;

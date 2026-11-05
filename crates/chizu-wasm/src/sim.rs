@@ -20,6 +20,12 @@ use crate::snapshot::{Header, Mover, TripleBuffer};
 /// [`Sim::overview`] が返す数のうち、固定の並びの個数。そのあとに止まっている道路網の並びが続く。画面の側の `OVERVIEW_LENGTH` と合わせる。
 pub const OVERVIEW_LENGTH: usize = 21;
 
+/// [`Sim::carless`] が返す数のうち、固定の並びの個数。そのあとに世帯の多い区切りの並びが続く。画面の側の `CARLESS_FIXED` と合わせる。
+pub const CARLESS_FIXED: usize = 6;
+
+/// [`Sim::carless`] が並べる、世帯の多い区切りの数の上限。
+pub const CARLESS_AREAS: usize = 10;
+
 /// [`Sim::city_stats`] が返す数のうち、固定の並びの個数。そのあとに需要の内訳が続く。
 /// 画面の側は `city-stats-layout.json` から読むので、変えたら `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` で書き直す。
 pub const CITY_STATS_FIXED: usize = 27;
@@ -696,7 +702,7 @@ impl Sim {
     }
 
     /// 収支の見込みを次の数で返す。税率の上限（‰）、区画の種類ごとの税率（‰）、区画の種類ごとの税収、
-    /// 道路の維持費、発電所と浄水場の維持費。区画の種類の順は住宅、商業、工業、オフィス。
+    /// 道路の維持費、発電所と浄水場の維持費、共同の駐車場の維持費。区画の種類の順は住宅、商業、工業、オフィス。
     /// 金額はどれも 1 日あたりである。
     pub fn finance(&self) -> Vec<f64> {
         let f = self.world.finances();
@@ -705,7 +711,44 @@ impl Sim {
         out.extend(f.taxes.map(|m| m.0 as f64));
         out.push(f.road_upkeep.0 as f64);
         out.extend(f.facility_upkeep.map(|m| m.0 as f64));
+        out.push(f.parking_upkeep.0 as f64);
         out
+    }
+
+    /// 車を持てない世帯を、次の数で返す。家のある世帯のうち、車を置く枠のない世帯である。
+    /// 世帯の数、理由ごとの数（範囲に駐車場がない、満車、料金が上限を超える、借りるのを待っている、道路に面していない）が [`CARLESS_FIXED`] 個、
+    /// そのあとに、世帯の多い区切り（8×8 マス）の上位 [`CARLESS_AREAS`] 件ぶんの `[真ん中のマスの x, y, 世帯の数]` が続く。
+    /// 状態は変えない。
+    pub fn carless(&self) -> Vec<f64> {
+        let all = self.world.carless_households();
+        let mut by_reason = [0_u64; chizu_core::CarlessReason::ALL.len()];
+        for c in &all {
+            by_reason[c.reason.index()] += 1;
+        }
+        let mut out = vec![all.len() as f64];
+        out.extend(by_reason.map(|n| n as f64));
+        debug_assert_eq!(out.len(), CARLESS_FIXED);
+        for a in chizu_core::carless_areas(&all, CARLESS_AREAS) {
+            let center = a.center();
+            out.extend([center.x as f64, center.y as f64, f64::from(a.households)]);
+        }
+        out
+    }
+
+    /// 家の正面のマスが `at` から [`chizu_core::car_place::SHARED_LOT_RADIUS`] マスの中にある、車を持てない世帯の数。
+    /// 共同の駐車場を `at` に置く前に、届く範囲の中の世帯を見せるのに使う。状態は変えない。
+    pub fn carless_in_range(&self, at: TilePos) -> f64 {
+        let r = i128::from(chizu_core::car_place::SHARED_LOT_RADIUS);
+        let near = |c: &chizu_core::Carless| {
+            let d = |p: i64, q: i64| i128::from(p) - i128::from(q);
+            let (dx, dy) = (d(c.front.x, at.x), d(c.front.y, at.y));
+            dx * dx + dy * dy <= r * r
+        };
+        self.world
+            .carless_households()
+            .iter()
+            .filter(|c| near(c))
+            .count() as f64
     }
 
     /// 人口と幸福度とマイルストーンを、次の [`OVERVIEW_LENGTH`] 個の数で返す。
@@ -1478,7 +1521,7 @@ mod tests {
     fn finance_follows_tax_rate_commands_and_the_log() {
         let mut sim = Sim::new(0);
         let before = sim.finance();
-        assert_eq!(before.len(), 12);
+        assert_eq!(before.len(), 13);
         assert_eq!(before[0], f64::from(MAX_TAX_PERMILLE));
         // 住宅、商業、工業、オフィスの順の税率
         assert_eq!(&before[1..5], &[100.0; 4]);
@@ -1733,5 +1776,60 @@ mod tests {
         sim.set_mover_view(None);
         sim.publish();
         assert!(sim.movers.is_empty());
+    }
+
+    /// 車を持てない世帯の数と理由、世帯の多い所が、中核の読み取りと合う。共同の駐車場を置くと、範囲の中の世帯が借りて減る。
+    #[test]
+    fn carless_counts_match_the_core_and_fall_when_a_lot_is_placed() {
+        let (mut sim, _guard) = crate::test_town::carless_town(2);
+        let housed = sim.world().carless_households().len();
+        assert!(housed > 12, "世帯が足りない: {housed}");
+        let out = sim.carless();
+        assert_eq!(out[0], housed as f64);
+        // 駐車場がないので、理由は範囲に駐車場がないだけ
+        assert_eq!(out[1..CARLESS_FIXED], [housed as f64, 0.0, 0.0, 0.0, 0.0]);
+        assert!(out.len() > CARLESS_FIXED && (out.len() - CARLESS_FIXED) % 3 == 0);
+        let areas = &out[CARLESS_FIXED..];
+        assert!(areas.len() / 3 <= CARLESS_AREAS);
+        // 区画の数の和は世帯の数以下で、多い順に並ぶ
+        let counts: Vec<f64> = areas.chunks(3).map(|a| a[2]).collect();
+        assert!(counts.windows(2).all(|w| w[0] >= w[1]), "{counts:?}");
+        assert!(counts.iter().sum::<f64>() <= housed as f64);
+        // 画面が寄せる先は、世帯のいる区切りの真ん中である
+        let lot_at = TilePos::new(24, 9);
+        assert_eq!(sim.carless_in_range(lot_at), housed as f64);
+        assert_eq!(sim.carless_in_range(TilePos::new(500, 9)), 0.0);
+
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
+        // 置いただけでは貸さない。次の移住を見る tick で、範囲の中の世帯が借りる
+        assert_eq!(sim.carless()[4], housed as f64, "借りるのを待っている");
+        sim.advance(chizu_core::world::people::MIGRATION_INTERVAL as u32);
+        let after = sim.carless();
+        let rented: u32 = sim.world().car_places().rented_counts().values().sum();
+        assert_eq!(rented, 12, "平面の駐車場の 12 台ぶんが借りられる");
+        let now = sim.world().carless_households().len();
+        assert!(now >= housed - 12, "借りた世帯が減った分より多い");
+        assert_eq!(after[0], now as f64);
+        assert_eq!(after[2], after[0], "残りは満車");
+        assert_eq!(after[1..2], [0.0]);
+        assert_eq!(after[4], 0.0);
+    }
+
+    #[test]
+    fn finance_includes_the_parking_upkeep() {
+        let (mut sim, _guard) = crate::test_town::carless_town(0);
+        assert_eq!(sim.finance()[12], 0.0);
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingGarage, 28);
+        sim.advance(1);
+        let f = sim.finance();
+        let upkeep = ServiceKind::ParkingLot.upkeep_per_day().0
+            + ServiceKind::ParkingGarage.upkeep_per_day().0;
+        assert_eq!(f[12], upkeep as f64);
+        // 発電所と浄水場の欄には入らない
+        assert_eq!(f[10], ServiceKind::PowerPlant.upkeep_per_day().0 as f64);
+        assert_eq!(f[11], ServiceKind::WaterPump.upkeep_per_day().0 as f64);
+        let core = sim.world().finances();
+        assert_eq!(core.parking_upkeep.0, upkeep);
     }
 }

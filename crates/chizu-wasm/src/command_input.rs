@@ -164,6 +164,8 @@ pub fn parse(
             let kind = match field("service") {
                 Field::Text(t) if t == "PowerPlant" => ServiceKind::PowerPlant,
                 Field::Text(t) if t == "WaterPump" => ServiceKind::WaterPump,
+                Field::Text(t) if t == "ParkingLot" => ServiceKind::ParkingLot,
+                Field::Text(t) if t == "ParkingGarage" => ServiceKind::ParkingGarage,
                 _ => return Err(InputError::BadService),
             };
             let rotation = integer(&field, "rotation")

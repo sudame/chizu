@@ -1,4 +1,4 @@
-import { pickStall } from "./growth-notice.ts";
+import { pickNext, pickStall } from "./growth-notice.ts";
 
 // 通知センター。警告の知らせを、画面の隅の鐘の印と数の印、押すと開く一覧にまとめる。
 // 新しい知らせは、小さな札で 1 回だけ数秒知らせる。解けた知らせは一覧から消え、閉じた知らせは状態が変わるまで出し直さない。
@@ -15,7 +15,12 @@ export type Notice = {
   key: string;
   headline: string;
   details: string[];
-  jump: { label: string; targets: Target[] } | null;
+  jump: {
+    label: string;
+    targets: Target[];
+    /** 真なら、targets の並びのまま先頭から順に移る（先頭が一番大きい所、など）。偽なら座標の順に移る。 */
+    ordered?: boolean;
+  } | null;
 };
 
 /** 覚えている知らせ。key と、最後に見えたゲームの tick。 */
@@ -141,6 +146,7 @@ type Item = {
   close: HTMLButtonElement;
   last: Target | null;
   targets: Target[];
+  ordered: boolean;
   notice: Notice;
 };
 
@@ -202,10 +208,13 @@ export function setupNoticeCenter(
       close,
       last: null,
       targets: [],
+      ordered: false,
       notice,
     };
     jumpButton.addEventListener("click", () => {
-      const picked = pickStall(item.targets, item.last);
+      const picked = item.ordered
+        ? pickNext(item.targets, item.last)
+        : pickStall(item.targets, item.last);
       if (picked === null) {
         return;
       }
@@ -265,6 +274,7 @@ export function setupNoticeCenter(
         );
       }
       item.targets = notice.jump?.targets ?? [];
+      item.ordered = notice.jump?.ordered ?? false;
       if (item.targets.length === 0) {
         item.last = null;
       }

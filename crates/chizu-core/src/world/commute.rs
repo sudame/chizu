@@ -140,21 +140,10 @@ impl World {
     /// 空きがあって料金が払える上限（[`fee_cap`]）以下なら借りる。どこも借りられなければ枠を持たない。
     /// 面した道路のない駐車場は貸さない。
     fn rent_shared_lots(&mut self) {
-        let lots: Vec<(TilePos, TilePos, u32)> = self
-            .facilities
-            .iter()
-            .filter(|f| f.kind.is_parking() && f.entrance.is_some())
-            .map(|f| (f.area.min, f.front, f.kind.parking_spaces()))
-            .collect();
+        let lots = self.shared_lot_sites();
         if lots.is_empty() {
             return;
         }
-        let radius = i128::from(SHARED_LOT_RADIUS);
-        let dist2 = |a: TilePos, b: TilePos| {
-            let d = |p: i64, q: i64| i128::from(p) - i128::from(q);
-            let (dx, dy) = (d(a.x, b.x), d(a.y, b.y));
-            dx * dx + dy * dy
-        };
         let mut rented = self.car_places.rented_counts();
         let p = &self.population;
         let mut renting = Vec::new();
@@ -169,17 +158,13 @@ impl World {
             if SHARED_LOT_FEE > fee_cap(savings) {
                 continue;
             }
-            let mut near: Vec<(i128, TilePos, u32)> = lots
-                .iter()
-                .map(|(c, front, spaces)| (dist2(home.front, *front), *c, *spaces))
-                .filter(|(d, _, _)| *d <= radius * radius)
-                .collect();
-            near.sort_unstable();
-            let found = near.into_iter().find(|(_, c, spaces)| {
-                let mut lot = self.trips.shared_lot(*c);
-                lot.rented = rented.get(c).copied().unwrap_or(0);
-                lot.has_room(*spaces)
-            });
+            let found = lots_in_range(&lots, home.front)
+                .into_iter()
+                .find(|(_, c, spaces)| {
+                    let mut lot = self.trips.shared_lot(*c);
+                    lot.rented = rented.get(c).copied().unwrap_or(0);
+                    lot.has_room(*spaces)
+                });
             if let Some((_, c, _)) = found {
                 let n = rented.entry(c).or_insert(0);
                 *n = n.checked_add(1).expect("貸した枠の数があふれた");
@@ -189,6 +174,25 @@ impl World {
         for (h, c) in renting {
             self.car_places.rent(h, c);
         }
+    }
+
+    /// 貸せる共同の駐車場。駐車場ごとに、角のマス、正面のマス、台数を施設を置いた順に並べる。
+    /// 面した道路のない駐車場は貸さない。
+    pub(super) fn shared_lot_sites(&self) -> Vec<SharedLotSite> {
+        self.facilities
+            .iter()
+            .filter(|f| f.kind.is_parking() && f.entrance.is_some())
+            .map(|f| (f.area.min, f.front, f.kind.parking_spaces()))
+            .collect()
+    }
+
+    /// 道路に面していない共同の駐車場。貸せないが、範囲の中にあるかを理由の判定に使う。並びは [`Self::shared_lot_sites`] と同じ。
+    pub(super) fn unconnected_lot_sites(&self) -> Vec<SharedLotSite> {
+        self.facilities
+            .iter()
+            .filter(|f| f.kind.is_parking() && f.entrance.is_none())
+            .map(|f| (f.area.min, f.front, f.kind.parking_spaces()))
+            .collect()
     }
 
     /// ゲーム内の 1 日に 1 回、料金が払える上限を超えた世帯に借りた枠を返させ、枠のない世帯に貸し直す。
@@ -313,15 +317,36 @@ mod tests {
     }
 }
 
+/// 貸せる共同の駐車場 1 つ。角のマス、正面のマス、台数。
+pub(super) type SharedLotSite = (TilePos, TilePos, u32);
+
+/// 家の正面のマス `from` から [`SHARED_LOT_RADIUS`] マスの中にある駐車場を、直線の距離の近い順（同じなら角のマスの順）に並べる。
+/// 距離は 2 乗で、駐車場の台数が空いているかは見ない。
+pub(super) fn lots_in_range(lots: &[SharedLotSite], from: TilePos) -> Vec<(i128, TilePos, u32)> {
+    let radius = i128::from(SHARED_LOT_RADIUS);
+    let dist2 = |a: TilePos, b: TilePos| {
+        let d = |p: i64, q: i64| i128::from(p) - i128::from(q);
+        let (dx, dy) = (d(a.x, b.x), d(a.y, b.y));
+        dx * dx + dy * dy
+    };
+    let mut near: Vec<(i128, TilePos, u32)> = lots
+        .iter()
+        .map(|(c, front, spaces)| (dist2(from, *front), *c, *spaces))
+        .filter(|(d, _, _)| *d <= radius * radius)
+        .collect();
+    near.sort_unstable();
+    near
+}
+
 /// 建物の自宅の枠の数の上限。テストで自宅の枠が足りない街を作るのに使い、ふつうは `None` である。
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-util")))]
 fn home_spaces_limit() -> Option<u64> {
     None
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-util"))]
 fn home_spaces_limit() -> Option<u64> {
-    car_place_tests::HOME_SPACES_LIMIT.with(std::cell::Cell::get)
+    crate::car_place::testing::HOME_SPACES_LIMIT.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
@@ -495,11 +520,7 @@ mod car_place_tests {
         check(&w);
     }
 
-    thread_local! {
-        /// 建物の自宅の枠の数の上限（[`super::home_spaces_limit`]）。
-        pub(super) static HOME_SPACES_LIMIT: std::cell::Cell<Option<u64>> =
-            const { std::cell::Cell::new(None) };
-    }
+    use crate::car_place::testing::HOME_SPACES_LIMIT;
 
     /// 共同の駐車場の枠を借りた世帯を、駐車場の角のマスごとに数える。どの世帯も家から範囲の中の駐車場を借り、
     /// 貸した枠と外来の台数の和は台数を超えず、駐車場の台数の表と世帯の枠が合う。

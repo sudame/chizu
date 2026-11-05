@@ -9,6 +9,8 @@ pub mod movers;
 pub mod save;
 pub mod sim;
 pub mod snapshot;
+#[cfg(test)]
+mod test_town;
 pub mod walk_path;
 
 use chizu_core::network::{DIAGONAL_TILE_MM, TILE_MM, road_cost_per_tile};
@@ -57,14 +59,20 @@ pub fn road_cost_table() -> Vec<f64> {
         .collect()
 }
 
-/// 施設の表。`[発電所の費用, 間口, 奥行き, 浄水場の費用, 間口, 奥行き]`。
+/// 施設の表。施設の種類（`ServiceKind::ALL` の順に、発電所、浄水場、平面の駐車場、駐車場ビル）ごとに
+/// `[費用, 間口, 奥行き, 台数]` を並べる。台数は共同の駐車場の台数で、ほかの施設は 0 である。
 #[wasm_bindgen]
 pub fn service_table() -> Vec<f64> {
-    [ServiceKind::PowerPlant, ServiceKind::WaterPump]
+    ServiceKind::ALL
         .into_iter()
         .flat_map(|k| {
             let (w, d) = k.size();
-            [k.cost().0 as f64, w as f64, d as f64]
+            [
+                k.cost().0 as f64,
+                w as f64,
+                d as f64,
+                f64::from(k.parking_spaces()),
+            ]
         })
         .collect()
 }
@@ -227,12 +235,27 @@ impl Simulation {
         self.0.current_tick()
     }
 
+    /// 車を持てない世帯の数と理由ごとの数、世帯の多い所。並びは `sim::Sim::carless` にある。
+    pub fn carless(&self) -> Vec<f64> {
+        self.0.carless()
+    }
+
+    /// 共同の駐車場を (x, y) に置いたとき、届く範囲の中の車を持てない世帯の数。
+    pub fn carless_in_range(&self, x: f64, y: f64) -> Result<f64, JsError> {
+        let coord = |v: f64| {
+            (v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0)
+                .then_some(v as i64)
+                .ok_or_else(|| JsError::new("マスの座標が整数でない"))
+        };
+        Ok(self.0.carless_in_range(TilePos::new(coord(x)?, coord(y)?)))
+    }
+
     /// 区画の種類ごとに、需要が正なのに空き区画がないかを 1 か 0 で並べた 4 個の数。並びは `sim::Sim::lot_shortage` にある。
     pub fn lot_shortage(&self) -> Vec<f64> {
         self.0.lot_shortage()
     }
 
-    /// 収支の見込みの 12 個の数。並びは `sim::Sim::finance` にある。
+    /// 収支の見込みの 13 個の数。並びは `sim::Sim::finance` にある。
     pub fn finance(&self) -> Vec<f64> {
         self.0.finance()
     }
