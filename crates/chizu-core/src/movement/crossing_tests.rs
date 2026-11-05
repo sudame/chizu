@@ -349,6 +349,51 @@ fn walkers_obey_the_signal() {
     assert!(t.trips.is_empty(), "残った {}", t.trips.len());
 }
 
+/// 信号の十字路で、x の向きが青になった tick。
+fn x_green_start(n: &Network, node: NodeId) -> u64 {
+    let light = |t| {
+        signal::state(n, node, Tick(t), &signal::Demand::default())
+            .unwrap()
+            .light_for(0)
+    };
+    (1..1_000)
+        .find(|t| light(*t) == signal::Light::Green && light(*t - 1) != signal::Light::Green)
+        .unwrap()
+}
+
+#[test]
+fn a_turning_car_on_green_goes_before_walkers_who_come_after_it() {
+    // 信号の十字路で、x の向きが青のあいだ、西の腕の南の歩道から東へ、南の腕の横断歩道を渡る人が
+    // 途切れずに来る。東から来て南へ左折する車は、人が渡っていない所へ着けば、あとから来た人より先に入る。
+    // 信号のない交差点で手前まで来た車を先に通すのと同じである。
+    let (mut n, node) = crossroads();
+    n.set_signal(node, true).unwrap();
+    let start = x_green_start(&n, node);
+    let mut t = Town::new(n);
+    t.now = Tick(start);
+    let car = t.drive(at(16, 10, (-1, 0), 0), at(10, 18, (0, 1), 0));
+    let first = t.trips.get(car).unwrap().link();
+    let mut entered = None;
+    for tick in 0..signal::GREEN {
+        t.walk(at(9, 10, (1, 0), 4_000), at(18, 10, (1, 0), 0));
+        t.step(node);
+        if t.trips.get(car).is_none_or(|c| c.link() != first) {
+            entered = Some(tick);
+            break;
+        }
+    }
+    let entered = entered.expect("青のうちに曲がれない");
+    assert!(
+        entered < u64::from(PED_PATIENCE),
+        "あとから来た人を待った {entered}"
+    );
+    // 人は、車を先に通したあとで渡る。
+    for _ in 0..1_500 {
+        t.step(node);
+    }
+    assert!(t.trips.is_empty(), "残った {}", t.trips.len());
+}
+
 #[test]
 fn a_walker_crossing_midblock_stops_the_car() {
     // 両端の行き止まりまで遠い長い道路の真ん中で、南の側の出入口から北の側の出入口へ横切る。

@@ -620,15 +620,18 @@ pub(super) fn gate(
             g.busy.insert((node, next.segment));
             continue;
         }
-        let green = || {
-            let axis = net
-                .segment_line(link.segment)
-                .map_or(0, |l| signal::axis(l.step));
-            signal::state(net, node, now, &g.signals)
-                .is_none_or(|st| st.light_for(axis) == signal::Light::Green)
-        };
+        // 信号のある交差点では、腕が青の車だけを手前まで来た車として数える。黄と赤の車は停止線で止まり、
+        // 横断歩道を通らないので、歩く人はその車を待たない。
+        let axis = net
+            .segment_line(link.segment)
+            .map_or(0, |l| signal::axis(l.step));
+        let green = signal::state(net, node, now, &g.signals)
+            .is_none_or(|st| st.light_for(axis) == signal::Light::Green);
+        if !green {
+            continue;
+        }
         let stopped = t.speed == MmPerTick::ZERO;
-        let yielded = if stopped && t.yielded > 0 && green() {
+        let yielded = if stopped && t.yielded > 0 {
             t.yielded
         } else {
             0
