@@ -24,6 +24,8 @@ const LOT: Lot = {
     { x0: 10, y0: 20, x1: 10.625, y1: 21.25, openX: 1, openY: 0, count: 4 },
     { x0: 11, y0: 22, x1: 11.625, y1: 22.625, openX: 0, openY: 1, count: 2 },
   ],
+  lanes: [],
+  houses: [],
 };
 const LOTS = new Map([[lotKey(10, 20), LOT]]);
 const VIEW = { minX: 0, minY: 0, maxX: 40, maxY: 40 };

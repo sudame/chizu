@@ -62,12 +62,20 @@ export const SEGMENT_STRIDE = 5;
 /** 建物 1 つの数の個数。chizu-wasm の buildings と同じ。 */
 export const BUILDING_STRIDE = 7;
 
-/** 駐車場の形の 1 件の見出しの数（建物の min の x と y、平面の台数、建物の中の台数、長方形の数、枠の並びの数）。 */
-export const LOT_HEADER = 6;
-/** 駐車場の長方形 1 つの数の個数（x0、y0、x1、y1）。 */
+/**
+ * 駐車場の形の 1 件の見出しの数（建物の min の x と y、平面の台数、建物の中の台数、長方形の数、枠の並びの数、
+ * 私道の数、家の数）。
+ */
+export const LOT_HEADER = 8;
+/** 駐車場の長方形 1 つの数の個数（x0、y0、x1、y1）。私道と家の長方形も同じ個数である。 */
 export const LOT_FACE_STRIDE = 4;
 /** 駐車場の枠の並び 1 本の数の個数（x0、y0、x1、y1、車の入る側の向きの x と y、枠の数）。 */
 export const LOT_STRIP_STRIDE = 7;
+
+/** 駐車場の形の 1 件の長さ。見出しが崩れていれば NaN になる。 */
+export function lotRecordLength(faces: number, strips: number, lanes: number, houses: number) {
+  return LOT_HEADER + (faces + lanes + houses) * LOT_FACE_STRIDE + strips * LOT_STRIP_STRIDE;
+}
 
 /** 駐車場の形の並びが、見出しの数のとおりに過不足なく読めるか。 */
 export function lotsWellFormed(data: Float64Array): boolean {
@@ -76,12 +84,12 @@ export function lotsWellFormed(data: Float64Array): boolean {
     if (i + LOT_HEADER > data.length) {
       return false;
     }
-    const faces = data[i + 4] ?? -1;
-    const strips = data[i + 5] ?? -1;
-    if (!Number.isInteger(faces) || !Number.isInteger(strips) || faces < 0 || strips < 0) {
+    const counts = [4, 5, 6, 7].map((k) => data[i + k] ?? -1);
+    if (counts.some((c) => !Number.isInteger(c) || c < 0)) {
       return false;
     }
-    i += LOT_HEADER + faces * LOT_FACE_STRIDE + strips * LOT_STRIP_STRIDE;
+    const [faces = 0, strips = 0, lanes = 0, houses = 0] = counts;
+    i += lotRecordLength(faces, strips, lanes, houses);
   }
   return i === data.length;
 }
