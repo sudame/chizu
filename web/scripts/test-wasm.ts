@@ -1117,7 +1117,8 @@ try {
     near(commercial, mixHex("#eaf0f8", "#dde6f3", blocks), 4),
     `塗ったマスが商業の淡い青の地面で描かれる（${commercial.join(", ")}）`,
   );
-  // 低密度の住宅は、区画の番号 5 で送られ、高密度の住宅と違う黄緑の地面で描かれる。確かめたら消す
+  // 低密度の住宅は、区画の番号 5 で送られ、高密度の住宅と違う黄緑の地面と建物の色で描かれる。
+  // 高密度の住宅を塗る前に確かめ、建った家は取り壊して区画も消す。確かめたら消す
   {
     await pickTool(page, "zone-ResidentialLow");
     const beforeLow = await outcomeCount();
@@ -1141,6 +1142,50 @@ try {
       lowZoned.command === "PaintZone" && lowZoned.outcome === "Applied" && near(low, wantLow, 4),
       `低密度の住宅を塗ると、黄緑の地面（#f0f5d6）で描かれる（${low.join(", ")}、${lowZoned.text}）`,
     );
+    // 建物は、建物のまとまりを薄く重ねた色で描かれる。高密度の住宅の色とは別である
+    const lowBuildingHex = mixHex(
+      mixHex("#f0f5d6", "#d6e59c", blocks),
+      "#dce8ad",
+      stageWeights(view.zoom).clusters,
+    );
+    const highBuildingHex = mixHex(
+      mixHex("#eef4e6", "#cde0b9", blocks),
+      "#d3e3c0",
+      stageWeights(view.zoom).clusters,
+    );
+    const lowBuilding = async () => {
+      for (let x = 14; x <= 18; x++) {
+        for (let y = 29; y <= 31; y++) {
+          const c = await pixel(
+            cx + (x + 0.6 - view.x) * view.zoom,
+            cy + (y + 0.8 - view.y) * view.zoom,
+          );
+          if (near(c, lowBuildingHex, 4)) {
+            return { x, y, c };
+          }
+        }
+      }
+      return null;
+    };
+    await setSpeed(FAST_SPEED);
+    let found = await lowBuilding();
+    for (let i = 0; i < 100 && found === null; i++) {
+      await page.waitForTimeout(200);
+      found = await lowBuilding();
+    }
+    await setSpeed(1);
+    check(
+      found !== null && !near(found.c, highBuildingHex, 4),
+      `低密度の住宅の建物が、高密度と違う黄緑の色で描かれる（${found === null ? "見つからない" : `マス (${found.x}, ${found.y})、${found.c.join(", ")}`}、期待 ${lowBuildingHex}）`,
+    );
+    // 建った家を取り壊し、区画も消して、あとの確かめを前と同じ街から始める
+    await page.locator('button[data-tool="bulldoze"]').click();
+    const beforeBulldozeLow = await outcomeCount();
+    await page.mouse.move(l0.x, l0.y);
+    await page.mouse.down();
+    await page.mouse.move(l1.x, l1.y, { steps: 4 });
+    await page.mouse.up();
+    await nextOutcome(beforeBulldozeLow);
     await pickTool(page, "zone-Clear");
     const beforeClear = await outcomeCount();
     await page.mouse.move(l0.x, l0.y);
@@ -1214,7 +1259,7 @@ try {
   const firstBuilding = ((await map.getAttribute("data-first-building")) ?? "")
     .split(",")
     .map(Number);
-  let [bx = 0, by = 0] = firstBuilding;
+  const [bx = 0, by = 0] = firstBuilding;
   check(
     Number(await cityNumbers.getAttribute("data-buildings")) > 0,
     `時間を進めると住宅が建ち、数が出る（${await cityNumbers.textContent()}）`,
@@ -1246,73 +1291,6 @@ try {
   );
   const residentialDemand = await page.locator("#demand .bar").first().getAttribute("data-demand");
   check(residentialDemand !== null, `住宅の需要の棒が出る（${residentialDemand}）`);
-
-  // 低密度の住宅は、建物も区画の番号 5 で送られ、高密度の住宅と違う黄緑の色で描かれる。
-  // 通りに面した奥行き 2 の帯に塗り、一軒家が建つのを待つ
-  {
-    // 新しい建物は区画の候補から選ばれるので、低密度の帯に建つよう、高密度の空いた区画は先に消す。帯は、建たずに残る間口が出るよう広くとる
-    await pickTool(page, "zone-Clear");
-    const beforeClear = await outcomeCount();
-    const c0 = tilePoint(14, 26);
-    const c1 = tilePoint(30, 31);
-    await page.mouse.move(c0.x, c0.y);
-    await page.mouse.down();
-    await page.mouse.move(c1.x, c1.y, { steps: 4 });
-    await page.mouse.up();
-    await nextOutcome(beforeClear);
-    await pickTool(page, "zone-ResidentialLow");
-    const q0 = tilePoint(33, 30);
-    const q1 = tilePoint(48, 31);
-    await page.mouse.move(q0.x, q0.y);
-    await page.mouse.down();
-    await page.mouse.move(q1.x, q1.y, { steps: 4 });
-    await page.mouse.up();
-    const away = tilePoint(45, 45);
-    await page.mouse.move(away.x, away.y);
-    const weights = stageWeights(view.zoom);
-    const lowHex = mixHex(
-      mixHex("#f0f5d6", "#d6e59c", weights.blocks),
-      "#dce8ad",
-      weights.clusters,
-    );
-    const lowAt = async () => {
-      for (let x = 33; x <= 48; x++) {
-        for (let y = 30; y <= 31; y++) {
-          const c = await pixel(
-            cx + (x + 0.6 - view.x) * view.zoom,
-            cy + (y + 0.8 - view.y) * view.zoom,
-          );
-          if (near(c, lowHex, 4)) {
-            return { x, y, c };
-          }
-        }
-      }
-      return null;
-    };
-    await setSpeed(FAST_SPEED);
-    let found = await lowAt();
-    for (let i = 0; i < 300 && found === null; i++) {
-      await page.waitForTimeout(200);
-      found = await lowAt();
-    }
-    await setSpeed(1);
-    check(
-      found !== null && !near(found.c, houseHex, 4),
-      `低密度の住宅の建物が、高密度と違う黄緑の色で描かれる（${found === null ? "見つからない" : `マス (${found.x}, ${found.y})、${found.c.join(", ")}`}、期待 ${lowHex}）`,
-    );
-    // 消した高密度の区画を塗り直し、あとの確かめ（建たない理由の知らせなど）が前と同じ街で動くようにする
-    await pickTool(page, "zone-Residential");
-    const beforeRepaint = await outcomeCount();
-    await page.mouse.move(c0.x, c0.y);
-    await page.mouse.down();
-    await page.mouse.move(c1.x, c1.y, { steps: 4 });
-    await page.mouse.up();
-    await nextOutcome(beforeRepaint);
-    // 区画を消すと、その上の建物も消えることがある。あとの確かめが読む最初の建物を取り直す
-    [bx = 0, by = 0] = ((await map.getAttribute("data-first-building")) ?? "")
-      .split(",")
-      .map(Number);
-  }
 
   // 電気と水道。施設がないので、建物には届いていない印が出る
   const unsupplied = async () => Number((await map.getAttribute("data-unsupplied")) ?? 0);
@@ -1914,9 +1892,8 @@ try {
   const roofSide = await pixel(besideRidge.x, besideRidge.y);
   check(
     Number(await map.getAttribute("data-detail-roofs")) > 0 &&
-      // 最初の建物は、高密度でも低密度でもよい。どちらも住宅の縁の色で屋根の線を引く
-      ((ridgeArea.some((c) => near(c, "#a7c18e", 8)) && near(roofSide, "#d3e3c0", 8)) ||
-        (ridgeArea.some((c) => near(c, "#a9c24f", 8)) && near(roofSide, "#dce8ad", 8))),
+      ridgeArea.some((c) => near(c, "#a7c18e", 8)) &&
+      near(roofSide, "#d3e3c0", 8),
     `上限の倍率 ${fine.zoom} まで寄れ、住宅に屋根の線を描き足す（線 ${ridgeArea.map((c) => c.join(",")).join(" ")}、脇 ${roofSide.join(", ")}）`,
   );
 

@@ -197,6 +197,10 @@ function splitHomes(r: Rect, n: number, gap: number): Rect[] {
   });
 }
 
+/** 敷地を縮めずに棟へ割った長方形（`homes` が 1 なら敷地そのもの）。ラベルを置く棟を選ぶのに使う。 */
+export const homeRects = (site: Rect, homes: number): Rect[] =>
+  splitHomes(site, homes, HOME_GAP_MIN);
+
 /**
  * 建物の本体の形。`site` を `inset` だけ縮めた長方形から、駐車場の切り欠きを除く。
  * `edge` は縁の幅で、縁の内側の本体は、切り欠きの側も縁の幅だけ内へ縮める。

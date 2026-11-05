@@ -11,6 +11,7 @@ import {
   SYMBOL_BORDER,
   symbolLook,
 } from "./facility-symbols.ts";
+import { homeCount, homeRects, siteOf } from "./lots.ts";
 import {
   chunkOf,
   districtName,
@@ -740,7 +741,11 @@ export function parkingLabels(
     if (count === undefined || count <= 0) continue;
     const x1 = buildings[i + 2] ?? 0;
     const y1 = buildings[i + 3] ?? 0;
-    out.push({ key, x: (x0 + x1 + 1) / 2, y: (y0 + y1 + 1) / 2, count });
+    // 世帯ごとに棟へ割った低密度の家は、中心が棟のあいだの隙間に入るので、最初の棟の中心に置く
+    const site = siteOf(x0, y0, x1, y1);
+    const homes = homeCount(buildings[i + 4] ?? 0, buildings[i + 5] ?? 1, site, undefined);
+    const r = homeRects(site, homes)[0] ?? site;
+    out.push({ key, x: (r.x0 + r.x1) / 2, y: (r.y0 + r.y1) / 2, count });
   }
   return out;
 }

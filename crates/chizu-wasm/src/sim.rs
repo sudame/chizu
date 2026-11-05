@@ -1658,6 +1658,60 @@ mod tests {
         );
     }
 
+    const HOME_COUNT_FILE: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../web/src/protocol/home-count-fixture.json"
+    );
+
+    /// 画面の側は、低密度の家の棟の数を世帯数の式から求める（`web/src/map/lots.ts` の `homeCount`）。
+    /// 中核の `Building::households` と食い違わないよう、大きさと段階ごとの世帯数をここで書き出し、画面のテストが読む。
+    #[test]
+    fn home_count_fixture_matches_the_core_households() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(10, 11), TilePos::new(30, 16)),
+            zone: Some(Zone::ResidentialLow),
+        })
+        .unwrap();
+        sim.advance(chizu_core::world::growth::GROWTH_INTERVAL as u32 + 1);
+        let template = *sim
+            .world()
+            .buildings()
+            .iter()
+            .map(|(_, b)| b)
+            .next()
+            .expect("低密度の家が建たない");
+        let mut rows = Vec::new();
+        for w in 1..=4i64 {
+            for h in 1..=4i64 {
+                for level in 1..=5u8 {
+                    let mut b = template;
+                    b.zone = Zone::ResidentialLow;
+                    b.level = level;
+                    b.area = TileRect::from_corners(
+                        TilePos::new(100, 100),
+                        TilePos::new(100 + w - 1, 100 + h - 1),
+                    );
+                    rows.push(format!(
+                        "  {{ \"w\": {w}, \"h\": {h}, \"level\": {level}, \"households\": {} }}",
+                        b.households()
+                    ));
+                }
+            }
+        }
+        let expected = format!("[\n{}\n]\n", rows.join(",\n"));
+        if std::env::var_os("CHIZU_UPDATE_LAYOUT").is_some() {
+            std::fs::write(HOME_COUNT_FILE, &expected).unwrap();
+        }
+        let actual = std::fs::read_to_string(HOME_COUNT_FILE).unwrap();
+        assert!(
+            actual == expected,
+            "{HOME_COUNT_FILE} が中核の世帯数と食い違う。\
+             CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm で書き直す"
+        );
+    }
+
     fn road(from: (i64, i64), to: (i64, i64)) -> Command {
         Command::BuildRoad {
             from: TilePos::new(from.0, from.1),

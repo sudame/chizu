@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import fixture from "../protocol/home-count-fixture.json" with { type: "json" };
 import { roofGeometry } from "./detail.ts";
 import { homeCount, type Rect, siteOf } from "./lots.ts";
 import {
@@ -53,6 +54,26 @@ describe("通りに面した低密度の家の棟の数", () => {
     [2, 2, 2, 2],
   ])("%i×%i の段階 %i は %i 棟", (w, h, level, homes) => {
     expect(homeCount(LOW, level, siteOf(0, 0, w - 1, h - 1), undefined)).toBe(homes);
+  });
+
+  test("棟の数は、中核の世帯数（chizu-wasm のテストが書き出した表）と合う", () => {
+    expect(fixture.length).toBe(4 * 4 * 5);
+    for (const { w, h, level, households } of fixture) {
+      // 棟は世帯ごとに 1 つで、敷地の長い辺のマスの数を超えない
+      const want = Math.max(1, Math.min(households, Math.max(w, h)));
+      expect(
+        homeCount(LOW, level, siteOf(0, 0, w - 1, h - 1), undefined),
+        `${w}×${h} 段階 ${level}`,
+      ).toBe(want);
+    }
+  });
+
+  test("通りに面した低密度の家（2×2 まで、段階 2 まで）は、世帯の数だけ棟になる", () => {
+    for (const { w, h, level, households } of fixture) {
+      if (w <= 2 && h <= 2 && level <= 2) {
+        expect(homeCount(LOW, level, siteOf(0, 0, w - 1, h - 1), undefined)).toBe(households);
+      }
+    }
   });
 
   test("高密度の住宅は、世帯が増えても棟に分けない", () => {
