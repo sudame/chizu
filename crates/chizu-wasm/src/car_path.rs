@@ -105,12 +105,11 @@ fn turn_between(a: f64, b: f64) -> f64 {
     (b - a + core::f64::consts::PI).rem_euclid(core::f64::consts::TAU) - core::f64::consts::PI
 }
 
-/// リンクの、始まりと終わりのノード、1 歩の向き（長さ 1 にしたもの）、腕の向き。
+/// リンクの、始まりと終わりのノードと、1 歩の向き（長さ 1 にしたもの）。
 pub(crate) struct LinkGeom {
     pub(crate) from: NodeId,
     pub(crate) to: NodeId,
     pub(crate) dir: V,
-    pub(crate) step: (i64, i64),
 }
 
 pub(crate) fn geom(net: &Network, link: LinkId) -> Option<LinkGeom> {
@@ -125,7 +124,6 @@ pub(crate) fn geom(net: &Network, link: LinkId) -> Option<LinkGeom> {
         from,
         to,
         dir: (step.0 as f64 / len, step.1 as f64 / len),
-        step,
     })
 }
 
@@ -884,9 +882,9 @@ fn link_sig(net: &Network, link: LinkId) -> Option<Vec<u64>> {
     let lay = Layout::of(net, link, len);
     let start = center(net, g.from)?;
     let mut sig: Vec<u64> = [g.dir.0, g.dir.1, len, lay.clear, lay.stop, start.0, start.1]
-    .iter()
-    .map(|v| v.to_bits())
-    .collect();
+        .iter()
+        .map(|v| v.to_bits())
+        .collect();
     for n in [g.from, g.to] {
         sig.extend([u64::from(n.index), u64::from(n.generation)]);
     }

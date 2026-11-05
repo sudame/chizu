@@ -425,7 +425,8 @@ fn lane_of(net: &Network, link: LinkId, index: i64) -> (Mm, Mm) {
     let per_side = i64::from(kind.car_lanes_per_side());
     let lane = kind.lane_width_mm();
     let d = (per_side - index) * lane - lane / 2;
-    let (sx, sy) = geom(net, link).unwrap().step;
+    let dir = geom(net, link).unwrap().dir;
+    let (sx, sy) = (dir.0.round() as i64, dir.1.round() as i64);
     let (x, y) = if sx != 0 && sy != 0 {
         let c = d * 70_711 / 100_000;
         (c * sy, -c * sx)

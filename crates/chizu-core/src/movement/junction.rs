@@ -201,6 +201,9 @@ impl Move {
     }
 }
 
+/// 車道の四角の縁までの距離（mm）と速さ（mm/tick）。
+pub(super) type Reach = (i64, i64);
+
 /// 交差点の手前まで来た、車線の先頭の車。
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Approach {
@@ -223,7 +226,7 @@ pub(super) struct Approach {
     pub waited: u32,
     /// 車道の四角に入るまでの距離と、この tick に出しうるいちばん速い速さ。その速さのまま進んで四角に入るまでの
     /// 時間より、交差点の中の車がいまの速さのまま進んで四角を抜けるまでの時間が短ければ、その車を待たない。
-    pub arrives: (i64, i64),
+    pub arrives: Reach,
 }
 
 /// 交差点の中にいる車。
@@ -238,7 +241,7 @@ pub(super) struct Inside {
     /// 止まっているか。
     pub stopped: bool,
     /// 車道の四角を抜けるまでの距離と、いまの速さ。
-    pub leaves: (i64, i64),
+    pub leaves: Reach,
 }
 
 /// 交差点で止める候補。
@@ -272,7 +275,7 @@ pub(super) fn holds(
     let mut yielded = Vec::new();
     let mut group: Vec<(Approach, Move)> = Vec::new();
     // 置いた動きと、それが交差点の中で止まった車のものか、交差点の中の車の、車道の四角を抜けるまでの距離と速さ。
-    let mut placed: Vec<(Move, bool, Option<(i64, i64)>)> = Vec::new();
+    let mut placed: Vec<(Move, bool, Option<Reach>)> = Vec::new();
     for same in cands.chunk_by(|a, b| a.node == b.node) {
         let node = same[0].node;
         let lo = inside.partition_point(|x| x.node < node);
@@ -379,7 +382,7 @@ pub(super) fn holds(
 
 /// 交差点の中の車（車道の四角を抜けるまでの距離 `rest` と速さ `v`）が、いまの速さのまま進んで四角を抜けるのが、
 /// 候補（四角に入るまでの距離 `to_box` と、いちばん速い速さ `u`）が四角に入るより先か。止まった車は抜けない。
-fn gone_before((rest, v): (i64, i64), (to_box, u): (i64, i64)) -> bool {
+fn gone_before((rest, v): Reach, (to_box, u): Reach) -> bool {
     v > 0 && to_box > 0 && rest.saturating_mul(u) < to_box.saturating_mul(v)
 }
 
