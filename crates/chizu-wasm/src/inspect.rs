@@ -2,6 +2,7 @@
 //!
 //! 押された 1 つについてだけ集計し、毎 tick 全体を集計することはしない。
 
+use chizu_core::clock::GAME_SECONDS_PER_TICK;
 use chizu_core::happiness::{commute_time, total};
 use chizu_core::{BuildingId, TilePos, TileRect, World, ZoneKind};
 
@@ -14,8 +15,10 @@ pub struct Residents {
     pub happiness: u8,
     /// 幸福度の 3 つの要素（通勤、生活サービス、暮らし向き）の平均。
     pub parts: [u8; 3],
-    /// 職場のある住民の通勤の所要時間（移動の秒）の平均。幸福度の通勤の点と同じく、測った通勤の時間を均した値で、
-    /// まだ測っていない住民は直線距離からの見積もりを使う（[`commute_time`]）。職場のある住民がいなければ `None`。
+    /// 職場のある住民の通勤の所要時間の平均を、時計の秒にしたもの。幸福度の通勤の点と同じく、測った通勤の時間を
+    /// 均した値で、まだ測っていない住民は直線距離からの見積もりを使う（[`commute_time`]）。移動の 1 秒（1 tick）は
+    /// 時計の 12 秒にあたるので、[`GAME_SECONDS_PER_TICK`] を掛ける。observe の `commute.time` と同じ物差しである。
+    /// 職場のある住民がいなければ `None`。
     pub commute_seconds: Option<u64>,
 }
 
@@ -177,7 +180,8 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
             count,
             happiness: (happiness / count) as u8,
             parts: sums.map(|s| (s / count) as u8),
-            commute_seconds: (commuters > 0).then(|| commute_total / commuters),
+            commute_seconds: (commuters > 0)
+                .then(|| commute_total / commuters * u64::from(GAME_SECONDS_PER_TICK)),
         });
     }
     Some(info)
@@ -189,7 +193,7 @@ pub const INSPECT_LENGTH: usize = 15;
 /// 数に直す。要素がないものは -1 にする。なければ空の配列。
 ///
 /// 建物：`[1, 区画の種類, 段階, 電気, 水道, 上限, 埋まっている数, 住民の数, 幸福度, 通勤の点数,
-/// 生活サービスの点数, 暮らし向きの点数, 通勤の所要時間（秒）]`。
+/// 生活サービスの点数, 暮らし向きの点数, 通勤の所要時間（時計の秒）]`。
 /// 施設：`[2, 施設の種類, 供給量, 1 日の維持費, -1, ...]`。
 /// どちらも最後の 2 つは識別子の a と b で、建物なら ID の添え字と世代、施設なら min のマスの x と y である。
 /// 先頭の値が識別子の種類を兼ねる。
@@ -400,7 +404,7 @@ mod tests {
             u64::from(r.parts[2]),
             mean(&|c| u64::from(c.happiness.wealth))
         );
-        // 通勤の所要時間は、職のある住民だけで割る
+        // 通勤の所要時間は、職のある住民だけで割り、時計の秒（移動の秒の 12 倍）で出す
         let home = world.buildings().get(id).unwrap();
         let times: Vec<u64> = rows
             .iter()
@@ -410,7 +414,7 @@ mod tests {
         assert!(!times.is_empty(), "職に就いた住民がいない");
         assert_eq!(
             r.commute_seconds,
-            Some(times.iter().sum::<u64>() / times.len() as u64)
+            Some(times.iter().sum::<u64>() / times.len() as u64 * 12)
         );
         let encoded = encode(inspect(world, area_min(world, id)));
         assert_eq!(encoded[0], 1.0);

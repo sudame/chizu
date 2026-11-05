@@ -19,8 +19,9 @@ use crate::network::TILE_MM;
 use crate::round;
 use crate::units::{Money, Tick};
 
-/// 直線距離で見積もるときの、家から職場までの速さ（mm/秒）。道なりの遠回りと待ち時間を込みにした値である。
-pub const STRAIGHT_LINE_MM_PER_SECOND: u64 = 6_000;
+/// 直線距離で見積もるときの、家から職場までの速さ（mm/秒）。道なりの遠回り、歩き、待ち、渋滞を込みにした値で、
+/// 測った街の住民ごとの「直線距離 ÷ 測った通勤の時間」の中央値に合わせてある（`docs/design.md` の 1.6）。
+pub const STRAIGHT_LINE_MM_PER_SECOND: u64 = 1_000;
 
 /// この時間（移動の秒）までの通勤は満点にする。時計では 60 分にあたる（1 tick が移動の 1 秒、時計の 12 秒）。
 /// 測った街では、混んでいない街の通勤の中央値がこのあたりにある（`docs/design.md` の 1.6）。

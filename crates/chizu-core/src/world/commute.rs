@@ -110,7 +110,10 @@ impl World {
             self.population.set_trip(c.citizen, None);
             if row.schedule.next == c.to && row.schedule.depart_at.is_none() {
                 // 職場へは家から向かうので、着いた移動の時間が、家を出てから職場に着くまでの時間になる。
+                // 向かっているあいだに職場が別の建物に変わったら、予定が立て直されて上の条件で外れる。
+                // 職をなくしただけなら予定は残るので、職のない住民には記録しない。
                 if c.to == Activity::Work
+                    && row.workplace.is_some()
                     && let Some(f) = finished.filter(|f| f.reached)
                 {
                     let took = self.tick.0.saturating_sub(f.departed.0);
@@ -223,5 +226,93 @@ mod commute_time_tests {
             }
         }
         assert!(measured > 20, "通勤の時間を測った住民が少ない: {measured}");
+    }
+
+    /// 通勤の時間は、職場に着いた移動の、出発から着くまでの tick 数で書き換わり、ほかでは変わらない。
+    /// 朝の通勤のさなかに道路を壊し、途中で消える移動と、経路がなく始められない住民を出して確かめる。
+    #[test]
+    fn only_arrivals_at_work_record_the_commute() {
+        use crate::citizens::{Activity, COMMUTE_SMOOTHING};
+        use crate::clock::TICKS_PER_DAY;
+        use crate::command::Command;
+        use crate::id::{CitizenId, TripId};
+        use crate::tile::{TilePos, TileRect};
+        use crate::units::Tick;
+        use crate::world::people::Shift;
+        use std::collections::BTreeMap;
+
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 1);
+        let cut = TICKS_PER_DAY + Shift::of(ZoneKind::Industrial).leave_home + 150;
+        let (mut arrived, mut lost) = (0, 0);
+        let mut cut_done = false;
+        while w.tick.0 < 2 * TICKS_PER_DAY {
+            let to_work: BTreeMap<TripId, (CitizenId, Tick)> = w
+                .trips
+                .iter()
+                .filter_map(|(id, t)| {
+                    let c = w.trips.commuter(id).filter(|c| c.to == Activity::Work)?;
+                    Some((id, (c.citizen, t.departed())))
+                })
+                .collect();
+            let before: BTreeMap<CitizenId, Option<u32>> = w
+                .population
+                .citizen_ids()
+                .map(|id| (id, w.population.citizen(id).unwrap().commute))
+                .collect();
+            // 着いたかは step の中で、その tick（進める前の tick）で決まる。前の日の集計と同じ数え方である。
+            let now = w.tick.0;
+            if now == cut && !cut_done {
+                // 住宅の帯と工業の帯をつなぐ、西の縦の道路を壊す。通れなくなった移動は、次の step の初めに
+                // 探し直して消える。その結果は step の中で消されるので、ここで探し直して確かめる。
+                cut_done = true;
+                let area = TileRect::from_corners(TilePos::new(-60, 20), TilePos::new(-60, 30));
+                assert_eq!(
+                    w.apply(&Command::Bulldoze { area }),
+                    crate::world::ApplyOutcome::Applied
+                );
+                w.sync_router();
+            } else {
+                w.step();
+            }
+            let mut expected = before.clone();
+            for (trip, (citizen, departed)) in &to_work {
+                if w.trips.get(*trip).is_some() {
+                    continue;
+                }
+                // 取りやめた移動（家を失った世帯など）は結果を残さない。通勤の時間も変わらない。
+                let Some(f) = w.trips.finished(*trip) else {
+                    continue;
+                };
+                assert_eq!(f.departed, *departed, "出発の tick が引き継がれていない");
+                if !f.reached {
+                    lost += 1;
+                    continue;
+                }
+                arrived += 1;
+                let took = u32::try_from(now - departed.0).unwrap();
+                let old = before[citizen];
+                let n = COMMUTE_SMOOTHING as u32;
+                let mixed = old.map_or(took, |o| (o * (n - 1) + took + n / 2) / n);
+                expected.insert(*citizen, Some(mixed));
+            }
+            for (id, want) in expected {
+                let Some(row) = w.population.citizen(id) else {
+                    continue;
+                };
+                // 職場か家が変われば捨てる。それ以外は、職場に着いた住民だけが書き換わる。
+                if row.commute.is_some() || want.is_none() {
+                    assert_eq!(row.commute, want, "{id:?} tick {now}");
+                }
+            }
+        }
+        let t = w.traffic();
+        let today = t.yesterday.expect("前の日の集計がない");
+        assert!(arrived > 50, "職場に着いた移動が少ない: {arrived}");
+        assert!(lost > 0, "途中で消えた通勤がない");
+        assert!(
+            today.no_route > 0,
+            "経路がなく始められなかった移動がない: {today:?}"
+        );
     }
 }
