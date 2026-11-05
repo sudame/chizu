@@ -313,9 +313,11 @@ export function setupFinance(
     rateLabels.push(rate);
     amounts.push(amount);
   });
-  const feeList = make("div", "", "finance-list");
+  // 欄の高さを抑えるため、料金は税率と同じ並びの最後の行に置く
   const feeRow = make("div", "", "finance-row");
   feeRow.dataset.parkingFee = "";
+  feeRow.title =
+    "共同の駐車場の、借りた枠 1 台あたりの 1 日の料金。世帯は蓄えに応じて 10〜20 まで払い、超えると借りない。借りている世帯も 1 日 1 回の見直しで返す。";
   const feeMinus = make("button", "−");
   const feePlus = make("button", "＋");
   feeMinus.type = "button";
@@ -337,8 +339,8 @@ export function setupFinance(
   };
   feeMinus.addEventListener("click", () => changeFee(-1));
   feePlus.addEventListener("click", () => changeFee(1));
-  feeRow.append(make("span", "料金"), feeMinus, feeLabel, feePlus, feeAmount);
-  feeList.append(feeRow);
+  feeRow.append(make("span", "駐車場"), feeMinus, feeLabel, feePlus, feeAmount);
+  taxList.append(feeRow);
 
   for (let i = 0; i < EXPENSE_ROWS; i++) {
     const row = make("div", "", "finance-row");
@@ -349,19 +351,12 @@ export function setupFinance(
     expenseValues.push(value);
   }
   body.append(
-    make("h3", "税収（税率）"),
+    make("h3", "収入（税率と駐車場の料金）"),
     taxList,
-    make("h3", "駐車場の料金（1 台 1 日）"),
-    feeList,
-    make(
-      "p",
-      "蓄えに応じて 10〜20 まで払う。超えると借りず、借りている世帯も 1 日 1 回の見直しで返す。",
-      "finance-note",
-    ),
     make("h3", "維持費"),
     expenseList,
     netRow,
-    make("p", "金額は 1 日あたりの見込み。", "finance-note"),
+    make("p", "金額は 1 日あたりの見込み。駐車場の料金は 1 台 1 日の額。", "finance-note"),
   );
 
   const render = (finance: Finance) => {
