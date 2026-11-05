@@ -1336,7 +1336,7 @@ mod tests {
                 && b.level == LOW_DENSITY_MAX_LEVEL
                 && !is_diagonal(b.toward_road)
                 && frontage == LANE_FRONTAGE
-                && depth >= LANE_MIN_DEPTH + 1
+                && depth > LANE_MIN_DEPTH
         };
         let mut w = served_street_with(0);
         let mut legacy: Vec<BuildingId> = Vec::new();
