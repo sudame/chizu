@@ -21,7 +21,7 @@ use crate::snapshot::{Header, Mover, TripleBuffer};
 pub const OVERVIEW_LENGTH: usize = 21;
 
 /// [`Sim::carless`] が返す数のうち、固定の並びの個数。そのあとに世帯の多い区切りの並びが続く。画面の側の `CARLESS_FIXED` と合わせる。
-pub const CARLESS_FIXED: usize = 5;
+pub const CARLESS_FIXED: usize = 6;
 
 /// [`Sim::carless`] が並べる、世帯の多い区切りの数の上限。
 pub const CARLESS_AREAS: usize = 10;
@@ -716,12 +716,12 @@ impl Sim {
     }
 
     /// 車を持てない世帯を、次の数で返す。家のある世帯のうち、車を置く枠のない世帯である。
-    /// 世帯の数、理由ごとの数（範囲に駐車場がない、満車、料金が上限を超える、借りるのを待っている）が [`CARLESS_FIXED`] 個、
+    /// 世帯の数、理由ごとの数（範囲に駐車場がない、満車、料金が上限を超える、借りるのを待っている、道路に面していない）が [`CARLESS_FIXED`] 個、
     /// そのあとに、世帯の多い区切り（8×8 マス）の上位 [`CARLESS_AREAS`] 件ぶんの `[真ん中のマスの x, y, 世帯の数]` が続く。
     /// 状態は変えない。
     pub fn carless(&self) -> Vec<f64> {
         let all = self.world.carless_households();
-        let mut by_reason = [0_u64; 4];
+        let mut by_reason = [0_u64; chizu_core::CarlessReason::ALL.len()];
         for c in &all {
             by_reason[c.reason.index()] += 1;
         }
@@ -1787,7 +1787,7 @@ mod tests {
         let out = sim.carless();
         assert_eq!(out[0], housed as f64);
         // 駐車場がないので、理由は範囲に駐車場がないだけ
-        assert_eq!(out[1..CARLESS_FIXED], [housed as f64, 0.0, 0.0, 0.0]);
+        assert_eq!(out[1..CARLESS_FIXED], [housed as f64, 0.0, 0.0, 0.0, 0.0]);
         assert!(out.len() > CARLESS_FIXED && (out.len() - CARLESS_FIXED) % 3 == 0);
         let areas = &out[CARLESS_FIXED..];
         assert!(areas.len() / 3 <= CARLESS_AREAS);

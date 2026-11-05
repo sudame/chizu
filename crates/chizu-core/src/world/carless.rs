@@ -16,7 +16,7 @@ use crate::units::Money;
 /// 車を持てない理由。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CarlessReason {
-    /// 家から [`SHARED_LOT_RADIUS`](crate::car_place::SHARED_LOT_RADIUS) マスの中に、共同の駐車場がない。
+    /// 家から [`SHARED_LOT_RADIUS`](crate::car_place::SHARED_LOT_RADIUS) マスの中に、共同の駐車場が 1 つもない。
     NoLotInRange,
     /// 範囲の中に共同の駐車場はあるが、どれも空きがない。
     Full,
@@ -24,14 +24,17 @@ pub enum CarlessReason {
     FeeTooHigh,
     /// 範囲の中に空きのある共同の駐車場があり、料金も払える。次の決め直し（移住を見る間隔ごと）で借りる。
     Waiting,
+    /// 範囲の中の共同の駐車場が、どれも道路に面していない（前の道路が消えた）。道路に面していない駐車場は貸さない。
+    LotNotOnRoad,
 }
 
 impl CarlessReason {
-    pub const ALL: [CarlessReason; 4] = [
+    pub const ALL: [CarlessReason; 5] = [
         CarlessReason::NoLotInRange,
         CarlessReason::Full,
         CarlessReason::FeeTooHigh,
         CarlessReason::Waiting,
+        CarlessReason::LotNotOnRoad,
     ];
 
     /// `ALL` の中での位置。
@@ -62,7 +65,7 @@ pub struct CarlessArea {
     /// 車を持てない世帯の数。
     pub households: u32,
     /// 理由ごとの数。並びは [`CarlessReason::ALL`] である。
-    pub by_reason: [u32; 4],
+    pub by_reason: [u32; 5],
 }
 
 impl CarlessArea {
@@ -86,7 +89,7 @@ pub fn carless_areas(carless: &[Carless], limit: usize) -> Vec<CarlessArea> {
         let area = cells.entry(key).or_insert(CarlessArea {
             min: TilePos::new(key.0 * CARLESS_AREA_SIDE, key.1 * CARLESS_AREA_SIDE),
             households: 0,
-            by_reason: [0; 4],
+            by_reason: [0; 5],
         });
         area.households += 1;
         area.by_reason[c.reason.index()] += 1;
@@ -107,6 +110,7 @@ impl World {
     pub fn carless_households(&self) -> Vec<Carless> {
         let p = &self.population;
         let lots = self.shared_lot_sites();
+        let unconnected = self.unconnected_lot_sites();
         let rented = self.car_places.rented_counts();
         let mut out = Vec::new();
         for h in p.household_ids() {
@@ -123,7 +127,11 @@ impl World {
             let near = lots_in_range(&lots, b.front);
             let savings = p.household_money(h).unwrap_or(Money::ZERO);
             let reason = if near.is_empty() {
-                CarlessReason::NoLotInRange
+                if lots_in_range(&unconnected, b.front).is_empty() {
+                    CarlessReason::NoLotInRange
+                } else {
+                    CarlessReason::LotNotOnRoad
+                }
             } else if SHARED_LOT_FEE > fee_cap(savings) {
                 CarlessReason::FeeTooHigh
             } else {
@@ -305,7 +313,7 @@ mod tests {
             .map(|a| (a.min.x, a.min.y, a.households))
             .collect();
         assert_eq!(cells, [(0, 0, 3), (-8, -8, 2), (-16, -16, 1), (8, 0, 1)]);
-        assert_eq!(areas[0].by_reason, [2, 1, 0, 0]);
+        assert_eq!(areas[0].by_reason, [2, 1, 0, 0, 0]);
         assert_eq!(areas[0].center(), TilePos::new(4, 4));
         assert_eq!(carless_areas(&carless, 2).len(), 2);
         assert!(carless_areas(&[], 10).is_empty());

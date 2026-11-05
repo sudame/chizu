@@ -532,7 +532,13 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
     // 世帯がいないので、車を持てない世帯も、世帯の多い所もない。理由の欄はそろっている
     assert_eq!(o["parking"]["households"]["none"], 0);
     let reasons = &o["parking"]["households"]["noneReasons"];
-    for k in ["noLotInRange", "full", "feeTooHigh", "waiting"] {
+    for k in [
+        "noLotInRange",
+        "full",
+        "feeTooHigh",
+        "waiting",
+        "lotNotOnRoad",
+    ] {
         assert_eq!(reasons[k], 0, "{k}");
     }
     assert_eq!(o["parking"]["carlessAreas"], serde_json::json!([]));

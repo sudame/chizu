@@ -639,6 +639,8 @@ let probe: {
   carless: number;
 } | null = null;
 let probeSent = "";
+// 最後に問い合わせた tick。カーソルが動かなくても、街の数字が届いたときに共同の駐車場の円の中の数を問い合わせ直す
+let probeAskedTick = 0;
 let money = 0;
 // 空き区画がない状態が続いた長さは、Worker の tick で数える（描画は背景のタブで止まる）
 let lotShortageSince: LotShortageSince = [];
@@ -841,10 +843,26 @@ function roadAt(at: Tile): { from: Tile; to: Tile } {
   return roadEndpoints(roadIndex, roadStart, at, noSnap);
 }
 
+/** 同じマスへの問い合わせを、これだけの tick が空くまで繰り返さない（移住を見る間隔と同じ）。 */
+const PROBE_REFRESH_TICKS = 60;
+let latestProbeTick = 0;
+
+/** 街の数字が届いたとき、共同の駐車場の道具が同じマスに出していた円の中の数を、間隔を空けて問い合わせ直す。 */
+function refreshProbe(tick: number): void {
+  latestProbeTick = tick;
+  if (tool.kind === "service" && isParking(tool.service) && cursor !== null) {
+    if (tick - probeAskedTick >= PROBE_REFRESH_TICKS) {
+      probeSent = "";
+      updatePreview();
+    }
+  }
+}
+
 function requestProbe(service: ServiceName, at: Tile): void {
   const key = `${service},${at.x},${at.y}`;
   if (key !== probeSent) {
     probeSent = key;
+    probeAskedTick = latestProbeTick;
     send({ kind: "probe-service", service, x: at.x, y: at.y });
   }
 }
@@ -1267,6 +1285,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "cityStats") {
     // 建物の表が変わらないまま動いた需要と内訳
     const stats = parseCityStats(message.stats);
+    refreshProbe(message.tick);
     renderCityStats(stats, unsupplied, message.tick);
     noticeCenter.set("utility", utilityNotices(stats, unsupplied));
     demand = [...stats.demand];
@@ -1284,6 +1303,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     renderOverview(parseOverview(message.overview));
     lotShortageSince = trackLotShortage(lotShortageSince, message.lotShortage, message.tick);
     latestTick = message.tick;
+    refreshProbe(message.tick);
     noticeCenter.set(
       "growth",
       growthNotices(

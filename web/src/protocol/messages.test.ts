@@ -80,7 +80,7 @@ describe("isWorkerToMain", () => {
       isolated: [10, -59, 1],
       lotShortage: [0, 1, 0, 0],
       parkingShortage: [12, 30, 1, 5],
-      carless: [3, 2, 1, 0, 0, 12, 20, 3],
+      carless: [3, 2, 1, 0, 0, 0, 12, 20, 3],
       tick: 3600,
     };
     expect(isWorkerToMain(overview)).toBe(true);
@@ -96,9 +96,9 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ ...overview, parkingShortage: [1, 2, 3] })).toBe(false);
     expect(isWorkerToMain({ ...overview, parkingShortage: undefined })).toBe(false);
     // 車を持てない世帯は、固定の 5 つのあとに 3 つずつの区切りが続く
-    expect(isWorkerToMain({ ...overview, carless: [0, 0, 0, 0, 0] })).toBe(true);
-    expect(isWorkerToMain({ ...overview, carless: [0, 0, 0, 0] })).toBe(false);
-    expect(isWorkerToMain({ ...overview, carless: [0, 0, 0, 0, 0, 1, 2] })).toBe(false);
+    expect(isWorkerToMain({ ...overview, carless: [0, 0, 0, 0, 0, 0] })).toBe(true);
+    expect(isWorkerToMain({ ...overview, carless: [0, 0, 0, 0, 0] })).toBe(false);
+    expect(isWorkerToMain({ ...overview, carless: [0, 0, 0, 0, 0, 0, 1, 2] })).toBe(false);
     expect(isWorkerToMain({ ...overview, carless: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, tick: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, overview: [1, 2] })).toBe(false);

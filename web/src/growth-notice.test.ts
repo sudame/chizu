@@ -284,29 +284,39 @@ describe("空き区画がない知らせ", () => {
 });
 
 describe("車を持てない世帯の知らせ", () => {
-  // 世帯の数、理由（範囲に駐車場がない、満車、料金、待ち）、世帯の多い区切り（x, y, 世帯の数）
-  const flat = [120, 80, 30, 10, 0, 44, 12, 50, 20, 9, 31, 8];
+  // 世帯の数、理由（範囲に駐車場がない、満車、料金、待ち、道路に面していない）、世帯の多い区切り（x, y, 世帯の数）
+  const flat = [120, 80, 30, 10, 0, 0, 44, 12, 50, 20, 9, 31, 8];
 
   test("平らな配列を読み、世帯の多い所を並びのまま持つ", () => {
     expect(parseCarless(flat)).toEqual({
       total: 120,
-      reasons: [80, 30, 10, 0],
+      reasons: [80, 30, 10, 0, 0],
       areas: [
         { x: 44, y: 12, households: 50 },
         { x: 20, y: 9, households: 31 },
       ],
     });
     // 世帯がいなければ空
-    expect(parseCarless([0, 0, 0, 0, 0])).toEqual({ total: 0, reasons: [0, 0, 0, 0], areas: [] });
+    expect(parseCarless([0, 0, 0, 0, 0, 0])).toEqual({
+      total: 0,
+      reasons: [0, 0, 0, 0, 0],
+      areas: [],
+    });
   });
 
   test("車を持てない世帯があるときだけ出し、世帯の数と理由を添える", () => {
-    expect(carlessNotice(parseCarless([0, 0, 0, 0, 0]))).toBeNull();
+    expect(carlessNotice(parseCarless([0, 0, 0, 0, 0, 0]))).toBeNull();
     const notice = carlessNotice(parseCarless(flat));
     expect(notice?.headline).toBe("車を持てない世帯がある（120 世帯）");
     expect(notice?.action).toContain("範囲に駐車場がない 80・満車 30・料金が高い 10");
     // 待っている世帯だけのときは、理由の文を出さない
-    expect(carlessNotice(parseCarless([3, 0, 0, 0, 3]))?.action).not.toContain("・");
+    expect(carlessNotice(parseCarless([3, 0, 0, 0, 3, 0]))?.action).not.toContain("・");
+    expect(notice?.action).toContain("直線で 32 マス");
+    expect(notice?.action).not.toContain("道路を引く");
+    // 範囲の駐車場が道路に面していない世帯がいるときは、駐車場の前に道路を引くよう促す
+    const cut = carlessNotice(parseCarless([40, 0, 0, 0, 0, 40]));
+    expect(cut?.action).toContain("駐車場が道路に面していない 40");
+    expect(cut?.action).toContain("駐車場の前に道路を引く");
   });
 
   test("世帯の多い所へ、並びの順に移り、最後の次は最初へ戻る", () => {
@@ -331,7 +341,7 @@ describe("車を持てない世帯の知らせ", () => {
     const key = (carless: number[]) =>
       growthNotices(none, [], [], [], [], parseCarless(carless))[0]?.key;
     expect(key(flat)).toBe(key([121, 80, 31, 10, 0, 44, 12, 51]));
-    expect(growthNotices(none, [], [], [], [], parseCarless([0, 0, 0, 0, 0]))).toEqual([]);
+    expect(growthNotices(none, [], [], [], [], parseCarless([0, 0, 0, 0, 0, 0]))).toEqual([]);
     const shown = growthNotices(none, [], [], [], [], parseCarless(flat));
     const first = reconcile(emptyMemory(), shown, 100);
     expect(first.visible.map((v) => v.id)).toEqual(["carless"]);
@@ -356,7 +366,7 @@ describe("車を持てない世帯の知らせ", () => {
       [],
       [],
       [],
-      parseCarless([200, 150, 50, 0, 0, 44, 12, 90]),
+      parseCarless([200, 150, 50, 0, 0, 0, 44, 12, 90]),
     );
     const again = reconcile(closed, grown, 200);
     expect(again.visible).toEqual([]);

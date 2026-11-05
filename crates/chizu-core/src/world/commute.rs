@@ -186,6 +186,15 @@ impl World {
             .collect()
     }
 
+    /// 道路に面していない共同の駐車場。貸せないが、範囲の中にあるかを理由の判定に使う。並びは [`Self::shared_lot_sites`] と同じ。
+    pub(super) fn unconnected_lot_sites(&self) -> Vec<SharedLotSite> {
+        self.facilities
+            .iter()
+            .filter(|f| f.kind.is_parking() && f.entrance.is_none())
+            .map(|f| (f.area.min, f.front, f.kind.parking_spaces()))
+            .collect()
+    }
+
     /// ゲーム内の 1 日に 1 回、料金が払える上限を超えた世帯に借りた枠を返させ、枠のない世帯に貸し直す。
     /// 借りている世帯は、より近い駐車場ができても移らない。共同の駐車場がなければ何もしない。
     pub(super) fn review_shared_lots(&mut self) {

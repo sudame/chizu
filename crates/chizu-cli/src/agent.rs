@@ -167,9 +167,10 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  households 家のある世帯を、車を置く枠で分けた数。home 自宅の枠（住んでいる建物の駐車場）を持つ世帯、
                  shared 共同の駐車場の枠を借りた世帯、none 枠を持たない世帯（車を持てない世帯）。枠のない世帯は車を持たず、どの移動も歩く。
                  家のない世帯は、どれにも数えない。
-                 noneReasons none の理由ごとの数で、4 つの和が none に等しい。noLotInRange 家の正面のマスから 32 マスの中に共同の駐車場がない、
+                 noneReasons none の理由ごとの数で、5 つの和が none に等しい。noLotInRange 家の正面のマスから 32 マスの中に共同の駐車場が 1 つもない、
                  full 範囲の中に共同の駐車場はあるがどれも空きがない、feeTooHigh 料金が世帯の払える上限を超える、
-                 waiting 範囲の中に空きがあって料金も払えるので、次の決め直し（移住を見る間隔ごと）で借りる。
+                 waiting 範囲の中に空きがあって料金も払えるので、次の決め直し（移住を見る間隔ごと）で借りる、
+                 lotNotOnRoad 範囲の中に共同の駐車場はあるが、どれも道路に面していない（前の道路が消えた）ので貸せない。駐車場の前に道路を引く。
                  理由は状態に持たず、読み出すときに借りる決まりと同じ探し方で求める。
                  自宅の枠は住宅の駐車場の台数だけあり、建物に住む世帯に ID の順に配る（枠を持つ世帯からは取り上げない）。
                  自宅の枠のない世帯は、家の正面のマスから直線で 32 マスの中の共同の駐車場を近い順に試し、空きがあれば枠を借りる。
@@ -1269,7 +1270,7 @@ fn parking(world: &World) -> Value {
     } = world.trips().parking_tally();
     // 車を持てない世帯は家のある世帯のうち枠のない世帯で、理由は共同の駐車場を借りる決まりを読み取りだけで回して求める。
     let carless = world.carless_households();
-    let mut reasons = [0_u64; 4];
+    let mut reasons = [0_u64; CarlessReason::ALL.len()];
     for c in &carless {
         reasons[c.reason.index()] += 1;
     }
@@ -1324,6 +1325,7 @@ fn parking(world: &World) -> Value {
                 "full": reasons[CarlessReason::Full.index()],
                 "feeTooHigh": reasons[CarlessReason::FeeTooHigh.index()],
                 "waiting": reasons[CarlessReason::Waiting.index()],
+                "lotNotOnRoad": reasons[CarlessReason::LotNotOnRoad.index()],
             },
         },
         "carlessAreas": carless_areas_json(&carless),
@@ -1349,6 +1351,7 @@ fn carless_areas_json(carless: &[Carless]) -> Vec<Value> {
                     "full": a.by_reason[CarlessReason::Full.index()],
                     "feeTooHigh": a.by_reason[CarlessReason::FeeTooHigh.index()],
                     "waiting": a.by_reason[CarlessReason::Waiting.index()],
+                    "lotNotOnRoad": a.by_reason[CarlessReason::LotNotOnRoad.index()],
                 },
             })
         })
@@ -2410,10 +2413,16 @@ mod tests {
         let o = parking(&w);
         assert_eq!(o["households"]["shared"], 12);
         let reasons = &o["households"]["noneReasons"];
-        let sum: u64 = ["noLotInRange", "full", "feeTooHigh", "waiting"]
-            .iter()
-            .map(|k| reasons[k].as_u64().unwrap())
-            .sum();
+        let sum: u64 = [
+            "noLotInRange",
+            "full",
+            "feeTooHigh",
+            "waiting",
+            "lotNotOnRoad",
+        ]
+        .iter()
+        .map(|k| reasons[k].as_u64().unwrap())
+        .sum();
         assert_eq!(sum, none(&o), "理由の和が車を持てない世帯の数と違う");
         assert!(reasons["full"].as_u64().unwrap() > 0, "満車の世帯がいない");
         assert_eq!(reasons["waiting"], 0);

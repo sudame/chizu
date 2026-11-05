@@ -21,7 +21,7 @@ export const serviceCode = (service: ServiceName): number => SERVICE_NAMES.index
 export const FINANCE_LENGTH = 13;
 
 /** chizu-wasm の carless の、固定の並びの個数。そのあとに世帯の多い区切りの `[x, y, 世帯の数]` が続く。 */
-export const CARLESS_FIXED = 5;
+export const CARLESS_FIXED = 6;
 
 /** chizu-wasm の overview の数の個数。 */
 export const OVERVIEW_LENGTH = 21;

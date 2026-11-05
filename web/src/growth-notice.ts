@@ -202,20 +202,20 @@ export function parkingNotice(shortages: ParkingShortage[]): GrowthNotice | null
 /** 車を持てない世帯の数と、理由ごとの数、世帯の多い所。chizu-wasm の carless を読んだもの。 */
 export type Carless = {
   total: number;
-  /** 範囲に駐車場がない、満車、料金が上限を超える、借りるのを待っている、の順の世帯の数。 */
+  /** 範囲に駐車場がない、満車、料金が上限を超える、借りるのを待っている、範囲の駐車場が道路に面していない、の順の世帯の数。 */
   reasons: number[];
   /** 世帯の多い区切り（8×8 マス）の真ん中のマスと世帯の数。多い順。 */
   areas: { x: number; y: number; households: number }[];
 };
 
-/** worker から届いた [世帯の数, 理由ごとの数 ×4, x, y, 世帯の数, ...] を読む。 */
+/** worker から届いた [世帯の数, 理由ごとの数 ×5, x, y, 世帯の数, ...] を読む。 */
 export function parseCarless(flat: number[]): Carless {
   const at = (i: number) => flat[i] ?? 0;
   const areas: Carless["areas"] = [];
   for (let i = CARLESS_FIXED; i + 2 < flat.length; i += 3) {
     areas.push({ x: at(i), y: at(i + 1), households: at(i + 2) });
   }
-  return { total: at(0), reasons: [1, 2, 3, 4].map(at), areas };
+  return { total: at(0), reasons: [1, 2, 3, 4, 5].map(at), areas };
 }
 
 /** 車を持てない世帯がある。世帯の数と、いちばん多い理由を見出しに出す。なければ null。 */
@@ -224,17 +224,22 @@ export function carlessNotice(carless: Carless): GrowthNotice | null {
     return null;
   }
   const n = (v: number) => v.toLocaleString("ja-JP");
-  const [noLot = 0, full = 0, fee = 0] = carless.reasons;
+  const [noLot = 0, full = 0, fee = 0, , noRoad = 0] = carless.reasons;
   const parts = [
     ...(noLot > 0 ? [`範囲に駐車場がない ${n(noLot)}`] : []),
     ...(full > 0 ? [`満車 ${n(full)}`] : []),
     ...(fee > 0 ? [`料金が高い ${n(fee)}`] : []),
+    ...(noRoad > 0 ? [`駐車場が道路に面していない ${n(noRoad)}`] : []),
   ];
+  const hint =
+    noRoad > 0
+      ? "駐車場の前に道路を引く。世帯の多い所の近くには、共同の駐車場も置く。"
+      : "世帯の多い所の近くに、共同の駐車場を置く。";
   return {
     headline: `車を持てない世帯がある（${n(carless.total)} 世帯）`,
     action:
       (parts.length > 0 ? `${parts.join("・")}。` : "") +
-      "世帯の多い所の近くに、共同の駐車場を置く。歩いて 32 マス（256m）の中の駐車場だけを借りる",
+      `${hint}直線で 32 マス（256m）の中の駐車場だけを借りる`,
   };
 }
 
@@ -251,7 +256,7 @@ export function growthNotices(
   isolated: Isolated[] = [],
   lotZones: number[] = [],
   parking: ParkingShortage[] = [],
-  carless: Carless = { total: 0, reasons: [0, 0, 0, 0], areas: [] },
+  carless: Carless = { total: 0, reasons: [0, 0, 0, 0, 0], areas: [] },
 ): Notice[] {
   const out: Notice[] = [];
   const growth = growthNotice(blocks);
