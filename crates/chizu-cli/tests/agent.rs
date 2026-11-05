@@ -577,6 +577,16 @@ fn observe_gives_people_and_traffic_counts() {
     assert_eq!(n(&cars["stoppedAfterTicks"]), 100);
     // 速さ 0 の車は、駐車場の中で待つ車を含まない。
     assert!(n(&cars["queued"]) + n(&cars["waitingAtCurb"]) <= n(&cars["total"]));
+    // 出発の建物ごとの上位は、上限の件数までで、台数の和が waitingAtCurb を超えず、待ちが長い車は待つ車の内数である。
+    let waits = cars["curbWaits"].as_array().unwrap();
+    assert!(waits.len() <= 10);
+    assert!(waits.iter().map(|w| n(&w["waiting"])).sum::<u64>() <= n(&cars["waitingAtCurb"]));
+    assert!(waits.iter().all(|w| n(&w["long"]) <= n(&w["waiting"])));
+    assert!(
+        waits
+            .windows(2)
+            .all(|w| n(&w[0]["waiting"]) >= n(&w[1]["waiting"]))
+    );
     let trips = &o["traffic"]["trips"];
     let yesterday = &trips["yesterday"];
     assert!(n(&yesterday["arrived"]) > 0, "前の日に誰も着いていない");

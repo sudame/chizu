@@ -6,7 +6,7 @@
 use super::World;
 use crate::citizens::Activity;
 use crate::clock::TICKS_PER_DAY;
-use crate::movement::{Congestion, Finished};
+use crate::movement::{Congestion, CurbWait, Finished};
 use crate::network::SegmentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -211,6 +211,16 @@ impl World {
     /// いま走っている車の位置。状態は変えない。
     pub fn car_sample(&self) -> CarSample {
         CarSample::of(&self.trips)
+    }
+
+    /// 車線に出る順番を待っている車を、出発の建物ごとに数える。待っている車のいない建物は載せない。
+    /// 建物の番号の順に返す。`long_ticks` 以上待っている車は `long` にも数える。
+    /// 車の位置を建物の駐車場の出入りの位置と照らして建物を決める（見つからなければ出入口と照らす）。
+    /// どちらにも合わない車は載せないので、台数の合計は [`CarSample::waiting_at_curb`] 以下になる。
+    /// 状態は変えず、状態ハッシュにも入れない。
+    pub fn curb_waits(&self, long_ticks: u32) -> Vec<CurbWait> {
+        self.trips
+            .curb_waits(&self.network, &self.buildings, long_ticks)
     }
 
     /// 車のいる区間の混み具合。空いている区間は載せない。状態は変えず、状態ハッシュにも入れない。
