@@ -34,10 +34,12 @@ export function pushDemandSample(
   if (last === undefined || tick < last.tick) {
     return [{ tick, demand, net }];
   }
-  if (tick - last.tick < SAMPLE_GAP_TICKS) {
-    return [...series];
-  }
-  const all = [...series, { tick, demand, net }];
+  // 近すぎる数字は、末尾の控えを新しい値で上書きする（静かな時間の前の最後の変化を残すため）。
+  // ただし末尾が窓の先頭（1 日前の値を見つけるのに要る控え）なら、上書きせずに残して後ろに足す。
+  const all =
+    tick - last.tick < SAMPLE_GAP_TICKS && series.length > 1
+      ? [...series.slice(0, -1), { tick, demand, net }]
+      : [...series, { tick, demand, net }];
   let from = 0;
   all.forEach((s, i) => {
     if (s.tick <= tick - TICKS_PER_DAY) {

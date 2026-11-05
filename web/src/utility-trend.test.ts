@@ -81,10 +81,29 @@ describe("1 日前の需要", () => {
 });
 
 describe("控え", () => {
-  test("間隔が短いあいだは足さず（古いほうを残す）、1 日前より古い控えは 1 つだけ残す", () => {
+  test("近すぎる数字は末尾の控えを上書きする。末尾が窓の先頭なら残して後ろに足す", () => {
     let s = pushDemandSample([], 0, 1000, N);
     s = pushDemandSample(s, 10, 990, N);
-    expect(s).toEqual([{ tick: 0, demand: 1000, net: N }]);
+    // 末尾（tick 0）は窓の先頭なので残り、tick 10 が後ろに付く
+    expect(s.map((x) => x.tick)).toEqual([0, 10]);
+    s = pushDemandSample(s, 40, 980, N);
+    // 末尾（tick 10）は先頭ではないので、新しい値で上書きされる
+    expect(s).toEqual([
+      { tick: 0, demand: 1000, net: N },
+      { tick: 40, demand: 980, net: N },
+    ]);
+  });
+
+  test("静かな時間の前の最後の変化は、近い数字でも控えに残る", () => {
+    // tick 0 に 100、tick 30 に 150 になり、そのあと 7300 まで数字が来ない。tick 100 の本当の値は 150。
+    let s = pushDemandSample([], 0, 100, N);
+    s = pushDemandSample(s, 30, 150, N);
+    s = pushDemandSample(s, 7300, 200, N);
+    expect(demandADayAgo(s, 7300, N)).toBe(150);
+  });
+
+  test("1 日前より古い控えは、1 日前以前でいちばん新しい 1 つだけ残す", () => {
+    let s = pushDemandSample([], 0, 1000, N);
     s = pushDemandSample(s, 100, 990, N);
     s = pushDemandSample(s, TICKS_PER_DAY + 50, 900, N);
     // 1 日前（tick 50）以前でいちばん新しい控えは tick 0
