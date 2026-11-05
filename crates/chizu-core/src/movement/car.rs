@@ -636,7 +636,12 @@ pub(super) fn gate(
         // 信号のない交差点では数える。人が先に渡ると、空きができたときに車が人の列に止められ、止まった車が増えた。
         let after = t.route.links.get(t.leg as usize + 2).copied();
         let (to_lane, room) = exit_lane(net, conn, &st, t, node, next, after);
-        if light.is_some() && !room && st.rear.get(&to_lane).is_some_and(|r| r.1 == MmPerTick::ZERO)
+        if light.is_some()
+            && !room
+            && st
+                .rear
+                .get(&to_lane)
+                .is_some_and(|r| r.1 == MmPerTick::ZERO)
         {
             continue;
         }
