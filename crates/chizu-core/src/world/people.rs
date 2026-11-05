@@ -716,6 +716,11 @@ pub(crate) mod tests {
             w.step();
         }
         assert!(w.trips().get(trip).is_none(), "移動が終わらない");
+        // 途中で消えて終わった移動でも通ってしまわないよう、着いたことを確かめる。
+        assert!(
+            w.trips().finished(trip).is_some_and(|f| f.reached),
+            "前の職場へ着いて終わっていない"
+        );
         assert_eq!(w.population().citizen(id).unwrap().commute, None);
     }
 
