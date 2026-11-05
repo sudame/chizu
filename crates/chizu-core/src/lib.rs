@@ -49,6 +49,6 @@ pub use tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, TileRect};
 pub use units::{LaneOffset, Mm, MmPerTick, Money, Tick, WorldPos};
 pub use world::people::MigrationOutlook;
 pub use world::{
-    ApplyOutcome, CarSample, CitizenPlaces, CommuteDistances, DayTraffic, DenyReason, Traffic,
-    World,
+    ApplyOutcome, CarSample, CitizenPlaces, CommuteDistances, CommuteTimes, DayTraffic, DenyReason,
+    Traffic, World,
 };

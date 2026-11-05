@@ -193,6 +193,32 @@ fn a_full_destination_sends_the_car_to_the_nearest_free_lot() {
     assert!(walked.is_none());
 }
 
+/// 満車でほかの駐車場に回っても、出発の tick は最初の区切りのものを引き継ぐ。通勤の時間はここから数える。
+#[test]
+fn a_redirected_drive_keeps_its_departure_tick() {
+    let (mut s, ids) = Street::new(&[30, 5, 9, 1, 40]);
+    let (home, shop, near) = (ids[0], ids[1], ids[2]);
+    s.drive(home, shop).unwrap();
+    let (net, router) = (&s.net, &mut s.router);
+    let second = s
+        .trips
+        .spawn_drive(net, router, &s.buildings, (home, shop), Tick(77))
+        .unwrap();
+    assert_eq!(lot(&s, near), (0, 1), "近くの駐車場に回っていない");
+    let modes = s.run(second);
+    assert_eq!(
+        modes,
+        [LaneMode::Sidewalk, LaneMode::Car, LaneMode::Sidewalk]
+    );
+    assert_eq!(
+        s.trips.finished(second),
+        Some(Finished {
+            reached: true,
+            departed: Tick(77),
+        })
+    );
+}
+
 #[test]
 fn drives_sent_elsewhere_and_given_up_on_full_lots_are_counted() {
     let (mut s, ids) = Street::new(&[30, 5, 9, 1, 40]);

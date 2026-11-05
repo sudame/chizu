@@ -26,9 +26,9 @@ use chizu_core::world::growth::{GrowthBlock, StalledNetwork};
 use chizu_core::world::highway_line;
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, CarSample, ChunkCoord, CitizenPlaces, Command, CommandLog,
-    CommuteDistances, DailyLotMisses, DayTraffic, DenyReason, GameTime, Heading, Line, LotMisses,
-    MigrationOutlook, NodeControl, NodeId, ParkingTally, Rescues, ServiceKind, TICKS_PER_DAY,
-    TilePos, TileRect, Traffic, World, ZoneKind, replay,
+    CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic, DenyReason, GameTime,
+    HappinessParts, Heading, Line, LotMisses, MigrationOutlook, NodeControl, NodeId, ParkingTally,
+    Rescues, ServiceKind, TICKS_PER_DAY, TilePos, TileRect, Traffic, World, ZoneKind, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -157,10 +157,21 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  commuters 数えた住民、medianMeters 中央値（m）、under500m 500m 未満、from500mTo1km 500m 以上 1km 未満、
                  from1km 1km 以上の人数。職のない住民は数えない。住民は職のない間、家から近い空きのある職場を選ぶので、
                  職住を近づける区画の置き方は、この分布が短いほうへ寄ることで確かめられる。
+                 time 幸福度の通勤の点に使う通勤の時間の分布。家を出てから職場に着くまでの時間を、歩きも車も、待ちや渋滞を
+                 含めて測り、住民ごとに直近の数日で均した値である（新しい 1 回を 1/4 の重みで混ぜる）。いまの家と職場でまだ
+                 着いたことのない住民は、直線距離からの見積もりで数える。commuters 数えた住民、measured そのうち測った住民、
+                 medianMinutes 中央値、p90Minutes 長いほうから 1 割の境目（どちらも時計の分。通勤する住民がいなければ null）、
+                 overHour 時計で 60 分を超え、通勤の点が下がっている住民の数。
+                 通勤の点は時計で 60 分までは満点で、2 時間で 50 点、3 時間で 0 点になるまで一様に下がる。渋滞を直すと数日かけて上がる。
   migration      転入。wantingHouseholds 移住の処理（60 tick ごと）1 回で外から来ようとする世帯の数、
                  vacantHomes 外の世界と道路でつながった住宅の空き戸数、homelessHouseholds と homelessCitizens 家がなく空き家を待つ世帯と住民、
                  blockedHouseholds 来ようとしても空き家が足りず入れない世帯の数。
                  vacantHomes が 0 なのに wantingHouseholds があるときは、住宅が足りないか、外の世界とつながっていない。
+
+observe の population.happinessParts（幸福度の内訳）:
+  家のある住民の、幸福度の 3 つの要素の点数（0〜100）の平均。commute 通勤（commute.time の時間から決まる）、
+  services 電気と水道、wealth 職、世帯の蓄え、住宅の税率。happiness は 1:1:3 の重みで足した値の平均で、
+  電気と水道が欠けると上限で抑えられる。
 
 observe の demandFactors（demand の内訳）:
   区画の種類ごとに、demand を足し引きしている要因を [{factor, value}] で並べる。value を足し合わせると demand になる。値が 0 の要因も省かない。
@@ -1016,7 +1027,7 @@ fn citizen_places(p: CitizenPlaces) -> Value {
     })
 }
 
-fn commute(c: CommuteDistances) -> Value {
+fn commute(c: CommuteDistances, t: CommuteTimes) -> Value {
     let CommuteDistances {
         commuters,
         median_m,
@@ -1024,12 +1035,41 @@ fn commute(c: CommuteDistances) -> Value {
         under_1km,
         from_1km,
     } = c;
+    let CommuteTimes {
+        commuters: timed,
+        measured,
+        median_seconds,
+        p90_seconds,
+        over_full,
+    } = t;
+    // 1 tick は移動の 1 秒で、時計の 12 秒である。
+    let minutes = |s: Option<u64>| s.map(|s| s * 12 / 60);
     json!({
         "commuters": commuters,
         "medianMeters": median_m,
         "under500m": under_500m,
         "from500mTo1km": under_1km,
         "from1km": from_1km,
+        "time": {
+            "commuters": timed,
+            "measured": measured,
+            "medianMinutes": minutes(median_seconds),
+            "p90Minutes": minutes(p90_seconds),
+            "overHour": over_full,
+        },
+    })
+}
+
+fn happiness_parts(h: HappinessParts) -> Value {
+    let HappinessParts {
+        commute,
+        services,
+        wealth,
+    } = h;
+    json!({
+        "commute": commute,
+        "services": services,
+        "wealth": wealth,
     })
 }
 
@@ -1400,11 +1440,12 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "workingAge": working_age,
             "employed": employed,
             "happiness": happiness,
+            "happinessParts": happiness_parts(world.happiness_summary().1),
         },
         "citizenPlaces": citizen_places(world.citizen_places()),
         "traffic": traffic(world, before),
         "parking": parking(world),
-        "commute": commute(world.commute_distances()),
+        "commute": commute(world.commute_distances(), world.commute_times()),
         "migration": migration(world.migration_outlook()),
         "demand": by_zone(|z| demand[z.index()]),
         "demandFactors": by_zone(|z| {
@@ -1513,6 +1554,8 @@ const WATCHED: &[&str] = &[
     "/population/homes",
     "/population/employed",
     "/population/happiness",
+    "/population/happinessParts/commute",
+    "/commute/time/medianMinutes",
     "/citizenPlaces/homeless",
     "/traffic/cars/total",
     "/traffic/cars/stopped",

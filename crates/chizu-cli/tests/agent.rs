@@ -583,6 +583,17 @@ fn observe_gives_people_and_traffic_counts() {
     assert!(yesterday["avgTravelTicks"].as_f64().unwrap() > 0.0);
     let m = &o["migration"];
     assert!(m["vacantHomes"].is_u64() && m["blockedHouseholds"].is_u64());
+    // 通勤した住民は、通勤の時間を測ってある。
+    let time = &o["commute"]["time"];
+    assert_eq!(n(&time["commuters"]), n(&o["commute"]["commuters"]));
+    assert!(n(&time["measured"]) > 0, "通勤の時間を測った住民がいない");
+    assert!(n(&time["measured"]) <= n(&time["commuters"]));
+    assert!(n(&time["medianMinutes"]) <= n(&time["p90Minutes"]));
+    assert!(n(&time["overHour"]) <= n(&time["commuters"]));
+    let parts = &o["population"]["happinessParts"];
+    for k in ["commute", "services", "wealth"] {
+        assert!(n(&parts[k]) <= 100, "{k}");
+    }
     // 同じ記録を再生した observe は、前の observe からの増減を除いて、毎回同じ値になる。
     let mut again = json(&cli(&["agent", "observe", d]));
     assert_eq!(again["sinceLastObserve"]["changes"], serde_json::json!({}));
