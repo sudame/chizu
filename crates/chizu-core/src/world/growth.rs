@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
-use crate::building::{Building, DIAGONAL_LOT_SIDE, MAX_LEVEL, MAX_LOT_SIDE, demand};
+use crate::building::{
+    Building, DIAGONAL_LOT_SIDE, LANE_FRONTAGE, LANE_MIN_DEPTH, LotForm, MAX_LEVEL, MAX_LOT_SIDE,
+    demand,
+};
 use crate::chunk::{Layer, TileUse};
 use crate::clock::TICKS_PER_DAY;
 use crate::command::ServiceKind;
@@ -63,6 +66,9 @@ pub const SPAWN_PER_DEMAND: i64 = 8;
 
 /// 1 回に、区画の種類ごとに建てる建物の数の上限。
 pub const MAX_SPAWN_PER_ZONE: u32 = 16;
+
+/// 私道の敷地にできる大きさの住宅のうち、私道の敷地にする割合（%）。形は `docs/design.md` の 3.8 にある。
+pub const LANE_PERCENT: u32 = 70;
 
 /// 段階が 1 つ上がるまでの時間（tick）。
 pub const LEVEL_UP_TICKS: u64 = TICKS_PER_DAY;
@@ -543,7 +549,14 @@ impl World {
                     continue;
                 };
                 assert!(headroom.take(&self.network, link, w * k));
-                let id = self.place_building(zone, front, toward_road, w, k);
+                // 大きさを決めたあとに引くので、ほかの建物の位置と大きさは私道の有無に左右されない。
+                let lane = zone == ZoneKind::Residential
+                    && !is_diagonal(toward_road)
+                    && w == LANE_FRONTAGE
+                    && k >= LANE_MIN_DEPTH
+                    && r.below(100) < LANE_PERCENT;
+                let form = if lane { LotForm::Lane } else { LotForm::Street };
+                let id = self.place_building(zone, front, toward_road, w, k, form);
                 stats = stats.with(self.buildings.get(id).expect("建てた建物がない"));
             }
         }
@@ -556,6 +569,7 @@ impl World {
         toward_road: (i64, i64),
         w: u64,
         k: u64,
+        form: LotForm,
     ) -> BuildingId {
         let tiles: Vec<TilePos> = lot_tiles(front, toward_road, w, k)
             .map(|(_, _, t)| t)
@@ -574,6 +588,7 @@ impl World {
             level: 1,
             leveled_at: self.tick,
             supply: Supply::default(),
+            form,
         });
         self.write_occupancy(tiles.into_iter().map(|t| (t, TileUse::Building)));
         self.supply_dirty = true;
@@ -766,7 +781,11 @@ mod tests {
 
     /// 横の道路を引き、北に住宅、南に工業を塗った街。
     fn zoned_street() -> World {
-        let mut w = World::new(7);
+        zoned_street_with(7)
+    }
+
+    fn zoned_street_with(seed: u64) -> World {
+        let mut w = World::new(seed);
         let road = Command::BuildRoad {
             from: TilePos::new(0, 10),
             to: TilePos::new(40, 10),
@@ -807,7 +826,11 @@ mod tests {
 
     /// 通りに発電所と浄水場を置いた街。
     fn served_street() -> World {
-        let mut w = zoned_street();
+        served_street_with(7)
+    }
+
+    fn served_street_with(seed: u64) -> World {
+        let mut w = zoned_street_with(seed);
         assert_eq!(
             place(&mut w, ServiceKind::PowerPlant, (3, 9), 2),
             ApplyOutcome::Applied
@@ -925,6 +948,92 @@ mod tests {
         let mut again = served_street();
         run(&mut again, 30 * 60);
         assert_eq!(again, w);
+    }
+
+    /// 私道の敷地は、間口 2 マスで奥行き 4 マス以上の住宅だけに選ばれ、その一部になる。
+    #[test]
+    fn lane_lots_are_chosen_among_houses_of_the_right_size() {
+        let (mut lanes, mut eligible) = (0, 0);
+        // 種 3 は、高速道路が通りの区画にかかって道路を引けない
+        for seed in [0, 1, 2, 4, 5, 6] {
+            let mut w = served_street_with(seed);
+            run(&mut w, 30 * 60);
+            for (_, b) in w.buildings().iter() {
+                let x = b.area.max.x.abs_diff(b.area.min.x) + 1;
+                let y = b.area.max.y.abs_diff(b.area.min.y) + 1;
+                let (frontage, depth) = if b.toward_road.0 == 0 { (x, y) } else { (y, x) };
+                let fits = b.zone == ZoneKind::Residential
+                    && !is_diagonal(b.toward_road)
+                    && frontage == LANE_FRONTAGE
+                    && depth >= LANE_MIN_DEPTH;
+                eligible += u32::from(fits);
+                if b.form == LotForm::Lane {
+                    assert!(fits, "{b:?}");
+                    lanes += 1;
+                }
+            }
+        }
+        assert!(lanes > 0, "私道の敷地が建たない");
+        assert!(
+            lanes < eligible,
+            "私道の敷地にしない建物がない：{lanes}/{eligible}"
+        );
+    }
+
+    /// 私道の敷地の出入口と駐車場の出入りの位置は、どちらも私道の幅の中に取れる。行き止まりの端に
+    /// 接する敷地も含める（種 10 の `(39,4)〜(40,9)` は、入口が道路の上に取れず私道の外に落ちていた）。
+    #[test]
+    fn lane_lot_spots_sit_within_the_lane_width() {
+        let t = TILE_MM;
+        let mut lanes = 0;
+        for seed in [0, 1, 2, 4, 5, 6, 10] {
+            let mut w = served_street_with(seed);
+            run(&mut w, 30 * 60);
+            let net = w.network();
+            for (_, b) in w.buildings().iter() {
+                if b.lane_plan().is_none() {
+                    continue;
+                }
+                lanes += 1;
+                let (tx, ty) = b.toward_road;
+                let (ax, ay) = (-ty, tx);
+                let span = i64::try_from(if tx == 0 {
+                    b.area.max.x.abs_diff(b.area.min.x)
+                } else {
+                    b.area.max.y.abs_diff(b.area.min.y)
+                })
+                .unwrap();
+                // 私道のある端のマスの真ん中と、そこから外へ向かう向き（間口に沿う向きの符号）
+                let (k, out) = if crate::movement::lot_end(net, b) == crate::movement::LotEnd::Far {
+                    (span, 1)
+                } else {
+                    (0, -1)
+                };
+                let along = |x: i64, y: i64| x * ax + y * ay;
+                let tile_mid = along(
+                    (b.front.x + ax * k) * t + t / 2,
+                    (b.front.y + ay * k) * t + t / 2,
+                );
+                let outer = tile_mid + out * t / 2;
+                let (lo, hi) = if out > 0 {
+                    (outer - 3_000, outer)
+                } else {
+                    (outer, outer + 3_000)
+                };
+                for (name, spot) in [
+                    ("lot_spot", crate::movement::lot_spot(net, b)),
+                    ("building_spot", crate::movement::building_spot(net, b)),
+                ] {
+                    let p = spot.unwrap().world();
+                    let s = along(p.x.0, p.y.0);
+                    assert!(
+                        (lo..=hi).contains(&s),
+                        "{seed} {name} {s} が私道の幅 {lo}〜{hi} の外：{b:?}"
+                    );
+                }
+            }
+        }
+        assert!(lanes > 0, "私道の敷地が建たない");
     }
 
     #[test]
@@ -1231,6 +1340,7 @@ mod tests {
                 level: MAX_LEVEL,
                 leveled_at: Tick::ZERO,
                 supply: Supply::default(),
+                form: crate::building::LotForm::Street,
             });
         }
     }
@@ -1326,6 +1436,7 @@ mod tests {
             level,
             leveled_at: Tick::ZERO,
             supply: Supply::default(),
+            form: crate::building::LotForm::Street,
         })
     }
 

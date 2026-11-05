@@ -4,7 +4,7 @@
 //! 書き込みはせず、中核の公開の読み出し口だけを使う。
 
 use chizu_core::chunk::Layer;
-use chizu_core::movement::lot_tiles;
+use chizu_core::movement::{lane_tiles, lot_tiles};
 use chizu_core::network::{NodeControl, SegmentKind};
 use chizu_core::tile::local_index;
 use chizu_core::{
@@ -28,6 +28,7 @@ pub const LEGEND: &str = "\
   Z Y      信号のない交差点。Z は高速道路でないどの腕にも横断歩道があり、Y は横断歩道を外した腕がある
            （--layer traffic では混み具合の文字を先に出す）
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
+  =        私道の通るマス（私道の敷地の住宅の、端の列。私道の脇の枠もこの列にある。駐車場と建物より先に出す）
   p        建物の駐車場に切り欠いたマス（建物より先に出す。前面の帯のように 1 マスの一部だけの切り欠きも p にする）
   * ^ %    電気か水が届いていない建物（* 電気だけ、^ 水だけ、% 両方。R C I O の代わりに出す）
   R C I O  建物（住宅、商業、工業、オフィスの区画に建っている。電気も水も届いている）
@@ -86,6 +87,8 @@ struct Cell {
     building: [u32; 4],
     /// 駐車場に切り欠いたマスの数（1 マスの一部だけの帯も 1 と数える）。
     lot: u32,
+    /// 私道の通るマスの数。
+    lane: u32,
     /// 電気が届いていない建物のマスの数。
     unpowered: u32,
     /// 水が届いていない建物のマスの数。
@@ -126,7 +129,7 @@ fn facility_letter(k: ServiceKind) -> char {
 }
 
 impl Cell {
-    /// 載せる文字。公共施設、信号、横断歩道のある交差点（この 2 つは交通の層では道路のあと）、道路、駐車場、建物、区画、水辺、買っていない土地、空きマスの順に選び、
+    /// 載せる文字。公共施設、信号、横断歩道のある交差点（この 2 つは交通の層では道路のあと）、道路、私道、駐車場、建物、区画、水辺、買っていない土地、空きマスの順に選び、
     /// 同じ種類の中では数の多いものを選ぶ（道路は種類の大きいもの）。
     fn glyph(&self) -> char {
         if let Some(i) = argmax(&self.facility) {
@@ -148,7 +151,10 @@ impl Cell {
                     .map_or(char::from(b'0' + k), congestion_glyph);
             }
         }
-        // 駐車場に切り欠いたマスは、建物より先に出す。セルの中で建物のマスより少なければ、建物を出す。
+        // 私道と駐車場に切り欠いたマスは、建物より先に出す。セルの中で建物のマスより少なければ、建物を出す。
+        if self.lane > 0 && self.lane + self.lot >= self.building.iter().sum::<u32>() {
+            return '=';
+        }
         if self.lot > 0 && self.lot >= self.building.iter().sum::<u32>() {
             return 'p';
         }
@@ -333,6 +339,11 @@ pub fn render(
                 cell.lot += 1;
             }
         }
+        for t in lane_tiles(world.network(), b) {
+            if let Some(cell) = grid.cell_mut(t) {
+                cell.lane += 1;
+            }
+        }
     }
     for f in world.facilities() {
         grid.each_tile_in(f.area, |cell, _| cell.facility[f.kind.index()] += 1);
@@ -477,11 +488,16 @@ mod tests {
 
     /// 詰まりが起きる街（`chizu-core/tests/gridlock/city.rec`）の、車が混み合う朝を再生した世界。
     fn jammed_city() -> World {
+        city_at(66 * TICKS_PER_DAY + 2_000)
+    }
+
+    /// 人が遊んだ街（種 0）を、`ticks` まで再生した街。
+    fn city_at(ticks: u64) -> World {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../chizu-core/tests/gridlock/city.rec");
         let log = CommandLog::decode(&std::fs::read(path).unwrap()).unwrap();
         let mut world = World::new(0);
-        replay(&mut world, &log, 66 * TICKS_PER_DAY + 2_000);
+        replay(&mut world, &log, ticks);
         world
     }
 
@@ -574,6 +590,43 @@ mod tests {
         )
         .unwrap();
         assert!(text.contains("  p "), "{text}");
+    }
+
+    /// 私道の通るマスは =、私道の敷地の残りのマスは区画の文字になる。凡例にも = がある。
+    #[test]
+    fn private_lanes_are_drawn_before_buildings() {
+        // 育ちきった街の住宅は段階 3 以上で私道がないので、住宅が建ち始めた頃の街で見る
+        let world = city_at(8 * TICKS_PER_DAY);
+        let net = world.network();
+        let (mut lanes, mut rest) = (0, 0);
+        for (_, b) in world.buildings().iter() {
+            let lane = lane_tiles(net, b);
+            if lane.is_empty() {
+                continue;
+            }
+            let rect = b.area;
+            let text = render(&world, rect, 1, MapLayer::Terrain).unwrap();
+            let rows: Vec<&str> = text
+                .lines()
+                .rev()
+                .take(rect.max.y.abs_diff(rect.min.y) as usize + 1)
+                .collect();
+            for (r, row) in rows.iter().rev().enumerate() {
+                let glyphs: Vec<char> = row.chars().skip_while(|c| *c != ' ').skip(1).collect();
+                for (c, g) in glyphs.iter().enumerate() {
+                    let t = TilePos::new(rect.min.x + c as i64, rect.min.y + r as i64);
+                    if lane.contains(&t) {
+                        assert_eq!(*g, '=', "{t:?} は私道");
+                        lanes += 1;
+                    } else {
+                        assert_ne!(*g, '=', "{t:?} は私道でない");
+                        rest += 1;
+                    }
+                }
+            }
+        }
+        assert!(lanes > 0 && rest > 0, "{lanes} {rest}");
+        assert!(LEGEND.contains("  =  "), "{LEGEND}");
     }
 
     #[test]

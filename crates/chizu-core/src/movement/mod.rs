@@ -46,8 +46,8 @@ pub use congestion::{Congestion, classify as classify_congestion};
 pub use junction::Rescues;
 pub use parking::{
     CurbWait, DailyLotMisses, Lot, LotEnd, LotId, LotMisses, PARK_RADIUS, ParkingTally,
-    SHORTAGE_LOTS_FULL, SharedLot, building_spot, facility_spot, lot_end, lot_spot, lot_tiles,
-    shared_facility,
+    SHORTAGE_LOTS_FULL, SharedLot, building_spot, facility_spot, lane_tiles, lot_end, lot_spot,
+    lot_tiles, shared_facility,
 };
 pub use pos::SidewalkPos;
 

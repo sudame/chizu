@@ -4,8 +4,15 @@
 // 切り欠き方を画面の側で決め直さない。
 // 描くものは段で変わる。引きでは描かず、標準では切り欠いた所を淡い面で塗り、寄りでは縁と枠の白線を足す。
 // 建物の絵は、切り欠いた所を除いて描く。
+// 私道の敷地（docs/design.md の 3.8）は、私道の長方形と家の長方形も届く。私道は駐車場の面と同じ段で描き、
+// 建物の本体は家の長方形だけにする。
 
-import { LOT_FACE_STRIDE, LOT_HEADER, LOT_STRIP_STRIDE } from "../protocol/messages.ts";
+import {
+  LOT_FACE_STRIDE,
+  LOT_HEADER,
+  LOT_STRIP_STRIDE,
+  lotRecordLength,
+} from "../protocol/messages.ts";
 import { hex } from "./palette.ts";
 import type { Geometry } from "./roads.ts";
 
@@ -15,6 +22,10 @@ export const LOT_FACE_COLOR = hex("#e3e1dc");
 export const LOT_EDGE_COLOR = hex("#c9c4b9");
 /** 枠の白線の色。寄りで 1px の線にする。 */
 export const LOT_LINE_COLOR = hex("#ffffff");
+/** 私道の面の色（docs/map-style.md の色の表の「私道」）。 */
+export const LANE_FACE_COLOR = hex("#fbfaf6");
+/** 私道の縁の色。寄りで 1px の線にする。 */
+export const LANE_EDGE_COLOR = hex("#d6d0c4");
 /** 縁と白線の太さの半分（画面のピクセル）。線の太さは 1px である。 */
 export const LOT_LINE_HALF_PX = 0.5;
 
@@ -33,6 +44,10 @@ export type Lot = {
   /** 切り欠いた所を覆う、重ならない長方形。 */
   faces: Rect[];
   strips: Strip[];
+  /** 私道の長方形。私道の敷地でなければ空。 */
+  lanes: Rect[];
+  /** 私道の脇の家の長方形。空でなければ、建物の本体はこの家だけになる。 */
+  houses: Rect[];
 };
 
 /** 建物の左上のマスから駐車場を引く鍵。 */
@@ -46,21 +61,27 @@ export function parseLots(data: ArrayLike<number>): Map<string, Lot> {
     const at = (k: number) => data[i + k] ?? 0;
     const nFaces = at(4);
     const nStrips = at(5);
-    const end = i + LOT_HEADER + nFaces * LOT_FACE_STRIDE + nStrips * LOT_STRIP_STRIDE;
-    if (end > data.length) {
+    const nLanes = at(6);
+    const nHouses = at(7);
+    const end = i + lotRecordLength(nFaces, nStrips, nLanes, nHouses);
+    if (!(end <= data.length)) {
       break;
     }
-    const faces: Rect[] = [];
     const strips: Strip[] = [];
     let k = i + LOT_HEADER;
-    for (let f = 0; f < nFaces; f++, k += LOT_FACE_STRIDE) {
-      faces.push({
-        x0: data[k] ?? 0,
-        y0: data[k + 1] ?? 0,
-        x1: data[k + 2] ?? 0,
-        y1: data[k + 3] ?? 0,
-      });
-    }
+    const rects = (n: number): Rect[] => {
+      const out: Rect[] = [];
+      for (let f = 0; f < n; f++, k += LOT_FACE_STRIDE) {
+        out.push({
+          x0: data[k] ?? 0,
+          y0: data[k + 1] ?? 0,
+          x1: data[k + 2] ?? 0,
+          y1: data[k + 3] ?? 0,
+        });
+      }
+      return out;
+    };
+    const faces = rects(nFaces);
     for (let s = 0; s < nStrips; s++, k += LOT_STRIP_STRIDE) {
       strips.push({
         x0: data[k] ?? 0,
@@ -72,7 +93,9 @@ export function parseLots(data: ArrayLike<number>): Map<string, Lot> {
         count: data[k + 6] ?? 0,
       });
     }
-    lots.set(lotKey(at(0), at(1)), { surface: at(2), indoor: at(3), faces, strips });
+    const lanes = rects(nLanes);
+    const houses = rects(nHouses);
+    lots.set(lotKey(at(0), at(1)), { surface: at(2), indoor: at(3), faces, strips, lanes, houses });
     i = end;
   }
   return lots;
@@ -152,6 +175,10 @@ export function bodyShape(
   edge: number,
   lot: Lot | undefined,
 ): { outer: Rect[]; inner: Rect[] } {
+  // 私道の敷地は、中核の決めた家の長方形を、縮めずにそのまま本体にする
+  if (lot !== undefined && lot.houses.length > 0) {
+    return { outer: lot.houses, inner: lot.houses.map((h) => grow(h, -edge)) };
+  }
   const faces = lot?.faces ?? [];
   const build = (d: number) => {
     const outer = grow(site, -d);
@@ -187,6 +214,9 @@ export type LotMeshes = { lots: Geometry; lotEdges: Geometry; lotLines: Geometry
  * 縁は、敷地の外周に接する辺だけに引く。建物の本体に接する辺には、本体の縁があるので引かない。
  */
 export function addLot(meshes: LotMeshes, site: Rect, lot: Lot): void {
+  for (const r of lot.lanes) {
+    addLane(meshes, r);
+  }
   for (const f of lot.faces) {
     meshes.lots.box(f.x0, f.y0, f.x1, f.y1, LOT_FACE_COLOR);
     const onBoundary = (v: number, edge: number) => Math.abs(v - edge) < EPS;
@@ -206,6 +236,23 @@ export function addLot(meshes: LotMeshes, site: Rect, lot: Lot): void {
   }
   for (const s of lot.strips) {
     slotLines(meshes.lotLines, s);
+  }
+}
+
+/**
+ * 私道 1 本を頂点にする。面は駐車場の面と同じ段から出す。縁は長い辺の 2 本（敷地の外周の側と、家と枠のある側）に引き、
+ * 道路に面した辺と行き止まりの辺には引かない。道路に面した辺は道路とつながり、行き止まりの辺は庭に続く。
+ */
+function addLane(meshes: LotMeshes, r: Rect): void {
+  meshes.lots.box(r.x0, r.y0, r.x1, r.y1, LANE_FACE_COLOR);
+  const h = LOT_LINE_HALF_PX;
+  // 私道の長い辺の 2 本に縁を引く
+  if (r.x1 - r.x0 < r.y1 - r.y0) {
+    meshes.lotEdges.line(r.x0, r.y0, r.x0, r.y1, 0, LANE_EDGE_COLOR, h);
+    meshes.lotEdges.line(r.x1, r.y0, r.x1, r.y1, 0, LANE_EDGE_COLOR, h);
+  } else {
+    meshes.lotEdges.line(r.x0, r.y0, r.x1, r.y0, 0, LANE_EDGE_COLOR, h);
+    meshes.lotEdges.line(r.x0, r.y1, r.x1, r.y1, 0, LANE_EDGE_COLOR, h);
   }
 }
 
