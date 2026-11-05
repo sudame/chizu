@@ -83,15 +83,22 @@ fn diagonal_arms_and_bends_are_measured_along_the_arm() {
     assert_eq!(clear_line(&n, out), off(half));
 }
 
+/// 1 マスのリンクでは、停止線が手前の交差点の通り抜けの区間の中になる。そこを抜けた所は先の交差点の車道の四角に
+/// かかるので、車は先の四角の縁で待つ。2 つの四角は重なるので、待つ車は手前の交差点の四角にかかる。
 #[test]
-fn on_a_one_tile_link_cars_wait_clear_of_the_junction_behind() {
+fn on_a_one_tile_link_cars_wait_at_the_edge_of_the_box_ahead() {
+    use super::stop_line::box_reach;
     let mut n = Network::new();
     road(&mut n, (0, 10), (20, 10), RoadKind::Medium);
     road(&mut n, (10, 0), (10, 20), RoadKind::Medium);
     road(&mut n, (11, 0), (11, 20), RoadKind::Medium);
     let short = link(&n, (10, 10), (11, 10));
-    assert_eq!(stop_line(&n, short), clear_line(&n, short));
-    assert!(stop_line(&n, short).0 < 8_000);
+    let ahead = n.node_at(TilePos::new(11, 10)).unwrap();
+    let behind = n.node_at(TilePos::new(10, 10)).unwrap();
+    let edge = 8_000 - box_reach(&n, ahead, short);
+    assert!(edge < i64::from(clear_line(&n, short).0));
+    assert_eq!(stop_line(&n, short), off(edge));
+    assert!(edge < box_reach(&n, behind, short));
 }
 
 /// 大きい道路に車が途切れなく来るあいだ、小さい道路から入る車は停止線で待つ。
@@ -180,13 +187,58 @@ fn cars_stop_behind_the_stop_line_and_not_inside_the_junction() {
     assert_eq!(stopped_inside, 0);
 }
 
+/// tick の終わりに交差点 `node` の車道の四角にかかる車の、交差点の中の動き。停止線を越えた車は決めた車線への動き、
+/// ノードを越えた車はいまの車線への動きを持つ。停止線を越えていないのに四角にかかる車は、入りうる車線への動きを
+/// すべて持つ。
+fn box_moves(n: &Network, trips: &Trips, node: NodeId) -> Vec<Vec<super::junction::Move>> {
+    use super::junction::Move;
+    use super::stop_line::box_reach;
+    let mut inside = Vec::new();
+    for (_, t) in trips.iter().filter(|(_, t)| car::on_road(t)) {
+        let at = i64::from(t.offset.0) - i64::from(t.link_len.0);
+        let ends_here = !t.last_leg() && car::end_node(n, t.link()) == node;
+        if ends_here && at > -box_reach(n, node, t.link()) {
+            let next = t.route.links[t.leg as usize + 1];
+            let lanes: Vec<LaneId> = match car::bound_lane(n, t) {
+                Some(l) => vec![l],
+                None => n.link_lanes(next).collect(),
+            };
+            inside.push(
+                lanes
+                    .into_iter()
+                    .map(|l| Move::into_lane(n, t.link(), next, l))
+                    .collect(),
+            );
+        }
+        if t.leg > 0 && t.bound.is_none() {
+            let prev = t.route.links[t.leg as usize - 1];
+            if car::end_node(n, prev) == node
+                && i64::from(t.offset.0) < box_reach(n, node, t.link())
+            {
+                inside.push(vec![Move::into_lane(n, prev, t.link(), t.lane)]);
+            }
+        }
+    }
+    inside
+}
+
+/// [`box_moves`] のうち、交わる動きの組の数。
+fn crossing_pairs(inside: &[Vec<super::junction::Move>]) -> usize {
+    let mut pairs = 0;
+    for (i, a) in inside.iter().enumerate() {
+        for b in &inside[i + 1..] {
+            let hit = a.iter().any(|x| b.iter().any(|y| x.conflicts_in(y)));
+            pairs += usize::from(hit);
+        }
+    }
+    pairs
+}
+
 /// 十字路を、交わる動きの車が途切れなく通っても、tick の終わりに車道の四角の中に交わる動きの車が 2 台いない。
 /// 交差点の中の車が四角を抜けるのが、候補が四角に入るより先なら、候補はその車を待たずに入る。それでも
 /// 四角の中では重ならないことを確かめる。
 #[test]
 fn crossing_moves_never_share_the_box() {
-    use super::junction::Move;
-    use super::stop_line::box_reach;
     let mut n = Network::new();
     road(&mut n, (0, 20), (40, 20), RoadKind::Medium);
     road(&mut n, (20, 0), (20, 40), RoadKind::Medium);
@@ -211,33 +263,97 @@ fn crossing_moves_never_share_the_box() {
             }
         }
         arrived += trips.step(&n, &mut router, Tick::ZERO).len();
-        let mut inside = Vec::new();
-        for (_, t) in trips.iter().filter(|(_, t)| car::on_road(t)) {
-            if let Some(l) = car::bound_lane(&n, t) {
-                let at = i64::from(t.offset.0) - i64::from(t.link_len.0);
-                if car::end_node(&n, t.link()) == node && at > -box_reach(&n, node, t.link()) {
-                    let next = t.route.links[t.leg as usize + 1];
-                    inside.push(Move::into_lane(&n, t.link(), next, l));
-                }
-            } else if t.leg > 0 {
-                let prev = t.route.links[t.leg as usize - 1];
-                if car::end_node(&n, prev) == node
-                    && i64::from(t.offset.0) < box_reach(&n, node, t.link())
-                {
-                    inside.push(Move::into_lane(&n, prev, t.link(), t.lane));
-                }
-            }
-        }
+        let inside = box_moves(&n, &trips, node);
         busy += usize::from(!inside.is_empty());
-        for (i, a) in inside.iter().enumerate() {
-            for b in &inside[i + 1..] {
-                assert!(
-                    !a.conflicts_in(b),
-                    "{tick}: {a:?} と {b:?} が四角の中にいる"
-                );
-            }
-        }
+        assert_eq!(crossing_pairs(&inside), 0, "{tick}: {inside:?}");
     }
     assert_eq!(arrived, 40 * moves.len());
     assert!(busy > 100, "四角を通る車が少ない {busy}");
+}
+
+/// 十字路の 3 マス先の四方に大きい道路の交差点があり、出口が詰まって交差点の中の車が速さを落としても、
+/// 交わる動きの車が車道の四角に同時にいない。中の車がいまの速さで四角を抜けるという見込みは、
+/// 中の車の先に止まりうる所が近いときは使わない。
+#[test]
+fn crossing_moves_never_share_the_box_when_the_exits_jam() {
+    let mut n = Network::new();
+    road(&mut n, (0, 20), (40, 20), RoadKind::Medium);
+    road(&mut n, (20, 0), (20, 40), RoadKind::Medium);
+    for k in [17, 23] {
+        road(&mut n, (k, 0), (k, 40), RoadKind::Large);
+        road(&mut n, (0, k), (40, k), RoadKind::Large);
+    }
+    let node = n.node_at(TilePos::new(20, 20)).unwrap();
+    let mut router = AstarRouter::new(&n);
+    let mut trips = Trips::default();
+    let moves = [
+        ((1, 0), (-1, 0)),
+        ((-1, 0), (0, 1)),
+        ((0, 1), (1, 0)),
+        ((0, -1), (-1, 0)),
+        ((1, 0), (0, 1)),
+        ((0, 1), (0, -1)),
+        ((-1, 0), (1, 0)),
+        ((0, -1), (0, 1)),
+    ];
+    let mut busy = 0;
+    for tick in 0..3_000 {
+        if tick < 1_000 {
+            for &((dx, dy), (ex, ey)) in &moves {
+                let from = at(20 + 19 * dx, 20 + 19 * dy, (-dx as i8, -dy as i8), 0);
+                let to = at(20 + 19 * ex, 20 + 19 * ey, (ex as i8, ey as i8), 0);
+                trips.spawn_drives(&n, &mut router, &[(from, to)], Tick::ZERO);
+            }
+            // 大きい道路を流れる車が、十字路の出口の先の交差点を詰まらせる。
+            for k in [17, 23] {
+                for y in [1, 5] {
+                    let d = [
+                        (at(k, y, (0, 1), 0), at(k, 38, (0, 1), 0)),
+                        (at(y, k, (1, 0), 0), at(38, k, (1, 0), 0)),
+                        (at(k, 39 - y, (0, -1), 0), at(k, 2, (0, -1), 0)),
+                        (at(39 - y, k, (-1, 0), 0), at(2, k, (-1, 0), 0)),
+                    ];
+                    trips.spawn_drives(&n, &mut router, &d, Tick::ZERO);
+                }
+            }
+        }
+        trips.step(&n, &mut router, Tick::ZERO);
+        let inside = box_moves(&n, &trips, node);
+        busy += usize::from(!inside.is_empty());
+        assert_eq!(crossing_pairs(&inside), 0, "{tick}: {inside:?}");
+    }
+
+    assert!(busy > 100, "四角を通る車が少ない {busy}");
+    assert!(trips.iter().next().is_none(), "着かない車がいる");
+}
+
+/// 1 マスのリンクの先が大きい道路の交差点で、その道路に車が途切れなく流れても、1 マスのリンクから来る車と
+/// 交わる車が、先の交差点の車道の四角に同時にいない。1 マスのリンクへ入る車は、先の交差点の停止線で
+/// 止まれる速さで入り、停止線は先の四角の縁にある。
+#[test]
+fn one_tile_link_cars_never_share_the_box_ahead() {
+    let mut n = Network::new();
+    road(&mut n, (0, 10), (30, 10), RoadKind::Medium);
+    road(&mut n, (10, 0), (10, 20), RoadKind::Medium);
+    road(&mut n, (11, 0), (11, 30), RoadKind::Large);
+    let node = n.node_at(TilePos::new(11, 10)).unwrap();
+    let mut router = AstarRouter::new(&n);
+    let mut trips = Trips::default();
+    let mut busy = 0;
+    for tick in 0..1_500 {
+        if tick < 400 {
+            let mut d = vec![(at(1, 10, (1, 0), 0), at(25, 10, (1, 0), 0))];
+            for y in [1, 5] {
+                d.push((at(11, y, (0, 1), 0), at(11, 28, (0, 1), 0)));
+                d.push((at(11, 29 - y, (0, -1), 0), at(11, 1, (0, -1), 0)));
+            }
+            trips.spawn_drives(&n, &mut router, &d, Tick::ZERO);
+        }
+        trips.step(&n, &mut router, Tick::ZERO);
+        let inside = box_moves(&n, &trips, node);
+        busy += usize::from(inside.len() > 1);
+        assert_eq!(crossing_pairs(&inside), 0, "{tick}: {inside:?}");
+    }
+    assert!(busy > 100, "四角を通る車が少ない {busy}");
+    assert!(trips.iter().next().is_none(), "着かない車がいる");
 }

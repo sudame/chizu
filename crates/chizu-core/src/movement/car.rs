@@ -293,6 +293,16 @@ impl Tail {
         self.0[0]
     }
 
+    /// 位置 `at` にいる車のすぐ前の車の位置。`at` にいる車のうち 1 台は、その車自身とみなして飛ばす。
+    fn ahead_of(&self, at: i64) -> Option<i64> {
+        let k = self.0.partition_point(|c| c.0 < at);
+        let rest = &self.0[k..];
+        match rest.first() {
+            Some(c) if c.0 == at => rest.get(1).map(|c| c.0),
+            c => c.map(|c| c.0),
+        }
+    }
+
     /// 最後尾が `need` より先まで進んでいそうか。最後尾が交差点を抜けていく車（`leaving`）なら、入る車が抜けきる所に
     /// 着くまでの `ticks` tick のあいだ、車線の車がそれぞれ同じ速さで進むとみなす。ただし、どの車も前の車から車間を
     /// 空けた所までしか進まず、先頭の車はその車線の停止線 `stop` までしか進まない。そうでなければ、最後尾が `base`
@@ -530,6 +540,24 @@ fn drive(
         let s = stop_speed(net, t);
         if s >= i64::from(t.speed.0) - i64::from(CAR_DECEL) {
             v = v.min(s);
+        }
+    }
+    // 次のリンクの終わりが交差点なら、その停止線で止まれる速さまでしか出さない。次のリンクが短いと、ノードを越えた
+    // とたんに止まりきれない車になり、譲るかを確かめずにその交差点の四角へ入るためである。次のリンクが長ければ
+    // 停止線は遠いので、この上限は効かない。
+    if t.leg as usize + 2 < t.route.links.len() {
+        let next = t.route.links[t.leg as usize + 1];
+        if junction::is_junction(net, end_node(net, next)) {
+            let line = t.link_len.0.saturating_add(stop_line(net, next).0);
+            let s = safe_speed(
+                t.offset,
+                LaneOffset(line.saturating_add(SPACING)),
+                MmPerTick::ZERO,
+            )
+            .min(i64::from(line) - i64::from(t.offset.0));
+            if s >= i64::from(t.speed.0) - i64::from(CAR_DECEL) {
+                v = v.min(s);
+            }
         }
     }
     // 前の端がまだ衝突区間を抜けていなければ、区間の手前に止まった車があるものとして近づく。
@@ -799,8 +827,84 @@ struct Look {
     approach: Option<Approach>,
     /// 始まりの交差点の中にいる車。
     inside: Option<Inside>,
-    /// 停止線を越えて、終わりの交差点の中にいる車。
-    inside_end: Option<Inside>,
+    /// 終わりの交差点の中にいる車。停止線を越えた車は決めた車線への動きを 1 つ持つ。停止線を越えていないのに
+    /// 車道の四角にかかる車（1 マスのリンクで、手前の交差点を抜けた所で待つ車など）は、入りうる車線への動きを
+    /// すべて持つ。
+    inside_end: SmallVec<[Inside; 3]>,
+}
+
+/// 交差点の中の車が、車道の四角を抜けるまで `rest` を、いまの速さ `v` を落とさずに進めそうか。
+/// `run` は、前の車の後ろや、待つかもしれない停止線など、いちばん近く止まりうる所までの距離である。
+/// そこに止まった車があっても、四角を抜けるまで安全速度が `v` を下回らない距離があれば、進めるとみなす。
+fn keeps_pace(rest: i64, v: i64, run: i64) -> bool {
+    run >= rest.saturating_add(v).saturating_add(braking_distance(v))
+}
+
+/// 車 `order[k]` が、いまの位置から先で止まりうるいちばん近い所までの距離。前の車の後ろから車間を空けた所、
+/// 交差点の停止線、着く位置、区間の途中の衝突区間（`zones`）のうち、いちばん近い所である。
+/// 通り抜けの区間に入った車は、次のリンクの決めた車線の前の車（ほかのリンクからその車線へ向かう車を含む）と、
+/// 次のリンクの停止線か着く位置を見る。先頭の車で、リンクの終わりが交差点でなければ、次のリンクのどの車線の
+/// 最後尾も前の車とみなす。
+fn clear_run(
+    rows: &[Option<Trip>],
+    net: &Network,
+    st: &LaneState,
+    order: &[(LaneId, core::cmp::Reverse<LaneOffset>, usize)],
+    k: usize,
+    zones: &BTreeMap<LinkId, Vec<u32>>,
+) -> i64 {
+    let (lane, _, i) = order[k];
+    let t = rows[i].as_ref().expect("車の主体がない");
+    let p = i64::from(t.offset.0);
+    let base = i64::from(t.link_len.0);
+    let mut run = i64::MAX;
+    let spacing = i64::from(SPACING);
+    // 衝突区間の手前で止まる所。`from` はそのリンクの上の車の位置、`shift` はそのリンクの始まりの、いまのリンクの上の位置。
+    let jay = |run: &mut i64, link: LinkId, from: i64, shift: i64| {
+        for z in zones.get(&link).into_iter().flatten() {
+            if i64::from(z.saturating_add(crossing::JAY_HALF_MM)) >= from {
+                *run = (*run).min(shift + i64::from(jay_line(*z)) - p);
+            }
+        }
+    };
+    if let Some(to_lane) = bound_lane(net, t) {
+        let next = t.route.links[t.leg as usize + 1];
+        let at = p - base;
+        if let Some(a) = st.tails.get(&to_lane).and_then(|tl| tl.ahead_of(at)) {
+            run = run.min(base + a - spacing - p);
+        }
+        if t.leg as usize + 2 == t.route.links.len() {
+            run = run.min(base + i64::from(t.dest_offset.0) - p);
+        } else if junction::is_junction(net, end_node(net, next)) {
+            run = run.min(base + i64::from(stop_line(net, next).0) - p);
+        }
+        jay(&mut run, next, at, base);
+        return run;
+    }
+    if let Some(a) = k
+        .checked_sub(1)
+        .map(|q| order[q])
+        .filter(|q| q.0 == lane)
+        .and_then(|q| rows[q.2].as_ref())
+    {
+        run = run.min(i64::from(a.offset.0) - spacing - p);
+    } else if !t.last_leg() {
+        if junction::is_junction(net, end_node(net, t.link())) {
+            run = run.min(i64::from(line_of(net, t)) - p);
+        } else {
+            let next = t.route.links[t.leg as usize + 1];
+            for l in net.link_lanes(next) {
+                if let Some((a, _)) = st.last(l) {
+                    run = run.min(base + a - spacing - p);
+                }
+            }
+        }
+    }
+    if t.last_leg() {
+        run = run.min(i64::from(t.dest_offset.0) - p);
+    }
+    jay(&mut run, t.link(), p, 0);
+    run
 }
 
 /// `order[k]` の車について [`Look`] を作る。`order` は車線ごとに前から並べた車である。
@@ -811,23 +915,34 @@ fn look(
     st: &LaneState,
     order: &[(LaneId, core::cmp::Reverse<LaneOffset>, usize)],
     k: usize,
+    zones: &BTreeMap<LinkId, Vec<u32>>,
 ) -> Look {
     let (lane, _, i) = order[k];
     let t = rows[i].as_ref().expect("車の主体がない");
     let mut out = Look::default();
     let v = i64::from(t.speed.0);
+    let stopped = t.speed == MmPerTick::ZERO;
+    let at = i64::from(t.offset.0);
+    // 四角を抜けるまでの見込みに使う速さ。止まりうる所が近く、速さを落としうる車は、止まっているとみなして、
+    // 候補に待たせる。出口が詰まって中の車が速さを落とすと、候補が入るまでに抜けるという見込みが外れるためである。
+    let pace = |rest: i64, v: i64| {
+        if keeps_pace(rest, v, clear_run(rows, net, st, order, k, zones)) {
+            v
+        } else {
+            0
+        }
+    };
     // ほかの車と道筋が交わるのは車道の四角の中だけなので、ノードを越えた車は、四角を抜けるまで交差点の中にいる。
     if let Some((node, prev)) = inside_start(net, t) {
         let out_at = box_reach(net, node, t.link());
-        let at = i64::from(t.offset.0);
         if at < out_at {
             out.inside = Some(Inside {
                 node,
                 from: prev,
                 to: t.link(),
                 lane: t.lane,
-                stopped: t.speed == MmPerTick::ZERO,
-                leaves: (out_at - at, v),
+                stopped,
+                leaves: (out_at - at, pace(out_at - at, v)),
             });
         }
     }
@@ -837,18 +952,46 @@ fn look(
         let node = end_node(net, t.link());
         if junction::is_junction(net, node) {
             let next = t.route.links[t.leg as usize + 1];
-            let at = i64::from(t.offset.0) - i64::from(t.link_len.0);
-            out.inside_end = Some(Inside {
+            let rest = box_reach(net, node, next) - (at - i64::from(t.link_len.0));
+            // ノードを越えると次のリンクの最高速度より速くは進まない。
+            let next_kind = net.segment(next.segment).expect("リンクの区間がない").kind;
+            let v = v.min(i64::from(speed_limit(next_kind).0));
+            out.inside_end.push(Inside {
                 node,
                 from: t.link(),
                 to: next,
                 lane: to_lane,
-                stopped: t.speed == MmPerTick::ZERO,
-                leaves: (box_reach(net, node, next) - at, v),
+                stopped,
+                leaves: (rest, pace(rest, v)),
             });
         }
         return out;
     }
+    // 停止線を越えていなくても、終わりの交差点の車道の四角にかかっていれば、その交差点の中にいる。
+    // 停止線で止まりうるので、候補はこの車が抜けると見込まずに待つ。
+    let end = (!t.last_leg())
+        .then(|| end_node(net, t.link()))
+        .filter(|n| junction::is_junction(net, *n))
+        .filter(|n| at > i64::from(t.link_len.0) - box_reach(net, *n, t.link()));
+    let in_box = |to_lane: Option<LaneId>, out: &mut Look| {
+        let Some(node) = end else {
+            return;
+        };
+        let next = t.route.links[t.leg as usize + 1];
+        let rest = box_reach(net, node, next) + i64::from(t.link_len.0) - at;
+        let lanes: SmallVec<[LaneId; 3]> = match to_lane {
+            Some(l) => smallvec::smallvec![l],
+            None => net.link_lanes(next).collect(),
+        };
+        out.inside_end.extend(lanes.into_iter().map(|l| Inside {
+            node,
+            from: t.link(),
+            to: next,
+            lane: l,
+            stopped,
+            leaves: (rest, 0),
+        }));
+    };
     // 後ろの車は前の車に追従するので、車線の先頭の車だけを見る。前の車が停止線を越えていれば、
     // 交差点に入るかを決めるのは後ろの車である。
     let head = k == 0
@@ -857,6 +1000,7 @@ fn look(
             .as_ref()
             .is_some_and(|a| a.bound.is_some());
     if !head || t.last_leg() || !near_end(net, t) {
+        in_box(None, &mut out);
         return out;
     }
     let node = end_node(net, t.link());
@@ -868,9 +1012,10 @@ fn look(
     }
     let (to_lane, room) = exit_lane(net, conn, st, t, node, next, after);
     out.next_lane = Some(to_lane);
+    in_box(Some(to_lane), &mut out);
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
     // 車道の四角に入るまでの距離と、この tick に出しうるいちばん速い速さ。
-    let to_box = i64::from(t.link_len.0) - i64::from(t.offset.0) - box_reach(net, node, t.link());
+    let to_box = i64::from(t.link_len.0) - at - box_reach(net, node, t.link());
     let fastest = (v + i64::from(CAR_ACCEL)).min(i64::from(speed_limit(seg.kind).0));
     out.approach = Some(Approach {
         id: k,
@@ -884,6 +1029,7 @@ fn look(
         room,
         waited: t.waited,
         arrives: (to_box, fastest),
+        in_box: end.is_some(),
     });
     out.no_room = !room;
     out
@@ -1054,7 +1200,7 @@ pub(super) fn step(
         .collect();
     order.sort_unstable();
     let rows_ro = &*rows;
-    let look_at = |k: usize| look(rows_ro, net, conn, &st, &order, k);
+    let look_at = |k: usize| look(rows_ro, net, conn, &st, &order, k, &occupied.zones);
     #[cfg(feature = "parallel")]
     let looks: Vec<Look> = (0..order.len())
         .into_par_iter()
@@ -1069,7 +1215,7 @@ pub(super) fn step(
     let (cands, inside) = looks.iter().fold((Vec::new(), Vec::new()), |mut acc, l| {
         acc.0.extend(l.approach);
         acc.1.extend(l.inside);
-        acc.1.extend(l.inside_end);
+        acc.1.extend(l.inside_end.iter().copied());
         acc
     });
     let stop = junction::holds(net, cands, inside, now, &occupied.crosswalks, signals);

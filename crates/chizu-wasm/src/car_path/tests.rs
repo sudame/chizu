@@ -1,5 +1,5 @@
 use super::*;
-use chizu_core::movement::stop_line::{STOP_GAP_MM, STOP_WIDTH_MM, clear_line, stop_line};
+use chizu_core::movement::stop_line::{DRAWN_CAR_HALF_MM, box_reach, clear_line, stop_line};
 use chizu_core::movement::{CAR_LENGTH, MIN_GAP};
 use chizu_core::{Command, LaneMode, LaneOffset, RoadKind, TilePos, World};
 
@@ -162,9 +162,9 @@ fn a_queue_keeps_its_order_and_spacing() {
     }
 }
 
-/// 1 マスのリンクの終わりで待つ車が、入ってきた交差点の出ていく腕の横断歩道を抜けた所にいるか。
-/// `before` は `from` の手前のノードで、そこから `from` へまっすぐ入ってくる。
-fn clears_the_junction_behind(w: &World, [before, from, to]: [(i64, i64); 3], half: f64) {
+/// 1 マスのリンクの終わりで待つ車が、中核の位置のまま、描く車の前の端を先の交差点の車道の四角の縁にかけて
+/// 描かれるか。`before` は `from` の手前のノードで、そこから `from` へまっすぐ入ってくる。
+fn waits_at_the_box_ahead(w: &World, [before, from, to]: [(i64, i64); 3]) {
     let net = w.network();
     let link = link_toward(net, from, to);
     let came = link_toward(net, before, from);
@@ -175,32 +175,30 @@ fn clears_the_junction_behind(w: &World, [before, from, to]: [(i64, i64); 3], ha
     let g = geom(net, link).unwrap();
     let start = center(net, g.from).unwrap();
     let along = (d.x - start.0) * g.dir.0 + (d.y - start.1) * g.dir.1;
-    // 描く車の後ろの端が、横断歩道の外側にかかる。
+    assert!((along - f64::from(wait)).abs() < 1e-3, "{along} {wait}");
+    let ahead = net.node_at(TilePos::new(to.0, to.1)).unwrap();
+    let asphalt = (box_reach(net, ahead, link) - DRAWN_CAR_HALF_MM) as f64;
+    let front = along + CAR_HALF;
     assert!(
-        (along - CAR_HALF - half - ZEBRA_LENGTH).abs() < 1e-3,
-        "後ろの端 {}",
-        along - CAR_HALF
+        (f64::from(p.len.0) - asphalt - front).abs() < 1e-3,
+        "前の端 {front}"
     );
-    // 停止線の手前で待つと、手前の交差点の中に入ってしまう。
-    let line = half + ZEBRA_LENGTH + (STOP_GAP_MM + STOP_WIDTH_MM) as f64;
-    assert!(f64::from(p.len.0) - line - 2.0 * CAR_HALF < half + ZEBRA_LENGTH);
 }
 
 #[test]
-fn on_a_one_tile_link_the_waiting_car_stays_out_of_the_junction_behind() {
+fn on_a_one_tile_link_the_waiting_car_waits_at_the_box_ahead() {
     let w = town_of(&[
         ((0, 10), (20, 10), M),
         ((10, 0), (10, 20), M),
         ((11, 0), (11, 20), M),
     ]);
-    clears_the_junction_behind(&w, [(0, 10), (10, 10), (11, 10)], 3_200.0);
+    waits_at_the_box_ahead(&w, [(0, 10), (10, 10), (11, 10)]);
     let w = town_of(&[
         ((0, 0), (20, 20), M),
         ((10, 0), (10, 20), M),
         ((11, 0), (11, 20), M),
     ]);
-    let half = (3_200 * 11_314 / 8_000) as f64;
-    clears_the_junction_behind(&w, [(0, 0), (10, 10), (11, 11)], half);
+    waits_at_the_box_ahead(&w, [(0, 0), (10, 10), (11, 11)]);
 }
 
 #[test]

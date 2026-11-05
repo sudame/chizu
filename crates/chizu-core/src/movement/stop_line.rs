@@ -151,19 +151,23 @@ pub fn clear_line(net: &Network, link: LinkId) -> LaneOffset {
 /// 通り抜けの区間がなければリンクの終わりである。
 ///
 /// 1 マスのリンクのように、そこが始まりのノードの通り抜けの区間の中になるときは、その区間を抜けた所にする。
-/// 待つ車が手前の交差点の中で止まらないようにするためである。
+/// 待つ車が手前の交差点の中で止まらないようにするためである。ただし、その所が終わりの交差点の車道の四角に
+/// かかるときは、四角の縁（[`box_reach`]）にする。交わる車の通る四角に、譲るかを決める前に入らないようにする
+/// ためである。2 つの交差点の四角が重なるときは、待つ車は手前の交差点の四角にかかる。
 pub fn stop_line(net: &Network, link: LinkId) -> LaneOffset {
     let len = link_len(net, link);
-    let Some((_, to)) = ends(net, link) else {
-        return offset(len);
-    };
-    let back = if junction::is_junction(net, to) {
-        crosswalk_end(net, to, link) + STOP_GAP_MM + STOP_WIDTH_MM + DRAWN_CAR_HALF_MM
-    } else if is_bend(net, to) {
-        along_arm(net, link, node_half(net, to))
-    } else {
-        0
-    };
     let clear = i64::from(clear_line(net, link).0);
-    offset((len - back).max(clear).min(len))
+    match ends(net, link) {
+        Some((_, to)) if junction::is_junction(net, to) => {
+            let back =
+                crosswalk_end(net, to, link) + STOP_GAP_MM + STOP_WIDTH_MM + DRAWN_CAR_HALF_MM;
+            let edge = len - box_reach(net, to, link);
+            offset((len - back).max(clear.min(edge)).min(len))
+        }
+        Some((_, to)) if is_bend(net, to) => {
+            let back = along_arm(net, link, node_half(net, to));
+            offset((len - back).max(clear).min(len))
+        }
+        _ => offset(len),
+    }
 }

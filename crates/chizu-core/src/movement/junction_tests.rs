@@ -663,6 +663,7 @@ fn approach(
         room: true,
         waited,
         arrives: (0, 1),
+        in_box: false,
     }
 }
 
