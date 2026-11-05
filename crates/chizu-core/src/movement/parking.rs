@@ -1250,7 +1250,7 @@ impl Trips {
             let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
             let mut routes = plan(router, net, mode, &ends, false).into_iter();
             // 置き直す行はまだ歩いているので、車線の上の車には入らない。
-            let mut ix = (mode == LaneMode::Car).then(|| car::LaneIndex::of(&self.rows, None));
+            let mut ix = (mode == LaneMode::Car).then(|| car::LaneIndex::of(&self.rows, net, None));
             let (zones, entering) = if mode == LaneMode::Car && !legs.is_empty() {
                 (
                     super::crossing::jay_zones(net, &self.rows),

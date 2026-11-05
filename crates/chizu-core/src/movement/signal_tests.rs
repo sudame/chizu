@@ -155,7 +155,8 @@ fn eastbound_against(stream: usize) -> (Tick, bool, u64) {
         let Some(t) = c.trips.get(id) else {
             break;
         };
-        if t.link() == first {
+        // 交差点に入るのは、停止線を越えたときである。
+        if t.link() == first && t.bound.is_none() {
             stopped |= t.speed() == MmPerTick::ZERO;
         } else if crossed.is_none() {
             let light = c.lit(node).light_for(0);
@@ -208,7 +209,13 @@ fn signalled_crossroads_lets_cars_in_only_on_green_or_yellow() {
     let mut arrived = 0;
     let mut entered = [0_usize; 4];
     for _ in 0..1_500 {
-        let before: Vec<(TripId, LinkId)> = c.trips.iter().map(|(id, t)| (id, t.link())).collect();
+        // 交差点に入るのは、停止線を越えたときである。
+        let before: Vec<(TripId, LinkId)> = c
+            .trips
+            .iter()
+            .filter(|(_, t)| t.bound.is_none())
+            .map(|(id, t)| (id, t.link()))
+            .collect();
         let now = c.now;
         arrived += c.step().len();
         let st = c.lit(node);
@@ -216,7 +223,10 @@ fn signalled_crossroads_lets_cars_in_only_on_green_or_yellow() {
             let Some(arm) = incoming.iter().position(|(l, _)| *l == link) else {
                 continue;
             };
-            if c.trips.get(id).is_none_or(|t| t.link() != link) {
+            if c.trips
+                .get(id)
+                .is_none_or(|t| t.link() != link || t.bound.is_some())
+            {
                 entered[arm] += 1;
                 let light = st.light_for(incoming[arm].1);
                 assert_ne!(light, Light::Red, "赤で入った {now:?}");
@@ -286,17 +296,23 @@ fn every_movement(n: Network, node: NodeId, per: usize, ticks: usize) -> usize {
     assert!(ids.iter().all(Option::is_some));
     let (mut arrived, mut entered) = (0, 0);
     for _ in 0..ticks {
+        // 交差点に入るのは、停止線を越えたときである。
         let before: Vec<(TripId, LinkId)> = c
             .trips
             .iter()
-            .filter(|(_, t)| car::on_road(t) && end_node(&c.net, t.link()) == node)
+            .filter(|(_, t)| {
+                car::on_road(t) && t.bound.is_none() && end_node(&c.net, t.link()) == node
+            })
             .map(|(id, t)| (id, t.link()))
             .collect();
         let now = c.now;
         arrived += c.step().len();
         let st = c.lit(node);
         for (id, link) in before {
-            if c.trips.get(id).is_some_and(|t| t.link() != link) {
+            if c.trips
+                .get(id)
+                .is_some_and(|t| t.link() != link || t.bound.is_some())
+            {
                 entered += 1;
                 let axis = signal::axis(c.net.segment_line(link.segment).unwrap().step);
                 assert_ne!(

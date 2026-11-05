@@ -601,12 +601,13 @@ fn signals_scenario_stops_cars_on_red() {
     };
     let (mut waited, mut entered) = (0, 0);
     for _ in 6..COMMUTE_TICKS {
-        // 信号の交差点へ向かうリンクの上の車。進めたあとにリンクが変わっていれば、交差点に入った。
+        // 信号の交差点へ向かうリンクの上の、停止線の手前の車。進めたあとに停止線を越えたかリンクが変わっていれば、
+        // 交差点に入った。
         let now = world.tick();
         let before: Vec<_> = world
             .trips()
             .iter()
-            .filter(|(_, t)| t.mode() == LaneMode::Car)
+            .filter(|(_, t)| t.mode() == LaneMode::Car && !t.past_stop_line())
             .filter(|(_, t)| lit.contains(&end_of(world.network(), t.link())))
             .map(|(id, t)| (id, t.link()))
             .collect();
@@ -616,7 +617,7 @@ fn signals_scenario_stops_cars_on_red() {
             let Some(t) = world.trips().get(id) else {
                 continue;
             };
-            if t.mode() != LaneMode::Car || t.link() == link {
+            if t.mode() != LaneMode::Car || (t.link() == link && !t.past_stop_line()) {
                 continue;
             }
             entered += 1;
