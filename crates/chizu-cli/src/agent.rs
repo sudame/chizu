@@ -60,6 +60,8 @@ observe の sinceLastObserve（前の observe からの増減）:
   見る数は、お金、収支、人口、就業、幸福度、車、転入、需要、建物の数、電気と水道の余裕、施設の数、買ったチャンクの数である。
   new の直後の observe は、new が見た街との増減になる。前の observe がないとき（フィードバックのディレクトリなど）は null で、何も書かない。
 
+observe の buildings.lanes: 行き止まりの私道の脇に一軒家を並べた住宅（段階 1〜2 の、間口 2 マスで奥行き 4 マス以上の住宅の一部）。
+  lots その建物の数、houses その家の数（世帯の数と同じ）。私道は map で = になる。住民と車は私道の入口から出入りする。
 observe の shortages: 主の網の余りが負の種類（"power"、"water"）の一覧。足りているときは空。lowHeadroom は足りないと偽になるので、足りないことはここか main.shortage で読む。
 observe の utilities（power と water）:
   capacity と demand 道路網をまたいだ供給量と需要の合計。この合計から余りは出さない。つながっていない施設の分まで足されて、
@@ -1558,6 +1560,14 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "byZone": by_zone(|z| count(&|b| b.zone == z)),
             "powered": count(&|b| b.supply.power),
             "watered": count(&|b| b.supply.water),
+            "lanes": {
+                "lots": count(&|b| b.lane_plan().is_some()),
+                "houses": buildings
+                    .iter()
+                    .filter_map(|(_, b)| b.lane_plan())
+                    .map(|p| p.houses)
+                    .sum::<u64>(),
+            },
         },
         "facilities": facilities,
         "utilities": utilities,

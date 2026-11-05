@@ -95,7 +95,10 @@ export function equipmentCenters(
   return out;
 }
 
-/** 屋根を置く本体の長方形。駐車場に切り欠いた所があれば、それを除いたいちばん広い長方形である。 */
+/**
+ * 屋根を置く本体の長方形。駐車場に切り欠いた所があれば、それを除いたいちばん広い長方形である。
+ * 私道の敷地なら、いちばん広い家になる（roofGeometry は家ごとに屋根を描く）。
+ */
 export function roofBody(
   tx0: number,
   ty0: number,
@@ -128,8 +131,19 @@ export function roofGeometry(
     const tx1 = buildings[i + 2] ?? 0;
     const ty1 = buildings[i + 3] ?? 0;
     const zone = buildings[i + 4] ?? 0;
+    const lot = lots.get(lotKey(tx0, ty0));
+    if (lot !== undefined && lot.houses.length > 0) {
+      // 私道の敷地は、家ごとに屋根を描く。住宅だけが私道の敷地になる
+      const edge = buildingEdgeColor(zone);
+      for (const h of bodyShape(siteOf(tx0, ty0, tx1, ty1), 0, BUILDING_EDGE, lot).inner) {
+        if (overlaps(rect, h.x0, h.y0, h.x1, h.y1)) {
+          hipRoof(geometry, h.x0, h.y0, h.x1, h.y1, edge);
+        }
+      }
+      continue;
+    }
     // 本体（縁の内側）の長方形。駐車場に切り欠いた所があれば、それを除いたいちばん広い長方形に置く
-    const body = roofBody(tx0, ty0, tx1, ty1, lots.get(lotKey(tx0, ty0)));
+    const body = roofBody(tx0, ty0, tx1, ty1, lot);
     if (body === undefined) {
       continue;
     }
