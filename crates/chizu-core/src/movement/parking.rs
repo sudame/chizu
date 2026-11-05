@@ -340,7 +340,7 @@ pub struct CurbWait {
 /// 出入口のリンクがなければ `None`。
 ///
 /// 私道の敷地（`Building::lane_plan`）の住民は、私道を通って通りに出るので、私道の入口（[`lot_spot`] と同じ点）を
-/// 出入口にする。私道は経路の網に入れず、私道の中の道のりも足さない（`docs/design.md` の 3.7）。
+/// 出入口にする。私道は経路の網に入れず、私道の中の道のりも足さない（`docs/design.md` の 3.8）。
 pub fn building_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
     if b.lane_plan().is_some() {
         return lot_choice(net, b).map(|(p, _)| p);

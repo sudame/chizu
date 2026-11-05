@@ -4,7 +4,7 @@
 //! 間口のどちらの端に寄せるかは中核の `lot_end`（出入りの位置 `lot_spot` と同じ決まり）が決める。
 //! ここはその値を、ワールドのマスの座標の長方形に置くだけで、状態は変えない。
 //! 決め方は `docs/design.md` の 3.6「敷地の切り欠き方」にある。
-//! 私道の敷地は、私道と家の長方形も送る。形は中核の `Building::lane_plan` が決め、3.7 にある。
+//! 私道の敷地は、私道と家の長方形も送る。形は中核の `Building::lane_plan` が決め、3.8 にある。
 
 use chizu_core::building::{
     Building, LANE_WIDTH_MM, ParkingCut, SLOT_DEPTH_MM, SLOT_WIDTH_MM, SLOTS_PER_TILE,
