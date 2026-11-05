@@ -984,7 +984,9 @@ pub(super) fn signal_demand(rows: &[Option<Trip>], net: &Network) -> signal::Dem
                 }
                 at = at.saturating_add(crossing::width(net, s));
             }
-        } else if on_road(t) && near_end(net, t) {
+        } else if on_road(t) && t.bound.is_none() && near_end(net, t) {
+            // 停止線を越えた車は、もう交差点の中にいて灯火に従わないので数えない。交わる向きの車は、
+            // 信号が変わっても交差点の譲り合いでその車を待つ（`junction`）。
             let node = end_node(net, t.link());
             if !signalled(node) {
                 continue;
@@ -992,12 +994,7 @@ pub(super) fn signal_demand(rows: &[Option<Trip>], net: &Network) -> signal::Dem
             let Some(l) = net.segment_line(t.link().segment) else {
                 continue;
             };
-            // 停止線を越えた車は、交差点を抜けるまで止まりきれない車として数える。
-            let committed = if t.bound.is_some() {
-                t.speed > MmPerTick::ZERO
-            } else {
-                committed(net, t)
-            };
+            let committed = committed(net, t);
             d.note(node, signal::axis(l.step), |a| {
                 a.cars = true;
                 a.committed |= committed;
