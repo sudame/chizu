@@ -3,20 +3,25 @@ import {
   balanceNote,
   deficitNote,
   financeRows,
+  formatFee,
   formatMoney,
   formatRate,
   formatSigned,
   isDeficit,
+  PendingFee,
   PendingRates,
+  parkingFeeCommand,
   parseFinance,
+  steppedFee,
   steppedRate,
   summaryText,
   taxCommand,
 } from "./finance.ts";
 import { FINANCE_LENGTH, isWorkerToMain } from "./protocol/messages.ts";
 
-// 税率の上限、税率 4 つ、税収 4 つ、道路、発電所、浄水場、駐車場
-const SAMPLE = [300, 100, 120, 100, 0, 1_000, 400, 300, 0, 180, 1_200, 0, 96];
+// 税率の上限、税率 4 つ、税収 4 つ、道路、発電所、浄水場、駐車場の維持費、駐車場の料金、料金の上限、料金の収入
+const SAMPLE = [300, 100, 120, 100, 0, 1_000, 400, 300, 0, 180, 1_200, 0, 96, 10, 50, 120];
+const DEFICIT = [300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0, 96, 10, 50, 0];
 
 describe("parseFinance", () => {
   it("長さの違う配列は読まない", () => {
@@ -34,14 +39,17 @@ describe("parseFinance", () => {
       powerUpkeep: 1_200,
       waterUpkeep: 0,
       parkingUpkeep: 96,
-      income: 1_700,
+      parkingFee: 10,
+      maxParkingFee: 50,
+      parkingFees: 120,
+      income: 1_820,
       expenses: 1_476,
-      net: 224,
+      net: 344,
     });
   });
 
   it("支出が収入を上回れば赤字", () => {
-    const deficit = parseFinance([300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0, 96]);
+    const deficit = parseFinance(DEFICIT);
     expect(deficit?.net).toBe(-1_476);
     expect(deficit !== null && isDeficit(deficit)).toBe(true);
     const f = parseFinance(SAMPLE);
@@ -67,14 +75,14 @@ describe("文言と数字の整形", () => {
   it("見出しと所持金の横の文は、赤字のときだけそれを示す", () => {
     expect(summaryText(null)).toBe("収支");
     const surplus = parseFinance(SAMPLE);
-    expect(summaryText(surplus)).toBe("収支 +224 / 日");
+    expect(summaryText(surplus)).toBe("収支 +344 / 日");
     expect(deficitNote(surplus)).toBe("");
     expect(deficitNote(null)).toBe("");
-    const deficit = parseFinance([300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0, 96]);
+    const deficit = parseFinance(DEFICIT);
     expect(summaryText(deficit)).toBe("収支 -1,476 / 日（赤字）");
     expect(deficitNote(deficit)).toBe("赤字 -1,476 / 日");
     // 上の帯には、黒字でも 1 日あたりの収支を出す
-    expect(balanceNote(surplus)).toBe("+224 / 日");
+    expect(balanceNote(surplus)).toBe("+344 / 日");
     expect(balanceNote(deficit)).toBe("赤字 -1,476 / 日");
     expect(balanceNote(null)).toBe("");
   });
@@ -98,7 +106,8 @@ describe("文言と数字の整形", () => {
       { label: "浄水場の維持費", value: "0" },
       { label: "駐車場の維持費", value: "-96" },
     ]);
-    expect(rows.net).toEqual({ label: "差し引き", value: "+224" });
+    expect(rows.parkingFees).toEqual({ label: "駐車場の料金", value: "+120" });
+    expect(rows.net).toEqual({ label: "差し引き", value: "+344" });
   });
 });
 
@@ -110,6 +119,29 @@ describe("税率の操作", () => {
     expect(steppedRate(300, 1, 300)).toBe(300);
     expect(steppedRate(295, 1, 300)).toBe(300);
     expect(steppedRate(5, -1, 300)).toBe(0);
+  });
+
+  it("駐車場の料金を 1 ずつ動かし、0 と上限で止める", () => {
+    expect(steppedFee(10, 1, 50)).toBe(11);
+    expect(steppedFee(10, -1, 50)).toBe(9);
+    expect(steppedFee(0, -1, 50)).toBe(0);
+    expect(steppedFee(50, 1, 50)).toBe(50);
+    expect(formatFee(10)).toBe("10 / 台");
+    expect(parkingFeeCommand(12)).toEqual({ kind: "SetParkingFee", fee: 12 });
+  });
+
+  it("押した先の料金を、反映されるまで覚える", () => {
+    const p = new PendingFee();
+    expect(p.press(1, 10, 50)).toBe(11);
+    p.receive(10);
+    expect(p.shown(10)).toBe(11);
+    expect(p.press(1, 10, 50)).toBe(12);
+    p.receive(12);
+    expect(p.shown(12)).toBe(12);
+    expect(p.press(1, 50, 50)).toBeNull();
+    expect(p.press(-1, 10, 50)).toBe(9);
+    p.reject();
+    expect(p.shown(10)).toBe(10);
   });
 
   it("SetTaxRate のコマンドを作る", () => {

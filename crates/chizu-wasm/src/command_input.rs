@@ -155,6 +155,12 @@ pub fn parse(
                 .and_then(|v| u16::try_from(v).map_err(|_| InputError::BadInteger("permille")))?;
             Ok(Command::SetTaxRate { zone, permille })
         }
+        "SetParkingFee" => {
+            // 上限の検査は Command::validate に任せる
+            let fee = integer(&field, "fee")
+                .and_then(|v| u16::try_from(v).map_err(|_| InputError::BadInteger("fee")))?;
+            Ok(Command::SetParkingFee { fee })
+        }
         "Bulldoze" => Ok(Command::Bulldoze {
             area: TileRect {
                 min: tile(&field, "minX", "minY")?,
@@ -530,6 +536,23 @@ mod tests {
                 tax(Field::Text("Office".into()), bad),
                 Err(InputError::BadInteger("permille"))
             );
+        }
+    }
+
+    #[test]
+    fn accepts_set_parking_fee() {
+        let fee = |fee: Field| object(&[("kind", Field::Text("SetParkingFee".into())), ("fee", fee)]);
+        assert_eq!(
+            fee(Field::Number(30.0)),
+            Ok(Command::SetParkingFee { fee: 30 })
+        );
+        for bad in [
+            Field::Number(-1.0),
+            Field::Number(70_000.0),
+            Field::Number(0.5),
+            Field::Missing,
+        ] {
+            assert_eq!(fee(bad), Err(InputError::BadInteger("fee")));
         }
     }
 

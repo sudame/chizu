@@ -1892,3 +1892,32 @@ fn low_density_homes_show_in_observe_and_map() {
     assert!(body.contains('D') || body.contains('d'), "{map}");
     assert!(!body.contains('R') && !body.contains('r'), "{map}");
 }
+
+/// act で駐車場の料金を決めると、observe の parking.fee に出て、範囲の外の料金は断られる。
+#[test]
+fn act_sets_the_parking_fee() {
+    let dir = session("agent-parking-fee");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "8"]);
+    let seen = json(&cli(&["agent", "observe", d]));
+    assert_eq!(seen["parking"]["fee"], 10);
+    assert_eq!(seen["financesPerDay"]["parkingFees"], 0);
+    let cmd = write(
+        &dir.join("fee.json"),
+        r#"[{"type":"SetParkingFee","fee":30},{"type":"SetParkingFee","fee":51}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmd]));
+    let outcomes: Vec<&str> = acted["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["outcome"].as_str().unwrap())
+        .collect();
+    assert_eq!(outcomes, ["Applied", "Invalid"]);
+    let seen = json(&cli(&["agent", "observe", d]));
+    assert_eq!(seen["parking"]["fee"], 30);
+    assert_eq!(
+        seen["sinceLastObserve"]["changes"]["parking.fee"]["delta"],
+        20
+    );
+}
