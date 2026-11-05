@@ -529,6 +529,41 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
         }
     }
     assert_eq!(o["parking"]["households"]["shared"], 0);
+    // 世帯がいないので、車を持てない世帯も、世帯の多い所もない。理由の欄はそろっている
+    assert_eq!(o["parking"]["households"]["none"], 0);
+    let reasons = &o["parking"]["households"]["noneReasons"];
+    for k in [
+        "noLotInRange",
+        "full",
+        "feeTooHigh",
+        "waiting",
+        "lotNotOnRoad",
+    ] {
+        assert_eq!(reasons[k], 0, "{k}");
+    }
+    assert_eq!(o["parking"]["carlessAreas"], serde_json::json!([]));
+    // 駐車場の層では、埋まり具合の文字（借りられた枠がなければ半分に満たない -）で出る
+    let layer = cli(&[
+        "agent", "map", d, "9", "-2", "18", "2", "--layer", "parking",
+    ]);
+    assert_eq!(
+        grid_rows(&layer, 5, 10),
+        [
+            "----......",
+            "----......",
+            "2222222222",
+            "rrrrrrrr--",
+            "rrrrrrrr--"
+        ],
+        "{layer}"
+    );
+    assert!(
+        layer.contains("- + # X  共同の駐車場の埋まり具合"),
+        "{layer}"
+    );
+    assert!(!layer.contains("L 平面の共同の駐車場"), "{layer}");
+    let err = cli_fails(&["agent", "map", d, "9", "-2", "18", "2", "--layer", "power"]);
+    assert!(err.contains("traffic か parking"), "{err}");
     assert_eq!(o["facilities"]["ParkingLot"], 1);
     assert_eq!(o["facilities"]["ParkingGarage"], 1);
     let upkeep = &o["financesPerDay"]["facilityUpkeep"];

@@ -106,5 +106,9 @@ fn write_rewritten_records() {
     let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} がない"));
     let log = CommandLog::decode(&std::fs::read(var("REC")).unwrap()).unwrap();
     std::fs::write(var("OUT_ALL"), to_low_density(&log, Rewrite::All).encode()).unwrap();
-    std::fs::write(var("OUT_HALF"), to_low_density(&log, Rewrite::Even).encode()).unwrap();
+    std::fs::write(
+        var("OUT_HALF"),
+        to_low_density(&log, Rewrite::Even).encode(),
+    )
+    .unwrap();
 }

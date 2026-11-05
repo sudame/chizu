@@ -248,6 +248,9 @@ const corners = (sides: number) =>
   });
 const DISC_CORNERS = corners(DISC_SIDES);
 const HEX_CORNERS = corners(6);
+// 施設の届く範囲の円を描く正多角形の辺の数。半径 32 マスでも角が目立たない
+const CIRCLE_SIDES = 64;
+const CIRCLE_CORNERS = corners(CIRCLE_SIDES);
 
 /** 頂点を三角形の列として積む。座標は基準のマスからの相対のマスの単位で、マスの中心は +0.5 にある。 */
 export class Geometry {
@@ -416,6 +419,29 @@ export class Geometry {
       this.#vertex(x, y, 0, 0, half, min, color);
       this.#vertex(x, y, c0, s0, half, min, color);
       this.#vertex(x, y, c1, s1, half, min, color);
+    }
+  }
+
+  /**
+   * ワールド座標 (x, y) を中心にした、半径 `radius`（マス）の円。`fill` で塗り、縁を `edge` の画面で `edgePx` ピクセルの線で引く。
+   * 施設の届く範囲を見せるのに使う。縁は塗りの外にはみ出さず、半径の上に引く。
+   */
+  circle(x: number, y: number, radius: number, fill: Color, edge: Color, edgePx: number): void {
+    for (let k = 0; k < CIRCLE_SIDES; k++) {
+      const [c0, s0] = CIRCLE_CORNERS[k] ?? [1, 0];
+      const [c1, s1] = CIRCLE_CORNERS[k + 1] ?? [1, 0];
+      this.#vertex(x, y, 0, 0, radius, 0, fill);
+      this.#vertex(x, y, c0, s0, radius, 0, fill);
+      this.#vertex(x, y, c1, s1, radius, 0, fill);
+      this.line(
+        x + c0 * radius,
+        y + s0 * radius,
+        x + c1 * radius,
+        y + s1 * radius,
+        0,
+        edge,
+        edgePx / 2,
+      );
     }
   }
 

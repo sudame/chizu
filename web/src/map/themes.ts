@@ -5,13 +5,19 @@
 import { demandBar } from "../city-panel.ts";
 import type { LayerCode } from "../protocol/messages.ts";
 import { HIGHWAY_CODE } from "./lanes.ts";
-import { THEME_COLORS, TRAFFIC_LAYER, TRAFFIC_LEVELS } from "./layers.ts";
+import {
+  PARKING_LAYER,
+  PARKING_LOT_LEVELS,
+  THEME_COLORS,
+  TRAFFIC_LAYER,
+  TRAFFIC_LEVELS,
+} from "./layers.ts";
 import type { Color } from "./palette.ts";
 import { buildingEdgeColor, roadStyle } from "./roads.ts";
 import { stageWeights } from "./stages.ts";
 import { TRAFFIC_UNCOUNTED_COLOR } from "./traffic.ts";
 
-export type ThemeId = "none" | "traffic" | "power" | "water" | "demand";
+export type ThemeId = "none" | "traffic" | "power" | "water" | "parking" | "demand";
 
 export type Theme = {
   id: ThemeId;
@@ -28,6 +34,7 @@ export const THEMES: readonly Theme[] = [
   { id: "traffic", label: "交通", layer: TRAFFIC_LAYER, swatch: TRAFFIC_LEVELS[0]?.color ?? null },
   { id: "power", label: "電気", layer: 1, swatch: THEME_COLORS.suppliedBuilding },
   { id: "water", label: "水道", layer: 2, swatch: THEME_COLORS.enoughRoad },
+  { id: "parking", label: "駐車場", layer: PARKING_LAYER, swatch: THEME_COLORS.lotNearlyFull },
   { id: "demand", label: "需要", layer: null, swatch: demandColor(1) },
 ];
 
@@ -188,6 +195,22 @@ export function themeLegend(
           kind: "dash",
           color: cssColor(THEME_COLORS.unconnectedRoad),
         },
+      ];
+    case "parking":
+      return [
+        {
+          label: "車を持てない世帯の家",
+          kind: "hatch",
+          color: cssColor(THEME_COLORS.carlessHome),
+          accent: cssColor(THEME_COLORS.carlessHatch),
+        },
+        ...PARKING_LOT_LEVELS.map(
+          (l): ThemeLegendItem => ({
+            label: `共同の駐車場：${l.label}`,
+            kind: "fill",
+            color: cssColor(l.color),
+          }),
+        ),
       ];
     case "demand":
       return ZONE_LABELS.map((label, i) => ({

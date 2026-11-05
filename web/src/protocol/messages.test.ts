@@ -12,7 +12,7 @@ describe("isWorkerToMain", () => {
     n: 3,
     sum: 6n,
     roadCosts: [250, 450, 750, 8000, 11314],
-    serviceTable: [60000, 4, 4, 25000, 2, 2],
+    serviceTable: [60000, 4, 4, 0, 25000, 2, 2, 0, 3000, 2, 2, 12, 72000, 4, 4, 240],
     seed: "0",
   };
   const roads = {
@@ -32,11 +32,14 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ kind: "chunks", chunks: [] })).toBe(true);
     expect(isWorkerToMain(roads)).toBe(true);
     const probe = { kind: "service-probe", service: "WaterPump", x: 3, y: -4 };
-    expect(isWorkerToMain({ ...probe, results: [null, "道路に面していない", null, null] })).toBe(
+    const answer = { ...probe, carless: 0 };
+    expect(isWorkerToMain({ ...answer, results: [null, "道路に面していない", null, null] })).toBe(
       true,
     );
-    expect(isWorkerToMain({ ...probe, results: [null, null, null] })).toBe(false);
-    expect(isWorkerToMain({ ...probe, results: [null, 1, null, null] })).toBe(false);
+    expect(isWorkerToMain({ ...answer, results: [null, null, null] })).toBe(false);
+    expect(isWorkerToMain({ ...answer, results: [null, 1, null, null] })).toBe(false);
+    // 共同の駐車場の届く範囲の世帯の数が、数でなければ受け取らない
+    expect(isWorkerToMain({ ...probe, results: [null, null, null, null] })).toBe(false);
     const inspect = { kind: "inspect", query: { kind: "tile", x: 3, y: -4 }, info: [] };
     expect(isWorkerToMain(inspect)).toBe(true);
     expect(isWorkerToMain({ ...inspect, info: [2, 1, 1200, 1200] })).toBe(true);
@@ -77,6 +80,7 @@ describe("isWorkerToMain", () => {
       isolated: [10, -59, 1],
       lotShortage: [0, 1, 0, 0],
       parkingShortage: [12, 30, 1, 5],
+      carless: [3, 2, 1, 0, 0, 0, 12, 20, 3],
       tick: 3600,
     };
     expect(isWorkerToMain(overview)).toBe(true);
@@ -91,6 +95,11 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ ...overview, parkingShortage: [] })).toBe(true);
     expect(isWorkerToMain({ ...overview, parkingShortage: [1, 2, 3] })).toBe(false);
     expect(isWorkerToMain({ ...overview, parkingShortage: undefined })).toBe(false);
+    // 車を持てない世帯は、固定の 5 つのあとに 3 つずつの区切りが続く
+    expect(isWorkerToMain({ ...overview, carless: [0, 0, 0, 0, 0, 0] })).toBe(true);
+    expect(isWorkerToMain({ ...overview, carless: [0, 0, 0, 0, 0] })).toBe(false);
+    expect(isWorkerToMain({ ...overview, carless: [0, 0, 0, 0, 0, 0, 1, 2] })).toBe(false);
+    expect(isWorkerToMain({ ...overview, carless: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, tick: undefined })).toBe(false);
     expect(isWorkerToMain({ ...overview, overview: [1, 2] })).toBe(false);
     expect(
