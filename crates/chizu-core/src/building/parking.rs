@@ -5,6 +5,7 @@
 //!
 //! 1. 要る台数を、住宅なら世帯の数、それ以外なら職場の数（税で減らす前）から決める。
 //! 2. 要る台数を、敷地を切り欠いた平面の駐車場と、建物の中（地下か立体）の駐車場に分ける。
+//!    集合住宅（住宅の段階 3〜5）は、平面には世帯の数の 0.7 倍までしか持たず、残りを建物の中に持つ。
 
 use super::Building;
 use crate::command::ZoneKind;
@@ -61,6 +62,7 @@ impl Building {
     /// 駐車場の配置。
     pub fn parking_layout(&self) -> ParkingLayout {
         let needed = self.parking_needed();
+        let surface_wanted = self.surface_wanted(needed);
         let (dx, dy) = self.toward_road;
         let tiles = self.tile_count();
         let w = self.area.max.x.abs_diff(self.area.min.x) + 1;
@@ -71,10 +73,10 @@ impl Building {
         let (surface, cut) = if diagonal {
             (0, ParkingCut::None)
         } else if tiles <= STRIP_MAX_TILES {
-            let slots = needed.min(frontage * SLOTS_PER_TILE);
+            let slots = surface_wanted.min(frontage * SLOTS_PER_TILE);
             (slots, ParkingCut::FrontStrip { slots })
         } else {
-            let slots = needed.min(tiles / SURFACE_SHARE * SLOTS_PER_TILE);
+            let slots = surface_wanted.min(tiles / SURFACE_SHARE * SLOTS_PER_TILE);
             let cut_tiles = slots.div_ceil(SLOTS_PER_TILE);
             let cut = ParkingCut::Side {
                 columns: cut_tiles.div_ceil(depth),
@@ -99,16 +101,24 @@ impl Building {
         }
     }
 
-    /// 要る台数。住宅の段階 1〜2（戸建て）は世帯の数、段階 3〜5（集合住宅）は世帯の数の 0.7 倍、
-    /// 商業と工業は職場の数、オフィスは職場の数の 0.5 倍で、端数は切り上げる。
+    /// 要る台数。住宅は世帯の数、商業と工業は職場の数、オフィスは職場の数の 0.5 倍で、端数は切り上げる。
     fn parking_needed(&self) -> u64 {
         let (base, num, den) = match self.zone {
-            ZoneKind::Residential if self.level <= 2 => (self.households(), 1, 1),
-            ZoneKind::Residential => (self.households(), 7, 10),
+            ZoneKind::Residential => (self.households(), 1, 1),
             ZoneKind::Commercial | ZoneKind::Industrial => (self.workplaces(), 1, 1),
             ZoneKind::Office => (self.workplaces(), 1, 2),
         };
         (base * num).div_ceil(den)
+    }
+
+    /// 要る台数 `needed` のうち、平面の駐車場に持ちたい台数。集合住宅（住宅の段階 3〜5）は世帯の数の
+    /// 0.7 倍（切り上げ）までで、残りは地下の駐車場として建物の中に持つ。ほかの建物は `needed` のまま。
+    fn surface_wanted(&self, needed: u64) -> u64 {
+        if self.zone == ZoneKind::Residential && self.level > 2 {
+            (self.households() * 7).div_ceil(10)
+        } else {
+            needed
+        }
     }
 }
 
@@ -193,13 +203,14 @@ mod tests {
                 }
             )
         );
-        // 4×4 の集合住宅の段階 5 は 20 世帯で 14 台。5 マスで、奥行き 4 の列に入りきらず 2 列にまたがる。
+        // 4×4 の集合住宅の段階 5 は 20 世帯で 20 台。平面は世帯の 0.7 倍の 14 台で、5 マスで、奥行き 4 の列に
+        // 入りきらず 2 列にまたがる。残りの 6 台は地下に持つ。
         assert_eq!(
             layout(Residential, (4, 4), 5),
             (
+                20,
                 14,
-                14,
-                0,
+                6,
                 Side {
                     columns: 2,
                     tiles: 5
@@ -305,7 +316,28 @@ mod tests {
         let mut l = building(Residential, (3, 3), 5);
         l.toward_road = (1, 1);
         let l = l.parking_layout();
-        assert_eq!((l.needed, l.surface, l.indoor), (9, 0, 9));
+        assert_eq!((l.needed, l.surface, l.indoor), (12, 0, 12));
+    }
+
+    #[test]
+    fn apartments_have_a_space_per_household_and_keep_the_surface_lot() {
+        for w in 1..=6_i64 {
+            for h in 1..=6_i64 {
+                for road in [(0, -1), (0, 1), (1, 0), (-1, 0), (1, 1)] {
+                    for level in 3..=crate::building::MAX_LEVEL {
+                        let mut b = building(Residential, (w, h), level);
+                        b.toward_road = road;
+                        let at = format!("{w}×{h} {road:?} の段階 {level}");
+                        let l = b.parking_layout();
+                        let households = b.households();
+                        assert_eq!(l.needed, households, "{at}");
+                        assert_eq!(l.total(), households, "{at}");
+                        // 平面は世帯の 0.7 倍（切り上げ）までで、足りない分はすべて建物の中に持つ。
+                        assert!(l.surface <= (households * 7).div_ceil(10), "{at}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
