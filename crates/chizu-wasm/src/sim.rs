@@ -1393,6 +1393,24 @@ mod tests {
         assert_ne!(sim.chunk_tiles(east)[30 * CHUNK_SIDE] & TILE_ZONABLE, 0);
     }
 
+    /// 画面はまだ低密度の住宅を見分けないので、低密度のマスは住宅の値で送り、高密度と同じに描かせる。
+    #[test]
+    fn low_density_tiles_go_to_the_screen_as_residential() {
+        let mut sim = Sim::new(0);
+        let origin = ChunkCoord::new(0, 0);
+        sim.submit(road((10, 10), (20, 10))).unwrap();
+        sim.submit(Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(12, 11), TilePos::new(14, 12)),
+            zone: Some(Zone::ResidentialLow),
+        })
+        .unwrap();
+        let tile = sim.chunk_tiles(origin)[12 * CHUNK_SIDE + 13];
+        assert_eq!(
+            (tile >> TILE_ZONE_SHIFT) & TILE_ZONE_MASK,
+            ZoneKind::Residential as u8
+        );
+    }
+
     #[test]
     fn chunks_outside_memory_read_as_fresh_unowned_chunks() {
         let sim = Sim::new(0);
