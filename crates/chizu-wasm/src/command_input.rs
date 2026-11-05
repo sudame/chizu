@@ -122,6 +122,7 @@ pub fn parse(
             let zone = match field("zone") {
                 Field::Text(t) => match t.as_str() {
                     "Residential" => Some(Zone::Residential),
+                    "ResidentialLow" => Some(Zone::ResidentialLow),
                     "Commercial" => Some(Zone::Commercial),
                     "Industrial" => Some(Zone::Industrial),
                     "Office" => Some(Zone::Office),
@@ -445,6 +446,20 @@ mod tests {
             Ok(Command::PaintZone {
                 area,
                 zone: Some(Zone::Office)
+            })
+        );
+        assert_eq!(
+            paint(Field::Text("ResidentialLow".into())),
+            Ok(Command::PaintZone {
+                area,
+                zone: Some(Zone::ResidentialLow)
+            })
+        );
+        assert_eq!(
+            paint(Field::Text("Residential".into())),
+            Ok(Command::PaintZone {
+                area,
+                zone: Some(Zone::Residential)
             })
         );
         assert_eq!(

@@ -589,6 +589,7 @@ const ZONE_CODE: Partial<Record<ZoneName, number>> = {
   Commercial: 2,
   Industrial: 3,
   Office: 4,
+  ResidentialLow: 5,
 };
 const zoneArea = (zone: ZoneName): { fill: Color; edge: Color } => {
   const code = ZONE_CODE[zone];

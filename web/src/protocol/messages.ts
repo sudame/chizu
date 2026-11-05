@@ -25,8 +25,14 @@ export const CARLESS_FIXED = 6;
 
 /** chizu-wasm の overview の数の個数。 */
 export const OVERVIEW_LENGTH = 21;
-/** 区画の種類。Clear は区画を消す。 */
-export type ZoneName = "Residential" | "Commercial" | "Industrial" | "Office" | "Clear";
+/** 区画の種類。Residential は高密度の住宅、Clear は区画を消す。 */
+export type ZoneName =
+  | "Residential"
+  | "ResidentialLow"
+  | "Commercial"
+  | "Industrial"
+  | "Office"
+  | "Clear";
 
 /** 画面から送るコマンド。chizu-wasm が Command に直し、検証する。座標はマスの座標。 */
 export type CommandMessage =
@@ -59,7 +65,7 @@ export type CommandMessage =
     }
   | { kind: "BuyChunk"; cx: number; cy: number }
   /** 区画の種類ごとの税率（‰）。上限は chizu-core の MAX_TAX_PERMILLE で、中核が検証する。 */
-  | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear">; permille: number }
+  | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear" | "ResidentialLow">; permille: number }
   | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number }
   /** マス (x, y) の交差点に信号を置くか（on が true）、外す。chizu-wasm がマスのノードを引く。 */
   | { kind: "SetSignal"; x: number; y: number; on: boolean }
@@ -130,7 +136,7 @@ export const TILE_WATER = 1;
 export const TILE_ROAD = 1 << 1;
 /** 区画を塗れる。 */
 export const TILE_ZONABLE = 1 << 2;
-/** 区画の種類（1 住宅、2 商業、3 工業、4 オフィス、なければ 0）を置くビットの位置。3 ビットを使う。 */
+/** 区画の種類（1 住宅（高密度）、2 商業、3 工業、4 オフィス、5 住宅（低密度）、なければ 0）を置くビットの位置。3 ビットを使う。 */
 export const TILE_ZONE_SHIFT = 3;
 /** 区画に建った建物がある。施設のマスには立たない。 */
 export const TILE_BUILDING = 1 << 6;

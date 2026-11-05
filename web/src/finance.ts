@@ -3,7 +3,8 @@
 
 import { FINANCE_LENGTH, type ZoneName } from "./protocol/messages.ts";
 
-export type TaxZone = Exclude<ZoneName, "Clear">;
+/** 税率は区画の種類ごとに決め、密度では分けない。 */
+export type TaxZone = Exclude<ZoneName, "Clear" | "ResidentialLow">;
 
 /** 税率をかける区画の種類。chizu-wasm の finance の並びと同じ。 */
 export const TAX_ZONES: { zone: TaxZone; label: string }[] = [

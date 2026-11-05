@@ -554,6 +554,14 @@ export const ZONE_COLORS: Record<number, ZoneColors> = {
     building: hex("#c2e0e3"),
     edge: hex("#84bbc1"),
   },
+  // 低密度の住宅。高密度の緑より黄に寄せ、工業の黄とは取り違えない淡い黄緑にする
+  5: {
+    ground: hex("#f0f5d6"),
+    blockEmpty: hex("#e7efc3"),
+    block: hex("#d6e59c"),
+    building: hex("#dce8ad"),
+    edge: hex("#a9c24f"),
+  },
 };
 const UNKNOWN_ZONE: ZoneColors = {
   ground: hex("#f4f2ec"),

@@ -43,6 +43,7 @@ export type BuildingView = {
   kind: "building";
   /** 押したものの識別子。以後はマスでなくこれで引く。 */
   target: InspectTarget;
+  /** 区画の種類。低密度の住宅は ResidentialLow で、高密度の住宅（Residential）と分かれる。 */
   zone: Exclude<ZoneName, "Clear">;
   level: number;
   power: boolean;
@@ -87,7 +88,11 @@ const ZONES: Record<number, BuildingView["zone"]> = {
   2: "Commercial",
   3: "Industrial",
   4: "Office",
+  5: "ResidentialLow",
 };
+
+/** 住宅（高密度でも低密度でも）か。 */
+const isHome = (zone: BuildingView["zone"]) => zone === "Residential" || zone === "ResidentialLow";
 const SERVICES: Record<number, ServiceName> = Object.fromEntries(
   SERVICE_NAMES.map((name, i) => [i + 1, name]),
 );
@@ -117,7 +122,7 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
   if (at(0) !== 1 || zone === undefined) {
     return null;
   }
-  const residents = zone === "Residential" && at(7) > 0;
+  const residents = isHome(zone) && at(7) > 0;
   return {
     kind: "building",
     target,
@@ -138,14 +143,15 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
         }
       : null,
     carPlaces:
-      zone === "Residential" && at(13) >= 0
+      isHome(zone) && at(13) >= 0
         ? { homeSpaces: at(13), home: at(14), shared: at(15), none: at(16) }
         : null,
   };
 }
 
 const ZONE_LABEL: Record<BuildingView["zone"], string> = {
-  Residential: "住宅",
+  Residential: "住宅（高密度）",
+  ResidentialLow: "住宅（低密度）",
   Commercial: "商業",
   Industrial: "工業",
   Office: "オフィス",
@@ -198,7 +204,7 @@ export function describeInspect(view: InspectView): InspectText {
     { label: "電気", value: reach(view.power) },
     { label: "水道", value: reach(view.water) },
   ];
-  if (view.zone !== "Residential") {
+  if (!isHome(view.zone)) {
     return {
       title: `${ZONE_LABEL[view.zone]}の職場（段階 ${view.level}）`,
       rows: [{ label: "働く人", value: `${n(view.occupied)} / ${n(view.capacity)} 人` }, ...supply],
@@ -230,7 +236,8 @@ export function describeInspect(view: InspectView): InspectText {
       { label: "　車を持てない世帯", value: `${n(c.none)} 世帯` },
     );
   }
-  return { title: `住宅（段階 ${view.level}）`, rows };
+  const density = view.zone === "ResidentialLow" ? "低密度" : "高密度";
+  return { title: `住宅（${density}、段階 ${view.level}）`, rows };
 }
 
 /** 2 つの問い合わせが同じか。 */
