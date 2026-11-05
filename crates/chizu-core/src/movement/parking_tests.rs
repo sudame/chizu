@@ -1151,7 +1151,7 @@ fn a_drive_lost_to_a_removed_road_leaves_the_household_without_a_car() {
 
 /// 道路の南側に、`north` の向かいの建物を建てる。出入口は同じ x で、北側の建物と反対の歩道に付く。
 fn build_opposite(s: &mut Street, north: BuildingId) -> BuildingId {
-    let n = s.buildings.get(north).unwrap().clone();
+    let n = *s.buildings.get(north).unwrap();
     let front = TilePos::new(n.front.x, 1);
     let segment = n.entrance.segment;
     let start = s.net.segment_line(segment).unwrap().start.x;
