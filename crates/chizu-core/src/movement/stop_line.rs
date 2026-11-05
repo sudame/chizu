@@ -80,6 +80,26 @@ fn crosswalk_end(net: &Network, n: NodeId, link: LinkId) -> i64 {
     along_arm(net, link, node_half(net, n)) + if zebra { ZEBRA_MM } else { 0 }
 }
 
+/// ノード `n` の車道の四角の半分の大きさ。つながる区間の、車道の半分の幅のいちばん大きい値である。
+fn asphalt_half(net: &Network, n: NodeId) -> i64 {
+    let Some(node) = net.node(n) else {
+        return 0;
+    };
+    node.segments
+        .iter()
+        .filter_map(|s| net.segment(*s))
+        .map(|s| i64::from(s.kind.car_lanes_per_side()) * s.kind.lane_width_mm())
+        .max()
+        .unwrap_or(0)
+}
+
+/// 交差点 `n` の車道の四角に、区間 `link.segment` の腕から車が入る所と出る所の、車の真ん中のノードの中心からの距離。
+/// 描く車の前の端が四角の縁にかかる所で、出ていくときは後ろの端が縁を抜ける所である。
+/// 交差点の中で道筋が交わるのは、この四角の中だけである。
+pub fn box_reach(net: &Network, n: NodeId, link: LinkId) -> i64 {
+    along_arm(net, link, asphalt_half(net, n)) + DRAWN_CAR_HALF_MM
+}
+
 /// ノード `n` が、2 本の区間を向きを変えてつなぐ角か。
 pub fn is_bend(net: &Network, n: NodeId) -> bool {
     let Some(node) = net.node(n) else {

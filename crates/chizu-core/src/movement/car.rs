@@ -25,7 +25,7 @@ use super::Trip;
 use super::crossing::{self, JayCar};
 use super::junction::{self, Approach, Inside};
 use super::signal;
-use super::stop_line::{clear_line, has_interior, stop_line};
+use super::stop_line::{box_reach, clear_line, has_interior, stop_line};
 use crate::command::NodeId;
 use crate::network::{Dir, LaneId, LaneMode, LinkId, Network};
 use crate::routing::{Connector, speed_limit};
@@ -771,26 +771,36 @@ fn look(
     let (lane, _, i) = order[k];
     let t = rows[i].as_ref().expect("車の主体がない");
     let mut out = Look::default();
+    let v = i64::from(t.speed.0);
+    // ほかの車と道筋が交わるのは車道の四角の中だけなので、ノードを越えた車は、四角を抜けるまで交差点の中にいる。
     if let Some((node, prev)) = inside_start(net, t) {
-        out.inside = Some(Inside {
-            node,
-            from: prev,
-            to: t.link(),
-            lane: t.lane,
-            stopped: t.speed == MmPerTick::ZERO,
-        });
+        let out_at = box_reach(net, node, t.link());
+        let at = i64::from(t.offset.0);
+        if at < out_at {
+            out.inside = Some(Inside {
+                node,
+                from: prev,
+                to: t.link(),
+                lane: t.lane,
+                stopped: t.speed == MmPerTick::ZERO,
+                clears: at + v >= out_at,
+            });
+        }
     }
     // 通り抜けの区間に入った車は、決めた車線へ進む。
     if let Some(to_lane) = bound_lane(net, t) {
         out.next_lane = Some(to_lane);
         let node = end_node(net, t.link());
         if junction::is_junction(net, node) {
+            let next = t.route.links[t.leg as usize + 1];
+            let at = i64::from(t.offset.0) - i64::from(t.link_len.0);
             out.inside_end = Some(Inside {
                 node,
                 from: t.link(),
-                to: t.route.links[t.leg as usize + 1],
+                to: next,
                 lane: to_lane,
                 stopped: t.speed == MmPerTick::ZERO,
+                clears: at + v >= box_reach(net, node, next),
             });
         }
         return out;
@@ -815,6 +825,8 @@ fn look(
     let (to_lane, room) = exit_lane(net, conn, st, t, node, next, after);
     out.next_lane = Some(to_lane);
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
+    // 車道の四角に入るまでの距離。
+    let to_box = i64::from(t.link_len.0) - i64::from(t.offset.0) - box_reach(net, node, t.link());
     out.approach = Some(Approach {
         id: k,
         node,
@@ -826,6 +838,7 @@ fn look(
         committed: committed(net, t),
         room,
         waited: t.waited,
+        reaches: to_box <= v + i64::from(CAR_ACCEL),
     });
     out.no_room = !room;
     out

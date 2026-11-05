@@ -217,6 +217,8 @@ pub(super) struct Approach {
     pub room: bool,
     /// ノードの手前で待った tick 数。
     pub waited: u32,
+    /// この tick のうちに車道の四角に入りうるか。
+    pub reaches: bool,
 }
 
 /// 交差点の中にいる車。
@@ -230,6 +232,8 @@ pub(super) struct Inside {
     pub lane: LaneId,
     /// 止まっているか。
     pub stopped: bool,
+    /// いまの速さのまま進めば、この tick のうちに車道の四角を抜けるか。
+    pub clears: bool,
 }
 
 /// 交差点で止める候補。
@@ -262,8 +266,8 @@ pub(super) fn holds(
     let mut held = Vec::new();
     let mut yielded = Vec::new();
     let mut group: Vec<(Approach, Move)> = Vec::new();
-    // 置いた動きと、それが交差点の中で止まった車のものか。
-    let mut placed: Vec<(Move, bool)> = Vec::new();
+    // 置いた動きと、それが交差点の中で止まった車のものか、この tick のうちに車道の四角を抜ける車のものか。
+    let mut placed: Vec<(Move, bool, bool)> = Vec::new();
     for same in cands.chunk_by(|a, b| a.node == b.node) {
         let node = same[0].node;
         let lo = inside.partition_point(|x| x.node < node);
@@ -317,14 +321,17 @@ pub(super) fn holds(
         placed.extend(
             inside[lo..hi]
                 .iter()
-                .map(|x| (Move::into_lane(net, x.from, x.to, x.lane), x.stopped)),
+                .map(|x| (Move::into_lane(net, x.from, x.to, x.lane), x.stopped, x.clears)),
         );
         for (c, mv) in &group {
+            // この tick のうちに四角に入らない候補は、この tick のうちに四角を抜ける車を待たない。
             let blocked = |skip_stopped: bool| {
                 placed
                     .iter()
-                    .filter(|(_, stopped)| !(skip_stopped && *stopped))
-                    .any(|(m, _)| m.conflicts_in(mv))
+                    .filter(|(_, stopped, clears)| {
+                        !(skip_stopped && *stopped) && !(*clears && !c.reaches)
+                    })
+                    .any(|(m, ..)| m.conflicts_in(mv))
             };
             // 待ちすぎた車は、交差点の中で止まった車の脇をすり抜けて入る。
             let skip_stopped = c.waited >= GIVE_UP;
@@ -337,7 +344,7 @@ pub(super) fn holds(
                 let stuck = !skip_stopped
                     && placed
                         .iter()
-                        .any(|(m, stopped)| *stopped && m.conflicts_in(mv));
+                        .any(|(m, stopped, _)| *stopped && m.conflicts_in(mv));
                 if c.room && peds(c) && !stuck {
                     yielded.push(c.id);
                 }
@@ -349,7 +356,7 @@ pub(super) fn holds(
             // 交差点に入らないので、その道筋と交わる後の候補を止めても、どの車も先に進めないためである。
             let for_peds = clear && !free;
             if c.committed || (c.room && !for_peds) {
-                placed.push((*mv, false));
+                placed.push((*mv, false, false));
             }
         }
     }
