@@ -14,6 +14,10 @@
 //! 停めてある台数と押さえた台数は別に数える。建物から車が出るときは停めてある台数だけを減らすので、
 //! まだ着いていない車のために押さえた空きを、出る車が使ってしまうことはない。
 //! 建物が消えると、その駐車場に停めてあった車も消える。そこへ向かっていた車は、着いたら停めずに消える。
+//!
+//! 遊ぶ人が置く共同の駐車場（[`LotId::Shared`] と [`LotId::Rented`]）もある。世帯が借りた枠は、車がいない
+//! あいだも空かない（月極）。借りられていない枠は、近くへ来た車（外来）が建物の駐車場と同じく使う。
+//! 出入りの位置は施設の正面の道路の上にとる（[`facility_spot`]）。
 
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -28,6 +32,7 @@ use crate::command::ZoneKind;
 use crate::id::{BuildingId, TripId};
 use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId, TILE_MM};
 use crate::routing::AstarRouter;
+use crate::service::Facility;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::{TilePos, TileRect};
 use crate::units::WorldPos;
@@ -44,16 +49,16 @@ pub(super) enum Then {
     /// 車に乗って `park_at` まで走り、駐車場 `lot` に停めて `to` まで歩く。
     Drive {
         park_at: SidewalkPos,
-        lot: BuildingId,
+        lot: LotId,
         to: SidewalkPos,
     },
     /// 車を駐車場 `lot` に停めて、`to` まで歩く。
-    Walk { lot: BuildingId, to: SidewalkPos },
+    Walk { lot: LotId, to: SidewalkPos },
 }
 
 impl Then {
     /// 押さえている駐車場。
-    pub(super) fn lot(&self) -> Option<BuildingId> {
+    pub(super) fn lot(&self) -> Option<LotId> {
         match self {
             Then::Arrive => None,
             Then::Drive { lot, .. } | Then::Walk { lot, .. } => Some(*lot),
@@ -217,10 +222,99 @@ impl StateHash for Lot {
     }
 }
 
-/// 建物ごとの駐車場。どちらの台数も 0 の建物は持たない。
+/// 車を停める駐車場。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum LotId {
+    /// 建物の駐車場。
+    Building(BuildingId),
+    /// 共同の駐車場の、借りられていない枠（外来の車が使う）。駐車場の占める範囲の最小の角で指す。
+    Shared(TilePos),
+    /// 共同の駐車場の、世帯が借りた枠。借りた世帯の車だけが使う。
+    Rented(TilePos),
+}
+
+impl LotId {
+    /// 建物の駐車場なら、その建物。
+    pub fn building(self) -> Option<BuildingId> {
+        match self {
+            LotId::Building(b) => Some(b),
+            LotId::Shared(_) | LotId::Rented(_) => None,
+        }
+    }
+
+    /// 共同の駐車場なら、その角のマス。
+    pub fn shared_corner(self) -> Option<TilePos> {
+        match self {
+            LotId::Building(_) => None,
+            LotId::Shared(c) | LotId::Rented(c) => Some(c),
+        }
+    }
+}
+
+impl StateHash for LotId {
+    fn write_state(&self, h: &mut StateHasher) {
+        match self {
+            // 建物の駐車場は建物の ID だけを書く。共同の駐車場のない街では、ハッシュが前と変わらない。
+            LotId::Building(b) => h.write(b),
+            LotId::Shared(c) | LotId::Rented(c) => {
+                // 建物の ID の添え字に使わない値を印にして、建物の駐車場と分ける。
+                h.write(&u32::MAX);
+                h.write(&u8::from(matches!(self, LotId::Rented(_))));
+                h.write(&c.x);
+                h.write(&c.y);
+            }
+        }
+    }
+}
+
+/// 共同の駐車場 1 つの台数。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedLot {
+    /// 世帯に貸した枠の数。車がいないあいだも空かない。
+    pub rented: u32,
+    /// 借りた世帯の車が停まっている台数。
+    pub rented_parked: u32,
+    /// 借りていない車（外来）の、停めた台数と押さえた台数。
+    pub visitors: Lot,
+}
+
+impl SharedLot {
+    /// 台数 `spaces` の駐車場に、外来の車か新しく借りる世帯のための空きがあるか。
+    pub fn has_room(self, spaces: u32) -> bool {
+        u64::from(self.rented) + u64::from(self.visitors.parked) + u64::from(self.visitors.reserved)
+            < u64::from(spaces)
+    }
+}
+
+impl StateHash for SharedLot {
+    fn write_state(&self, h: &mut StateHasher) {
+        h.write(&self.rented);
+        h.write(&self.rented_parked);
+        h.write(&self.visitors);
+    }
+}
+
+/// 角のマスが `corner` の共同の駐車場。
+pub fn shared_facility(facilities: &[Facility], corner: TilePos) -> Option<&Facility> {
+    facilities
+        .iter()
+        .find(|f| f.kind.is_parking() && f.area.min == corner)
+}
+
+/// 駐車場 `lot` がいまもあるか。
+pub(super) fn lot_exists(lot: LotId, buildings: &Buildings, facilities: &[Facility]) -> bool {
+    match lot {
+        LotId::Building(b) => buildings.get(b).is_some(),
+        LotId::Shared(c) | LotId::Rented(c) => shared_facility(facilities, c).is_some(),
+    }
+}
+
+/// 建物ごとの駐車場と、共同の駐車場ごとの台数。どの台数も 0 の駐車場は持たない。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Parking {
     lots: BTreeMap<BuildingId, Lot>,
+    /// 共同の駐車場の台数。角のマスで引く。
+    shared: BTreeMap<TilePos, SharedLot>,
 }
 
 impl Parking {
@@ -237,46 +331,140 @@ impl Parking {
         }
     }
 
-    fn reserve(&mut self, b: BuildingId) {
-        self.update(b, |l| {
-            l.reserved = l.reserved.checked_add(1).expect("押さえた台数があふれた");
-        });
+    fn shared_lot(&self, c: TilePos) -> SharedLot {
+        self.shared.get(&c).copied().unwrap_or_default()
     }
 
-    /// 押さえた空きを返す。建物が消えて駐車場がなくなっていれば何もしない。
-    fn release(&mut self, b: BuildingId) {
-        if self.lots.contains_key(&b) {
-            self.update(b, |l| {
+    /// 共同の駐車場 `c` を `f` で書き換える。どの台数も 0 になったら表から外す。
+    fn update_shared(&mut self, c: TilePos, f: impl FnOnce(&mut SharedLot)) {
+        let lot = self.shared.entry(c).or_default();
+        f(lot);
+        if *lot == SharedLot::default() {
+            self.shared.remove(&c);
+        }
+    }
+
+    fn reserve(&mut self, lot: LotId) {
+        match lot {
+            LotId::Building(b) => self.update(b, |l| {
+                l.reserved = l.reserved.checked_add(1).expect("押さえた台数があふれた");
+            }),
+            LotId::Shared(c) => self.update_shared(c, |s| {
+                s.visitors.reserved = s
+                    .visitors
+                    .reserved
+                    .checked_add(1)
+                    .expect("押さえた台数があふれた");
+            }),
+            // 借りた枠はいつも空けてあるので、押さえない。
+            LotId::Rented(_) => {}
+        }
+    }
+
+    /// 押さえた空きを返す。駐車場がなくなっていれば何もしない。
+    fn release(&mut self, lot: LotId) {
+        match lot {
+            LotId::Building(b) if self.lots.contains_key(&b) => self.update(b, |l| {
                 l.reserved = l
                     .reserved
                     .checked_sub(1)
                     .expect("押さえていない空きを返した");
-            });
+            }),
+            // 取り壊して同じ角に置き直した駐車場には、前に押さえた分が残っていない。
+            LotId::Shared(c) if self.shared_lot(c).visitors.reserved > 0 => {
+                self.update_shared(c, |s| s.visitors.reserved -= 1);
+            }
+            LotId::Building(_) | LotId::Shared(_) | LotId::Rented(_) => {}
         }
     }
 
     /// 押さえた空きに車を停め、停めたら `true`。駐車場がなくなっていれば、車は停めずに消える。
-    fn park(&mut self, b: BuildingId) -> bool {
-        let there = self.lots.contains_key(&b);
-        if there {
-            self.update(b, |l| {
-                l.reserved = l
-                    .reserved
-                    .checked_sub(1)
-                    .expect("押さえていない空きに停めた");
-                l.parked = l.parked.checked_add(1).expect("停めた台数があふれた");
-            });
+    fn park(&mut self, lot: LotId) -> bool {
+        match lot {
+            LotId::Building(b) => {
+                let there = self.lots.contains_key(&b);
+                if there {
+                    self.update(b, |l| {
+                        l.reserved = l
+                            .reserved
+                            .checked_sub(1)
+                            .expect("押さえていない空きに停めた");
+                        l.parked = l.parked.checked_add(1).expect("停めた台数があふれた");
+                    });
+                }
+                there
+            }
+            LotId::Shared(c) => {
+                // 取り壊して同じ角に置き直した駐車場には、前に押さえた空きがない。
+                let there = self.shared_lot(c).visitors.reserved > 0;
+                if there {
+                    self.update_shared(c, |s| {
+                        s.visitors.reserved -= 1;
+                        s.visitors.parked =
+                            s.visitors.parked.checked_add(1).expect("停めた台数があふれた");
+                    });
+                }
+                there
+            }
+            LotId::Rented(c) => {
+                // 借りた枠の数は、借りている世帯がいるあいだ 0 にならない。
+                let there = self.shared_lot(c).rented > 0;
+                if there {
+                    self.update_shared(c, |s| {
+                        s.rented_parked = s.rented_parked.checked_add(1).expect("停めた台数があふれた");
+                    });
+                }
+                there
+            }
         }
-        there
     }
 
     /// 停めてある車を 1 台出す。停めてある車がなければ `false`。
-    pub(super) fn unpark(&mut self, b: BuildingId) -> bool {
-        let had = self.get(b).parked > 0;
-        if had {
-            self.update(b, |l| l.parked -= 1);
+    pub(super) fn unpark(&mut self, lot: LotId) -> bool {
+        match lot {
+            LotId::Building(b) => {
+                let had = self.get(b).parked > 0;
+                if had {
+                    self.update(b, |l| l.parked -= 1);
+                }
+                had
+            }
+            LotId::Shared(c) => {
+                let had = self.shared_lot(c).visitors.parked > 0;
+                if had {
+                    self.update_shared(c, |s| s.visitors.parked -= 1);
+                }
+                had
+            }
+            LotId::Rented(c) => {
+                let had = self.shared_lot(c).rented_parked > 0;
+                if had {
+                    self.update_shared(c, |s| s.rented_parked -= 1);
+                }
+                had
+            }
         }
-        had
+    }
+
+    /// 出した車を、車で出られなかったので駐車場に戻す。
+    fn put_back(&mut self, lot: LotId) {
+        let add = |n: u32| n.checked_add(1).expect("停めた台数があふれた");
+        match lot {
+            LotId::Building(b) => self.update(b, |l| l.parked = add(l.parked)),
+            LotId::Shared(c) => {
+                self.update_shared(c, |s| s.visitors.parked = add(s.visitors.parked));
+            }
+            LotId::Rented(c) => self.update_shared(c, |s| s.rented_parked = add(s.rented_parked)),
+        }
+    }
+
+    /// 共同の駐車場ごとの、貸した枠の数を `counts` にする。載っていない駐車場は 0 にする。
+    fn set_rented(&mut self, counts: &BTreeMap<TilePos, u32>) {
+        let corners: BTreeSet<TilePos> = self.shared.keys().chain(counts.keys()).copied().collect();
+        for c in corners {
+            let n = counts.get(&c).copied().unwrap_or(0);
+            self.update_shared(c, |s| s.rented = n);
+        }
     }
 
     /// 世帯の枠が駐車場 `own` にある運転する人が、建物 `id` の駐車場に停められるか。空きがあり、
@@ -289,12 +477,16 @@ impl Parking {
 
     /// 世帯の枠が駐車場 `own` にある運転する人が停められる、行き先 `to` の近くの駐車場を、試す順に返す。行き先そのものを
     /// 先に、そのあとは [`PARK_RADIUS`] マスの中の建物を近い順に並べる。同じ距離なら番号の小さい建物を先にする。
+    ///
+    /// 共同の駐車場は、外来の空きがあれば同じ範囲の候補に入る。距離が同じなら建物を先にする。
+    /// 枠を借りた世帯の車は、借りた枠をいつも使える。家（`home`）に帰るときは、遠くても借りた枠を先に試す。
     fn candidates(
         &self,
-        buildings: &Buildings,
+        (buildings, facilities): (&Buildings, &[Facility]),
         (to, dest): (BuildingId, &Building),
-        own: Option<BuildingId>,
-    ) -> Vec<BuildingId> {
+        own: Option<LotId>,
+        home: Option<BuildingId>,
+    ) -> Vec<LotId> {
         let r = i64::try_from(PARK_RADIUS).expect("範囲が i64 に収まらない");
         let at = |dx: i64, dy: i64| {
             let c = |v: i64, d: i64| v.checked_add(d).expect("マスの座標があふれた");
@@ -302,18 +494,42 @@ impl Parking {
         };
         let area = TileRect::from_corners(at(-r, -r), at(r, r));
         let dist = |a: TilePos| a.x.abs_diff(dest.front.x).max(a.y.abs_diff(dest.front.y));
-        let mut near: Vec<(u64, BuildingId)> = buildings
+        let own_building = own.and_then(LotId::building);
+        let mut near: Vec<(u64, LotId)> = buildings
             .fronts_in(area)
             .filter(|id| *id != to)
             .filter_map(|id| Some((id, buildings.get(id)?)))
-            .filter(|(id, b)| self.is_free(*id, b, own))
-            .map(|(id, b)| (dist(b.front), id))
+            .filter(|(id, b)| self.is_free(*id, b, own_building))
+            .map(|(id, b)| (dist(b.front), LotId::Building(id)))
             .collect();
+        let first = match own {
+            Some(LotId::Rented(c))
+                if home == Some(to) && shared_facility(facilities, c).is_some() =>
+            {
+                Some(LotId::Rented(c))
+            }
+            _ => self
+                .is_free(to, dest, own_building)
+                .then_some(LotId::Building(to)),
+        };
+        for f in facilities.iter().filter(|f| f.kind.is_parking()) {
+            let (c, d) = (f.area.min, dist(f.front));
+            let lot = if own == Some(LotId::Rented(c)) {
+                LotId::Rented(c)
+            } else if self.shared_lot(c).has_room(f.kind.parking_spaces()) {
+                LotId::Shared(c)
+            } else {
+                continue;
+            };
+            if d <= PARK_RADIUS && first != Some(lot) {
+                near.push((d, lot));
+            }
+        }
+        // `LotId` は建物を先に並べるので、距離が同じなら建物を先に試す。
         near.sort_unstable();
-        let first = self.is_free(to, dest, own).then_some(to);
         first
             .into_iter()
-            .chain(near.into_iter().map(|(_, id)| id))
+            .chain(near.into_iter().map(|(_, lot)| lot))
             .collect()
     }
 }
@@ -321,6 +537,10 @@ impl Parking {
 impl StateHash for Parking {
     fn write_state(&self, h: &mut StateHasher) {
         h.write(&self.lots);
+        // 共同の駐車場のない街では、ハッシュが前と変わらないようにする。
+        if !self.shared.is_empty() {
+            h.write(&self.shared);
+        }
     }
 }
 
@@ -356,6 +576,24 @@ pub fn building_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
 /// 出入りの位置が道路の上に取れなければ（行き止まりの端など）、出入口の位置にする。
 pub fn lot_spot(net: &Network, b: &Building) -> Option<SidewalkPos> {
     lot_choice(net, b).map(|(p, _)| p)
+}
+
+/// 共同の駐車場の出入りの位置。施設の正面のマス（`Facility::front`）の前の道路の、施設の側の歩道の上である。
+/// 歩道の上でもあり、同じ側の車のリンクの上でもある。面した道路がなければ `None`。
+pub fn facility_spot(net: &Network, f: &Facility) -> Option<SidewalkPos> {
+    let link = f.entrance?;
+    let line = net.segment_line(link.segment)?;
+    let road = TilePos::new(
+        f.front.x.checked_add(f.toward_road.0)?,
+        f.front.y.checked_add(f.toward_road.1)?,
+    );
+    let k = line.position_of(road)?;
+    let steps = match link.dir {
+        Dir::Forward => k,
+        Dir::Backward => line.len.checked_sub(k)?,
+    };
+    let at = steps.checked_mul(u64::try_from(TILE_MM).ok()?)?;
+    SidewalkPos::on_any_link(net, link, LaneOffset(u32::try_from(at).ok()?))
 }
 
 /// 切り欠いた駐車場が寄る、間口の端。
@@ -592,7 +830,7 @@ fn reachable(
 
 impl Trip {
     /// 空きを押さえている駐車場。車を停めるまでのあいだだけ持つ。
-    pub fn parking_lot(&self) -> Option<BuildingId> {
+    pub fn parking_lot(&self) -> Option<LotId> {
         self.then.lot()
     }
 }
@@ -619,67 +857,106 @@ impl Trips {
         self.parking.lots.iter().map(|(id, l)| (*id, *l))
     }
 
+    /// 角のマスが `corner` の共同の駐車場の台数。
+    pub fn shared_lot(&self, corner: TilePos) -> SharedLot {
+        self.parking.shared_lot(corner)
+    }
+
+    /// 共同の駐車場ごとの、貸した枠の数を `counts` にする。載っていない駐車場は 0 にする。
+    /// 世帯の枠（`CarPlaces`）を変えたあとに呼ぶ。
+    pub fn set_rented(&mut self, counts: &BTreeMap<TilePos, u32>) {
+        self.parking.set_rented(counts);
+    }
+
+    /// 取り壊した共同の駐車場 `corner` の台数を捨てる。そこに停めてあった世帯の車は、どこにもないものにする。
+    /// 向かっている車は、着いても停めずに消える。
+    pub fn forget_shared_lot(&mut self, corner: TilePos) {
+        self.parking.shared.remove(&corner);
+        self.commuters.forget_cars_at(corner);
+    }
+
     /// 建物 `from` から建物 `to` へ、歩く → 車 → 歩く で向かう移動を作る。行き先の駐車場の空きは
     /// このときに押さえ、`from` に停めてある車があれば 1 台出す。建物がないか、行き先の近くがどこも満車か、
     /// 3 つの区切りのどれかの経路がなければ `None` で、駐車場も変えない。運転する人は世帯の枠を持たない
-    /// ものとし、住宅の駐車場には停めない。
+    /// ものとし、住宅の駐車場には停めない。`facilities` は共同の駐車場を探すのに使う。
     pub fn spawn_drive(
         &mut self,
         net: &Network,
         router: &mut AstarRouter,
-        buildings: &Buildings,
+        (buildings, facilities): (&Buildings, &[Facility]),
         (from, to): (BuildingId, BuildingId),
         now: Tick,
     ) -> Option<TripId> {
-        self.spawn_drive_taking(net, router, buildings, (from, to), Some(from), None, now)
+        let take = Some(LotId::Building(from));
+        let sites = (buildings, facilities);
+        self.spawn_drive_taking(net, router, sites, (from, to), take, (None, None), now)
     }
 
     /// [`Trips::spawn_drive`] と同じだが、停めてある車を出す駐車場を `take` で決め、運転する人の世帯の枠のある
-    /// 駐車場を `own` で渡す。`take` が `None` ならどの駐車場からも出さない。
+    /// 駐車場と家を `(own, home)` で渡す。`take` が `None` ならどの駐車場からも出さない。
+    ///
+    /// 車が共同の駐車場から出るときは、出発の建物の出入口からその駐車場の出入りの位置まで歩いて乗る。
+    /// 共同の駐車場の枠を借りた世帯の車がまだどこにもなく、家から出るときは、借りた枠から車が出る。
     #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_drive_taking(
         &mut self,
         net: &Network,
         router: &mut AstarRouter,
-        buildings: &Buildings,
+        (buildings, facilities): (&Buildings, &[Facility]),
         (from, to): (BuildingId, BuildingId),
-        take: Option<BuildingId>,
-        own: Option<BuildingId>,
+        take: Option<LotId>,
+        (own, home): (Option<LotId>, Option<BuildingId>),
         now: Tick,
     ) -> Option<TripId> {
         let from_b = buildings.get(from)?;
         let door = building_spot(net, from_b)?;
         router.sync(net);
-        let origin = reachable_lot_spot(net, router, from_b)?;
+        let start = take.or(match own {
+            Some(LotId::Rented(c)) if home == Some(from) => Some(LotId::Rented(c)),
+            _ => None,
+        });
+        let origin = match start.and_then(LotId::shared_corner) {
+            Some(c) => facility_spot(net, shared_facility(facilities, c)?)?,
+            None => reachable_lot_spot(net, router, from_b)?,
+        };
         let dest = building_spot(net, buildings.get(to)?)?;
-        let took = take.filter(|b| self.parking.unpark(*b));
-        let id = self.start_drive(net, router, buildings, (door, origin), (to, dest), own, now);
-        if let (None, Some(b)) = (id, took) {
-            self.parking.update(b, |l| {
-                l.parked = l.parked.checked_add(1).expect("停めた台数があふれた");
-            });
+        let took = take.filter(|lot| self.parking.unpark(*lot));
+        let id = self.start_drive(
+            net,
+            router,
+            (buildings, facilities),
+            (door, origin),
+            (to, dest),
+            (own, home),
+            now,
+        );
+        if let (None, Some(lot)) = (id, took) {
+            self.parking.put_back(lot);
         }
         id
     }
 
     /// 出入口 `door` から駐車場の出入りの位置 `origin` まで歩き、そこから建物 `to`（出入口 `dest`）へ
-    /// 車で向かう移動を作る。運転する人の世帯の枠のある駐車場は `own` である。
+    /// 車で向かう移動を作る。運転する人の世帯の枠のある駐車場と家は `(own, home)` である。
     #[allow(clippy::too_many_arguments)]
     fn start_drive(
         &mut self,
         net: &Network,
         router: &mut AstarRouter,
-        buildings: &Buildings,
+        (buildings, facilities): (&Buildings, &[Facility]),
         (door, origin): (SidewalkPos, SidewalkPos),
         (to, dest): (BuildingId, SidewalkPos),
-        own: Option<BuildingId>,
+        (own, home): (Option<LotId>, Option<BuildingId>),
         now: Tick,
     ) -> Option<TripId> {
         router.sync(net);
         // 近い順に試し、車でも歩いても行ける最初の駐車場にする。
-        let candidates = self
-            .parking
-            .candidates(buildings, (to, buildings.get(to)?), own);
+        let candidates = self.parking.candidates(
+            (buildings, facilities),
+            (to, buildings.get(to)?),
+            own,
+            home,
+        );
         if candidates.is_empty() {
             self.parking_tally.lots_full = self.parking_tally.lots_full.saturating_add(1);
             self.lot_misses.add(to, now.0 / TICKS_PER_DAY, |m| {
@@ -688,7 +965,12 @@ impl Trips {
             return None;
         }
         let (lot, park_at) = candidates.into_iter().find_map(|lot| {
-            let at = reachable_lot_spot(net, router, buildings.get(lot)?)?;
+            let at = match lot {
+                LotId::Building(b) => reachable_lot_spot(net, router, buildings.get(b)?)?,
+                LotId::Shared(c) | LotId::Rented(c) => {
+                    facility_spot(net, shared_facility(facilities, c)?)?
+                }
+            };
             (reachable(net, router, LaneMode::Car, origin, at)
                 && reachable(net, router, LaneMode::Sidewalk, at, dest))
             .then_some((lot, at))
@@ -705,7 +987,9 @@ impl Trips {
         self.parking.reserve(lot);
         let tally = &mut self.parking_tally;
         tally.drives = tally.drives.saturating_add(1);
-        if lot != to {
+        // 家に帰って借りた枠に停めるのは、行き先の駐車場に停められなかったのではない。
+        let rented_home = matches!(lot, LotId::Rented(_)) && home == Some(to);
+        if lot != LotId::Building(to) && !rented_home {
             tally.parked_elsewhere = tally.parked_elsewhere.saturating_add(1);
             self.lot_misses.add(to, now.0 / TICKS_PER_DAY, |m| {
                 m.parked_elsewhere = m.parked_elsewhere.saturating_add(1);

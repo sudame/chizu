@@ -715,6 +715,9 @@ impl World {
         let (gone, kept): (Vec<Facility>, Vec<Facility>) =
             self.facilities.iter().partition(|f| overlaps(f.area, area));
         self.facilities = kept;
+        for f in gone.iter().filter(|f| f.kind.is_parking()) {
+            self.forget_shared_lot(f.area.min);
+        }
         let freed: Vec<_> = gone
             .iter()
             .flat_map(|f| crate::zone::tiles_of(f.area))

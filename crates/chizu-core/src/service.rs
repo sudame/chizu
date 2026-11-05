@@ -25,11 +25,36 @@ use crate::tile::{TilePos, TileRect};
 use crate::units::Money;
 
 impl ServiceKind {
-    pub const ALL: [ServiceKind; 2] = [ServiceKind::PowerPlant, ServiceKind::WaterPump];
+    pub const ALL: [ServiceKind; 4] = [
+        ServiceKind::PowerPlant,
+        ServiceKind::WaterPump,
+        ServiceKind::ParkingLot,
+        ServiceKind::ParkingGarage,
+    ];
+
+    /// 電気と水道を供給する施設。並びは [`ServiceKind::utility_slot`] の順である。
+    pub const UTILITIES: [ServiceKind; 2] = [ServiceKind::PowerPlant, ServiceKind::WaterPump];
+
+    /// 共同の駐車場。
+    pub const PARKING: [ServiceKind; 2] = [ServiceKind::ParkingLot, ServiceKind::ParkingGarage];
 
     /// `ALL` の中での位置。施設の種類ごとの表の添え字に使う。
     pub fn index(self) -> usize {
         self as usize - 1
+    }
+
+    /// 電気なら 0、水道なら 1。共同の駐車場は電気も水道も供給しないので `None`。
+    pub fn utility_slot(self) -> Option<usize> {
+        match self {
+            ServiceKind::PowerPlant => Some(0),
+            ServiceKind::WaterPump => Some(1),
+            ServiceKind::ParkingLot | ServiceKind::ParkingGarage => None,
+        }
+    }
+
+    /// 共同の駐車場か。
+    pub fn is_parking(self) -> bool {
+        self.parking_spaces() > 0
     }
 
     /// 建設費。
@@ -37,6 +62,8 @@ impl ServiceKind {
         match self {
             ServiceKind::PowerPlant => Money(60_000),
             ServiceKind::WaterPump => Money(25_000),
+            ServiceKind::ParkingLot => Money(3_000),
+            ServiceKind::ParkingGarage => Money(72_000),
         }
     }
 
@@ -45,22 +72,34 @@ impl ServiceKind {
         match self {
             ServiceKind::PowerPlant => Money(1_200),
             ServiceKind::WaterPump => Money(600),
+            ServiceKind::ParkingLot => Money(96),
+            ServiceKind::ParkingGarage => Money(2_880),
         }
     }
 
     /// 間口と奥行き（マス）。
     pub fn size(self) -> (u64, u64) {
         match self {
-            ServiceKind::PowerPlant => (4, 4),
-            ServiceKind::WaterPump => (2, 2),
+            ServiceKind::PowerPlant | ServiceKind::ParkingGarage => (4, 4),
+            ServiceKind::WaterPump | ServiceKind::ParkingLot => (2, 2),
         }
     }
 
-    /// 供給量。建物の需要と同じ単位である。
+    /// 電気か水道の供給量。建物の需要と同じ単位である。共同の駐車場は 0。
     pub fn capacity(self) -> u64 {
         match self {
             ServiceKind::PowerPlant => 3_600,
             ServiceKind::WaterPump => 3_000,
+            ServiceKind::ParkingLot | ServiceKind::ParkingGarage => 0,
+        }
+    }
+
+    /// 共同の駐車場の台数。平面は 1 マスに 3 台、駐車場ビルはそれを 5 層に積む。ほかの施設は 0。
+    pub fn parking_spaces(self) -> u32 {
+        match self {
+            ServiceKind::PowerPlant | ServiceKind::WaterPump => 0,
+            ServiceKind::ParkingLot => 12,
+            ServiceKind::ParkingGarage => 240,
         }
     }
 }
@@ -315,9 +354,9 @@ pub fn isolated_facilities(
     facilities
         .iter()
         .filter(|f| {
-            let slot = match f.kind {
-                ServiceKind::PowerPlant => 0,
-                ServiceKind::WaterPump => 1,
+            // 共同の駐車場は電気も水道も供給しないので、網につながっていなくても知らせない。
+            let Some(slot) = f.kind.utility_slot() else {
+                return false;
             };
             let Some(&c) = f.entrance.and_then(|e| of_segment.get(&e.segment)) else {
                 return true;
@@ -347,11 +386,9 @@ fn tally(network: &Network, facilities: &[Facility], buildings: &Buildings) -> T
     let mut comps = Components::of(network);
     let mut balance = vec![[Balance::default(); 2]; comps.parent.len()];
     for f in facilities {
-        if let Some(c) = f.entrance.and_then(|e| comps.of_link(network, e)) {
-            let slot = match f.kind {
-                ServiceKind::PowerPlant => 0,
-                ServiceKind::WaterPump => 1,
-            };
+        if let Some(c) = f.entrance.and_then(|e| comps.of_link(network, e))
+            && let Some(slot) = f.kind.utility_slot()
+        {
             balance[c][slot].capacity += f.kind.capacity();
         }
     }
@@ -487,8 +524,7 @@ pub fn evaluate_supply(
         .iter()
         .map(|(id, _)| (*id, Supply::default()))
         .collect();
-    for kind in ServiceKind::ALL {
-        let slot = kind.index();
+    for (slot, kind) in ServiceKind::UTILITIES.into_iter().enumerate() {
         let sources: Vec<OnSegment> = facilities
             .iter()
             .filter(|f| f.kind == kind)
@@ -522,9 +558,10 @@ pub fn evaluate_supply(
                 Some(rest) if demand <= rest => {
                     left[c] = Some(rest - demand);
                     let s = &mut out[i].1;
-                    match kind {
-                        ServiceKind::PowerPlant => s.power = true,
-                        ServiceKind::WaterPump => s.water = true,
+                    if slot == 0 {
+                        s.power = true;
+                    } else {
+                        s.water = true;
                     }
                 }
                 // 収まらない建物が出たら、この成分のそれより遠い建物には配らない。

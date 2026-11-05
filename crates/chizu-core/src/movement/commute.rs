@@ -12,18 +12,23 @@
 //! 職場が変わるかなくなった住民が家でない所に停めた車は、どこにもないものに戻す（[`Trips::return_car`]）。
 //! ほかの住民が乗っているときや、離れた所に停めてあるときは、車がないものとして歩く。
 //! 世帯の車がまだどこにもなければ、車は出発の建物から現れる。停めてある台数は世帯の数を超えて増えない。
+//! 共同の駐車場の枠を借りた世帯（[`CarPlace::Shared`]）の車は、家にいるあいだ借りた枠に停まり、
+//! 家と借りた枠のあいだは歩く。
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::{Trips, building_spot};
+use super::parking::lot_exists;
+use super::{LotId, Trips, building_spot};
 use crate::building::Buildings;
 use crate::car_place::CarPlace;
 use crate::citizens::Activity;
 use crate::id::{BuildingId, CitizenId, HouseholdId, TripId};
 use crate::network::{Network, TILE_MM};
 use crate::routing::AstarRouter;
+use crate::service::Facility;
 use crate::state_hash::{StateHash, StateHasher};
+use crate::tile::TilePos;
 use crate::units::Tick;
 
 /// 車を持たない世帯の住民が車で向かう、建物どうしの直線の距離の下限（mm）。500m である。
@@ -53,7 +58,7 @@ impl StateHash for Commuter {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HouseholdCar {
     /// 駐車場 `lot` に停めてある。`by` は停めた住民である。
-    Parked { lot: BuildingId, by: CitizenId },
+    Parked { lot: LotId, by: CitizenId },
     /// 移動 `0` が使っている。
     InUse(TripId),
 }
@@ -84,7 +89,7 @@ pub(super) struct Commuters {
 
 impl Commuters {
     /// 移動 `trip` の車を駐車場 `lot` に停めた。通勤でないか、世帯の車でなければ何もせず `false`。
-    pub(super) fn parked(&mut self, trip: TripId, lot: BuildingId) -> bool {
+    pub(super) fn parked(&mut self, trip: TripId, lot: LotId) -> bool {
         let Some(c) = self.by_trip.get(&trip) else {
             return false;
         };
@@ -104,6 +109,14 @@ impl Commuters {
         self.by_trip
             .get(&trip)
             .is_some_and(|c| self.cars.get(&c.household) != Some(&HouseholdCar::InUse(trip)))
+    }
+
+    /// 共同の駐車場 `corner` に停めてある世帯の車を、どこにもないものにする。
+    pub(super) fn forget_cars_at(&mut self, corner: TilePos) {
+        self.cars.retain(|_, car| match car {
+            HouseholdCar::Parked { lot, .. } => lot.shared_corner() != Some(corner),
+            HouseholdCar::InUse(_) => true,
+        });
     }
 
     /// 移動 `trip` を覚えていた分を消す。世帯の車を使ったまま停めずに終わったなら、車はどこにもないものとする。
@@ -139,11 +152,8 @@ pub struct CommuteRequest {
 
 impl CommuteRequest {
     /// 世帯の枠のある駐車場。住宅の駐車場は、その建物の自宅の枠を持つ世帯の車だけが使える。
-    fn own_lot(&self) -> Option<BuildingId> {
-        match self.place {
-            Some(CarPlace::Home) => self.home,
-            None => None,
-        }
+    fn own_lot(&self) -> Option<LotId> {
+        CarPlace::lot(self.place, self.home)
     }
 }
 
@@ -176,7 +186,7 @@ impl Trips {
         &mut self,
         net: &Network,
         router: &mut AstarRouter,
-        buildings: &Buildings,
+        (buildings, facilities): (&Buildings, &[Facility]),
         requests: &[CommuteRequest],
         now: Tick,
     ) -> Vec<Option<TripId>> {
@@ -196,9 +206,14 @@ impl Trips {
                 // 車が停めてあれば、その駐車場から出す。まだどこにもなければ、車は出発の建物から現れる。
                 let take = match self.commuters.cars.get(&r.who.household).copied() {
                     None => None,
-                    Some(HouseholdCar::Parked { lot, .. }) if buildings.get(lot).is_none() => None,
+                    Some(HouseholdCar::Parked { lot, .. })
+                        if !lot_exists(lot, buildings, facilities) =>
+                    {
+                        None
+                    }
                     Some(HouseholdCar::Parked { lot, by })
-                        if by == r.who.citizen || Some(lot) == r.home && lot == r.from =>
+                        if by == r.who.citizen
+                            || Some(lot) == r.own_lot() && r.home == Some(r.from) =>
                     {
                         Some(lot)
                     }
@@ -211,7 +226,7 @@ impl Trips {
                             HouseholdCar::Parked { .. } if r.home.is_none() => {
                                 &mut tally.no_car_other
                             }
-                            HouseholdCar::Parked { lot, .. } if Some(lot) == r.home => {
+                            HouseholdCar::Parked { lot, .. } if Some(lot) == r.own_lot() => {
                                 &mut tally.no_car_at_home
                             }
                             HouseholdCar::Parked { .. } => &mut tally.no_car_parked_away,
@@ -223,10 +238,10 @@ impl Trips {
                 let id = self.spawn_drive_taking(
                     net,
                     router,
-                    buildings,
+                    (buildings, facilities),
                     (r.from, r.to),
                     take,
-                    r.own_lot(),
+                    (r.own_lot(), r.home),
                     now,
                 )?;
                 self.commuters
@@ -278,18 +293,13 @@ impl Trips {
         }
     }
 
-    /// 住民 `citizen` が家（`home`）でない所に停めた世帯の車を、どこにもないものに戻す。職場が変わったり
-    /// なくなったりした住民の車が、前の職場に停めたまま残らないようにする。次に車で出る住民の出発の建物から
-    /// 車が現れる。
-    pub fn return_car(
-        &mut self,
-        household: HouseholdId,
-        citizen: CitizenId,
-        home: Option<BuildingId>,
-    ) {
+    /// 住民 `citizen` が世帯の枠（`own`。自宅か借りた枠）でない所に停めた世帯の車を、どこにもないものに戻す。
+    /// 職場が変わったりなくなったりした住民の車が、前の職場に停めたまま残らないようにする。次に車で出る住民の
+    /// 出発の建物から車が現れる。
+    pub fn return_car(&mut self, household: HouseholdId, citizen: CitizenId, own: Option<LotId>) {
         if let Some(HouseholdCar::Parked { lot, by }) = self.commuters.cars.get(&household).copied()
             && by == citizen
-            && Some(lot) != home
+            && Some(lot) != own
         {
             self.commuters.cars.remove(&household);
             self.parking.unpark(lot);
