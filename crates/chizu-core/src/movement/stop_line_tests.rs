@@ -44,7 +44,10 @@ fn the_lines_sit_where_the_map_draws_them() {
     let len = 10 * TILE_MM;
     let back = half + ZEBRA_MM + STOP_GAP_MM + STOP_WIDTH_MM + DRAWN_CAR_HALF_MM;
     assert_eq!(stop_line(&n, into), off(len - back));
-    assert_eq!(clear_line(&n, out), off(half + ZEBRA_MM + DRAWN_CAR_HALF_MM));
+    assert_eq!(
+        clear_line(&n, out),
+        off(half + ZEBRA_MM + DRAWN_CAR_HALF_MM)
+    );
     // 行き止まりの端には区間がない。
     assert_eq!(clear_line(&n, into), LaneOffset::START);
     assert_eq!(stop_line(&n, out), off(len));

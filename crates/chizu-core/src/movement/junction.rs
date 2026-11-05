@@ -318,11 +318,13 @@ pub(super) fn holds(
             )
         });
         placed.clear();
-        placed.extend(
-            inside[lo..hi]
-                .iter()
-                .map(|x| (Move::into_lane(net, x.from, x.to, x.lane), x.stopped, x.clears)),
-        );
+        placed.extend(inside[lo..hi].iter().map(|x| {
+            (
+                Move::into_lane(net, x.from, x.to, x.lane),
+                x.stopped,
+                x.clears,
+            )
+        }));
         for (c, mv) in &group {
             // この tick のうちに四角に入らない候補は、この tick のうちに四角を抜ける車を待たない。
             let blocked = |skip_stopped: bool| {

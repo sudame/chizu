@@ -299,7 +299,10 @@ impl Trip {
                 link: next,
                 along: i64::from(self.offset.0) - i64::from(self.link_len.0),
                 len,
-                prev: Some((link, mm(self.shift_at(net, stop_line::stop_line(net, link))))),
+                prev: Some((
+                    link,
+                    mm(self.shift_at(net, stop_line::stop_line(net, link))),
+                )),
                 lane_shift: mm(lane_shift::target(net, next, step, index)),
             });
         }
@@ -999,7 +1002,7 @@ impl Trips {
         let mut routes = plan(router, net, mode, &ends, false).into_iter();
         // 車は、出発のリンクの車線のうち車の少ない車線に置く。前の車と重なるなら、その後ろの空いた
         // 位置まで下げる。どの車線にも空きがなければ、空くまで待たせる。
-        let mut ix = car::LaneIndex::of(&self.rows, None);
+        let mut ix = car::LaneIndex::of(&self.rows, net, None);
         let (zones, entering) = if mode == LaneMode::Car {
             (
                 crossing::jay_zones(net, &self.rows),

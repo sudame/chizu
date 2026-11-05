@@ -107,17 +107,21 @@ pub(super) fn on_road(t: &Trip) -> bool {
     t.mode == LaneMode::Car && !t.waiting
 }
 
-/// 車線ごとの、車線の上の車の位置。前から順に並ぶ。
+/// 車線ごとの、車線の上の車の位置。前から順に並ぶ。通り抜けの区間に入ってその車線へ向かう車は、
+/// 車線の始まりにいるものとして入れる。その車がノードを越えたときに、車線の始まりに空きが残るようにする。
 #[derive(Default)]
 pub(super) struct LaneIndex(BTreeMap<LaneId, Vec<LaneOffset>>);
 
 impl LaneIndex {
     /// 行 `skip` を除いた、車線の上の車の位置。
-    pub(super) fn of(rows: &[Option<Trip>], skip: Option<usize>) -> LaneIndex {
+    pub(super) fn of(rows: &[Option<Trip>], net: &Network, skip: Option<usize>) -> LaneIndex {
         let mut ix = LaneIndex::default();
         for (i, t) in rows.iter().enumerate() {
             if let Some(t) = t.as_ref().filter(|t| on_road(t) && Some(i) != skip) {
                 ix.0.entry(t.lane).or_default().push(t.offset);
+                if let Some(l) = bound_lane(net, t) {
+                    ix.0.entry(l).or_default().push(LaneOffset::START);
+                }
             }
         }
         for v in ix.0.values_mut() {
@@ -252,7 +256,7 @@ pub(super) fn place(
 /// 重ならない車線のうち車の少ない車線に置く。どこも重なるなら（道路の種類を下げて車線が減ったときなど）、
 /// 止めて出発を待つ車にし、空いたら `place` で置き直す。
 pub(super) fn keep_lane(rows: &mut [Option<Trip>], net: &Network, i: usize, index: usize) {
-    let ix = LaneIndex::of(rows, Some(i));
+    let ix = LaneIndex::of(rows, net, Some(i));
     let t = rows[i].as_ref().expect("置く車がない");
     let lanes: Vec<LaneId> = net.link_lanes(t.link()).collect();
     let same = lanes[index.min(lanes.len() - 1)];
@@ -292,6 +296,8 @@ impl LaneState {
                 *r = (t.offset, t.speed);
             }
             if let Some(l) = bound_lane(net, t) {
+                // 車線を選ぶときは、その車線へ向かう車も数える。
+                *st.count.entry(l).or_insert(0) += 1;
                 let at = i64::from(t.offset.0) - i64::from(t.link_len.0);
                 let r = st.bound.entry(l).or_insert((at, t.speed));
                 if at < r.0 {
@@ -963,7 +969,7 @@ pub(super) fn step(
         .collect();
     let mut still_waiting = Vec::new();
     if !waiting.is_empty() {
-        let mut ix = LaneIndex::of(rows, None);
+        let mut ix = LaneIndex::of(rows, net, None);
         let entering = Entering::of(rows, net, conn);
         for i in waiting {
             if !place(rows, net, &mut ix, i, &occupied.zones, &entering) {
