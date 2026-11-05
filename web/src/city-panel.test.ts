@@ -329,9 +329,11 @@ describe("city_stats の並びの形", () => {
   });
 
   test("Worker から来る cityStats は、形が合うものだけ受け取る", () => {
-    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 0, 0, 0, 0] })).toBe(true);
-    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 2, 0, 5] })).toBe(false);
-    expect(isWorkerToMain({ kind: "cityStats", stats: fixed })).toBe(false);
+    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 0, 0, 0, 0], tick: 0 })).toBe(
+      true,
+    );
+    expect(isWorkerToMain({ kind: "cityStats", stats: [...fixed, 2, 0, 5], tick: 0 })).toBe(false);
+    expect(isWorkerToMain({ kind: "cityStats", stats: fixed, tick: 0 })).toBe(false);
   });
 
   test("形の合わない並びでも、内訳は空になるだけで読める", () => {

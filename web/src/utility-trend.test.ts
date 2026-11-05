@@ -67,7 +67,8 @@ describe("尽きるまでの時間の言い方", () => {
   test("時計の時間で言う", () => {
     expect(formatTimeUntilOut(100)).toBe("1 時間もたたずに");
     expect(formatTimeUntilOut(8 * MIN_TREND_TICKS)).toBe("約 8 時間で");
-    expect(formatTimeUntilOut(8.4 * MIN_TREND_TICKS)).toBe("約 8 時間で");
+    expect(formatTimeUntilOut(8.9 * MIN_TREND_TICKS)).toBe("約 8 時間で");
+    expect(formatTimeUntilOut(2.9 * TICKS_PER_DAY)).toBe("約 2 日で");
     expect(formatTimeUntilOut(2 * TICKS_PER_DAY)).toBe("約 2 日で");
   });
 });

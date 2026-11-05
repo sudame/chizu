@@ -78,7 +78,7 @@ export function formatTimeUntilOut(ticks: number): string {
     return "1 時間もたたずに";
   }
   if (hours >= 48) {
-    return `約 ${Math.round(hours / 24).toLocaleString("ja-JP")} 日で`;
+    return `約 ${Math.floor(hours / 24).toLocaleString("ja-JP")} 日で`;
   }
-  return `約 ${Math.round(hours).toLocaleString("ja-JP")} 時間で`;
+  return `約 ${Math.floor(hours).toLocaleString("ja-JP")} 時間で`;
 }

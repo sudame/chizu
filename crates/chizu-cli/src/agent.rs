@@ -75,7 +75,9 @@ observe の utilities（power と water）:
     each（その網ごとの capacity、demand、headroom、headroomPeople、代表のマス at）。
   trend の見方: 前の日の同じ時刻の値は持たないので、前の observe（sinceLastObserve と同じ last-observe.json）の headroomPeople との差を、
     経過した tick で 1 日（7200 tick）あたりに引き伸ばして見積もる。basis は "sinceLastObserve"、見積もれないときは null で、reason に理由を書く。
-    見積もれないのは、前の observe がない（フィードバックのディレクトリなど）、前の observe から 300 tick（ゲーム内の 1 時間）未満、headroomPeople が決まらない、のとき。
+    見積もれないのは、前の observe がない（フィードバックのディレクトリなど）、前の observe から 300 tick（ゲーム内の 1 時間）未満、
+    前の observe から 7200 tick（ゲーム内の 1 日）を超えている（間の人口の伸びの変化を均してしまうので）、
+    前の observe から発電所か浄水場の数が変わった（余りの差に施設の増減が入るので）、headroomPeople が決まらない、のとき。
     state は "shrinking"（減っている）、"notShrinking"（増えたか同じ）、"short"（すでに足りない）、"unknown"（見積もれない）。
     changePerDay は 1 日あたりの headroomPeople の増減（負なら減っている）。式は (now - before) × 7200 ÷ elapsedTicks を 0 向きに丸めた整数。
     ticksUntilOut は state が "shrinking" のときだけ、同じ減り方が続くとして余りが 0 を割るまでの tick（now × elapsedTicks ÷ (before - now) を切り捨て）。
@@ -1637,6 +1639,7 @@ fn since_last_observe(
 /// 経過が [`MIN_TREND_TICKS`] に満たないときと、前の observe がないときは、見積もらずに理由を書く。
 fn attach_utility_trends(seen: &mut Value, last: Option<&Value>) {
     let tick = seen.get("tick").and_then(Value::as_u64);
+    let seen_facilities = seen.get("facilities").cloned().unwrap_or(Value::Null);
     for kind in ["power", "water"] {
         let Some(main) = seen.pointer_mut(&format!("/utilities/{kind}/main")) else {
             continue;
@@ -1650,15 +1653,24 @@ fn attach_utility_trends(seen: &mut Value, last: Option<&Value>) {
                 .and_then(Value::as_i64)
         });
         let from_tick = last.and_then(|l| l.get("tick").and_then(Value::as_u64));
-        main["trend"] = utility_trend(now, before, from_tick, tick);
+        let facilities_changed = ["PowerPlant", "WaterPump"].iter().any(|k| {
+            let was = last.and_then(|l| l.pointer(&format!("/values/facilities.{k}")));
+            // 前の observe に施設の数がなければ、増えていないとは言えないので、変わったものとして扱う
+            was.is_none_or(|w| Some(w) != seen_facilities.get(*k))
+        });
+        main["trend"] = utility_trend(now, before, from_tick, tick, facilities_changed);
     }
 }
+
+/// 減り方を見積もる最長の間隔（tick）。ゲーム内の 1 日。これを超えると、間の人口の伸びの変化を均してしまい、当てにならない。
+const MAX_TREND_TICKS: u64 = TICKS_PER_DAY;
 
 fn utility_trend(
     now: Option<i64>,
     before: Option<i64>,
     from_tick: Option<u64>,
     tick: Option<u64>,
+    facilities_changed: bool,
 ) -> Value {
     let none = |reason: String| {
         json!({
@@ -1682,6 +1694,14 @@ fn utility_trend(
         );
     };
     let elapsed = tick.saturating_sub(from_tick);
+    if facilities_changed {
+        return none("前の observe から発電所か浄水場の数が変わったので、余りの差は施設の増減を含み、減り方として使えない".into());
+    }
+    if elapsed > MAX_TREND_TICKS {
+        return none(format!(
+            "前の observe から {elapsed} tick（{MAX_TREND_TICKS} tick = ゲーム内の 1 日超）あいていて、人口の伸びが変わるので当てにならない。1 日以内にあけて observe する"
+        ));
+    }
     let Some(trend) = headroom_trend(i128::from(before), i128::from(now), elapsed) else {
         return none(format!(
             "前の observe から {elapsed} tick しかたっておらず、短すぎて見積もれない（{MIN_TREND_TICKS} tick = ゲーム内の 1 時間以上あけて observe する）"
@@ -1929,25 +1949,25 @@ mod tests {
     #[test]
     fn trend_of_a_shrinking_headroom_gives_time_until_out() {
         // 1 日で 1,800 人分から 1,200 人分へ。1 日あたり -600 で、あと 2 日 = 48 時間。
-        let t = utility_trend(Some(1200), Some(1800), Some(0), Some(7200));
+        let t = utility_trend(Some(1200), Some(1800), Some(0), Some(7200), false);
         assert_eq!(t["state"], "shrinking");
         assert_eq!(t["basis"], "sinceLastObserve");
         assert_eq!(t["changePerDay"], -600);
         assert_eq!(t["ticksUntilOut"], 14_400);
         assert_eq!(t["hoursUntilOut"], 48.0);
         // 半日で同じだけ減ったなら、速さは倍で、あと 1 日 = 24 時間。
-        let t = utility_trend(Some(1200), Some(1800), Some(1000), Some(4600));
+        let t = utility_trend(Some(1200), Some(1800), Some(1000), Some(4600), false);
         assert_eq!(t["changePerDay"], -1200);
         assert_eq!(t["hoursUntilOut"], 24.0);
         // 800 tick で 1,500 から 700 へ減ると、あと 700 tick。時計の時間は小数 1 桁で 2.3 時間。
-        let t = utility_trend(Some(700), Some(1500), Some(0), Some(800));
+        let t = utility_trend(Some(700), Some(1500), Some(0), Some(800), false);
         assert_eq!(t["ticksUntilOut"], 700);
         assert_eq!(t["hoursUntilOut"], 2.3);
     }
 
     #[test]
     fn trend_of_a_growing_headroom_does_not_run_out() {
-        let t = utility_trend(Some(1800), Some(1200), Some(0), Some(7200));
+        let t = utility_trend(Some(1800), Some(1200), Some(0), Some(7200), false);
         assert_eq!(t["state"], "notShrinking");
         assert_eq!(t["changePerDay"], 600);
         assert!(t["ticksUntilOut"].is_null() && t["hoursUntilOut"].is_null());
@@ -1955,7 +1975,7 @@ mod tests {
 
     #[test]
     fn trend_of_a_shortage_is_short() {
-        let t = utility_trend(Some(-40), Some(300), Some(0), Some(7200));
+        let t = utility_trend(Some(-40), Some(300), Some(0), Some(7200), false);
         assert_eq!(t["state"], "short");
         assert!(t["ticksUntilOut"].is_null());
     }
@@ -1969,16 +1989,39 @@ mod tests {
         };
         // 前の observe がない
         assert!(
-            reason(utility_trend(Some(10), None, None, Some(7200))).contains("前の observe がない")
+            reason(utility_trend(Some(10), None, None, Some(7200), false))
+                .contains("前の observe がない")
         );
         // 短すぎる
         assert!(
-            reason(utility_trend(Some(10), Some(20), Some(100), Some(200))).contains("短すぎて")
+            reason(utility_trend(
+                Some(10),
+                Some(20),
+                Some(100),
+                Some(200),
+                false
+            ))
+            .contains("短すぎて")
+        );
+        // 施設の数が変わった、間があきすぎた
+        assert!(
+            reason(utility_trend(Some(10), Some(20), Some(0), Some(7200), true))
+                .contains("施設の増減")
+        );
+        assert!(
+            reason(utility_trend(
+                Some(10),
+                Some(20),
+                Some(0),
+                Some(7201),
+                false
+            ))
+            .contains("1 日超")
         );
         // 人数が決まらない
-        assert!(reason(utility_trend(None, Some(20), Some(0), Some(7200))).contains("null"));
+        assert!(reason(utility_trend(None, Some(20), Some(0), Some(7200), false)).contains("null"));
         assert!(
-            reason(utility_trend(Some(10), None, Some(0), Some(7200)))
+            reason(utility_trend(Some(10), None, Some(0), Some(7200), false))
                 .contains("決まっていなかった")
         );
     }

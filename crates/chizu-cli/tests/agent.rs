@@ -1150,10 +1150,10 @@ fn observe_gives_the_trend_of_a_shrinking_headroom() {
     assert!((hours - ticks as f64 / 300.0).abs() < 0.06, "{trend}");
 }
 
-/// 発電所を足して余りが増えたあとの trend は、減っていないと言い、尽きるまでの時間は出さない。
+/// 前の observe から発電所を足していると、余りの差に施設の増減が入るので、減り方は見積もらず理由を出す。
 #[test]
-fn observe_trend_of_a_growing_headroom_has_no_time_until_out() {
-    let (dir, x, y) = supplied_town("agent-trend-growing");
+fn observe_trend_is_not_estimated_across_a_new_facility() {
+    let (dir, x, y) = supplied_town("agent-trend-facility");
     let d = dir.to_str().unwrap();
     cli(&["agent", "observe", d]);
     let more = write(
@@ -1168,9 +1168,35 @@ fn observe_trend_of_a_growing_headroom_has_no_time_until_out() {
     cli(&["agent", "advance", d, "600"]);
     let o = json(&cli(&["agent", "observe", d]));
     let trend = &o["utilities"]["power"]["main"]["trend"];
-    assert_eq!(trend["state"], "notShrinking", "{trend}");
-    assert!(trend["changePerDay"].as_i64().unwrap() > 0, "{trend}");
-    assert!(trend["ticksUntilOut"].is_null() && trend["hoursUntilOut"].is_null());
+    assert_eq!(trend["state"], "unknown", "{trend}");
+    assert!(trend["basis"].is_null());
+    assert!(
+        trend["reason"].as_str().unwrap().contains("施設"),
+        "{trend}"
+    );
+    // 施設の数が前と同じなら、次の observe は見積もれる
+    cli(&["agent", "advance", d, "600"]);
+    let next = json(&cli(&["agent", "observe", d]));
+    assert_eq!(
+        next["utilities"]["power"]["main"]["trend"]["basis"],
+        "sinceLastObserve"
+    );
+}
+
+/// 前の observe から 1 日を超えてあいていると、見積もらず理由を出す。
+#[test]
+fn observe_trend_is_not_estimated_after_more_than_a_day() {
+    let (dir, _, _) = supplied_town("agent-trend-long");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "observe", d]);
+    cli(&["agent", "advance", d, "7201"]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let trend = &o["utilities"]["power"]["main"]["trend"];
+    assert_eq!(trend["state"], "unknown", "{trend}");
+    assert!(
+        trend["reason"].as_str().unwrap().contains("1 日超"),
+        "{trend}"
+    );
 }
 
 /// 前の observe の記録が壊れていても、observe は落ちず、前の値なしとして上書きする。
