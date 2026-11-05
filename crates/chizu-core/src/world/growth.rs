@@ -519,7 +519,7 @@ impl World {
                 homes_grew |= b.zone.kind() == ZoneKind::Residential;
             }
         }
-        // 住宅の段階が上がると駐車場の台数が増えるので、増えた枠を配る。
+        // 住宅の段階が上がると駐車場の台数が変わるので、枠を配り直す。増えれば配り、減れば ID の大きい世帯から取り上げる。
         if homes_grew {
             self.assign_car_places();
         }
