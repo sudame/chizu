@@ -1650,6 +1650,29 @@ mod tests {
             .find_map(|h| p.home(h).flatten())
             .expect("住む世帯がない");
         let b = w.buildings().get(home).unwrap().area;
+        // y = -10 の道路に駅（敷地は x 3〜12、y -13〜-11、駅の線路は y = -12）を置き、
+        // 駅の端から東へ線路を引いて、途中の x = 20 から 45 度で分岐させる。
+        let road = Command::BuildRoad {
+            from: TilePos::new(0, -10),
+            to: TilePos::new(30, -10),
+            kind: RoadKind::Small,
+        };
+        let station = Command::PlaceBuilding {
+            kind: ServiceKind::Station,
+            at: TilePos::new(12, -11),
+            rotation: 2,
+        };
+        let main_line = Command::BuildRail {
+            from: TilePos::new(12, -12),
+            to: TilePos::new(30, -12),
+        };
+        let branch = Command::BuildRail {
+            from: TilePos::new(20, -12),
+            to: TilePos::new(25, -17),
+        };
+        for c in [road, station, main_line, branch] {
+            assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+        }
         let areas = [
             // 道路の 1 マスだけでも、区間全体が消えて沿道の建物も消える。
             rect((20, 10), (20, 10)),
@@ -1659,6 +1682,15 @@ mod tests {
             rect((6, 8), (6, 8)),
             rect((0, 0), (40, 40)),
             rect((100, 100), (101, 101)),
+            // 線路だけ。分岐の先の区間。
+            rect((28, -12), (28, -12)),
+            // 線路だけ。駅の端と分岐のノードは、ほかの線路が残るので消えない。
+            rect((15, -12), (15, -12)),
+            // 駅だけ。駅の線路も一緒に消える。
+            rect((5, -13), (5, -13)),
+            // 線路と道路の両方にかかる。
+            rect((25, -12), (25, -10)),
+            rect((-10, -20), (40, 40)),
         ];
         for area in areas {
             let before = w.clone();
@@ -1666,10 +1698,7 @@ mod tests {
             assert_eq!(w, before, "{area:?}");
             let mut after = w.clone();
             let outcome = after.apply(&Command::Bulldoze { area });
-            if preview.segments.is_empty()
-                && preview.facilities.is_empty()
-                && preview.buildings.is_empty()
-            {
+            if preview.is_empty() {
                 assert_eq!(outcome, ApplyOutcome::Denied(DenyReason::NothingToBulldoze));
                 continue;
             }
@@ -1698,11 +1727,34 @@ mod tests {
                 .filter(|id| gone(id))
                 .count();
             assert_eq!(preview.displaced_households as usize, displaced, "{area:?}");
+            assert_eq!(
+                preview.rail_tiles as usize,
+                w.rail().rail_tile_count() - after.rail().rail_tile_count(),
+                "{area:?}"
+            );
+            assert_eq!(
+                preview.stations.len(),
+                w.rail().stations().count() - after.rail().stations().count(),
+                "{area:?}"
+            );
+            assert_eq!(
+                preview.tracks.len(),
+                w.rail().tracks().count() - after.rail().tracks().count(),
+                "{area:?}"
+            );
         }
         // 道路の 1 マスの見積もりは、区間の全体と、沿道の建物を含む。
         let one = w.bulldoze_preview(rect((20, 10), (20, 10)));
         assert!(one.road_tiles > 1);
         assert!(!one.buildings.is_empty());
+        // 分岐の手前の区間を消しても、両端のノードのマスは残る。
+        let middle = w.bulldoze_preview(rect((15, -12), (15, -12)));
+        assert_eq!((middle.tracks.len(), middle.rail_tiles), (1, 7));
+        assert!(middle.stations.is_empty() && middle.segments.is_empty());
+        let station = w.bulldoze_preview(rect((5, -13), (5, -13)));
+        assert_eq!((station.stations.len(), station.rail_tiles), (1, 9));
+        let both = w.bulldoze_preview(rect((25, -12), (25, -10)));
+        assert!(both.rail_tiles > 0 && both.road_tiles > 0);
     }
 
     /// 建物の 1 マスにかかる長方形でも、建物ごと取り壊す。区画と道路は残り、住む世帯は家なしに、

@@ -457,22 +457,20 @@ impl Rail {
         }
     }
 
-    /// 長方形にかかる駅と線路を消し、つながりのなくなったノードも消す。駅は ID の順に消し、駅の線路も一緒に消す。
-    /// 駅の外の線路は、範囲にかかった区間（ノードからノードまで）ごと消す。消すものがなければ網を変えない。
-    pub fn bulldoze(&mut self, area: TileRect) -> RailRemoval {
-        let mut removal = RailRemoval::default();
-        let gone: Vec<StationId> = self
+    /// 長方形を取り壊したときに消える駅（ID の順）と線路。長方形にかかる駅と、その駅の線路と、
+    /// 範囲にかかった駅の外の線路（ノードからノードまでの区間）である。[`Rail::bulldoze`] はこれを消す。
+    pub fn bulldoze_targets(&self, area: TileRect) -> (Vec<StationId>, BTreeSet<TrackId>) {
+        let stations: Vec<StationId> = self
             .stations
             .iter()
             .filter(|(_, s)| overlaps(s.area, area))
             .map(|(id, _)| id)
             .collect();
-        let mut tracks = BTreeSet::new();
-        for id in gone {
-            let s = self.stations.remove(id).expect("消す駅がない");
-            removal.stations.push(s.area);
-            tracks.insert(s.track);
-        }
+        let mut tracks: BTreeSet<TrackId> = stations
+            .iter()
+            .filter_map(|id| self.stations.get(*id))
+            .map(|s| s.track)
+            .collect();
         for (id, tr) in self.tracks.iter() {
             if tr.station.is_none()
                 && self
@@ -481,6 +479,18 @@ impl Rail {
             {
                 tracks.insert(id);
             }
+        }
+        (stations, tracks)
+    }
+
+    /// 長方形にかかる駅と線路を消し、つながりのなくなったノードも消す。駅は ID の順に消し、駅の線路も一緒に消す。
+    /// 駅の外の線路は、範囲にかかった区間（ノードからノードまで）ごと消す。消すものがなければ網を変えない。
+    pub fn bulldoze(&mut self, area: TileRect) -> RailRemoval {
+        let mut removal = RailRemoval::default();
+        let (gone, tracks) = self.bulldoze_targets(area);
+        for id in gone {
+            let s = self.stations.remove(id).expect("消す駅がない");
+            removal.stations.push(s.area);
         }
         for id in tracks {
             removal

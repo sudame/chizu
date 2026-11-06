@@ -9,16 +9,21 @@ export type TileBox = { min: Tile; max: Tile };
 export type BulldozePreview = {
   /** 消える道路のマスの数。 */
   roadTiles: number;
+  /** 消える線路のマスの数。駅の中を含む。 */
+  railTiles: number;
   /** 家をなくす世帯の数。 */
   displacedHouseholds: number;
   /** 消える道路の区間（交差点から交差点まで）の両端のマス。 */
   segments: { from: Tile; to: Tile }[];
   facilities: TileBox[];
   buildings: TileBox[];
+  stations: TileBox[];
+  /** 消える線路（ノードからノードまで）の両端のマス。 */
+  tracks: { from: Tile; to: Tile }[];
 };
 
 /** 先頭の個数の欄の数。chizu-wasm の `Sim::bulldoze_preview` と同じ。 */
-const HEADER = 5;
+const HEADER = 8;
 
 /** `bulldoze_preview` の数の並びを読む。空や形の合わないものは、消えるものがないとして `null` を返す。 */
 export function parseBulldozePreview(info: ArrayLike<number>): BulldozePreview | null {
@@ -33,7 +38,8 @@ export function parseBulldozePreview(info: ArrayLike<number>): BulldozePreview |
     at0(3),
     at0(4),
   ] as const;
-  if (info.length !== HEADER + 4 * (segments + facilities + buildings)) {
+  const [railTiles, stations, tracks] = [at0(5), at0(6), at0(7)] as const;
+  if (info.length !== HEADER + 4 * (segments + facilities + buildings + stations + tracks)) {
     return null;
   }
   let at = HEADER;
@@ -42,27 +48,41 @@ export function parseBulldozePreview(info: ArrayLike<number>): BulldozePreview |
     at += 4;
     return v;
   };
-  const segs = Array.from({ length: segments }, () => {
-    const [x0, y0, x1, y1] = next();
-    return { from: { x: x0, y: y0 }, to: { x: x1, y: y1 } };
-  });
+  const lines = (n: number): { from: Tile; to: Tile }[] =>
+    Array.from({ length: n }, () => {
+      const [x0, y0, x1, y1] = next();
+      return { from: { x: x0, y: y0 }, to: { x: x1, y: y1 } };
+    });
+  const segs = lines(segments);
   const boxes = (n: number): TileBox[] =>
     Array.from({ length: n }, () => {
       const [x0, y0, x1, y1] = next();
       return { min: { x: x0, y: y0 }, max: { x: x1, y: y1 } };
     });
+  const facilityBoxes = boxes(facilities);
+  const buildingBoxes = boxes(buildings);
+  const stationBoxes = boxes(stations);
   return {
     roadTiles,
+    railTiles,
     displacedHouseholds,
     segments: segs,
-    facilities: boxes(facilities),
-    buildings: boxes(buildings),
+    facilities: facilityBoxes,
+    buildings: buildingBoxes,
+    stations: stationBoxes,
+    tracks: lines(tracks),
   };
 }
 
 /** 消えるものがあるか。 */
 export function isEmptyPreview(p: BulldozePreview): boolean {
-  return p.segments.length === 0 && p.facilities.length === 0 && p.buildings.length === 0;
+  return (
+    p.segments.length === 0 &&
+    p.facilities.length === 0 &&
+    p.buildings.length === 0 &&
+    p.stations.length === 0 &&
+    p.tracks.length === 0
+  );
 }
 
 /** 道具の説明の欄に出す、消える数。消えるものがなければ空の文字列。 */
@@ -71,11 +91,17 @@ export function bulldozeSummary(p: BulldozePreview): string {
   if (p.roadTiles > 0) {
     parts.push(`道路 ${p.roadTiles.toLocaleString("ja-JP")} マス`);
   }
+  if (p.railTiles > 0) {
+    parts.push(`線路 ${p.railTiles.toLocaleString("ja-JP")} マス`);
+  }
   if (p.buildings.length > 0) {
     parts.push(`建物 ${p.buildings.length.toLocaleString("ja-JP")} 棟`);
   }
   if (p.facilities.length > 0) {
     parts.push(`施設 ${p.facilities.length.toLocaleString("ja-JP")}`);
+  }
+  if (p.stations.length > 0) {
+    parts.push(`駅 ${p.stations.length.toLocaleString("ja-JP")}`);
   }
   if (p.displacedHouseholds > 0) {
     parts.push(`家をなくす世帯 ${p.displacedHouseholds.toLocaleString("ja-JP")}`);
