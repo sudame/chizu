@@ -1,5 +1,5 @@
 // 路線の一覧。鉄道の道具の帯の中に出し、路線ごとに色、駅の並び、本数と上限、止まっている印を見せる。
-// 本数は 1 ずつ上げ下げできる。路線を延ばす、消すこともここから行う。
+// 本数は 1 ずつ上げ下げできる。路線を延ばす、駅を挿す、消すこともここから行う。
 
 import { type LineRef, removeLineCommand, setLineTrainsCommand } from "./map/line-tool.ts";
 import {
@@ -69,6 +69,8 @@ export type LinePanelHandlers = {
   send: (command: CommandMessage) => void;
   /** 路線を延ばす道具にする。 */
   extend: (line: LineRef) => void;
+  /** 路線の途中に駅を挿す道具にする。 */
+  insert: (line: LineRef) => void;
 };
 
 function element<K extends keyof HTMLElementTagNameMap>(
@@ -92,6 +94,7 @@ export function renderLines(
   lines: readonly RailLineInfo[],
   nameOf: (station: Tile) => string,
   extending: LineRef | null,
+  inserting: LineRef | null,
   handlers: LinePanelHandlers,
 ): void {
   list.replaceChildren();
@@ -126,15 +129,22 @@ export function renderLines(
       String(extending?.index === ref.index && extending.generation === ref.generation),
     );
     extend.addEventListener("click", () => handlers.extend(ref));
+    const insert = element("button", "chip", "駅を挿す");
+    insert.type = "button";
+    insert.setAttribute(
+      "aria-pressed",
+      String(inserting?.index === ref.index && inserting.generation === ref.generation),
+    );
+    insert.addEventListener("click", () => handlers.insert(ref));
     const remove = element("button", "chip", "消す");
     remove.type = "button";
     remove.ariaLabel = `${row.name}を消す`;
     remove.addEventListener("click", () => handlers.send(removeLineCommand(ref)));
     // 環状にした路線は延ばせない
     if (line.looped) {
-      item.append(minus, plus, remove);
+      item.append(minus, plus, insert, remove);
     } else {
-      item.append(minus, plus, extend, remove);
+      item.append(minus, plus, extend, insert, remove);
     }
     item.append(element("span", "line-stops", row.stops));
     if (row.headway !== "") {

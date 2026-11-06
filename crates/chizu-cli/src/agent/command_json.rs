@@ -175,6 +175,11 @@ enum CommandJson {
         line: NodeJson,
         station: NodeJson,
     },
+    InsertLineStation {
+        line: NodeJson,
+        after_index: u8,
+        station: NodeJson,
+    },
     RemoveLine {
         line: NodeJson,
     },
@@ -296,6 +301,15 @@ impl From<Command> for CommandJson {
                 line: line_json(line),
                 station: station_json(station),
             },
+            Command::InsertLineStation {
+                line,
+                after_index,
+                station,
+            } => CommandJson::InsertLineStation {
+                line: line_json(line),
+                after_index,
+                station: station_json(station),
+            },
             Command::RemoveLine { line } => CommandJson::RemoveLine {
                 line: line_json(line),
             },
@@ -377,6 +391,15 @@ impl CommandJson {
                 line: line_id(line),
                 station: station_id(station),
             },
+            CommandJson::InsertLineStation {
+                line,
+                after_index,
+                station,
+            } => Command::InsertLineStation {
+                line: line_id(line),
+                after_index,
+                station: station_id(station),
+            },
             CommandJson::RemoveLine { line } => Command::RemoveLine {
                 line: line_id(line),
             },
@@ -438,6 +461,7 @@ fn explain_out_of_range(value: &Value) -> Option<String> {
             SimSpeed::MAX.multiplier().into(),
         ),
         "PlaceBuilding" => int_field("rotation", "建物の向き", 0, 3),
+        "InsertLineStation" => int_field("after_index", "挿す位置", 0, 31),
         "SetLineTrains" => int_field(
             "trains",
             "列車の本数",
@@ -479,6 +503,7 @@ mod tests {
             json!({"type":"PlaceBuilding","kind":"Station","at":[4,4],"rotation":2}),
             json!({"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":1,"generation":0}}),
             json!({"type":"ExtendLine","line":{"index":0,"generation":0},"station":{"index":2,"generation":1}}),
+            json!({"type":"InsertLineStation","line":{"index":0,"generation":0},"after_index":0,"station":{"index":2,"generation":1}}),
             json!({"type":"RemoveLine","line":{"index":0,"generation":0}}),
             json!({"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":16}),
             json!({"type":"SetFare","fare":20}),
@@ -614,6 +639,17 @@ mod tests {
                     generation: 6,
                 },
             },
+            Command::InsertLineStation {
+                line: LineId {
+                    index: 2,
+                    generation: 3,
+                },
+                after_index: 1,
+                station: StationId {
+                    index: 8,
+                    generation: 9,
+                },
+            },
             Command::RemoveLine {
                 line: LineId {
                     index: 7,
@@ -649,10 +685,11 @@ mod tests {
                 Command::ExtendLine { .. } => 13,
                 Command::RemoveLine { .. } => 14,
                 Command::SetLineTrains { .. } => 15,
-                Command::SetFare { .. } => 16,
+                Command::InsertLineStation { .. } => 16,
+                Command::SetFare { .. } => 17,
             }
         }
-        let mut seen = [false; 17];
+        let mut seen = [false; 18];
         for c in commands {
             seen[kind(&c)] = true;
             let json = to_json(c);

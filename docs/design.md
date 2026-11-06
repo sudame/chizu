@@ -1605,6 +1605,7 @@ pub struct Crossing { pub track: TrackId, pub at: TilePos }
 |---|---|
 | `CreateLine { from, to }` | 駅 `from` から駅 `to` への路線を作る。駅は `StationId` で指す |
 | `ExtendLine { line, station }` | 路線の終点の先に駅を 1 つ足す。最初の駅を指せば環状の路線になる |
+| `InsertLineStation { line, after_index, station }` | 路線の `after_index` 番目（0 始まり）の駅の次に駅を挿す。取り壊した途中の駅を建て直したあとに、元の位置へ戻すのに使う。環状の路線にも挿せる。断る理由は `ExtendLine` と同じで、位置が並びの外なら `NoSuchStation` で断る |
 | `RemoveLine { line }` | 路線をなくす。走っている列車と、待っている人は後述の「途中で消えたとき」のとおりに扱う |
 | `SetLineTrains { line, trains }` | 路線を走らせる列車の本数を決める。0〜16 で、後述の行き詰まりを防ぐ上限を超える分は上限に抑える |
 
@@ -2063,7 +2064,7 @@ chizu-cli：
 
 - 列車の維持費は、`Finances::rail_upkeep` に、走っている本数 × 600 として足す。行は分けない。
 - 状態ハッシュの鉄道の欄（`Rail` が空でないとき）に、路線（駅の並び、環状か、本数、進路と待てる所の印、止まっているか、出た tick）と列車（位置、速さ、押さえた要素の数、状態、待った tick）を足した。行き詰まりの回数（`RailTally`）は入れない。
-- `SNAPSHOT_VERSION` は 21 から 22 に上げた。`FORMAT_VERSION` は変えず、記録の種類に `CreateLine`（13）、`ExtendLine`（14）、`RemoveLine`（15）、`SetLineTrains`（16）を足した。駅と路線の ID は、信号のノードと同じく index と generation で書く。`SetLineTrains` の本数が 16 を超えるものは記録しない。
+- `SNAPSHOT_VERSION` は 21 から 22 に上げた。`FORMAT_VERSION` は変えず、記録の種類に `CreateLine`（13）、`ExtendLine`（14）、`RemoveLine`（15）、`SetLineTrains`（16）を足した。そのあとに `InsertLineStation`（17）を足した（これも版は上げない）。駅と路線の ID は、信号のノードと同じく index と generation で書く。`SetLineTrains` の本数が 16 を超えるものは記録しない。
 - `DenyReason` の最後に `RailNoRoute`、`NoSuchStation`、`NoSuchLine`、`LineLimit`、`StationInLine` を足した。そのあとに `LineStarvesOther` を足した（上の「上限が下がるとき」）。
 - ゴールデンに、駅 2 つの往復に本数を変えながら列車を走らせ、途中で線路を分けて取り壊す記録（`rail_lines`）を足した。
 
@@ -2300,7 +2301,7 @@ chizu-cli：
 お金：
 
 - 運賃は乗ったときに所持金に入れる（乗り換えは作る順の 7 で、2 回目の乗車は払わない）。収支の `fares` は前の日の運賃の収入で、1 時間ごとの見込みの足し引きには入れない。
-- `SetFare` は記録の種類 17 で、0〜20 の外は受け付けない。運賃だけを変えた街は、状態ハッシュに鉄道の欄を書く（`Rail::is_blank`）。
+- `SetFare` は記録の種類 18 で（17 は先に入った `InsertLineStation`）、0〜20 の外は受け付けない。運賃だけを変えた街は、状態ハッシュに鉄道の欄を書く（`Rail::is_blank`）。
 
 状態、記録、ゴールデン：
 

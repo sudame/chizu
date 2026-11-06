@@ -17,9 +17,14 @@ export type LineDraft = {
   pending: { first: Tile; second: Tile } | null;
   /** 延ばす路線。ここに駅を足していく。 */
   extend: LineRef | null;
+  /**
+   * 駅を挿す路線。`after` は、どの駅の次に挿すかを選んだ駅の並びの添え字で、選ぶまでは null。
+   * 路線の駅を押して位置を選び、そのあと路線にない駅を押すと、そこに挿す。
+   */
+  insert: { line: LineRef; after: number | null } | null;
 };
 
-export const EMPTY_DRAFT: LineDraft = { first: null, pending: null, extend: null };
+export const EMPTY_DRAFT: LineDraft = { first: null, pending: null, extend: null, insert: null };
 
 const sameTile = (a: Tile, b: Tile) => a.x === b.x && a.y === b.y;
 
@@ -46,6 +51,17 @@ export function extendLineCommand(line: LineRef, at: Tile): CommandMessage {
   };
 }
 
+export function insertLineStationCommand(line: LineRef, after: number, at: Tile): CommandMessage {
+  return {
+    kind: "InsertLineStation",
+    lineIndex: line.index,
+    lineGeneration: line.generation,
+    afterIndex: after,
+    atX: at.x,
+    atY: at.y,
+  };
+}
+
 export function removeLineCommand(line: LineRef): CommandMessage {
   return { kind: "RemoveLine", lineIndex: line.index, lineGeneration: line.generation };
 }
@@ -63,14 +79,30 @@ export function setLineTrainsCommand(line: LineRef, trains: number): CommandMess
 /**
  * 駅 `station`（敷地の min のマス）を押したときの、コマンドと次の状態。
  * 延ばす路線があればそこへ足す。なければ、最初の駅を覚え、2 つ目の駅で路線を作る。
- * 駅でない所を押したときは何もしない。
+ * 駅を挿す路線があれば、その路線の駅（`insertStations`、路線の並びの順）を押して位置を選び、
+ * 路線にない駅を押して挿す。駅でない所を押したときは何もしない。
  */
 export function clickStation(
   draft: LineDraft,
   station: Tile | null,
+  insertStations: readonly Tile[] = [],
 ): { command: CommandMessage | null; draft: LineDraft } {
   if (station === null || draft.pending !== null) {
     return { command: null, draft };
+  }
+  if (draft.insert !== null) {
+    const { line, after } = draft.insert;
+    const index = insertStations.findIndex((t) => sameTile(t, station));
+    if (index >= 0) {
+      return { command: null, draft: { ...draft, insert: { line, after: index } } };
+    }
+    if (after === null) {
+      return { command: null, draft };
+    }
+    return {
+      command: insertLineStationCommand(line, after, station),
+      draft: { ...draft, insert: { line, after: null } },
+    };
   }
   if (draft.extend !== null) {
     return { command: extendLineCommand(draft.extend, station), draft };
@@ -84,7 +116,12 @@ export function clickStation(
   }
   return {
     command: createLineCommand(draft.first, station),
-    draft: { first: null, pending: { first: draft.first, second: station }, extend: null },
+    draft: {
+      first: null,
+      pending: { first: draft.first, second: station },
+      extend: null,
+      insert: null,
+    },
   };
 }
 
@@ -113,14 +150,19 @@ export function adoptCreated(
   if (made === undefined) {
     return draft;
   }
-  return { first: null, pending: null, extend: { index: made.index, generation: made.generation } };
+  return {
+    first: null,
+    pending: null,
+    extend: { index: made.index, generation: made.generation },
+    insert: null,
+  };
 }
 
 /** 路線を作るコマンドが断られたときの状態。最初の駅を選んだ状態に戻し、別の駅を選びなおせるようにする。 */
 export function abandonPending(draft: LineDraft): LineDraft {
   return draft.pending === null
     ? draft
-    : { first: draft.pending.first, pending: null, extend: null };
+    : { first: draft.pending.first, pending: null, extend: null, insert: null };
 }
 
 /** 路線を見分ける鍵。 */
@@ -140,6 +182,18 @@ export function extendTarget(
   return lines.find((l) => l.index === e.index && l.generation === e.generation) ?? null;
 }
 
+/** 駅を挿している路線が、まだ一覧にあるか。 */
+export function insertTarget(
+  draft: LineDraft,
+  lines: readonly RailLineInfo[],
+): RailLineInfo | null {
+  const e = draft.insert?.line;
+  if (e === undefined) {
+    return null;
+  }
+  return lines.find((l) => l.index === e.index && l.generation === e.generation) ?? null;
+}
+
 /** 道具の説明の欄に出す、次にすることの案内。 */
 export function lineToolHint(
   draft: LineDraft,
@@ -148,6 +202,11 @@ export function lineToolHint(
 ): string {
   if (draft.pending !== null) {
     return "路線を作っている";
+  }
+  if (draft.insert !== null) {
+    return draft.insert.after === null
+      ? `${lineLabel(draft.insert.line)}に駅を挿す。どの駅の次かを、路線の駅を押して選ぶ`
+      : `${lineLabel(draft.insert.line)}に駅を挿す。挿す駅を押す（別の駅を押すと位置を選びなおせる）`;
   }
   if (draft.extend !== null) {
     return `${lineLabel(draft.extend)}を延ばす。次の駅を押す（最初の駅を押すと環状になる）`;

@@ -132,7 +132,17 @@ export function bulldozeSummary(p: BulldozePreview): string {
   if (p.displacedHouseholds > 0) {
     parts.push(`家をなくす世帯 ${p.displacedHouseholds.toLocaleString("ja-JP")}`);
   }
-  return parts.length === 0 ? "" : `消える：${parts.join("・")}`;
+  if (parts.length === 0) {
+    return "";
+  }
+  const note = removesCrossing(p) ? "（踏切のマスを含むので線路も消える）" : "";
+  return `消える：${parts.join("・")}${note}`;
+}
+
+/** 消える道路のマスと線路のマスが重なるか。重なるのは踏切のマスで、道路の区間と線路が一緒に消える。 */
+export function removesCrossing(p: BulldozePreview): boolean {
+  const rail = new Set(p.railTileList.map((t) => `${t.x},${t.y}`));
+  return p.roadTileList.some((t) => rail.has(`${t.x},${t.y}`));
 }
 
 /** 消える道路のマス。中核が数えたマスと同じで、ほかの区間が残って通るマスは入らない。 */
