@@ -6,6 +6,7 @@
 use chizu_core::chunk::Layer;
 use chizu_core::movement::{lane_tiles, lot_tiles};
 use chizu_core::network::{NodeControl, SegmentKind};
+use chizu_core::rail::choice::{STATION_WALK_RADIUS, in_walk_range};
 use chizu_core::tile::local_index;
 use chizu_core::{
     CHUNK_SIDE, Congestion, ServiceKind, TilePos, TileRect, World, Zone, ZoneKind, is_water,
@@ -52,6 +53,23 @@ const PARKING_LEGEND_LINES: &str = "\
 /// 凡例の「H 1 2 3」の行の代わりに出す、交通の層の道路の凡例。
 const TRAFFIC_LEGEND_LINE: &str = "  - + # X  道路の混み具合（- 空いている、+ やや混んでいる、# 混んでいる、X 詰まっている。H 高速道路は混み具合を数えない）";
 
+/// 乗りきれず人が残った駅とみなす、待っている人の数。画面の「公共交通」の主題図（`web/src/map/transit.ts` の
+/// `WAITING_ALERT`）と同じである。
+const CROWDED_WAITING: usize = 100;
+
+/// 路線の色の番号 0〜7 に当てる文字。道路、施設、建物、区画の文字と重ならない文字を選んだ。
+const LINE_GLYPHS: [char; 8] = ['A', 'B', 'J', 'K', 'M', 'N', 'Q', 'U'];
+
+/// 路線の色の呼び名。画面の `LINE_COLOR_NAMES` と同じ並びである。
+const LINE_COLOR_NAMES: [&str; 8] = ["青", "緑", "橙", "紫", "桃", "水", "茶", "黄緑"];
+
+/// 凡例の「T」の行の代わりに出す、鉄道の層の線路と駅の凡例。
+const RAIL_LEGEND_LINES: &str = "  A B J K M N Q U  路線の通る線路のマス（路線の色の番号 0〜7 の順。青 緑 橙 紫 桃 水 茶 黄緑。同じ線路を通る路線は、止まっていない路線の若い番号を出す）
+  x        止まっている路線の線路のマス（線路がつながっていない）
+  T        どの路線も通らない線路のマス
+  !        乗りきれず人が残った駅か、待っている人が 100 人以上の駅（E の代わりに出す）
+  :        駅の出入口から駅まで歩く範囲（64 マス）の中の、ほかに何も載らない空きマス";
+
 /// 地図に重ねる層。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum MapLayer {
@@ -62,6 +80,8 @@ pub enum MapLayer {
     Traffic,
     /// 車を持てない世帯のいる住宅と、共同の駐車場の埋まり具合を出す。
     Parking,
+    /// 線路を路線の色の番号で出し、駅まで歩く範囲と、乗りきれず人が残った駅を出す。
+    Rail,
 }
 
 impl MapLayer {
@@ -69,8 +89,9 @@ impl MapLayer {
         match name {
             "traffic" => Ok(MapLayer::Traffic),
             "parking" => Ok(MapLayer::Parking),
+            "rail" => Ok(MapLayer::Rail),
             _ => Err(format!(
-                "--layer {name:?} は知らない層。traffic か parking を使う"
+                "--layer {name:?} は知らない層。traffic、parking、rail のどれかを使う"
             )),
         }
     }
@@ -107,6 +128,13 @@ struct Cell {
     rail: u32,
     /// 踏切のマスの数。
     crossing: u32,
+    /// 線路のマスを通る路線のうち、止まっていない路線の若い番号（なければ止まっている路線の若い番号）と、止まっているか。
+    /// 鉄道の層でだけ入れる。
+    line: Option<(bool, u32)>,
+    /// 乗りきれず人が残った駅があるか。鉄道の層でだけ入れる。
+    crowded: bool,
+    /// セルの真ん中のマスが、駅の徒歩圏にあるか。鉄道の層でだけ入れる。
+    walk: bool,
     /// 共同の駐車場の埋まり具合の段階（0〜3）の最大。駐車場の層でだけ入れる。
     lot_fill: Option<u8>,
     /// 車を持てない世帯のいる住宅のマスの数。駐車場の層でだけ入れる。
@@ -184,7 +212,11 @@ impl Cell {
             };
         }
         if self.station > 0 {
-            return facility_letter(ServiceKind::Station);
+            return if self.crowded {
+                '!'
+            } else {
+                facility_letter(ServiceKind::Station)
+            };
         }
         if self.crossing > 0 {
             return 'F';
@@ -206,7 +238,11 @@ impl Cell {
             }
         }
         if self.rail > 0 {
-            return 'T';
+            return match self.line {
+                Some((true, _)) => 'x',
+                Some((false, i)) => LINE_GLYPHS[(i % 8) as usize],
+                None => 'T',
+            };
         }
         // 私道と駐車場に切り欠いたマスは、建物より先に出す。セルの中で建物のマスより少なければ、建物を出す。
         if self.lane > 0 && self.lane + self.lot >= self.building.iter().sum::<u32>() {
@@ -234,6 +270,8 @@ impl Cell {
             '~'
         } else if self.owned * 2 < self.samples {
             ','
+        } else if self.walk {
+            ':'
         } else {
             '.'
         }
@@ -259,6 +297,8 @@ struct Grid {
     cols: usize,
     rows: usize,
     cells: Vec<Cell>,
+    /// 凡例のあとに足す行。鉄道の層の路線ごとの数である。
+    notes: Vec<String>,
 }
 
 impl Grid {
@@ -356,6 +396,7 @@ pub fn render(
         cols: cols as usize,
         rows: rows as usize,
         cells: vec![Cell::default(); (cols * rows) as usize],
+        notes: Vec::new(),
     };
 
     // 水辺と買った土地は、セルごとに見本のマスで調べる。
@@ -446,6 +487,9 @@ pub fn render(
             cell.crossing += 1;
         }
     }
+    if layer == MapLayer::Rail {
+        mark_rail_layer(world, &mut grid);
+    }
     if layer == MapLayer::Parking {
         // 画面の「駐車場」のレイヤー（chizu-wasm の layers）と同じ割合の段階にする
         for f in world.facilities().iter().filter(|f| f.kind.is_parking()) {
@@ -510,6 +554,92 @@ pub fn render(
     Ok(text(&grid, layer))
 }
 
+/// 鉄道の層の中身を入れる。線路は通る路線で、駅は混み具合で、空きマスは駅まで歩く範囲で見分ける。
+/// 駅まで歩く範囲は、中核が駅を探す物差し（家の正面のマスから駅の出入口のマスまで、直線で 64 マス以内）と同じで、
+/// セルの真ん中のマスで測る。
+fn mark_rail_layer(world: &World, grid: &mut Grid) {
+    let rail = world.rail();
+    let net = world.network();
+    for (id, line) in rail.lines() {
+        let key = (line.stopped, id.index);
+        let mut seen = std::collections::BTreeSet::new();
+        for step in &line.path {
+            if !seen.insert(step.track) {
+                continue;
+            }
+            let Some(l) = rail.track_line(step.track) else {
+                continue;
+            };
+            for t in l.tiles() {
+                if rail.station_at(t).is_some() {
+                    continue;
+                }
+                if let Some(cell) = grid.cell_mut(t) {
+                    cell.line = Some(cell.line.map_or(key, |old| old.min(key)));
+                }
+            }
+        }
+    }
+    for (id, s) in rail.stations() {
+        let left_behind = rail.left_behind().iter().any(|(st, _, _)| *st == id);
+        if left_behind || rail.waiting_at(id) >= CROWDED_WAITING {
+            grid.each_tile_in(s.area, |cell, _| cell.crowded = true);
+        }
+    }
+    let doors: Vec<TilePos> = rail
+        .stations()
+        .filter_map(|(_, s)| chizu_core::movement::facility_spot(net, &s.site()).map(|p| p.tile))
+        .collect();
+    let reach = STATION_WALK_RADIUS / grid.scale + 2;
+    for door in doors {
+        let (col0, row0) = (
+            (door.x - grid.rect.min.x).div_euclid(grid.scale),
+            (door.y - grid.rect.min.y).div_euclid(grid.scale),
+        );
+        for row in (row0 - reach).max(0)..=(row0 + reach).min(grid.rows as i64 - 1) {
+            for col in (col0 - reach).max(0)..=(col0 + reach).min(grid.cols as i64 - 1) {
+                let at = TilePos::new(
+                    grid.rect.min.x + col * grid.scale + grid.scale / 2,
+                    grid.rect.min.y + row * grid.scale + grid.scale / 2,
+                );
+                if in_walk_range(at, door) {
+                    grid.cells[row as usize * grid.cols + col as usize].walk = true;
+                }
+            }
+        }
+    }
+    for (id, line) in rail.lines() {
+        let name = format!(
+            "{}線",
+            LINE_COLOR_NAMES[(id.index % LINE_GLYPHS.len() as u32) as usize]
+        );
+        let waiting: usize = rail
+            .queues()
+            .filter(|((_, l, _), _)| *l == id)
+            .map(|(_, q)| q.len())
+            .sum();
+        let running = rail.trains().filter(|(_, t)| t.line == id).count();
+        let state = if line.stopped {
+            "、止まっている（線路がつながっていない）"
+        } else if line.cap() == 0 {
+            "、走れない（本数の上限が 0）"
+        } else {
+            ""
+        };
+        grid.notes.push(format!(
+            "  {} {}（路線 {}）：本数 {}、走っている {}、いちばん混んだ列車 {}%、待っている人 {}{}",
+            LINE_GLYPHS[(id.index % LINE_GLYPHS.len() as u32) as usize],
+            name,
+            id.index,
+            line.trains,
+            running,
+            rail.line_load_permille(id) / 10,
+            waiting,
+            state
+        ));
+    }
+}
+
 /// 上の目盛りの基準にする数。縮尺 1 のときは x、そうでなければ列の番号で、絶対値の下 1 桁が 0 の列に x を書く。
 fn key(grid: &Grid, col: usize) -> i64 {
     if grid.scale == 1 {
@@ -560,6 +690,23 @@ fn text(grid: &Grid, layer: MapLayer) -> String {
                 })
                 .collect();
             out.push_str(&lines.join("\n"));
+        }
+        MapLayer::Rail => {
+            let lines: Vec<&str> = LEGEND
+                .lines()
+                .map(|l| {
+                    if l.trim_start().starts_with("T ") {
+                        RAIL_LEGEND_LINES
+                    } else {
+                        l
+                    }
+                })
+                .collect();
+            out.push_str(&lines.join("\n"));
+            if !grid.notes.is_empty() {
+                out.push_str("\n路線（文字は線路のマスの文字）\n");
+                out.push_str(&grid.notes.join("\n"));
+            }
         }
     }
     out.push('\n');
@@ -826,8 +973,109 @@ mod tests {
         );
     }
 
+    /// 駅 2 つを線路で結び、路線を作った街。駅の線路は y = 8 で、x 3〜12 と x 16〜25 にある。
+    fn rail_world() -> World {
+        use chizu_core::{ApplyOutcome, Command, RoadKind};
+        let t = TilePos::new;
+        let mut w = World::new(0);
+        for c in [
+            Command::BuildRoad {
+                from: t(0, 10),
+                to: t(40, 10),
+                kind: RoadKind::Small,
+            },
+            Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: t(12, 9),
+                rotation: 2,
+            },
+            Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: t(25, 9),
+                rotation: 2,
+            },
+            // 線路は 2 本に分けて引く。片方だけ取り壊しても、もう片方が残る
+            Command::BuildRail {
+                from: t(12, 8),
+                to: t(14, 8),
+            },
+            Command::BuildRail {
+                from: t(14, 8),
+                to: t(16, 8),
+            },
+        ] {
+            assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+        }
+        let ids: Vec<_> = w.rail().stations().map(|(id, _)| id).collect();
+        let c = Command::CreateLine {
+            from: ids[0],
+            to: ids[1],
+        };
+        assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+        w
+    }
+
+    /// 鉄道の層は、線路を路線の色の番号の文字（路線 0 は A）にし、止まっている路線は x にする。
+    /// 層を付けなければ T のまま。凡例の下に路線ごとの行が付く。
+    #[test]
+    fn rail_layer_draws_lines_and_stopped_lines() {
+        use chizu_core::{ApplyOutcome, Command};
+        let t = TilePos::new;
+        let mut w = rail_world();
+        let row = TileRect::from_corners(t(12, 8), t(16, 8));
+        let glyphs = |w: &World, layer| glyphs_of(w, row, layer).into_iter().collect::<String>();
+        assert_eq!(glyphs(&w, MapLayer::Terrain), "ETTTE");
+        assert_eq!(glyphs(&w, MapLayer::Rail), "EAAAE");
+        let text = render(&w, row, 1, MapLayer::Rail).unwrap();
+        assert!(
+            text.contains("A 青線（路線 0）：本数 0、走っている 0"),
+            "{text}"
+        );
+        assert!(text.contains("A B J K M N Q U"), "{text}");
+        assert!(text.contains("  x  "), "{text}");
+        // 線路を 1 本取り壊すと路線が止まり、残った線路は x になる
+        let cut = Command::Bulldoze {
+            area: TileRect::from_corners(t(15, 8), t(15, 8)),
+        };
+        assert_eq!(w.apply(&cut), ApplyOutcome::Applied);
+        let after = glyphs(&w, MapLayer::Rail);
+        assert!(after.contains('x') && !after.contains('A'), "{after}");
+        assert!(
+            render(&w, row, 1, MapLayer::Rail)
+                .unwrap()
+                .contains("止まっている")
+        );
+    }
+
+    /// 駅まで歩く範囲は、駅の出入口から 64 マス以内の空きマスを : にする。範囲の外は . のまま。
+    /// ほかのものが載るマス（道路など）は隠さない。
+    #[test]
+    fn rail_layer_marks_the_walk_range_of_the_stations() {
+        let t = TilePos::new;
+        let w = rail_world();
+        let near = TileRect::from_corners(t(2, 20), t(26, 20));
+        let far = TileRect::from_corners(t(2, 100), t(26, 100));
+        let all = |rect, layer| glyphs_of(&w, rect, layer).into_iter().collect::<String>();
+        assert_eq!(all(near, MapLayer::Terrain), ".".repeat(25));
+        assert_eq!(all(near, MapLayer::Rail), ":".repeat(25));
+        assert_eq!(all(far, MapLayer::Rail), ".".repeat(25));
+        // 道路の上（y = 10）は道路のまま
+        let road = TileRect::from_corners(t(2, 10), t(6, 10));
+        assert_eq!(all(road, MapLayer::Rail), "22222".replace('2', "1"));
+        // まとめた文字（縮尺 8）でも、セルの真ん中が範囲に入れば :
+        let text = render(
+            &w,
+            TileRect::from_corners(t(0, 64), t(63, 71)),
+            8,
+            MapLayer::Rail,
+        )
+        .unwrap();
+        assert!(text.lines().last().unwrap().contains(':'), "{text}");
+    }
+
     #[test]
     fn unknown_layer_is_refused() {
+        assert!(MapLayer::parse("rail").is_ok());
         assert!(MapLayer::parse("traffic").is_ok());
         assert!(MapLayer::parse("parking").is_ok());
         assert!(MapLayer::parse("power").is_err());

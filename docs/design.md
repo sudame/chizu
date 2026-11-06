@@ -1870,7 +1870,7 @@ pub struct Crossing { pub track: TrackId, pub at: TilePos }
 - act は、`buildRail { from, to }`、`placeBuilding` の `station`、`createLine { from, to }`（駅の ID）、`extendLine { line, station }`、`removeLine { line }`、`setLineTrains { line, trains }`、`setFare { fare }` を受ける。断る理由（`RailTooSharp`、`RailNoRoute`、`HighwayCrossing`、`CrossingNearJunction`、`NodeOnCrossing` など）も、ほかのコマンドと同じく出す。
 - observe は `rail` を足す。`stations`（ID、位置、名前、待っている人、今日乗った人と降りた人）、`lines`（ID、駅の並び、本数、走っている本数、1 周の tick、運転間隔、今日乗った人、いちばん混んだ区間の乗車率、乗りきれずに残った人、止まっているか）、`fare`、`crossings`（踏切の数、踏切で止まった車の延べ tick、`crossingOverrun`）、`deadlock`（行き詰まりの輪を見つけて列車を消した回数）、`gaveUp`（待ちきれずに歩いた人）。
 - observe の `traffic` に、その日に着いた移動の手段ごとの数（歩き、車、鉄道）を足す。`finances` に運賃と鉄道の維持費を足す。どれも `sinceLastObserve` に載せる。
-- map は、線路のマスを `T`、駅を `E`、踏切を `F` で出し、凡例に足す。踏切は道路より先に出す。`--layer rail` で、駅まで歩く範囲のマスを `:`、乗りきれずに残った人のいる駅を `!` で出す。
+- map は、線路のマスを `T`、駅を `E`、踏切を `F` で出し、凡例に足す。踏切は道路より先に出す。`--layer rail` で、線路を通る路線の色の番号の文字（`A B J K M N Q U`。止まっている路線は `x`）、駅まで歩く範囲のマスを `:`、乗りきれずに残った人のいる駅を `!` で出す（作る順の 8 で決めた細部の「chizu-cli」）。
 - コマンドと JSON を行き来する match はワイルドカードなしなので、コマンドを足す PR で chizu-cli がコンパイルで止まる。同じ PR で追従させる。
 
 判断：chizu-cli の中身【マネージャー】。
@@ -2379,6 +2379,13 @@ chizu-cli：
 
 - 待ちきれずに歩いた人は、中核が駅ごとには持たず（始まりからの積み上げが 1 つ）、画面が 1 秒ほどごとの値の差を取る。駅を名指しするのは、待っている人の多い順にする。駅ごとに持つには状態の形を変える必要があり、この手がかりの PR では変えない。
 - 解けた知らせの覚えと、閉じた知らせの扱いは、既存の通知センター（`notice-center.ts`）と同じである。
+
+chizu-cli：
+
+- `map --layer rail` は、線路のマスを、通る路線の色の番号の文字（`A B J K M N Q U` が 0〜7）で出す。道路、施設、建物、区画の文字と重ならない文字を選んだ。止まっている路線の線路は `x`、どの路線も通らない線路は `T` のままである。同じ線路を通る路線は、止まっていない路線の若い番号を出す。
+- 乗りきれず人が残った駅か、待っている人が 100 人以上の駅（画面の `WAITING_ALERT` と同じ）は、`E` の代わりに `!` で出す。駅の出入口から 64 マス以内（中核の `in_walk_range`）の、ほかに何も載らない空きマスは `:` にする。まとめた文字（`--scale`）では、セルの真ん中のマスで測る。
+- 凡例の下に、路線ごとの本数、走っている本数、いちばん混んだ列車の乗車率、待っている人、止まっているか走れないかを 1 行ずつ付ける。路線ごとの混み具合は、文字ではなくこの行で読む（路線の色の番号と混み具合を、1 文字では同時に出せない）。
+- observe の `rail.stations` に、`door`（出入口のマス。なければ null）、`households` と `carless`（徒歩圏の世帯と、車を持てない世帯。出入口がなければ null）を足した。
 
 #### 踏切の描画
 
