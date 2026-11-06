@@ -489,14 +489,20 @@ impl Sim {
         out
     }
 
-    /// 切り欠いた駐車場の形を、切り欠く建物の分だけ返す。並びは [`crate::lots::encode`] にある。
+    /// 切り欠いた駐車場の形を、切り欠く建物の分と、共同の駐車場の分だけ返す。並びは [`crate::lots::encode`] にある。
     /// 間口のどちらの端に寄せるかは道路網で変わるので、版は建物の表と道路網の両方で決まる。
     pub fn lots(&self) -> Vec<f64> {
-        crate::lots::encode(
-            self.world.network(),
+        let net = self.world.network();
+        let mut out = crate::lots::encode(
+            net,
             self.world.seed(),
             self.world.buildings().iter().map(|(_, b)| b),
-        )
+        );
+        out.extend(crate::lots::encode_facilities(
+            net,
+            self.world.facilities().iter(),
+        ));
+        out
     }
 
     /// 停めてある車の台数を、駐車場のある建物の分だけ返す。並びは [`crate::lots::encode_parked`] にある。

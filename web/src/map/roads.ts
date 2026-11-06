@@ -19,7 +19,17 @@ import {
   roadHalfWidth,
   SIDEWALK_WIDTH,
 } from "./lanes.ts";
-import { addLot, bodyShape, homeCount, lotKey, parseLots, siteOf } from "./lots.ts";
+import {
+  addGarageDeck,
+  addLot,
+  bodyShape,
+  homeCount,
+  lotKey,
+  parseLots,
+  type Rect,
+  SERVICE_PARKING_GARAGE,
+  siteOf,
+} from "./lots.ts";
 import { type Color, facilityStyle, GROUND_COLOR, hex } from "./palette.ts";
 import { stageWeights } from "./stages.ts";
 
@@ -670,6 +680,7 @@ export function buildingMeshes(
     marks: new Geometry(origin),
   };
   const facilityBoxes: Box[] = [];
+  const garageDecks: Rect[] = [];
   for (let i = 0; i + FACILITY_STRIDE <= facilities.length; i += FACILITY_STRIDE) {
     const [x0 = 0, y0 = 0, x1 = 0, y1 = 0, kind = 0] = facilities.subarray(i, i + FACILITY_STRIDE);
     facilityBoxes.push({
@@ -680,6 +691,15 @@ export function buildingMeshes(
       color: facilitySiteColor(kind),
       edge: facilitySiteEdgeColor(kind),
     });
+    // 共同の駐車場は、枠の白線を敷地の上に引く（駐車場ビルは屋上の面と縁を足す）
+    const lot = lots.get(lotKey(x0, y0));
+    if (lot !== undefined) {
+      const site = siteOf(x0, y0, x1, y1);
+      if (kind === SERVICE_PARKING_GARAGE) {
+        garageDecks.push(site);
+      }
+      addLot(meshes, site, lot);
+    }
   }
   // 建物の本体は、駐車場に切り欠いた所を除いた長方形に分ける。縁と本体は、切り欠きの側も縁の幅だけ内に縮める
   const buildingBoxes: Box[] = [];
@@ -721,6 +741,10 @@ export function buildingMeshes(
     meshes.facilities.box(x0, y0 + e, x0 + e, y1 - e, edge);
     meshes.facilities.box(x1 - e, y0 + e, x1, y1 - e, edge);
     meshes.facilities.box(x0 + e, y0 + e, x1 - e, y1 - e, color);
+  }
+  // 駐車場ビルの屋上は、敷地の壁の内側に明るい面を重ね、寄りでは縁を引く
+  for (const site of garageDecks) {
+    addGarageDeck(meshes, site);
   }
   // 寄りの段に移るあいだは、本体を濃く描いたまま縁を濃くしていくので、縁と本体を分ける
   for (const { x0, y0, x1, y1, edge } of buildingBoxes) {
