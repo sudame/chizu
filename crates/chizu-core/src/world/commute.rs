@@ -431,7 +431,10 @@ mod car_place_tests {
             }
         }
         for (id, n) in &living {
-            let spaces = w.buildings().parking_spaces(*id);
+            let spaces = w
+                .buildings()
+                .parking_spaces(*id)
+                .min(super::home_spaces_limit().unwrap_or(u64::MAX));
             let got = held.get(id).copied().unwrap_or(0);
             assert_eq!(got, (*n).min(spaces), "建物 {id:?} の枠の数");
         }
@@ -539,23 +542,21 @@ mod car_place_tests {
         check(&w);
     }
 
-    /// 戸建てが集合住宅に上がって自宅の枠が減ると、ID の大きい世帯から枠を返す。返した世帯の車は、停めてあれば
-    /// 駐車場から外し、家へ向かっていれば着いても停めずに、押さえた空きを返す。
+    /// 自宅の枠が減ると、ID の大きい世帯から枠を返す。返した世帯の車は、停めてあれば駐車場から外し、
+    /// 家へ向かっていれば着いても停めずに、押さえた空きを返す。
+    /// 枠が減る場面は、古い版（`SNAPSHOT_VERSION` 16）の保存データを読んだときに起きる（高密度の段階 1〜2 の枠が
+    /// 世帯の数から × 0.5 に減る）。ここでは、テスト用のつまみ（`HOME_SPACES_LIMIT`）で途中から枠を減らして通す。
     #[test]
-    fn houses_that_become_apartments_take_back_home_places() {
+    fn shrinking_home_places_are_taken_back() {
         let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
-        // 3 マス以上の段階 2 の戸建てで、段階 3 の台数より多く停めてあるか押さえてあり、段階 3 で枠を返す世帯の
-        // 車が、その建物へ向かっているもの。枠を返すのは、自宅の枠を持つ世帯のうち、ID の順で段階 3 の台数を
-        // 超える分である。
+        // 減らしたあとの枠の数より多く停めてあるか押さえてある住宅で、枠を返す世帯の車が、その建物へ向かっている
+        // もの。枠を返すのは、自宅の枠を持つ世帯のうち、ID の順で減らしたあとの枠の数を超える分である。
+        const LIMIT: u64 = 2;
         let pick = |w: &World| {
             w.buildings().iter().find_map(|(id, b)| {
-                let mut up = *b;
-                up.level = 3;
-                let spaces = up.parking_spaces(w.seed());
+                let spaces = w.buildings().parking_spaces(id).min(LIMIT);
                 let lot = w.trips().lot(id);
                 if !(b.zone == crate::command::Zone::Residential
-                    && b.level == 2
-                    && b.tile_count() >= 3
                     && u64::from(lot.parked + lot.reserved) > spaces)
                 {
                     return None;
@@ -584,23 +585,13 @@ mod car_place_tests {
         };
         let mut found = None;
         while w.tick.0 < 14 * TICKS_PER_DAY && found.is_none() {
-            // 戸建てが段階 3 に上がる前に、車が家へ向かう場面を作るため、段階 2 の戸建てを段階 2 に留める。
-            let hold: Vec<BuildingId> = w
-                .buildings()
-                .iter()
-                .filter(|(_, b)| b.zone == crate::command::Zone::Residential && b.level == 2)
-                .map(|(id, _)| id)
-                .collect();
-            for id in hold {
-                w.buildings.get_mut(id).unwrap().leveled_at = w.tick;
-            }
             w.step();
             found = pick(&w);
         }
-        let id = found.expect("枠を返す世帯の車が家へ向かっている戸建てがない");
-        w.buildings.get_mut(id).unwrap().level = 3;
+        let id = found.expect("枠を返す世帯の車が家へ向かっている住宅がない");
+        HOME_SPACES_LIMIT.with(|l| l.set(Some(LIMIT)));
         w.assign_car_places();
-        let spaces = w.buildings().parking_spaces(id);
+        let spaces = w.buildings().parking_spaces(id).min(LIMIT);
         assert_eq!(holders(&w).get(&id).copied().unwrap_or(0), spaces);
         assert!(
             dropped(&w).contains_key(&id),
@@ -623,7 +614,8 @@ mod car_place_tests {
             }
         }
         let lot = w.trips().lot(id);
-        assert!(u64::from(lot.parked + lot.reserved) <= w.buildings().parking_spaces(id));
+        assert!(u64::from(lot.parked + lot.reserved) <= spaces);
+        HOME_SPACES_LIMIT.with(|l| l.set(None));
     }
 
     use crate::car_place::testing::HOME_SPACES_LIMIT;
