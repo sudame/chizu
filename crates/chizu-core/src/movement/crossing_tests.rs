@@ -435,6 +435,95 @@ fn a_walker_gets_across_turning_cars_at_a_signal() {
 }
 
 #[test]
+fn a_lone_walker_at_a_signal_does_not_wait_for_the_cycle() {
+    // 車の来ない信号の十字路で、南の腕（y の向き）の横断歩道を渡る人。y の向きが青の段階に着いても、
+    // 人の求めで x の向きに青が移るので、骨組みの周期を待たない。待つのは、角に着いた tick だけである。
+    let cycle = 2 * signal::PHASE;
+    for start in (100..100 + cycle).step_by(5) {
+        let (mut n, node) = crossroads();
+        n.set_signal(node, true).unwrap();
+        let mut t = Town::new(n);
+        let mut walker = None;
+        let mut waited = 0;
+        for k in 0..start + 200 {
+            if k == start {
+                walker = Some(t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0)));
+            }
+            t.step(node);
+            let Some(w) = walker else { continue };
+            match t.trips.get(w) {
+                Some(trip) => waited = waited.max(trip.waited),
+                None => break,
+            }
+        }
+        assert!(
+            walker.is_some_and(|w| t.trips.get(w).is_none()),
+            "着かない {start}"
+        );
+        assert!(waited <= 2, "空いた信号で待った start={start} {waited}");
+    }
+}
+
+#[test]
+fn the_green_moved_for_a_walker_lasts_while_it_is_on_the_crosswalk() {
+    // 車の来ない信号の十字路で、南の腕（y の向き）を渡る人。人の求めで x の向きに移した青は、人が
+    // 角に着いた tick だけでなく、渡っているあいだも続く。y の向きの青には戻らない。
+    let (mut n, node) = crossroads();
+    n.set_signal(node, true).unwrap();
+    let mut t = Town::new(n);
+    let mut crossed = 0;
+    let mut gone = false;
+    let mut on_before = false;
+    for k in 0..400_u64 {
+        if k == 120 {
+            t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0));
+        }
+        t.step(node);
+        let lights = t.trips.lights().state(&t.net, node).unwrap().lights;
+        // 灯火は、その tick を進める前の位置から決まる。
+        if on_before {
+            crossed += 1;
+            assert_eq!(lights[0], signal::Light::Green, "x の青が続かない {k}");
+            assert_ne!(lights[2], signal::Light::Green, "y の青に戻った {k}");
+        }
+        on_before = !t.occupied().is_empty();
+        gone |= k > 120 && t.trips.iter().next().is_none();
+    }
+    assert!(crossed >= 3, "渡っているところを確かめられない {crossed}");
+    assert!(gone, "人が渡り終えない");
+}
+
+#[test]
+fn a_walker_at_a_signal_gets_across_a_steady_stream_of_cars_on_its_arm() {
+    // 信号の十字路で、北から南へ直進する車が 2 tick ごとに来て、y の向きの車が途切れない。南の腕を渡る人は、
+    // 信号のない交差点と同じく来た車を先に通し、待ちすぎた所で x の向きの青を引き止めて渡る。
+    let (mut n, node) = crossroads();
+    n.set_signal(node, true).unwrap();
+    let mut t = Town::new(n);
+    let mut walker = None;
+    let mut gone = None;
+    for k in 0..800_u64 {
+        if k % 2 == 0 {
+            t.drive(at(10, 1, (0, 1), 0), at(10, 19, (0, 1), 0));
+        }
+        if k == 100 {
+            walker = Some(t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0)));
+        }
+        t.step(node);
+        if gone.is_none() && walker.is_some_and(|w| t.trips.get(w).is_none()) {
+            gone = Some(k);
+        }
+    }
+    // 歩くのに約 60 tick かかる。待つのは、待ちすぎるまでと、そのあと x の向きの段階が来るまでの 1 周期である。
+    let gone = gone.expect("歩く人が渡れない");
+    let cycle = 2 * signal::PHASE;
+    assert!(
+        gone < 100 + 60 + u64::from(crossing::PED_WAIT) + cycle + 20,
+        "待ちすぎた {gone}"
+    );
+}
+
+#[test]
 fn walkers_do_not_wait_for_cars_queued_at_a_red_light() {
     // 信号の十字路で、x の向きの直進の車が青を使い続け、北から来る車は赤で停止線に並ぶ。北の腕の横断歩道を
     // 東から西へ渡る人は、並んだ車を待たずに渡り始める。赤の車は横断歩道を通らないからである。
