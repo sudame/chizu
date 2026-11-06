@@ -297,7 +297,8 @@ observe の rail（線路と駅）:
   facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅と列車の 1 日の維持費である。
   lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、
   trains 遊ぶ人が決めた本数（SetLineTrains の値。cap が下がって列車が消えても変わらない）、cap 行き詰まりを防ぐ本数の上限
-    （共有の区画を通る路線は、区画の枠のうち自分の分で運べる本数までにする。それより多く走らせても、区画の手前で待つだけである）、
+    （共有の区画を通る路線は、区画の枠のうち自分の分で運べる本数までにする。それより多く走らせても、区画の手前で待つだけである。
+    区画の枠は本数 1 以上の路線で分ける。本数 0 の路線の cap は、本数を 1 以上にしたら配られる分から決めた値である）、
   capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
     sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有の区画の枠を、これらの路線と分けている）。
     shortSpans 進路にある、待てる所になれない短い線路（from と to が線路の両端のノードのマス、lengthMm が長さ）。
@@ -486,7 +487,8 @@ observe の removedCrosswalks:
       進路は線路の上の最短の道のりで選び、ノードで 45 度より大きく曲がる所と、途中で向きを変える所は通らない。
       そうしないと届かなければ Denied（RailNoRoute）。路線は往復し、両端の駅で折り返す。途中の駅は通り過ぎてよい。
       駅がなければ Denied（NoSuchStation）、同じ駅なら Denied（StationInLine）、路線が 64 本あれば Denied（LineLimit）。
-      作るとほかの路線の cap が 0 になる（共有の区画の枠を分けきれず、走れなくなる）なら Denied（LineStarvesOther）。
+      作るとほかの路線（本数 1 以上の路線）の cap が 0 になる（共有の区画の枠を分けきれず、走れなくなる）なら Denied（LineStarvesOther）。
+      作った路線は本数 0 なので、共有の区画の枠を使わない。
       作る路線そのものの cap が 0 で（区画の枠が回ってこず、走れない）、ほかの路線の cap を下げるなら
       Denied（LineStarvesSelf）。走らない路線のために、ほかの路線の列車が消えるだけだからである。
       作る路線の cap が 0 でも、ほかの路線の cap が変わらないなら受け付ける。
@@ -515,6 +517,11 @@ observe の removedCrosswalks:
       待てる所の輪のうち短いものの長さ − 1）を区画を使う路線で分けた数である。列車は待てる所から次の待てる所までを
       まとめて押さえて進み、区画に入るのは自分の路線の分の枠が空いているときだけである。待てる所が 1 つ以下の路線と、
       区画の枠の分け前がない路線は cap が 0 で、列車は走らない。
+      区画の枠は、区画を使う路線のうち本数 1 以上の路線で等しく分ける（本数 0 の路線の分は 0）。そのため、本数を 0 から
+      1 以上にすると、区画を一緒に使うほかの路線の cap が下がることがある（act の結果の loweredLines）。0 にすると上がる。
+      1 以上どうしで変えても、ほかの路線は変わらない。ほかの路線（本数 1 以上）の cap を 0 にするなら Denied（LineStarvesOther、
+      starvedLine 付き）、この路線の cap が 0 なのにほかの路線の cap を下げるなら Denied（LineStarvesSelf）。
+      本数を変えて区画の分が変わったときは、超えた列車をすぐに消す（removedTrains）。
       列車は 4 両 80m、時速 90km で、最初の駅に 1 本ずつ現れる。駅に 20 tick 止まり、終点では 30 tick かけて折り返す。
       同じ駅から前の列車が出てから、運転間隔（1 周の見込みの時間 ÷ 本数）の半分を空けて出る。先の閉塞を押さえてから
       入るので、2 本が同じ閉塞に入ることはない。本数を減らすと、終点で折り返す列車から消える。消える列車に乗っていた人は、
@@ -3372,7 +3379,7 @@ mod tests {
     }
 
     /// 上限が 0 になった路線は、止まっていなくても haltedLines に理由つきで出る。
-    /// 駅 a–b の区間運転を 4 本作ると、共有の区画の枠 3 を前の 3 本が使い、4 本目の上限が 0 になる。
+    /// 駅 a–b の区間運転を 4 本作り、前の 3 本を走らせると、共有の区画の枠 3 を前の 3 本が使い、4 本目の上限が 0 になる。
     /// コマンドの前に a–b が走っていたことにして、前後の比べを確かめる。
     #[test]
     fn halted_lines_show_a_line_whose_cap_became_zero() {
@@ -3410,9 +3417,17 @@ mod tests {
                 to: st(1),
             });
         }
-        let mut before = line_states(&w);
         let lines: Vec<_> = w.rail().lines().map(|(id, _)| id).collect();
         assert_eq!(lines.len(), 4);
+        // 区画の枠は本数 1 以上の路線で分けるので、前の 3 本を走らせると 4 本目の上限が 0 になる。
+        for line in &lines[..3] {
+            let c = Command::SetLineTrains {
+                line: *line,
+                trains: 1,
+            };
+            assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+        }
+        let mut before = line_states(&w);
         before.insert(lines[3], (true, 0, 3));
         let mut out = json!({});
         note_line_changes(&mut out, &w, &before);
