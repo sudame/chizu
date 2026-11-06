@@ -749,6 +749,23 @@ fn observe_gives_people_and_traffic_counts() {
     assert!(yesterday["avgTravelTicks"].as_f64().unwrap() > 0.0);
     let m = &o["migration"];
     assert!(m["vacantHomes"].is_u64() && m["blockedHouseholds"].is_u64());
+    // 始まりからの転入と転出の積み上げは、いまの世帯の数と食い違わない。
+    assert!(n(&m["arrivedHouseholds"]) > 0, "誰も越してきていない");
+    assert_eq!(
+        n(&m["leftHouseholds"]),
+        n(&m["leftUnhappyHouseholds"]) + n(&m["leftHomelessHouseholds"])
+    );
+    assert_eq!(
+        n(&m["arrivedHouseholds"]) - n(&m["leftHouseholds"]),
+        n(&o["population"]["households"])
+    );
+    assert_eq!(
+        n(&m["arrivedCitizens"]) - n(&m["leftCitizens"]),
+        n(&o["population"]["citizens"])
+    );
+    // 前の observe からの増減にも出る。
+    let arrived = &o["sinceLastObserve"]["changes"]["migration.arrivedHouseholds"];
+    assert_eq!(arrived["to"], m["arrivedHouseholds"], "{arrived}");
     // 通勤した住民は、通勤の時間を測ってある。
     let time = &o["commute"]["time"];
     assert_eq!(n(&time["commuters"]), n(&o["commute"]["commuters"]));
