@@ -602,7 +602,10 @@ mod tests {
         for (id, (_, score)) in &scores {
             let h = p.citizen(*id).unwrap().household;
             let was = by_household.insert(h, u64::from(*score));
-            assert!(was.is_none_or(|v| v == u64::from(*score)), "世帯の中で点が違う");
+            assert!(
+                was.is_none_or(|v| v == u64::from(*score)),
+                "世帯の中で点が違う"
+            );
         }
         let want = by_household.values().sum::<u64>() / by_household.len() as u64;
         assert_eq!(u64::from(w.newcomer_parking()), want);

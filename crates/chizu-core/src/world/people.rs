@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
 use crate::building::{BASE_RESIDENTIAL_DEMAND, CityStats, happiness_pull, residential_tax_pull};
-use crate::citizens::{HAPPINESS_MAX, HappinessParts};
 use crate::citizens::{Activity, MAX_HOUSEHOLD_SIZE, ScheduleState, WORKING_AGES, draw_household};
+use crate::citizens::{HAPPINESS_MAX, HappinessParts};
 use crate::clock::TICKS_PER_DAY;
 use crate::command::ZoneKind;
 use crate::happiness;
