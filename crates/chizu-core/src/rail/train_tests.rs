@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use super::train::TRAIN_BLOCK_LEN_MM;
 use crate::command::{Command, RoadKind};
+use crate::network::Dir;
 use crate::record::{CommandLog, replay};
 use crate::tile::ChunkCoord;
 use crate::units::{Money, Tick};
@@ -881,4 +883,262 @@ fn a_stopped_line_lets_go_of_a_shared_station() {
     let most = run(&mut w, 10_000, 3_000);
     assert!(w.rail().trains().all(|(_, t)| t.line == one));
     assert_eq!(most, usize::from(w.rail().line(one).unwrap().allowed()));
+}
+
+/// 前からある路線の進路をすっぽり含む路線は、前の路線の上限を 0 にするので断る。前の路線の列車は消えない。
+#[test]
+fn a_line_that_would_starve_another_is_denied() {
+    let (mut w, a, b, c) = three_in_a_row();
+    let one = create(&mut w, a, b);
+    set_trains(&mut w, one, 3);
+    run(&mut w, 500, 1_000);
+    let before = w.state_hash();
+    assert_eq!(w.rail().line(one).unwrap().cap(), 3);
+    assert_eq!(w.rail().train_count(), 3);
+    assert_eq!(
+        w.apply(&Command::CreateLine { from: a, to: c }),
+        ApplyOutcome::Denied(DenyReason::LineStarvesOther)
+    );
+    assert_eq!(w.state_hash(), before);
+    // 延ばして同じ形になる路線も断る。c–b は b のホームを共有するので、a–b の上限は 2 に下がる。
+    let two = create(&mut w, c, b);
+    assert_eq!(w.rail().line(one).unwrap().cap(), 2);
+    assert_eq!(w.rail().train_count(), 2);
+    assert_eq!(
+        w.apply(&Command::ExtendLine {
+            line: two,
+            station: a
+        }),
+        ApplyOutcome::Denied(DenyReason::LineStarvesOther)
+    );
+    assert_eq!(w.rail().train_count(), 2);
+    run(&mut w, 3_000, 1_000);
+    assert_eq!(w.rail().train_count(), 2);
+}
+
+/// 上限が下がるが 0 にはならない路線は受け付ける。超えた分の列車はすぐに消え、残りは行き詰まらずに走り続ける。
+/// 共有するようになった駅で先を押さえ直せない列車も消えるが、路線は上限まで出直す。
+#[test]
+fn a_line_lowering_another_cap_removes_only_the_excess() {
+    let (mut w, [west, mid, east, north]) = two_line_world();
+    let one = line_through(&mut w, &[west, mid, east]);
+    set_trains(&mut w, one, 16);
+    let cap_before = w.rail().line(one).unwrap().cap();
+    for _ in 0..20_000 {
+        w.step();
+        if w.rail().train_count() == usize::from(cap_before) {
+            break;
+        }
+    }
+    assert_eq!(w.rail().train_count(), usize::from(cap_before));
+    create(&mut w, west, north);
+    let cap_after = w.rail().line(one).unwrap().cap();
+    assert!(0 < cap_after && cap_after < cap_before, "{cap_before} → {cap_after}");
+    let count = |w: &World| w.rail().trains().filter(|(_, t)| t.line == one).count();
+    assert!((1..=usize::from(cap_after)).contains(&count(&w)));
+    run(&mut w, 10_000, 3_000);
+    assert_eq!(count(&w), usize::from(cap_after));
+}
+
+/// 上限と、0 のときの理由を読める。区間運転（W–M–E があるときの W–M）は、待てる所がなく上限が 0 になる。
+#[test]
+fn line_capacity_shows_why_the_cap_is_zero() {
+    let (mut w, [west, mid, east, _]) = two_line_world();
+    let one = line_through(&mut w, &[west, mid, east]);
+    let two = line_through(&mut w, &[west, mid]);
+    let rail = w.rail();
+    let c1 = rail.line_capacity(one).unwrap();
+    assert_eq!(c1.shared_with, vec![two]);
+    assert!(c1.cap > 0);
+    assert_eq!(usize::from(c1.cap), c1.wait_places - 1);
+    let c2 = rail.line_capacity(two).unwrap();
+    assert_eq!(c2.cap, 0);
+    assert!(c2.wait_places < 2);
+    assert_eq!(c2.shared_with, vec![one]);
+}
+
+/// 上りと下りですれ違う 2 本の下で線路を分けると、分けた所の分岐に 2 本がかかる。ID の大きいほうを消す。
+#[test]
+fn splitting_a_track_under_two_passing_trains_keeps_blocks_apart() {
+    let mut w = rich_world();
+    ok(&mut w, road((0, 10), (120, 10)));
+    let a = station(&mut w, (12, 8), 2);
+    let b = station(&mut w, (112, 8), 2);
+    ok(&mut w, rail((12, 8), (103, 8)));
+    let id = create(&mut w, a, b);
+    set_trains(&mut w, id, 3);
+    // 2 本が逆の向きに同じ線路の同じ所にいる tick を探し、その下で線路を分ける。
+    for _ in 0..20_000 {
+        w.step();
+        let heads: Vec<(TrackId, Dir, i64)> = w
+            .rail()
+            .trains()
+            .map(|(_, t)| (t.track, t.dir, t.offset))
+            .collect();
+        let found = heads.iter().enumerate().find_map(|(i, p)| {
+            heads[i + 1..]
+                .iter()
+                .find(|q| q.0 == p.0 && q.1 != p.1)
+                .map(|q| (*p, *q))
+        });
+        let Some((p, q)) = found else { continue };
+        let line = w.rail().track_line(p.0).unwrap();
+        let len = line.length().0;
+        // 前向きの距離にそろえる。
+        let fwd = |h: (TrackId, Dir, i64)| match h.1 {
+            Dir::Forward => h.2,
+            Dir::Backward => len - h.2,
+        };
+        let (lo, hi) = (fwd(p).min(fwd(q)), fwd(p).max(fwd(q)));
+        // 2 本の先頭のあいだが 1 両より短ければ、そのあいだのマスで分けると両方の体がかかる。
+        if hi - lo > TRAIN_BLOCK_LEN_MM || hi - lo < 2 * crate::network::TILE_MM {
+            continue;
+        }
+        let k = u64::try_from((lo + hi) / 2 / crate::network::TILE_MM).unwrap();
+        if k == 0 || k >= line.len {
+            continue;
+        }
+        let t = line.tile(k);
+        if w.apply(&rail((t.x, t.y), (t.x - 5, t.y - 5))) != ApplyOutcome::Applied {
+            continue;
+        }
+        check_blocks(&w);
+        run(&mut w, 5_000, 2_000);
+        return;
+    }
+    panic!("すれ違う所が見つからない");
+}
+
+/// レビューで使った、線路のつながった駅の並びに路線と列車を置き、途中で線路と路線を変える形。
+/// 線路を変えた直後に備えが働いた種を回し、閉塞が重ならず、備えが一度も働かないことを確かめる。
+struct Xorshift(u64);
+
+impl Xorshift {
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 % n
+    }
+}
+
+fn rebuilt_while_running(seed: u64) {
+    let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut w = World::new_with_money(6, Money(1_000_000_000_000)).with_unlimited_land();
+    for cx in -1..=6 {
+        for cy in -1..=1 {
+            let _ = w.apply(&Command::BuyChunk {
+                coord: ChunkCoord::new(cx, cy),
+            });
+        }
+    }
+    ok(&mut w, road((0, 10), (400, 10)));
+    let k = 2 + r.below(4) as usize;
+    let gaps = [1_i64, 2, 3, 5, 8, 9, 10, 15, 30, 50];
+    let mut x = 3;
+    let mut ends = Vec::new();
+    let mut st = Vec::new();
+    for _ in 0..k {
+        st.push(station(&mut w, (x + 9, 8), 2));
+        ends.push((x, x + 9));
+        x += 9 + gaps[r.below(gaps.len() as u64) as usize];
+    }
+    for i in 0..k - 1 {
+        ok(&mut w, rail((ends[i].1, 8), (ends[i + 1].0, 8)));
+    }
+    for i in 0..k - 1 {
+        let (e, nw) = (ends[i].1, ends[i + 1].0);
+        if r.below(100) < 60 {
+            let (lo, hi) = (e + 1, nw - 1);
+            if hi >= lo {
+                let p = lo + r.below((hi - lo + 1) as u64) as i64;
+                let to = if r.below(2) == 0 {
+                    (p + 5, 3)
+                } else {
+                    (p - 5, 3)
+                };
+                let _ = w.apply(&rail((p, 8), to));
+            }
+        }
+        if r.below(100) < 30 {
+            let _ = w.apply(&rail((e, 8), (e + 5, 3)));
+        }
+        if r.below(100) < 30 {
+            let _ = w.apply(&rail((nw, 8), (nw - 5, 3)));
+        }
+    }
+    let mut r = Xorshift(seed.wrapping_mul(77) + 3);
+    let mut ids = Vec::new();
+    for _ in 0..2 + r.below(3) {
+        let mut pick: Vec<StationId> = st.iter().copied().filter(|_| r.below(2) == 0).collect();
+        if pick.len() < 2 {
+            continue;
+        }
+        if r.below(2) == 0 {
+            pick.reverse();
+        }
+        if w.apply(&Command::CreateLine {
+            from: pick[0],
+            to: pick[1],
+        }) != ApplyOutcome::Applied
+        {
+            continue;
+        }
+        let id = w.rail().lines().last().unwrap().0;
+        for s in &pick[2..] {
+            let _ = w.apply(&Command::ExtendLine {
+                line: id,
+                station: *s,
+            });
+        }
+        let trains = 1 + r.below(16) as u8;
+        let _ = w.apply(&Command::SetLineTrains { line: id, trains });
+        ids.push(id);
+    }
+    for tick in 0..8_000 {
+        if tick % 1_500 == 700 {
+            let mut kind = r.below(5);
+            let x = 3 + r.below(150) as i64;
+            if ids.is_empty() && (kind == 2 || kind == 3) {
+                kind = 0;
+            }
+            let c = match kind {
+                0 => rail((x, 8), (x + 5, 3)),
+                1 => Command::Bulldoze {
+                    area: TileRect::from_corners(at(x, 3), at(x + 5, 5)),
+                },
+                2 => Command::SetLineTrains {
+                    line: ids[r.below(ids.len() as u64) as usize],
+                    trains: r.below(17) as u8,
+                },
+                3 => Command::ExtendLine {
+                    line: ids[r.below(ids.len() as u64) as usize],
+                    station: st[r.below(st.len() as u64) as usize],
+                },
+                _ => Command::Bulldoze {
+                    area: TileRect::from_corners(at(x, 8), at(x, 8)),
+                },
+            };
+            let _ = w.apply(&c);
+            check_blocks(&w);
+        }
+        w.step();
+        check_blocks(&w);
+        assert_eq!(
+            w.rail().tally().deadlock,
+            0,
+            "種 {seed} の tick {tick} で行き詰まった"
+        );
+    }
+}
+
+/// 線路を分けて分岐ができた直後や、駅を取り壊して進路が短くなった直後に、待てる所の外で止まった列車と、
+/// 上限を超えた列車と、分けた所の分岐に重なる列車を消すので、備えは働かない。
+/// 4287 は線路を分けた直後、4151 は駅を取り壊した直後、5753 はほかの路線の上限を下げた直後、
+/// 7277 はすれ違う 2 本の下で線路を分けた直後に、直す前は備えが働くか閉塞が重なった。
+#[test]
+fn rebuilding_while_trains_run_does_not_deadlock() {
+    for seed in [4151, 4287, 5611, 5753, 7277] {
+        rebuilt_while_running(seed);
+    }
 }

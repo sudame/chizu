@@ -123,10 +123,12 @@ pub enum DenyReason {
     LineLimit = 25,
     /// 駅がもう路線に入っている（環状にするために最初の駅を指すときを除く）。
     StationInLine = 26,
+    /// 路線を作るか延ばすと、ほかの路線の待てる所が足りなくなり、その路線の本数の上限が 0 になる（走れなくなる）。
+    LineStarvesOther = 27,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 27] = [
+    pub const ALL: [DenyReason; 28] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -154,6 +156,7 @@ impl DenyReason {
         DenyReason::NoSuchLine,
         DenyReason::LineLimit,
         DenyReason::StationInLine,
+        DenyReason::LineStarvesOther,
     ];
 
     pub fn index(self) -> usize {
@@ -1095,10 +1098,11 @@ mod tests {
             | DenyReason::NoSuchStation
             | DenyReason::NoSuchLine
             | DenyReason::LineLimit
-            | DenyReason::StationInLine => DenyReason::ALL.contains(&r),
+            | DenyReason::StationInLine
+            | DenyReason::LineStarvesOther => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 27);
+        assert_eq!(DenyReason::ALL.len(), 28);
     }
     use crate::command::MAX_TAX_PERMILLE;
 

@@ -95,7 +95,7 @@ impl_arena_id!(RailNodeId, TrackId, StationId, LineId, TrainId);
 pub mod line;
 pub mod train;
 
-pub use line::{RailLine, Step, StepKind};
+pub use line::{LineCapacity, RailLine, Step, StepKind};
 pub use train::{Block, RailTally, Train, TrainState};
 
 /// 線路の網のノード。

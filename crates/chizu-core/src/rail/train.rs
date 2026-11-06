@@ -345,6 +345,87 @@ impl Rail {
         }
     }
 
+    /// 進路か待てる所が変わった直後に、続けられない列車を消す（止まった路線の列車と同じ扱い）。
+    ///
+    /// 行き詰まりを防ぐ決まりの 3 では、列車が押さえた範囲の終わりは、いつも待てる所にある。進路が替わると
+    /// 先に押さえた要素を返し（[`Rail::relocate_trains`]）、待てる所が変わると前の終わりが待てる所でなくなるので、
+    /// この形が崩れる。そこで、押さえた範囲の終わりが待てる所でない列車は、ID の順に、次の待てる所までを
+    /// まとめて押さえ直す。ほかの列車が押さえていて押さえ直せなければ、その列車を消す。
+    /// 待てる所の外で先を待つ列車を残すと、ほかの列車と待ち合う輪ができるためである。
+    ///
+    /// その前に、次の 2 つを消す。
+    /// - 上限（[`RailLine::cap`]）を超えた本数。ID の大きい列車から消す。上限を超えた列車を次の駅まで残すと、
+    ///   駅に着く前に路線の中で待ち合う輪ができることがあるためである。
+    /// - ほかの列車と同じ閉塞を押さえる列車。ID の小さい列車から残す。上りと下りにすれ違う 2 本の下で
+    ///   線路を分けると、分けた所の分岐（上りと下りで 1 つの閉塞）に 2 本がかかるためである。
+    pub(crate) fn settle_trains(&mut self) {
+        let mut counts = BTreeMap::<LineId, u8>::new();
+        let mut gone = Vec::new();
+        for (id, t) in self.trains.iter() {
+            let cap = self.lines.get(t.line).map_or(0, RailLine::cap);
+            let n = counts.entry(t.line).or_default();
+            if *n >= cap {
+                gone.push(id);
+            } else {
+                *n += 1;
+            }
+        }
+        // ID の小さい列車から数えて残すので、消えるのは ID の大きい列車である。
+        for id in gone {
+            self.trains.remove(id);
+        }
+        let mut held = BTreeMap::<Block, TrainId>::new();
+        let mut gone = Vec::new();
+        for (id, t) in self.trains.iter() {
+            let line = self.lines.get(t.line).expect("列車の路線がない");
+            let blocks = line.held_blocks(t);
+            if blocks.iter().any(|b| held.contains_key(b)) {
+                gone.push(id);
+            } else {
+                for b in blocks {
+                    held.insert(b, id);
+                }
+            }
+        }
+        for id in gone {
+            self.trains.remove(id);
+        }
+        let ids: Vec<TrainId> = self.trains.iter().map(|(id, _)| id).collect();
+        let mut gone = Vec::new();
+        for id in ids {
+            let t = self.trains.get(id).expect("列車がない");
+            let line = self.lines.get(t.line).expect("列車の路線がない");
+            let end = (t.pos + t.ahead) % line.len();
+            if line.step(end).wait {
+                continue;
+            }
+            let from = t.ahead + 1;
+            let to = line.run_ahead(t.pos, from);
+            let steps: Vec<u32> = (from..=to).map(|k| (t.pos + k) % line.len()).collect();
+            let free = from <= to
+                && line.step((t.pos + to) % line.len()).wait
+                && steps.iter().all(|i| {
+                    let s = line.step(*i);
+                    self.tracks.get(s.track).is_some()
+                        && s.blocks().all(|b| held.get(&b).is_none_or(|h| *h == id))
+                });
+            if free {
+                for i in &steps {
+                    for b in line.step(*i).blocks() {
+                        held.insert(b, id);
+                    }
+                }
+                self.trains.get_mut(id).expect("列車がない").ahead = to;
+            } else {
+                held.retain(|_, h| *h != id);
+                gone.push(id);
+            }
+        }
+        for id in gone {
+            self.trains.remove(id);
+        }
+    }
+
     /// 列車を 1 tick 進める。
     pub fn step(&mut self, tick: Tick) {
         if self.lines.is_unused() {
