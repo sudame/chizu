@@ -610,25 +610,29 @@ mod tests {
         }
     }
 
+    /// 密度は段階が上がっても変わらないので、どの区画でも、段階が上がって台数が減ることはない。
     #[test]
-    fn spaces_shrink_only_when_a_house_becomes_an_apartment() {
-        for zone in ZoneKind::ALL {
+    fn spaces_never_shrink_as_the_level_rises() {
+        let zones = [
+            Zone::Residential,
+            Zone::ResidentialLow,
+            Zone::Commercial,
+            Zone::Industrial,
+            Zone::Office,
+        ];
+        for zone in zones {
             for w in 1..=4 {
                 for h in 1..=4 {
                     for road in [(0, -1), (1, 0), (1, 1)] {
                         for seed in [seed_where(true), seed_where(false)] {
                             let mut prev = 0;
-                            for level in 1..=crate::building::MAX_LEVEL {
-                                let mut b = building(zone, (w, h), level);
+                            for level in 1..=zone.max_level() {
+                                let mut b = high_building(zone.kind(), (w, h), level);
+                                b.zone = zone;
                                 b.toward_road = road;
                                 let n = b.parking_spaces(seed);
                                 let at =
                                     format!("{zone:?} {w}×{h} {road:?} の段階 {level} 種 {seed}");
-                                // このテストの `building` は段階 1〜2 を低密度にするので、段階 3 は密度が変わる。
-                                // 実際の街では、低密度の住宅は段階 3 に上がらず、密度は変わらない。
-                                if zone == Residential && level == 3 {
-                                    prev = 0;
-                                }
                                 assert!(n >= prev, "{at}");
                                 prev = n;
                             }
@@ -637,7 +641,7 @@ mod tests {
                 }
             }
         }
-        // 4×4 の戸建ての段階 2 は 8 世帯で 8 台、集合住宅の段階 3 は 12 世帯で 6 台になる。
+        // 4×4 の低密度の段階 2 は 8 世帯で 8 台、高密度の段階 3 は 12 世帯で 6 台になる。
         assert_eq!(building(Residential, (4, 4), 2).parking_spaces(seed()), 8);
         assert_eq!(building(Residential, (4, 4), 3).parking_spaces(seed()), 6);
     }

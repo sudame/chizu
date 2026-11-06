@@ -431,7 +431,10 @@ mod car_place_tests {
             }
         }
         for (id, n) in &living {
-            let spaces = w.buildings().parking_spaces(*id);
+            let spaces = w
+                .buildings()
+                .parking_spaces(*id)
+                .min(super::home_spaces_limit().unwrap_or(u64::MAX));
             let got = held.get(id).copied().unwrap_or(0);
             assert_eq!(got, (*n).min(spaces), "建物 {id:?} の枠の数");
         }
@@ -537,6 +540,82 @@ mod car_place_tests {
             );
         }
         check(&w);
+    }
+
+    /// 自宅の枠が減ると、ID の大きい世帯から枠を返す。返した世帯の車は、停めてあれば駐車場から外し、
+    /// 家へ向かっていれば着いても停めずに、押さえた空きを返す。
+    /// 枠が減る場面は、古い版（`SNAPSHOT_VERSION` 16）の保存データを読んだときに起きる（高密度の段階 1〜2 の枠が
+    /// 世帯の数から × 0.5 に減る）。ここでは、テスト用のつまみ（`HOME_SPACES_LIMIT`）で途中から枠を減らして通す。
+    #[test]
+    fn shrinking_home_places_are_taken_back() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        // 減らしたあとの枠の数より多く停めてあるか押さえてある住宅で、枠を返す世帯の車が、その建物へ向かっている
+        // もの。枠を返すのは、自宅の枠を持つ世帯のうち、ID の順で減らしたあとの枠の数を超える分である。
+        const LIMIT: u64 = 2;
+        let pick = |w: &World| {
+            w.buildings().iter().find_map(|(id, b)| {
+                let spaces = w.buildings().parking_spaces(id).min(LIMIT);
+                let lot = w.trips().lot(id);
+                if !(b.zone == crate::command::Zone::Residential
+                    && u64::from(lot.parked + lot.reserved) > spaces)
+                {
+                    return None;
+                }
+                let mut holders: Vec<_> = w
+                    .car_places()
+                    .iter()
+                    .filter(|(h, place)| {
+                        *place == CarPlace::Home && w.population().home(*h).flatten() == Some(id)
+                    })
+                    .map(|(h, _)| h)
+                    .collect();
+                holders.sort_unstable();
+                let skip = usize::try_from(spaces).unwrap_or(usize::MAX);
+                let heading = holders.into_iter().skip(skip).any(|h| {
+                    matches!(
+                        w.trips().household_car(h),
+                        Some(HouseholdCar::InUse(t))
+                            if w.trips().iter().any(|(tid, trip)| {
+                                tid == t && trip.parking_lot() == Some(LotId::Building(id))
+                            })
+                    )
+                });
+                heading.then_some(id)
+            })
+        };
+        let mut found = None;
+        while w.tick.0 < 14 * TICKS_PER_DAY && found.is_none() {
+            w.step();
+            found = pick(&w);
+        }
+        let id = found.expect("枠を返す世帯の車が家へ向かっている住宅がない");
+        HOME_SPACES_LIMIT.with(|l| l.set(Some(LIMIT)));
+        w.assign_car_places();
+        let spaces = w.buildings().parking_spaces(id).min(LIMIT);
+        assert_eq!(holders(&w).get(&id).copied().unwrap_or(0), spaces);
+        assert!(
+            dropped(&w).contains_key(&id),
+            "家へ向かう車をなくした世帯がない"
+        );
+        check(&w);
+        // 枠を返した世帯の車は、着いても停めない。向かっている車がみな着けば、台数に収まる。
+        let living = |w: &World, h| w.population().home(h).flatten() == Some(id);
+        for _ in 0..TICKS_PER_DAY {
+            w.step();
+            check(&w);
+            let p = w.population();
+            for h in p.household_ids().filter(|h| living(&w, *h)) {
+                if let Some(HouseholdCar::Parked { lot, .. }) = w.trips().household_car(h) {
+                    assert!(
+                        w.car_places().get(h).is_some(),
+                        "枠のない世帯の車が {lot:?} に停まっている"
+                    );
+                }
+            }
+        }
+        let lot = w.trips().lot(id);
+        assert!(u64::from(lot.parked + lot.reserved) <= spaces);
+        HOME_SPACES_LIMIT.with(|l| l.set(None));
     }
 
     use crate::car_place::testing::HOME_SPACES_LIMIT;
