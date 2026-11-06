@@ -332,9 +332,9 @@ fn cars_sent_to_another_lot_are_told_apart_until_they_park() {
         if a.is_none() && b.is_none() {
             break;
         }
-        assert!(!a.is_some_and(|t| t.parks_elsewhere(&s.net, &s.buildings)));
+        assert!(!a.is_some_and(|t| t.parks_elsewhere(&s.net, &s.buildings, &[])));
         if let Some(t) = b {
-            seen.push((t.mode(), t.parks_elsewhere(&s.net, &s.buildings)));
+            seen.push((t.mode(), t.parks_elsewhere(&s.net, &s.buildings, &[])));
         }
         s.step();
     }
@@ -924,11 +924,11 @@ fn a_car_bound_for_a_removed_building_is_not_counted_as_parking_elsewhere() {
     let id = s.drive(home, shop).unwrap();
     s.board(&[id]);
     let t = s.trips.get(id).unwrap();
-    assert!(!t.parks_elsewhere(&s.net, &s.buildings));
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[]));
     s.buildings.remove(shop);
     s.trips.forget_lots(&s.buildings);
     let t = s.trips.get(id).unwrap();
-    assert!(!t.parks_elsewhere(&s.net, &s.buildings));
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[]));
 }
 
 #[test]
@@ -1530,4 +1530,48 @@ fn a_car_heading_to_a_removed_shared_lot_does_not_park() {
     s.run(to_shared);
     let lot = s.trips.shared_lot(c);
     assert_eq!((lot.rented, lot.visitors), (1, Lot::default()));
+}
+
+/// 職場が満車で、世帯が借りた枠に回る車は、`parked_elsewhere` の積み上げにも、車ごとの `parks_elsewhere` にも数えない。
+/// 外来の枠に回る車は、どちらにも数え、その駐車場が取り壊されれば `parks_elsewhere` は数えなくなる。
+#[test]
+fn rented_spaces_are_not_counted_as_parking_elsewhere_but_visitor_spaces_are() {
+    let (mut s, ids) = Street::new(&[50, 5, 30, 28]);
+    let (home, work, filler, visitor) = (ids[0], ids[1], ids[2], ids[3]);
+    let facilities = [shared_lot(&s, 8)];
+    let c = facilities[0].area.min;
+    s.trips
+        .set_rented(&std::collections::BTreeMap::from([(c, 1)]));
+    let sites = (&s.buildings, facilities.as_slice());
+    let (net, router) = (&s.net, &mut s.router);
+    // 職場の駐車場を埋める。
+    s.trips
+        .spawn_drive(net, router, sites, (filler, work), Tick::ZERO)
+        .unwrap();
+    let before = s.trips.parking_tally().parked_elsewhere;
+    let h = Household { home };
+    let request = CommuteRequest {
+        place: Some(CarPlace::Shared(c)),
+        ..h.request(0, (home, work))
+    };
+    let renter = s
+        .trips
+        .start_commutes(net, router, sites, &[request], Tick::ZERO)[0]
+        .expect("移動を作れない");
+    let t = s.trips.get(renter).unwrap();
+    assert_eq!(t.parking_lot(), Some(LotId::Rented(c)));
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &facilities));
+    assert_eq!(s.trips.parking_tally().parked_elsewhere, before);
+    // 借りていない車は外来の枠に回り、積み上げにも数える。
+    let (net, router) = (&s.net, &mut s.router);
+    let v = s
+        .trips
+        .spawn_drive(net, router, sites, (visitor, work), Tick::ZERO)
+        .unwrap();
+    let t = s.trips.get(v).unwrap();
+    assert_eq!(t.parking_lot(), Some(LotId::Shared(c)));
+    assert!(t.parks_elsewhere(&s.net, &s.buildings, &facilities));
+    assert_eq!(s.trips.parking_tally().parked_elsewhere, before + 1);
+    // 駐車場が取り壊されたら数えない。
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[]));
 }

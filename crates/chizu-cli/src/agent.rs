@@ -159,7 +159,8 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  住宅の駐車場は、その建物の自宅の枠を持つ世帯の車だけが使う。
                  redirectedCars いま移動中の車のうち、16 マスの中のほかの建物の駐車場か、共同の駐車場の外来の枠へ停めに
                  向かっている車。行き先の建物の駐車場が満車のときのほか、そこへ車か歩きで届かないときも、近くのほかの駐車場に
-                 回る。距離が同じなら建物の駐車場を先にする。
+                 回る。距離が同じなら建物の駐車場を先にする。世帯が借りた枠に停める車（家に帰る車も、職場が満車で借りた枠に
+                 回る車も）は、世帯の枠なので数えない。取り壊された駐車場へ向かう車も数えない。
                  次の 4 つは始まりからの積み上げで、日ごとの数は 2 つの observe の差で求める。
                  drives 車で走り始めた移動の数、parkedElsewhere そのうちほかの建物の駐車場に回った数（redirectedCars と同じ決まり）、
                  lotsFull 行き先の近くの駐車場がどこも満車で、車で向かうのをやめた数（やめた移動は、歩けるなら歩く）、
@@ -1367,7 +1368,7 @@ fn parking(world: &World) -> Value {
     let redirected = world
         .trips()
         .iter()
-        .filter(|(_, t)| t.parks_elsewhere(world.network(), world.buildings()))
+        .filter(|(_, t)| t.parks_elsewhere(world.network(), world.buildings(), world.facilities()))
         .count();
     json!({
         "byZone": by_zone(|k| {

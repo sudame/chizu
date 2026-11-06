@@ -1117,9 +1117,8 @@ impl Trips {
         self.parking.reserve(lot);
         let tally = &mut self.parking_tally;
         tally.drives = tally.drives.saturating_add(1);
-        // 家に帰って借りた枠に停めるのは、行き先の駐車場に停められなかったのではない。
-        let rented_home = matches!(lot, LotId::Rented(_)) && home == Some(to);
-        if lot != LotId::Building(to) && !rented_home {
+        // 借りた枠は世帯の枠で、行き先の駐車場に停められなかったのではない（`Trip::parks_elsewhere` と同じ決まり）。
+        if !matches!(lot, LotId::Rented(_)) && lot != LotId::Building(to) {
             tally.parked_elsewhere = tally.parked_elsewhere.saturating_add(1);
             self.lot_misses.add(to, now.0 / TICKS_PER_DAY, |m| {
                 m.parked_elsewhere = m.parked_elsewhere.saturating_add(1);
