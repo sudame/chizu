@@ -31,6 +31,12 @@ import { setupHudPanel, trackHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
 import {
+  type BulldozePreview,
+  bulldozeSummary,
+  parseBulldozePreview,
+  removedRoadTiles,
+} from "./map/bulldoze-preview.ts";
+import {
   Camera,
   type ChunkRange,
   chunksByDistance,
@@ -47,6 +53,7 @@ import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
 import {
   BULLDOZE_EDGE_COLOR,
   BULLDOZE_FILL_COLOR,
+  BULLDOZE_REACH_FILL_COLOR,
   CLEAR_ZONE_COLOR,
   HINT_EDGE_COLOR,
   HINT_FILL_COLOR,
@@ -640,6 +647,10 @@ let probe: {
   carless: number;
 } | null = null;
 let probeSent = "";
+// 取り壊しで消えるものの、中核の答え。範囲が変わるたびに Worker に問い合わせ、答えを待つあいだは次を送らない
+let bulldozeShown: { key: string; preview: BulldozePreview | null } | null = null;
+let bulldozeSent = "";
+let bulldozeWaiting = false;
 // 最後に問い合わせた tick。カーソルが動かなくても、街の数字が届いたときに共同の駐車場の円の中の数を問い合わせ直す
 let probeAskedTick = 0;
 let money = 0;
@@ -735,6 +746,41 @@ function updatePreview(): void {
     const area = tool.kind === "zone" ? zoneArea(tool.zone) : null;
     const min = { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y) };
     const max = { x: Math.max(start.x, end.x), y: Math.max(start.y, end.y) };
+    if (tool.kind === "bulldoze") {
+      // 実際に消える区間、施設、建物を、範囲より先に（下に）塗る
+      const key = requestBulldozePreview(min, max);
+      const preview = bulldozeShown?.key === key ? bulldozeShown.preview : null;
+      if (preview !== null) {
+        for (const t of removedRoadTiles(preview)) {
+          geometry.square(t, ROAD_VISUAL_HALF, BULLDOZE_REACH_FILL_COLOR, MIN_PX);
+        }
+        for (const b of [...preview.buildings, ...preview.facilities]) {
+          geometry.rect(b.min, b.max, BULLDOZE_REACH_FILL_COLOR);
+          geometry.outline(
+            b.min.x,
+            b.min.y,
+            b.max.x + 1,
+            b.max.y + 1,
+            BULLDOZE_EDGE_COLOR,
+            AREA_EDGE_PX,
+          );
+        }
+        for (const s of preview.segments) {
+          footprintOutline(geometry, s.from, s.to, BULLDOZE_EDGE_COLOR, AREA_EDGE_PX);
+        }
+        infoText = bulldozeSummary(preview);
+        // test:wasm が読む
+        mapCanvas.dataset.bulldozeRoadTiles = String(preview.roadTiles);
+        mapCanvas.dataset.bulldozeBuildings = String(preview.buildings.length);
+        mapCanvas.dataset.bulldozeFacilities = String(preview.facilities.length);
+        mapCanvas.dataset.bulldozeHouseholds = String(preview.displacedHouseholds);
+        mapCanvas.dataset.bulldozeSegments = String(preview.segments.length);
+      } else {
+        for (const k of ["RoadTiles", "Buildings", "Facilities", "Households", "Segments"]) {
+          delete mapCanvas.dataset[`bulldoze${k}`];
+        }
+      }
+    }
     geometry.rect(min, max, area?.fill ?? BULLDOZE_FILL_COLOR);
     geometry.outline(
       min.x,
@@ -847,16 +893,38 @@ function roadAt(at: Tile): { from: Tile; to: Tile } {
 /** 同じマスへの問い合わせを、これだけの tick が空くまで繰り返さない（移住を見る間隔と同じ）。 */
 const PROBE_REFRESH_TICKS = 60;
 let latestProbeTick = 0;
+let bulldozeAskedTick = 0;
 
 /** 街の数字が届いたとき、共同の駐車場の道具が同じマスに出していた円の中の数を、間隔を空けて問い合わせ直す。 */
 function refreshProbe(tick: number): void {
   latestProbeTick = tick;
+  // 取り壊す範囲は、街が動くと消えるものが変わるので、間隔を空けて問い合わせ直す
+  if (
+    tool.kind === "bulldoze" &&
+    cursor !== null &&
+    tick - bulldozeAskedTick >= PROBE_REFRESH_TICKS
+  ) {
+    bulldozeAskedTick = tick;
+    bulldozeSent = "";
+    updatePreview();
+  }
   if (tool.kind === "service" && isParking(tool.service) && cursor !== null) {
     if (tick - probeAskedTick >= PROBE_REFRESH_TICKS) {
       probeSent = "";
       updatePreview();
     }
   }
+}
+
+/** 範囲を取り壊したときに消えるものを問い合わせる。範囲の印を返す。答えを待っているあいだは、答えが届いてから最新の範囲を送る。 */
+function requestBulldozePreview(min: Tile, max: Tile): string {
+  const key = `${min.x},${min.y},${max.x},${max.y}`;
+  if (key !== bulldozeSent && !bulldozeWaiting) {
+    bulldozeSent = key;
+    bulldozeWaiting = true;
+    send({ kind: "bulldoze-preview", x0: min.x, y0: min.y, x1: max.x, y1: max.y });
+  }
+  return key;
 }
 
 function requestProbe(service: ServiceName, at: Tile): void {
@@ -903,6 +971,8 @@ function cancelTool(): void {
 
 function selectTool(next: Tool, button: HTMLButtonElement): void {
   tool = next;
+  bulldozeSent = "";
+  bulldozeShown = null;
   for (const b of toolButtons) {
     b.setAttribute("aria-pressed", String(b === button));
   }
@@ -1335,7 +1405,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     sentCommands.delete(message.id);
     // 街が変わったので、施設を置けるかを問い合わせ直す
     probeSent = "";
-    if (tool.kind === "service") {
+    // 取り壊しで消えるものも、街が変わったので古い見積もりを捨てて問い合わせ直す
+    bulldozeSent = "";
+    bulldozeShown = null;
+    if (tool.kind === "service" || tool.kind === "bulldoze") {
       updatePreview();
     }
     if (
@@ -1356,6 +1429,13 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   }
   if (message.kind === "service-probe") {
     probe = message;
+    updatePreview();
+    return;
+  }
+  if (message.kind === "bulldoze-preview") {
+    bulldozeWaiting = false;
+    const { x0, y0, x1, y1, info } = message;
+    bulldozeShown = { key: `${x0},${y0},${x1},${y1}`, preview: parseBulldozePreview(info) };
     updatePreview();
     return;
   }

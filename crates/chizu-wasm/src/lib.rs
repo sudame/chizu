@@ -209,6 +209,25 @@ impl Simulation {
         self.0.inspect_target(kind, a, b)
     }
 
+    /// 長方形 (x0, y0)-(x1, y1) を取り壊したときに消えるもの。並びは `sim::Sim::bulldoze_preview` にある。
+    pub fn bulldoze_preview(
+        &self,
+        x0: f64,
+        y0: f64,
+        x1: f64,
+        y1: f64,
+    ) -> Result<Vec<f64>, JsError> {
+        let coord = |v: f64| {
+            (v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0)
+                .then_some(v as i64)
+                .ok_or_else(|| JsError::new("マスの座標が整数でない"))
+        };
+        Ok(self.0.bulldoze_preview(
+            TilePos::new(coord(x0)?, coord(y0)?),
+            TilePos::new(coord(x1)?, coord(y1)?),
+        ))
+    }
+
     /// 施設ごとに `[min の x, min の y, max の x, max の y, 種類]`。
     pub fn facilities(&self) -> Vec<f64> {
         self.0.facilities()

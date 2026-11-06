@@ -511,8 +511,9 @@ impl Parking {
         }
     }
 
-    /// 出した車を、車で出られなかったので駐車場に戻す。
-    fn put_back(&mut self, lot: LotId) {
+    /// 空きを押さえずに、車を 1 台停める。出した車を、車で出られなかったので駐車場に戻すときと、
+    /// 枠を得た世帯の車をその枠に置くとき（[`Trips::place_car`]）に使う。
+    pub(super) fn put_back(&mut self, lot: LotId) {
         let add = |n: u32| n.checked_add(1).expect("停めた台数があふれた");
         match lot {
             LotId::Building(b) => self.update(b, |l| l.parked = add(l.parked)),
