@@ -378,6 +378,32 @@ fn depends_on(
     false
 }
 
+/// 列車 `id` が押さえた範囲の終わりを `from` から `to` へ移すときに、要る区画と区間の枠を待った列車のうち、待った
+/// 印を無視してよい列車。待った列車が、`id` が先に進まないと進めないときだけ無視する（閉塞を譲る決まりと同じ。
+/// 譲ると待ち合う輪になる）。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "depends_on に渡す状態を引数で受け取る"
+)]
+fn quota_ignore(
+    lines: &Arena<LineId, RailLine>,
+    trains: &Arena<TrainId, Train>,
+    held: &BTreeMap<Block, TrainId>,
+    quota: &Quota,
+    claims: &Claims,
+    id: TrainId,
+    from: u32,
+    to: u32,
+) -> BTreeSet<TrainId> {
+    let t = trains.get(id).expect("列車がない");
+    let line = lines.get(t.line).expect("列車の路線がない");
+    quota
+        .claimants(t.line, line, Some(from), to)
+        .into_iter()
+        .filter(|c| *c != id && depends_on(lines, trains, held, quota, claims, *c, id))
+        .collect()
+}
+
 /// 先の閉塞を押さえようとした結果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reserve {
@@ -1035,15 +1061,7 @@ impl Rail {
                 }
                 let place_free = by.is_none() && yield_to.is_none();
                 if must {
-                    // 枠を待っている先の列車が、この列車が先に進まないと進めないなら、その列車には枠を譲らない
-                    // （閉塞を譲る決まりと同じ。譲ると待ち合う輪になる）。
-                    let ignore: BTreeSet<TrainId> = quota
-                        .claimants(t.line, line, Some(from), to)
-                        .into_iter()
-                        .filter(|c| {
-                            *c != id && depends_on(lines, trains, held, quota, claims, *c, id)
-                        })
-                        .collect();
+                    let ignore = quota_ignore(lines, trains, held, quota, claims, id, from, to);
                     let quota_free = quota.free_for(t.line, line, Some(from), to, &ignore);
                     // 決まりの 4：押さえた範囲の終わりが入る区画と区間に、枠が空いているときだけ押さえる。
                     // 閉塞を待つときも、要る枠をこの列車が待っているものとして覚える。
@@ -1359,3 +1377,53 @@ impl StateHash for Train {
 #[cfg(test)]
 pub(super) static OVERDELETED: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+impl Rail {
+    /// 区画と区間の枠を譲る決まりを確かめる。列車 `b` が、次の範囲へ押さえた範囲の終わりを移すのに要る枠を待った
+    /// として、同じ路線の列車 `a` が同じ移り方（同じ枠）を求めたら、`b` の印を無視するかを返す。`b_waits_on_a` なら、
+    /// `b` の次の範囲の閉塞を `a` が押さえているものとし、そうでなければ閉塞はどれも空いているものとする。`b` の次の
+    /// 範囲で新しく要る枠がなければ `None` である。
+    pub(super) fn ignores_claim(&self, a: TrainId, b: TrainId, b_waits_on_a: bool) -> Option<bool> {
+        let ta = self.trains.get(a)?;
+        let tb = self.trains.get(b)?;
+        if ta.line != tb.line {
+            return None;
+        }
+        let line = self.lines.get(tb.line)?;
+        let k_from = tb.ahead + 1;
+        let k_to = line.run_ahead(tb.pos, k_from).min(line.len() - 1);
+        if k_from > k_to {
+            return None;
+        }
+        let from = Rail::reserved_end(line, tb);
+        let to = (tb.pos + k_to) % line.len();
+        let n = needs(tb.line, &line.plan, Some(from), to);
+        let mut quota = self.quota();
+        if let Some(k) = n.zone {
+            quota.claimed_zones.insert(k, Some(b));
+        } else {
+            quota.claimed_bins.insert(n.bin?, Some(b));
+        }
+        let mut held = BTreeMap::new();
+        if b_waits_on_a {
+            for k in k_from..=k_to {
+                for blk in line.blocks_maybe(tb, (tb.pos + k) % line.len()) {
+                    held.insert(blk, a);
+                }
+            }
+        }
+        let claims = Claims::default();
+        let ignore = quota_ignore(
+            &self.lines,
+            &self.trains,
+            &held,
+            &quota,
+            &claims,
+            a,
+            from,
+            to,
+        );
+        Some(ignore.contains(&b))
+    }
+}

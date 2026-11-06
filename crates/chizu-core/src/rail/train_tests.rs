@@ -353,6 +353,35 @@ fn a_two_station_shuttle_runs_up_to_the_cap_without_deadlock() {
     assert_eq!(w.rail().train_count(), 5);
 }
 
+/// 区画と区間の枠を譲る決まり：列車が、先に枠を待った同じ路線の列車の印を無視するのは、その列車がこちらを待って
+/// いるときだけである。待っていなければ、印を守って枠を譲る。
+#[test]
+fn a_claimed_quota_is_ignored_only_when_the_claimant_waits_on_us() {
+    let (mut w, [west, mid, east, north]) = two_line_world();
+    let one = line_through(&mut w, &[west, mid, east]);
+    let two = line_through(&mut w, &[north, mid, west]);
+    set_trains(&mut w, one, 4);
+    set_trains(&mut w, two, 4);
+    let (mut kept, mut ignored) = (0, 0);
+    for _ in 0..3_000 {
+        w.step();
+        // 枠は路線ごとなので、枠を待つのは同じ路線の列車である。
+        let ids: Vec<(TrainId, LineId)> = w.rail().trains().map(|(i, t)| (i, t.line)).collect();
+        for (x, lx) in &ids {
+            for (y, _) in ids.iter().filter(|(y, ly)| y != x && ly == lx) {
+                if w.rail().ignores_claim(*x, *y, false) == Some(false) {
+                    kept += 1;
+                }
+                if w.rail().ignores_claim(*x, *y, true) == Some(true) {
+                    ignored += 1;
+                }
+            }
+        }
+    }
+    assert!(kept > 0, "こちらを待たない列車の印を守る形がない");
+    assert!(ignored > 0, "こちらを待つ列車の印を無視する形がない");
+}
+
 /// 駅の線路をほかの路線が通らない終点では、着くホームがふさがっていれば、列車はもう 1 つのホームに入り、2 本が
 /// 同時に止まって折り返す（#371）。2 本は別々のホームを押さえる。
 #[test]
