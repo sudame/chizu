@@ -295,7 +295,8 @@ impl World {
             return None;
         }
         let closed = self.rail.closed_crossings();
-        let rail = RailCrossings::new(&self.network, self.rail.crossings(), &closed);
+        let rail = RailCrossings::new(&self.network, self.rail.crossings(), &closed)
+            .with_closing(&self.rail.closing_crossings());
         Some((closed, rail))
     }
 

@@ -655,12 +655,16 @@ fn junction_crossing_town(trains: u8) -> World {
 
 /// 交差点から 1 マス挟んだ踏切でも、交差点が詰まって踏切の上で止まる車は出ない。停止線で待つ車の後ろには、
 /// 踏切を抜けきった車が 1 台入れる。それより後ろの車は、抜けきる空きがないので踏切の手前で止まる。
+/// 交差点を出てすぐの踏切が閉じたかもうすぐ閉じるときは、その手前で止まる車の後ろに並ぶ空きがなければ交差点に
+/// 入らないので、交差点の四角の中で止まる車も出ない。
 #[test]
 fn a_crossing_next_to_a_busy_junction_keeps_cars_off_the_tracks() {
     let tile = at(13, 8);
     for trains in [1, 2] {
         let mut w = junction_crossing_town(trains);
+        let node = w.network().node_at(at(13, 10)).expect("交差点がない");
         let mut stuck = Vec::new();
+        let mut boxed = Vec::new();
         let mut held = 0_u64;
         for _ in 0..3 * crate::TICKS_PER_DAY {
             w.step();
@@ -670,6 +674,9 @@ fn a_crossing_next_to_a_busy_junction_keeps_cars_off_the_tracks() {
             if !inside.is_empty() {
                 stuck.push(w.tick().0);
             }
+            if crate::movement::RailCrossings::stopped_in_box(w.network(), w.trips(), node) > 0 {
+                boxed.push(w.tick().0);
+            }
             held += h;
         }
         let tally = w.rail().crossing_tally();
@@ -677,6 +684,10 @@ fn a_crossing_next_to_a_busy_junction_keeps_cars_off_the_tracks() {
         assert!(
             stuck.is_empty(),
             "列車 {trains} 本：踏切の上で止まった車 {stuck:?}"
+        );
+        assert!(
+            boxed.is_empty(),
+            "列車 {trains} 本：交差点の四角の中で止まった車 {boxed:?}"
         );
         assert!(held > 0, "列車 {trains} 本：交差点の列が踏切まで延びない");
         assert!(tally.closures > 50, "列車 {trains} 本：{tally:?}");

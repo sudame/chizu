@@ -38,6 +38,10 @@ use crate::tile::TilePos;
 /// 踏切を閉じる時間（tick）。先頭がこの tick 数のうちに踏切に着く見込みになったら閉じる。
 pub const CROSSING_WARN_TICKS: i64 = 16;
 
+/// 交差点に入る車が、出ていく腕の先の踏切が閉じると見込んで待つ、閉じる前の tick 数。停止線から交差点を抜けて、
+/// 交差点から 1 マス挟んだ踏切の手前に着くまでに、止まっていた車でも 4 tick ほどかかる。
+pub const CROSSING_NOTICE_TICKS: i64 = 8;
+
 /// 列車の先頭（進路の上の位置）から、体の前の端までの長さ（mm）。
 const NOSE_MM: i64 = TILE_MM / 2;
 
@@ -292,6 +296,29 @@ impl Rail {
             }
         }
         closed
+    }
+
+    /// いま閉じている踏切と、列車の先頭が [`CROSSING_WARN_TICKS`] と [`CROSSING_NOTICE_TICKS`] を足した tick 数の
+    /// うちに着きうる踏切。交差点に入る車が、出ていく腕の先で止まる所を見込むのに使う。駅に止まっている列車も、
+    /// 走り出すとすぐ閉じるので含める。押さえた範囲の先も見るので、閉じる踏切より多めになる。
+    pub fn closing_crossings(&self) -> BTreeSet<TilePos> {
+        let mut out = self.closed_crossings();
+        if self.crossings.is_empty() {
+            return out;
+        }
+        let by_track = self.crossings_by_track();
+        for (_, t) in self.trains.iter() {
+            let Some(line) = self.lines.get(t.line) else {
+                continue;
+            };
+            let reach = reach(t.speed, CROSSING_WARN_TICKS + CROSSING_NOTICE_TICKS);
+            for c in Self::crossings_within(&by_track, line, t, reach + NOSE_MM) {
+                if c.near >= NOSE_MM && c.near - NOSE_MM <= reach {
+                    out.insert(c.tile);
+                }
+            }
+        }
+        out
     }
 
     /// 走っている列車 `t` が、閉じる見込みに入る前に、踏切の先まで押さえ足すべきか。先頭から
