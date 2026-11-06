@@ -1150,7 +1150,8 @@ impl Rail {
 
     /// 路線 `line` の上限を決めているもの。
     fn cap_limit(&self, line: &RailLine) -> Option<CapLimit> {
-        if line.cap() >= MAX_LINE_TRAINS {
+        // 止まった路線と進路を走れない路線の cap が 0 なのは、線路が変わったためで、待てる所や区画の分け前ではない。
+        if line.cap() >= MAX_LINE_TRAINS || !runnable(&line.path, line.stopped) {
             return None;
         }
         Some(match line.plan.cap_zone {

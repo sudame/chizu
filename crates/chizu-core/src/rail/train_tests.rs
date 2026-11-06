@@ -334,6 +334,10 @@ fn a_route_does_not_reverse_at_a_junction() {
     );
     assert!(w.rail().line(bc).unwrap().stopped);
     assert!(!w.rail().line(ac).unwrap().stopped);
+    // 止まった路線の cap が 0 なのは線路が変わったためで、待てる所の数を理由に出さない。
+    let c = w.rail().line_capacity(bc).unwrap();
+    assert_eq!(c.cap, 0);
+    assert_eq!(c.cap_limit, None);
     set_trains(&mut w, bc, 2);
     for _ in 0..500 {
         w.step();
