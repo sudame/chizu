@@ -42,9 +42,31 @@ pub const INITIAL_FARE: u16 = 5;
 /// 運賃の上限。
 pub const MAX_FARE: u16 = 20;
 
-/// 運賃 1 円を、手段を選ぶ費用の秒に直す重み。運賃 5 で 25 秒になる。chizu の街は数百 m の大きさなので、
-/// 駅の近くどうしなら 500m 前後から鉄道が車に勝つ重さにした（設計 3.10 の「作る順の 6 で決めた細部」）。
-pub const FARE_SECONDS: u64 = 5;
+/// 運賃 1 円を、手段を選ぶ費用の秒に直す基準の重み。世帯ごとの重さは、これに蓄えで決まる倍率
+/// （[`fare_weight_permille`]）を掛ける（設計 3.10 の「釣り合いの決め直し（#342）」）。
+pub const FARE_SECONDS: u64 = 8;
+
+/// 蓄えのない世帯が運賃を感じる倍率（‰）。
+pub const FARE_WEIGHT_POOR_PERMILLE: u64 = 2_000;
+
+/// 蓄えが `SAVINGS_FOR_FULL_BONUS` に届いた世帯が運賃を感じる倍率（‰）。
+pub const FARE_WEIGHT_RICH_PERMILLE: u64 = 500;
+
+/// 蓄え `savings` の世帯が運賃を感じる倍率（‰）。蓄えの割合（蓄えを `SAVINGS_FOR_FULL_BONUS` で割った百分率、0〜100）に
+/// 比例して、[`FARE_WEIGHT_POOR_PERMILLE`] から [`FARE_WEIGHT_RICH_PERMILLE`] まで下げる。共同の駐車場の料金の
+/// 払える上限（`car_place::fee_cap`）と同じ割合を使う。
+pub fn fare_weight_permille(savings: Money) -> u64 {
+    let full = crate::happiness::SAVINGS_FOR_FULL_BONUS.0;
+    let percent = savings.0.clamp(0, full) * 100 / full;
+    let percent = u64::try_from(percent).expect("蓄えの割合は 0 以上");
+    FARE_WEIGHT_POOR_PERMILLE
+        - (FARE_WEIGHT_POOR_PERMILLE - FARE_WEIGHT_RICH_PERMILLE) * percent / 100
+}
+
+/// 額 `money`（運賃や駐車場の料金）を、蓄え `savings` の世帯が手段を選ぶ費用の秒に直す。
+pub fn money_seconds(money: u64, savings: Money) -> u64 {
+    money * FARE_SECONDS * fare_weight_permille(savings) / 1_000
+}
 
 /// 乗り換え。最初の路線を [`RidePlan::alight`] で降り、路線 `line` に向き `dir` で乗り換えて、駅 `alight` で降りる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

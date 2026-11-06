@@ -45,7 +45,7 @@ pub const RAIL_BLOCK_MAX_TILES: u64 = 50;
 pub const MAX_TRACKS_PER_NODE: usize = 3;
 
 /// 線路の 1 マスあたりの建設費。斜めは長さに比例して高くなる。
-pub const RAIL_COST_PER_TILE: Money = Money(1_500);
+pub const RAIL_COST_PER_TILE: Money = Money(500);
 
 /// 駅の間口（マス）。道路に沿う向きの長さで、駅の線路とホームの長さでもある。
 pub const STATION_FRONTAGE: u64 = 10;
@@ -109,8 +109,9 @@ pub mod train;
 pub use crossing::{CROSSING_WARN_TICKS, CrossingTally};
 pub use line::{LineCapacity, RailLine, ShortSpan, Step, StepKind};
 pub use rider::{
-    Exit, ExitFrom, FARE_SECONDS, INITIAL_FARE, MAX_FARE, QueueKey, RAIL_GIVE_UP, RidePlan,
-    RideTally, Rider, StationWalks, TRAIN_CAPACITY, Transfer,
+    Exit, ExitFrom, FARE_SECONDS, FARE_WEIGHT_POOR_PERMILLE, FARE_WEIGHT_RICH_PERMILLE,
+    INITIAL_FARE, MAX_FARE, QueueKey, RAIL_GIVE_UP, RidePlan, RideTally, Rider, StationWalks,
+    TRAIN_CAPACITY, Transfer, fare_weight_permille, money_seconds,
 };
 pub use train::{Block, RailTally, TRAIN_BLOCK_LEN_MM, Train, TrainState};
 

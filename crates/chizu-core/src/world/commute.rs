@@ -53,6 +53,11 @@ impl World {
                     home,
                     place: self.car_places.get(row.household),
                     owns_car: self.owns_car(row.household),
+                    savings: self
+                        .population
+                        .household_money(row.household)
+                        .unwrap_or(Money::ZERO),
+                    parking_fee: self.parking_fee,
                 }),
                 None => stuck.push(id),
             }

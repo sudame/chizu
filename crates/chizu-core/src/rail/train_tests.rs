@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use super::train::TRAIN_BLOCK_LEN_MM;
+use super::train::{TRAIN_BLOCK_LEN_MM, TRAIN_UPKEEP_PER_DAY};
 use super::*;
 use crate::command::{Command, RoadKind};
 use crate::network::Dir;
@@ -651,7 +651,10 @@ fn trains_cost_upkeep() {
     set_trains(&mut w, id, 2);
     run(&mut w, 1_000, 600);
     assert_eq!(w.rail().train_count(), 2);
-    assert_eq!(w.finances().rail_upkeep, base + Money(1_200));
+    assert_eq!(
+        w.finances().rail_upkeep,
+        base + Money(TRAIN_UPKEEP_PER_DAY.0 * 2)
+    );
 }
 
 /// 路線と列車の記録は、分けて再生しても、書き出して読み戻しても同じ街になる。

@@ -75,7 +75,7 @@ pub const DWELL_TICKS: u16 = 20;
 pub const TURNBACK_TICKS: u16 = 30;
 
 /// 列車 1 本の 1 日の維持費。
-pub const TRAIN_UPKEEP_PER_DAY: Money = Money(600);
+pub const TRAIN_UPKEEP_PER_DAY: Money = Money(300);
 
 /// 閉塞。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

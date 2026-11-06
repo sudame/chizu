@@ -648,8 +648,8 @@ fn act_builds_rail_and_a_station_and_observe_and_map_show_them() {
     assert_eq!(stations[0]["walkedIn"], 0, "{rail}");
     assert!(stations[0]["avgWalkTicks"].is_null(), "{rail}");
     assert!(stations[0]["walkGapTicks"].is_null(), "{rail}");
-    // 駅 800 と、4 マスの線路 6000 の 1%。
-    assert_eq!(o["financesPerDay"]["railUpkeep"], 860);
+    // 駅 400 と、4 マスの線路 2000 の 1%。
+    assert_eq!(o["financesPerDay"]["railUpkeep"], 420);
     let map = cli(&["agent", "map", d, "2", "8", "17", "8"]);
     assert_eq!(grid_rows(&map, 1, 16), [".EEEEEEEEEETTTT."], "{map}");
     // 鉄道の層では、駅まで歩く範囲の空きマスが : になる。線路はどの路線も通らないので T のまま
@@ -809,11 +809,11 @@ fn act_creates_a_line_and_observe_shows_the_trains() {
     }
     assert_eq!(rail["trainCount"], 3);
     assert_eq!(rail["deadlock"], 0);
-    // 列車 3 本の 1 日の維持費 1800 が足される。
+    // 列車 3 本の 1 日の維持費 900 が足される。
     assert_eq!(
         o["financesPerDay"]["railUpkeep"].as_i64().unwrap()
             - before["financesPerDay"]["railUpkeep"].as_i64().unwrap(),
-        1_800
+        900
     );
     assert_eq!(
         o["sinceLastObserve"]["changes"]["rail.trainCount"]["delta"],
