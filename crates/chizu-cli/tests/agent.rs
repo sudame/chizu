@@ -1679,6 +1679,38 @@ fn act_warns_about_a_road_drawn_from_the_end_of_a_bulldozed_road() {
     assert!(results[1]["warning"].is_string(), "{acted}");
 }
 
+/// Bulldoze が Applied のとき、結果に消えた道路のマス、施設、建物の数と、家をなくした世帯の数が付く。
+/// 道路は範囲にかかった区間ごと消えるので、1 マスを打っても区間の全体が数に出る。
+#[test]
+fn act_reports_what_a_bulldoze_removed() {
+    let (dir, x, y) = supplied_town("agent-bulldoze-report");
+    let d = dir.to_str().unwrap();
+
+    // 発電所だけの範囲では、施設が 1 つ消え、道路と建物は消えない。
+    let cmds = write(
+        &dir.join("b1.json"),
+        &serde_json::json!([{"type":"Bulldoze","area":[[x+30,y-4],[x+30,y-1]]}]).to_string(),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "Applied", "{acted}");
+    assert_eq!(r["bulldozed"]["facilities"], 1, "{acted}");
+    assert_eq!(r["bulldozed"]["roadTiles"], 0, "{acted}");
+    assert_eq!(r["bulldozed"]["buildings"], 0, "{acted}");
+
+    // 道路の 1 マスだけを打っても、40 マスの区間が全部消え、沿道の建物も消える。
+    let cmds = write(
+        &dir.join("b2.json"),
+        &serde_json::json!([{"type":"Bulldoze","area":[[x+10,y],[x+10,y]]}]).to_string(),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "Applied", "{acted}");
+    assert_eq!(r["bulldozed"]["roadTiles"], 40, "{acted}");
+    assert!(r["bulldozed"]["buildings"].as_u64().unwrap() > 0, "{acted}");
+    assert!(r["bulldozed"]["displacedHouseholds"].is_u64(), "{acted}");
+}
+
 /// join:false なら隣にあっても延ばさない。join の書き方が違うときや BuildRoad 以外では Invalid になる。
 #[test]
 fn act_does_not_join_when_join_is_false() {

@@ -561,6 +561,11 @@ impl Network {
             })
     }
 
+    /// 道路が通っているマスの数。
+    pub fn road_tile_count(&self) -> usize {
+        self.tiles.len()
+    }
+
     /// マス `t` を道路が通っているか。
     pub fn is_road_tile(&self, t: TilePos) -> bool {
         !self.segments_through(t).is_empty()

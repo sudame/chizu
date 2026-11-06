@@ -307,7 +307,9 @@ observe の removedCrosswalks:
       費用は区間ごとの建設費の差額で、上げるときだけかかり、下げても払い戻さない。高速道路は変えない。
       変える道路がなければ Denied（NoRoadToChange）、どれもすでに kind なら Denied（RoadKindUnchanged）。
   {"type":"Bulldoze","area":[[x,y],[x,y]]}
-      範囲の道路、施設、建物を取り壊す。
+      範囲の道路、施設、建物を取り壊す。道路は、範囲にかかった区間（交差点から交差点まで）ごと消える。
+      範囲が 1 マスでも、その区間の全体が消え、沿道の建物（住んでいた世帯は家をなくす）も消える。
+      施設と建物は、範囲にかかったものが消える。Applied のときの結果に、消えた数が bulldozed で付く（下の「act の結果」）。
   {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"ResidentialLow"|"Commercial"|"Industrial"|"Office"|null}
       区画を塗る。null は消す。Residential は高密度の住宅で、段階 5 まで上がり、集合住宅になる。
       ResidentialLow は低密度の住宅で、段階 2 で止まり、一軒家だけが建つ（縦横の道路沿いでは、間口 2、奥行き 3〜6 の私道の敷地か、
@@ -378,6 +380,9 @@ act の結果:
       notOwned 買っていない土地、water 水辺、building 建物か施設のマス、
       beyondDepth 道路から 6 マスを超えた奥（道路のない所を含む）、notFronted 道路から 6 マス以内だが、間口から続かない空き
       （道路の端の外、間口との間に塗れないマスを挟んだ、別の種類の区画の奥など）。
+  Bulldoze の Applied には bulldozed が付く。
+    roadTiles 消えた道路のマスの数、facilities 消えた施設の数、buildings 消えた建物の数、
+    displacedHouseholds 住んでいた建物が消えて家をなくした世帯の数。
   reason が NotOwned のときは notOwned も付き、買っていない土地のマスを示す。
     count 買っていないマスの数、tiles そのマス（先頭の 16 個まで）、
     chunks そのマスを含むチャンクのうち、いま BuyChunk で買えるもの（買った土地と辺で接する。先頭の 16 個まで）、
@@ -718,10 +723,17 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                 // 角の順番などをそろえたあとの、記録に入った形を返す。
                 out["command"] = command_json::to_json(command);
             }
+            let before_bulldoze = matches!(command, Command::Bulldoze { .. })
+                .then(|| BulldozeSnapshot::take(world));
             // 結果の種類が増えたら、ここで JSON の名前を決めさせる。
             #[deny(clippy::wildcard_enum_match_arm)]
             let outcome = match world.apply_recorded(seq, &command) {
-                ApplyOutcome::Applied => "Applied",
+                ApplyOutcome::Applied => {
+                    if let Some(before) = &before_bulldoze {
+                        out["bulldozed"] = before.removed(world);
+                    }
+                    "Applied"
+                }
                 ApplyOutcome::AppliedPartly(reason) => {
                     out["reason"] = json!(format!("{reason:?}"));
                     if let Some(paint) = paint_breakdown(world, &command) {
@@ -764,6 +776,41 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
         }
     }
     results
+}
+
+/// Bulldoze の前の街の控え。適用のあとの街と比べて、何が消えたかを求める。
+struct BulldozeSnapshot {
+    road_tiles: usize,
+    facilities: usize,
+    buildings: Vec<BuildingId>,
+    /// 家のある世帯の、住んでいる建物。
+    homes: Vec<BuildingId>,
+}
+
+impl BulldozeSnapshot {
+    fn take(world: &World) -> Self {
+        let p = world.population();
+        Self {
+            road_tiles: world.network().road_tile_count(),
+            facilities: world.facilities().len(),
+            buildings: world.buildings().iter().map(|(id, _)| id).collect(),
+            homes: p
+                .household_ids()
+                .filter_map(|h| p.home(h).flatten())
+                .collect(),
+        }
+    }
+
+    /// 取り壊しで消えた道路のマス、施設、建物の数と、家をなくした世帯の数。
+    fn removed(&self, world: &World) -> Value {
+        let gone = |id: &BuildingId| world.buildings().get(*id).is_none();
+        json!({
+            "roadTiles": self.road_tiles.saturating_sub(world.network().road_tile_count()),
+            "facilities": self.facilities.saturating_sub(world.facilities().len()),
+            "buildings": self.buildings.iter().filter(|id| gone(id)).count(),
+            "displacedHouseholds": self.homes.iter().filter(|id| gone(id)).count(),
+        })
+    }
 }
 
 /// 引いたあとの網で、act の前からあったノード（まだ残っているもの）から道路をたどって届くノード。
