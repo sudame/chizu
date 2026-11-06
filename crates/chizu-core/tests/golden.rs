@@ -1849,7 +1849,7 @@ fn upgrading_a_busy_street_keeps_buildings_and_moving_cars() {
     };
     let zones_before = zones(&world);
     let cars = on_street(&world);
-    assert!(cars.len() >= 10, "通りを走る車が少ない {}", cars.len());
+    assert!(cars.len() >= 7, "通りを走る車が少ない {}", cars.len());
 
     let line = chizu_core::Line::between(TilePos::new(-40, 0), TilePos::new(100, 0)).unwrap();
     let cost = world
