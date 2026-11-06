@@ -295,7 +295,8 @@ observe の rail（線路と駅）:
   stations 駅ごとの id、at（置いたときの at）、area 敷地の角、ends 駅の線路の両端のマス（ここから外へ線路を引く）、
   facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅と列車の 1 日の維持費である。
   lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、
-  trains 遊ぶ人が決めた本数（SetLineTrains の値。cap が下がって列車が消えても変わらない）、cap 行き詰まりを防ぐ本数の上限、
+  trains 遊ぶ人が決めた本数（SetLineTrains の値。cap が下がって列車が消えても変わらない）、cap 行き詰まりを防ぐ本数の上限
+    （共有の区画を通る路線は、区画の枠のうち自分の分で運べる本数までにする。それより多く走らせても、区画の手前で待つだけである）、
   capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
     sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有の区画の枠を、これらの路線と分けている）。
     shortSpans 進路にある、待てる所になれない短い線路（from と to が線路の両端のノードのマス、lengthMm が長さ）。

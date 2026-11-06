@@ -89,6 +89,22 @@ impl Step {
     pub fn is_stop(&self) -> bool {
         self.kind != StepKind::Pass
     }
+
+    /// 最高の速さで走る時間の見込み（tick）。
+    fn run_ticks(&self) -> u64 {
+        u64::try_from(round::div_ceil(self.len, TRAIN_MAX_SPEED)).expect("線路の長さが負")
+    }
+
+    /// 止まる時間と、減速と加速の遅れと、折り返しの時間の見込み（tick）。止まらない要素は 0 である。
+    fn stop_ticks(&self) -> u64 {
+        match self.kind {
+            StepKind::Pass => 0,
+            StepKind::Stop => u64::from(DWELL_TICKS) + STOP_LOSS_TICKS,
+            StepKind::Terminal => {
+                u64::from(DWELL_TICKS) + STOP_LOSS_TICKS + u64::from(TURNBACK_TICKS)
+            }
+        }
+    }
 }
 
 /// 路線。
@@ -142,6 +158,7 @@ impl RailLine {
     ///   空いた待てる所の手前の列車がいつも進める。終点の両方のホームは、折り返したあとの要素だけが待てる所なので
     ///   1 つに数える。
     /// - 自分だけの区間が 1 つの路線は、その区間の待てる所の数。区間が 2 つ以上なら、区間の待てる所の数の和 − 1。
+    ///   さらに、通る共有の区画の枠のうち、この路線の分で運べる本数までにする（`flow_cap`）。
     /// - 自分だけの待てる所を持たない路線（区間運転など）は、通る共有の区画の枠のうち、この路線の分。
     ///
     /// 待てる所が 2 つ未満の路線と、止まった路線と、通る区画の枠の分け前が 0 の路線は 0 である。
@@ -164,18 +181,12 @@ impl RailLine {
 
     /// 要素 `i` を最高の速さで走る時間の見込み（tick）。
     pub(crate) fn run_ticks(&self, i: u32) -> u64 {
-        u64::try_from(round::div_ceil(self.step(i).len, TRAIN_MAX_SPEED)).expect("線路の長さが負")
+        self.step(i).run_ticks()
     }
 
     /// 要素 `i` で止まる時間と、減速と加速の遅れと、折り返しの時間の見込み（tick）。止まらない要素は 0 である。
     pub(crate) fn stop_ticks(&self, i: u32) -> u64 {
-        match self.step(i).kind {
-            StepKind::Pass => 0,
-            StepKind::Stop => u64::from(DWELL_TICKS) + STOP_LOSS_TICKS,
-            StepKind::Terminal => {
-                u64::from(DWELL_TICKS) + STOP_LOSS_TICKS + u64::from(TURNBACK_TICKS)
-            }
-        }
+        self.step(i).stop_ticks()
     }
 
     /// 測った値を混ぜた 1 周の時間（tick）。
@@ -538,7 +549,51 @@ fn make_plans(lines: &[(LineId, &[Step], bool)]) -> BTreeMap<LineId, LinePlan> {
             }
         }
     }
+    for (k, p, _) in lines {
+        let plan = plans.get_mut(k).expect("路線がない");
+        if !plan.runs.is_empty() && plan.cap > 0 {
+            plan.cap = plan.cap.min(flow_cap(p, plan));
+        }
+    }
     plans
+}
+
+/// 自分だけの区間を持つ路線を、通る区画の枠のうち自分の路線の分で運べる量より多く走らせない本数。
+///
+/// 区画の枠は、押さえた範囲の終わりを区画に置く列車の数を抑える。区画 z の分が q で、列車が 1 周のうち押さえた
+/// 範囲の終わりを z に置く時間が t_z、1 周の時間が t なら、z を通れるのは t_z のあいだに q 本で、1 周で運べるのは
+/// q × t ÷ t_z 本の分である。これより多く走らせても、増えた列車は区画の手前の自分だけの区間で枠を待つだけで、
+/// 運べる量は増えず、維持費だけがかかる。そこで、枠に上限のある区画ごとに q × t ÷ t_z を切り上げた本数を求め、
+/// いちばん小さいものを返す。
+///
+/// 時間は [`RailLine::round_trip_ticks`] と同じ見込みである。列車は、先頭がいる要素から先で最初の待てる所まで
+/// 押さえるので、要素の時間は、その要素から先で最初の待てる所の区画に数える。
+fn flow_cap(p: &[Step], plan: &LinePlan) -> u8 {
+    let n = p.len();
+    let ticks = |s: &Step| s.run_ticks() + s.stop_ticks();
+    let total: u64 = p.iter().map(ticks).sum();
+    let mut in_zone = BTreeMap::<u16, u64>::new();
+    // 後ろから 2 周たどり、要素ごとに、そこから先で最初の待てる所の区画を求める。
+    let mut next: Option<Option<u16>> = None;
+    for d in (0..2 * n).rev() {
+        let i = d % n;
+        if p[i].wait {
+            next = Some(plan.zone[i]);
+        }
+        if d < n
+            && let Some(Some(z)) = next
+        {
+            *in_zone.entry(z).or_default() += ticks(&p[i]);
+        }
+    }
+    in_zone
+        .iter()
+        .filter_map(|(z, t)| {
+            let q = u64::from(*plan.quota.get(z)?);
+            (q != u64::from(u32::MAX)).then(|| (q * total).div_ceil(*t))
+        })
+        .min()
+        .map_or(MAX_LINE_TRAINS, clamp_cap)
 }
 
 /// 路線の本数の上限と、その内訳。読み取り用で、状態には持たない。

@@ -911,6 +911,8 @@ const COUNTS: [(u8, u8); 7] = [(1, 1), (1, 6), (6, 1), (3, 3), (6, 6), (16, 16),
 
 /// 区間運転（W–M–E があるときの W–M）が走る。W–M は自分だけの待てる所を持たず、W、W–M の線路、M の
 /// 待てる所の輪（4 つ）が共有の区画の中の輪になる。区画の枠は 3 で、W–M に 2、W–M–E に 1 を分ける。
+/// W–M–E の自分だけの区間には待てる所が 5 つあるが、W–M–E の列車は 1 周の 3 分の 1 以上を区画の中で過ごすので、
+/// 区画の分 1 で運べるのは 3 本の分である。上限は 3 になる（`flow_cap`）。5 本にしても、駅を出る数は変わらない。
 #[test]
 fn a_short_turn_line_runs_inside_another() {
     let (mut w, st) = two_line_world();
@@ -920,9 +922,10 @@ fn a_short_turn_line_runs_inside_another() {
     assert!(rail.line(inner).unwrap().plan.runs.is_empty());
     assert_eq!(rail.line(inner).unwrap().cap(), 2);
     assert_eq!(rail.line(outer).unwrap().plan.runs, vec![5]);
-    assert_eq!(rail.line(outer).unwrap().cap(), 5);
+    assert_eq!(rail.line(outer).unwrap().plan.quota[&0], 1);
+    assert_eq!(rail.line(outer).unwrap().cap(), 3);
     for (o, i) in run_inside(&[0, 1], &COUNTS) {
-        assert!(i <= 2 && o <= 5, "{o}/{i}");
+        assert!(i <= 2 && o <= 3, "{o}/{i}");
     }
 }
 
