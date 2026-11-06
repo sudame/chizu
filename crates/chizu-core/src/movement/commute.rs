@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::PARK_RADIUS;
+use super::car_pace::CarPace;
 use super::parking::{lot_exists, lot_near, shared_facility};
 use super::{LotId, Trips, building_spot};
 use crate::building::Buildings;
@@ -33,7 +34,7 @@ use crate::id::{BuildingId, CitizenId, HouseholdId, TripId};
 use crate::network::{Network, TILE_MM};
 use crate::rail::RidePlan;
 use crate::rail::choice::{
-    PARK_SECONDS, RideChoice, RideOffer, WalkEnd, car_seconds, tile_distance_mm, walk_seconds,
+    PARK_SECONDS, RideChoice, RideOffer, WalkEnd, tile_distance_mm, walk_seconds,
 };
 use crate::rail::money_seconds;
 use crate::routing::AstarRouter;
@@ -96,6 +97,10 @@ pub(super) struct Commuters {
     by_trip: BTreeMap<TripId, Commuter>,
     /// 世帯の車のいる所。どこにもない世帯は持たない。
     cars: BTreeMap<HouseholdId, HouseholdCar>,
+    /// 車で走り始めた通勤の移動ごとの、出発と行き先の建物の正面のマスの直線の距離（mm）。着いたら車の見込みに使う。
+    drives: BTreeMap<TripId, u64>,
+    /// 時間帯ごとの、車で行く時間の見込み。
+    pace: CarPace,
 }
 
 impl Commuters {
@@ -132,6 +137,7 @@ impl Commuters {
 
     /// 移動 `trip` を覚えていた分を消す。世帯の車を使ったまま停めずに終わったなら、車はどこにもないものとする。
     fn forget_trip(&mut self, trip: TripId) -> Option<Commuter> {
+        self.drives.remove(&trip);
         let c = self.by_trip.remove(&trip)?;
         if self.cars.get(&c.household) == Some(&HouseholdCar::InUse(trip)) {
             self.cars.remove(&c.household);
@@ -144,6 +150,8 @@ impl StateHash for Commuters {
     fn write_state(&self, h: &mut StateHasher) {
         h.write(&self.by_trip);
         h.write(&self.cars);
+        h.write(&self.drives);
+        h.write(&self.pace);
     }
 }
 
@@ -214,7 +222,7 @@ enum Pick {
 }
 
 impl Trips {
-    /// 依頼 `r` を車で行くときに、車の費用（[`car_seconds`]）に足す停める手間（移動の秒）。鉄道と比べるときだけ使う。
+    /// 依頼 `r` を車で行くときに、車の費用（[`CarPace::seconds`]）に足す停める手間（移動の秒）。鉄道と比べるときだけ使う。
     ///
     /// - 停めて出す手間 [`PARK_SECONDS`]。
     /// - 行き先の駐車場がいま満車か、行き先に駐車場がない（家に帰る世帯は自分の枠がない）とき、[`PARK_RADIUS`] マスの
@@ -263,7 +271,8 @@ impl Trips {
     /// [`Trips::start_commutes`] と同じだが、`rides` があれば鉄道の候補と費用で比べる（設計 3.10 の 4）。
     ///
     /// 歩きと車は今の距離の決まりで選び、そのうえで鉄道の費用が小さければ鉄道にする。車を選んだ移動は車の費用と、
-    /// 歩きを選んだ移動は歩きの費用と比べる。費用が同じなら今の手段を残す。[`OWNER_DRIVE_MIN_MM`] より近い移動は、
+    /// 歩きを選んだ移動は歩きの費用と比べる。車の費用は、出発の時間帯の見込み（[`CarPace`]）から求める。
+    /// 費用が同じなら今の手段を残す。[`OWNER_DRIVE_MIN_MM`] より近い移動は、
     /// 車を持つかによらず鉄道と比べない。家の枠でない駐車場に停めた車で出る移動（停めた車を取りに帰る移動を含む）も、
     /// 車を残さないよう鉄道と比べない。車を使えず鉄道を選んだ移動は、車がない移動（`no_car`）に数えない。
     /// 鉄道を選んだ移動は、乗る駅の出入口まで歩く移動として作り、着いたら駅の待ち行列に入る。
@@ -277,11 +286,15 @@ impl Trips {
         rides: Option<&RideChoice>,
     ) -> Vec<Option<TripId>> {
         let rides = rides.filter(|c| !c.is_empty());
+        self.commuters.pace.roll(now);
+        // 依頼ごとに `self` を書き換えるので、見込みは先に写しておく。同じ呼び出しの依頼は、どれも同じ時刻に出る。
+        let pace = self.commuters.pace.clone();
+        let car_seconds = |mm: u64| pace.seconds(mm, now);
         let picks: Vec<Pick> = requests
             .iter()
             .map(|r| {
                 // 鉄道の候補。費用 `base` に `extra` を足したものより小さいときだけ返す。
-                let ride = |base: fn(u64) -> u64, extra: u64| -> Option<RideOffer> {
+                let ride = |base: &dyn Fn(u64) -> u64, extra: u64| -> Option<RideOffer> {
                     let c = rides?;
                     let (a, b, d) = front_distance(buildings, r.from, r.to)?;
                     if d < OWNER_DRIVE_MIN_MM.unsigned_abs() {
@@ -300,7 +313,7 @@ impl Trips {
                     c.offer_for(&end(r.from, a)?, &end(r.to, b)?, r.savings)
                         .filter(|o| o.cost < base(d) + extra)
                 };
-                let walk = || ride(walk_seconds, 0).map_or(Pick::Walk, Pick::Ride);
+                let walk = || ride(&walk_seconds, 0).map_or(Pick::Walk, Pick::Ride);
                 // 家に帰る住民は、自分が家でない所に停めた車が近くにあれば、近くても車で帰る。歩いて帰ると、
                 // 車がその駐車場に残り、翌朝からも使えないためである。
                 let fetch = r.who.to == Activity::Home
@@ -370,7 +383,7 @@ impl Trips {
                 if !leaves_car
                     && rides.is_some()
                     && let Some(o) = ride(
-                        car_seconds,
+                        &car_seconds,
                         self.parking_seconds(r, (buildings, facilities)),
                     )
                 {
@@ -390,6 +403,9 @@ impl Trips {
                 self.commuters
                     .cars
                     .insert(r.who.household, HouseholdCar::InUse(id));
+                if let Some((_, _, d)) = front_distance(buildings, r.from, r.to) {
+                    self.commuters.drives.insert(id, d);
+                }
                 Pick::Drive(id)
             })
             .collect();
@@ -465,6 +481,24 @@ impl Trips {
     /// 移動が終わった主体 `id` の住民を返し、覚えていた分を消す。通勤でなければ `None`。
     pub fn take_commuter(&mut self, id: TripId) -> Option<Commuter> {
         self.commuters.forget_trip(id)
+    }
+
+    /// [`Trips::take_commuter`] と同じだが、`now` に着いた移動が世帯の車で走り始めた通勤なら、かかった時間を
+    /// 車で行く時間の見込み（[`CarPace`]）に足す。直前の `step` で終わった移動に使う。
+    pub fn end_commute(&mut self, id: TripId, now: Tick) -> Option<Commuter> {
+        if let Some(mm) = self.commuters.drives.remove(&id)
+            && let Some(f) = self.finished.get(&id)
+            && f.reached
+        {
+            self.commuters.pace.learn(f.departed, now, mm);
+        }
+        self.commuters.forget_trip(id)
+    }
+
+    /// 時間帯ごとの、車で行く時間の見込み。テストで見込みを直接変えるのに使う。
+    #[cfg(test)]
+    pub(super) fn car_pace_mut(&mut self) -> &mut CarPace {
+        &mut self.commuters.pace
     }
 
     /// 移動している住民。

@@ -9,6 +9,7 @@
 //! 建物から建物へ車で向かう移動は、歩く → 車 → 歩く の 3 つの区切りを順に進む（`parking`）。
 
 mod car;
+mod car_pace;
 #[cfg(test)]
 mod car_tests;
 mod commute;

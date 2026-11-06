@@ -2095,6 +2095,56 @@ fn the_train_wins_only_when_strictly_cheaper() {
     }
 }
 
+/// 車で行く時間の見込みが長い時間帯に出る移動は、測る前なら車を選ぶ鉄道の費用でも、鉄道を選ぶ。
+/// 見込みを測っていない時間帯の移動は、今までどおり車を選ぶ。
+#[test]
+fn a_slow_hour_for_cars_sends_drivers_to_the_train() {
+    use crate::clock::TICKS_PER_DAY;
+    use crate::rail::choice::{car_seconds, tile_distance_mm};
+    // 家（x = 0）、2km 先の職場（x = 250）と、駅の出入口（x = 1、249）。
+    let (mut s, ids) = Street::with_roads(&[0, 250, 1, 249], &[(0, 260)]);
+    let (home, work) = (ids[0], ids[1]);
+    let r = Household { home }.request(0, (home, work));
+    let (planner, line, _) = rail_planner(&s, &[ids[2], ids[3]]);
+    let front = |b: BuildingId| s.buildings.get(b).unwrap().front;
+    let (from_tile, to_tile) = (front(home), front(work));
+    let mm = tile_distance_mm(from_tile, to_tile);
+    let car = car_seconds(mm) + s.trips.parking_seconds(&r, (&s.buildings, &[]));
+    // 鉄道の費用を、測る前の車の見積もりより 100 秒大きくする。
+    let segs = (0..20_000_u32)
+        .flat_map(|a| (0..4_u32).map(move |b| [a, b]))
+        .find(|segs| {
+            rail_choice(&planner, line, segs)
+                .offer_for(&WalkEnd::at(from_tile), &WalkEnd::at(to_tile), r.savings)
+                .is_some_and(|o| o.cost == car + 100)
+        })
+        .expect("費用の合う区間の時間がない");
+    let choice = rail_choice(&planner, line, &segs);
+    let hour = TICKS_PER_DAY / 24;
+    let start_at = |s: &mut Street, at: Tick| {
+        let (net, router) = (&s.net, &mut s.router);
+        let id = s.trips.start_commutes_with_rides(
+            net,
+            router,
+            (&s.buildings, &[]),
+            &[r],
+            at,
+            Some(&choice),
+        )[0]
+        .unwrap();
+        let mode = mode_of(s, id);
+        s.trips.cancel(id);
+        mode
+    };
+    assert_eq!(start_at(&mut s, Tick(7 * hour)), "car");
+    // 0 日目の 7 時台に、測る前の見積もりの 3 倍かかった車の移動を測る。見込みを変えるのは次の日からである。
+    let pace = s.trips.car_pace_mut();
+    pace.learn(Tick(7 * hour), Tick(7 * hour + car_seconds(mm) * 3), mm);
+    assert_eq!(start_at(&mut s, Tick(7 * hour + 10)), "car");
+    assert_eq!(start_at(&mut s, Tick(TICKS_PER_DAY + 7 * hour)), "rail");
+    assert_eq!(start_at(&mut s, Tick(TICKS_PER_DAY + 12 * hour)), "car");
+}
+
 /// 西の道路（x 0〜100）と東の道路（x 102〜260）を、北へ `detour` マス回る道でつないだ街。建物は `xs` に建てる。
 fn detour_street(xs: &[i64], detour: i64) -> (Street, Vec<BuildingId>) {
     let (mut s, ids) = Street::with_roads(xs, &[(0, 100), (102, 260)]);
