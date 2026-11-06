@@ -734,6 +734,88 @@ fn act_creates_a_line_and_observe_shows_the_trains() {
     );
 }
 
+/// ほかの路線を走れなくする路線は断る。上限が 0 の路線は observe の capReason に理由が出て、
+/// 線路を取り壊して走れなくなった路線は act の haltedLines に出る。
+#[test]
+fn act_reports_lines_that_cannot_run() {
+    let dir = session("agent-rail-cap-zero");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "0"]);
+    let st = |i: u32| format!(r#"{{"index":{i},"generation":0}}"#);
+    let cmds = write(
+        &dir.join("r.json"),
+        &format!(
+            r#"[{{"type":"BuildRoad","from":[0,10],"to":[100,10],"kind":"Small"}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[12,9],"rotation":2}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[62,9],"rotation":2}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[92,9],"rotation":2}},
+            {{"type":"BuildRail","from":[12,8],"to":[53,8]}},
+            {{"type":"BuildRail","from":[62,8],"to":[83,8]}},
+            {{"type":"CreateLine","from":{a},"to":{b}}},
+            {{"type":"SetLineTrains","line":{l0},"trains":2}},
+            {{"type":"CreateLine","from":{a},"to":{c}}}]"#,
+            a = st(0),
+            b = st(1),
+            c = st(2),
+            l0 = st(0),
+        ),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    assert_eq!(acted["results"][8]["outcome"], "Denied", "{acted}");
+    assert_eq!(acted["results"][8]["reason"], "LineStarvesOther", "{acted}");
+    // 先に長い路線 c–a があれば、その中の区間 a–b は作れるが、上限が 0 で走らない。
+    let cmds = write(
+        &dir.join("s.json"),
+        &format!(
+            r#"[{{"type":"RemoveLine","line":{l0}}},
+            {{"type":"CreateLine","from":{c},"to":{a}}},
+            {{"type":"SetLineTrains","line":{l1},"trains":2}},
+            {{"type":"CreateLine","from":{a},"to":{b}}}]"#,
+            a = st(0),
+            b = st(1),
+            c = st(2),
+            l0 = st(0),
+            l1 = r#"{"index":0,"generation":1}"#,
+        ),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    for r in acted["results"].as_array().unwrap() {
+        assert_eq!(r["outcome"], "Applied", "{acted}");
+    }
+    cli(&["agent", "advance", d, "300"]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let lines = o["rail"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 2, "{o}");
+    assert!(lines[0]["cap"].as_u64().unwrap() > 0, "{o}");
+    assert_eq!(lines[0]["capReason"], serde_json::Value::Null, "{o}");
+    assert_eq!(lines[1]["cap"], 0, "{o}");
+    assert_eq!(
+        lines[1]["capReason"]["sharedWith"],
+        serde_json::json!([{"index":0,"generation":1}]),
+        "{o}"
+    );
+    assert!(
+        lines[1]["capReason"]["waitPlaces"].as_u64().unwrap() < 2,
+        "{o}"
+    );
+    assert!(o["rail"]["trainCount"].as_u64().unwrap() > 0, "{o}");
+    // b と c のあいだの線路を取り壊すと、c–a の路線は止まり、列車が消える。
+    let gone = write(
+        &dir.join("g.json"),
+        r#"{"type":"Bulldoze","area":[[70,8],[70,8]]}"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &gone]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "Applied", "{acted}");
+    assert_eq!(
+        r["haltedLines"][0]["id"],
+        serde_json::json!({"index":0,"generation":1}),
+        "{acted}"
+    );
+    assert_eq!(r["haltedLines"][0]["stopped"], true, "{acted}");
+    assert!(r["removedTrains"].as_u64().unwrap() > 0, "{acted}");
+}
+
 /// 大きすぎる縮尺は、あふれずに断る。
 #[test]
 fn map_refuses_huge_scale() {

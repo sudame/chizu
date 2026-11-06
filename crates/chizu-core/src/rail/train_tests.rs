@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use super::*;
 use super::train::TRAIN_BLOCK_LEN_MM;
+use super::*;
 use crate::command::{Command, RoadKind};
 use crate::network::Dir;
 use crate::record::{CommandLog, replay};
@@ -933,7 +933,10 @@ fn a_line_lowering_another_cap_removes_only_the_excess() {
     assert_eq!(w.rail().train_count(), usize::from(cap_before));
     create(&mut w, west, north);
     let cap_after = w.rail().line(one).unwrap().cap();
-    assert!(0 < cap_after && cap_after < cap_before, "{cap_before} → {cap_after}");
+    assert!(
+        0 < cap_after && cap_after < cap_before,
+        "{cap_before} → {cap_after}"
+    );
     let count = |w: &World| w.rail().trains().filter(|(_, t)| t.line == one).count();
     assert!((1..=usize::from(cap_after)).contains(&count(&w)));
     run(&mut w, 10_000, 3_000);
