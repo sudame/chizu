@@ -107,7 +107,7 @@ pub mod rider;
 pub mod train;
 
 pub use crossing::{CROSSING_WARN_TICKS, CrossingTally};
-pub use line::{LineCapacity, RailLine, ShortSpan, Step, StepKind, TurnLimit};
+pub use line::{CapLimit, LineCapacity, RailLine, ShortSpan, Step, StepKind, TurnLimit, ZoneShare};
 pub use rider::{
     Exit, ExitFrom, FARE_SECONDS, FARE_WEIGHT_POOR_PERMILLE, FARE_WEIGHT_RICH_PERMILLE,
     INITIAL_FARE, MAX_FARE, QueueKey, RAIL_GIVE_UP, RidePlan, RideTally, Rider, StationWalks,

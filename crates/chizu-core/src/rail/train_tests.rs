@@ -1327,6 +1327,50 @@ fn line_capacity_shows_why_the_cap_is_zero() {
     assert_eq!(c.shared_with, ids[..3].to_vec());
 }
 
+/// 上限が 0 でなくても、上限を決めているものを読める。共有の区画の枠を分けた路線は、枠と自分の分と分け合う路線が出る。
+/// 区画の枠を分けない路線は、待てる所の数で決まる。16 に抑えられていない路線は理由が出ない。
+#[test]
+fn line_capacity_shows_what_limits_a_nonzero_cap() {
+    use super::line::{CapLimit, ZoneShare};
+    let (mut w, [west, mid, _, _]) = two_line_world();
+    let ids: Vec<LineId> = (0..4).map(|_| line_through(&mut w, &[west, mid])).collect();
+    for id in &ids[..3] {
+        set_trains(&mut w, *id, 1);
+    }
+    let rail = w.rail();
+    let c = rail.line_capacity(ids[0]).unwrap();
+    assert_eq!(c.cap, 1);
+    assert_eq!(
+        c.cap_limit,
+        Some(CapLimit::Zone(ZoneShare {
+            room: 3,
+            share: 1,
+            shared_with: ids[1..3].to_vec(),
+        }))
+    );
+    // 本数 0 の路線は、本数を 1 以上にしたとしたら配られる分を出す。ほかに分けるのは本数 1 以上の 3 本である。
+    let c = rail.line_capacity(ids[3]).unwrap();
+    assert_eq!(c.cap, 0);
+    let Some(CapLimit::Zone(z)) = c.cap_limit else {
+        panic!("{:?}", c.cap_limit);
+    };
+    assert_eq!(z.room, 3);
+    assert_eq!(z.shared_with, ids[..3].to_vec());
+    assert_eq!(c.turn_zone, None);
+}
+
+/// 共有の区画のない路線の上限は待てる所の数で決まり、ほかの路線と分けた区画の理由は出ない。
+#[test]
+fn line_capacity_names_wait_places_when_no_zone_limits_the_cap() {
+    use super::line::CapLimit;
+    let (mut w, [west, mid, _, _]) = two_line_world();
+    let id = line_through(&mut w, &[west, mid]);
+    set_trains(&mut w, id, 1);
+    let c = w.rail().line_capacity(id).unwrap();
+    assert!(c.cap < 16);
+    assert_eq!(c.cap_limit, Some(CapLimit::WaitPlaces));
+}
+
 /// 駅 W、M、E、N の街に、駅を 2〜3 つ選んだ路線を 2〜4 本と、本数 1〜16 を種で選んで 20,000 tick 回す。
 /// 区間運転、同じ駅を並べた路線、分岐の先の路線がまざる。閉塞が重ならず、備えが働かず、どの列車も
 /// 3,000 tick 以内に駅を出る。`turn_caps` なら、終点で折り返せる本数で走らせる本数を抑える（ふだんの形）。

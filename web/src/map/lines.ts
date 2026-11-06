@@ -28,7 +28,7 @@ export const LINE_COLOR_NAMES: readonly string[] = [
 ];
 
 /** chizu-wasm の rail_lines の、路線ごとの見出しの数の個数。 */
-export const LINE_HEADER = 18;
+export const LINE_HEADER = 26;
 /** 本数の上限。chizu-core の MAX_LINE_TRAINS と同じ。 */
 export const MAX_LINE_TRAINS = 16;
 
@@ -64,6 +64,10 @@ export type RailLineInfo = {
   turnCap: number;
   /** 終点で折り返せる本数が上限より少ないとき、その本数を決めている終点。そうでなければ null。 */
   turnLimit: TurnLimit | null;
+  /** 上限を決めているもの。上限が 16 なら null（上限に抑えられていない）。 */
+  capLimit: CapLimit | null;
+  /** 終点で折り返せる本数が上限より少なく、区画の分け直しで路線の分が下がっているとき、その分け前。そうでなければ null。 */
+  turnZone: ZoneShare | null;
   /** 線路が変わって進路を選べなくなった。 */
   stopped: boolean;
   /** 運転間隔（tick）。列車がなければ 0。 */
@@ -81,6 +85,19 @@ export type RailLineInfo = {
 };
 
 type LineRef = { index: number; generation: number };
+
+/** 共有の区画の枠と、そのうち路線の分け前。 */
+export type ZoneShare = {
+  /** 区画の枠（押さえた範囲の終わりを区画に置ける列車の数）。 */
+  room: number;
+  /** 枠のうち、この路線の分。 */
+  share: number;
+  /** 同じ枠を分ける、本数 1 以上のほかの路線の数。 */
+  sharedLines: number;
+};
+
+/** 上限を決めているもの。待てる所の数か、共有の区画の分け前。 */
+export type CapLimit = { kind: "waitPlaces" } | ({ kind: "zone" } & ZoneShare);
 
 /** 終点で折り返せる本数を決めている終点。 */
 export type TurnLimit = {
@@ -143,6 +160,13 @@ export function parseLines(data: ArrayLike<number>): RailLineInfo[] {
         at(14) > 0
           ? { platforms: at(14), station: { x: at(15), y: at(16) }, sharedLines: at(17) }
           : null,
+      capLimit:
+        at(18) === 1
+          ? { kind: "waitPlaces" }
+          : at(18) === 2
+            ? { kind: "zone", room: at(19), share: at(20), sharedLines: at(21) }
+            : null,
+      turnZone: at(22) === 1 ? { room: at(23), share: at(24), sharedLines: at(25) } : null,
       stopped: at(6) === 1,
       headway: at(7),
       roundTrip: at(8),

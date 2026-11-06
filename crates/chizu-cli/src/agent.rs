@@ -305,14 +305,22 @@ observe の rail（線路と駅）:
   turnCap 終点の駅で折り返せる本数。終点の駅では、列車は着いたホームで折り返して同じホームから出るので、
     1 周の見込みの時間のうちに通せる本数には限りがある。駅の線路をほかの路線が通らない終点は、ホーム 2 つに列車が
     入れるので 2 倍通せる。同じホームに着いて折り返す路線どうしと、そのホームを通り抜ける路線（止まるか通る路線）は、
-    これを本数 1 以上の路線で分ける。
+    これを本数 1 以上の路線で分ける。turnCap は路線ごとの値で、分け合う路線の合計ではない（その路線が走らせられる本数。
+    分け合う路線の列車が同じホームに使う時間の和が、ホームの時間に収まるように、本数 1 以上の路線へ ID の順に 1 本ずつ配る）。
     これより多く走らせても、終点の手前に並んで 1 周が延びるだけなので、走らせる本数はこれまでに抑える。
     環状の路線は 16。乗り換えの駅を終点にせず、通して走る路線にすると増える。
+  turnZone turnCap が cap より小さく、区画の分け直しで路線の分が下がっているとき、その分け前（そうでなければ null）。
+    room 区画の枠、share 区画の枠のうちこの路線の分（turnCap はこの分で運べる本数までに抑えられる）、
+    sharedWith 同じ枠を分ける、本数 1 以上のほかの路線の id。turnLimit も出るときは、どちらも turnCap を抑えている。
   turnLimit turnCap が cap より小さいとき、turnCap を決めている終点（そうでなければ null）。station 終点の駅の id
     （ほかの路線が折り返すホームを通り抜けて抑えられている路線では、そのホームの駅）、
     platforms 列車が折り返せるホームの数（駅の線路をほかの路線も通る終点は 1、通らない終点は 2）、
     sharedWith 同じホームを使う（着いて折り返すか、通り抜ける）、本数 1 以上のほかの路線の id（このホームの時間を分け合っている）。
-  capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
+  capReason cap が 0 のとき、または cap が 16 に届かず何かに抑えられているときの理由（それ以外は null）。
+    limit cap を決めているもの（null なら 16）。kind が waitPlaces なら待てる所の数、zone なら共有の区画の枠のうちこの路線の分で、
+    zone には room 区画の枠、share この路線の分（本数 0 の路線は、本数を 1 以上にしたら配られる分）、
+    sharedWith 同じ枠を分ける、本数 1 以上のほかの路線の id が付く。
+    waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
     sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有の区画の枠を、これらの路線と分けている）。
     shortSpans 進路にある、待てる所になれない短い線路（from と to が線路の両端のノードのマス、lengthMm が長さ）。
     列車の押さえる長さ minWaitLengthMm（72m）より短い線路は待てる所にならない。線路を分岐で割ると、割れた短い線路がここに出る
@@ -589,7 +597,10 @@ act の結果:
     本数（trains）か turnCap か走らせる本数が変わった路線だけを出す（本数を決めた路線のほか、同じホームで折り返す
     路線を走らせて、ほかの路線の turnCap が下がったときなど）。cap の変化は loweredLines に出る。
     路線ごとの line（id）、trains、cap、allowed（走らせる本数）、turnCap と turnCapBefore（コマンドの前の turnCap。
-    コマンドで作った路線は null）、turnLimit（observe の rail.lines と同じ）。
+    コマンドで作った路線は null）、turnLimit と turnZone（observe の rail.lines と同じ）。
+  決めた本数（trains）を、行き詰まりを防ぐ上限（cap）で抑えている路線があれば cappedLines が付く。コマンドで本数か cap が
+    変わった路線だけを出す。路線ごとの line（id）、trains、cap、capBefore（コマンドの前の cap。コマンドで作った路線は null）、
+    allowed（走らせる本数）、capReason（cap を決めているもの。observe の rail.lines と同じ）。
   コマンドで路線そのものが消えたら（駅の取り壊しなど。RemoveLine も含む）、removedLines にその id の並びが付く。
   コマンドで列車が消えたら removedTrains にその数が付く（上限が下がった、路線が止まった、進路が変わって先を押さえ直せないなど）。
     removedTrainsByLine は路線ごとの内訳（line と removed の並び）。
@@ -2382,6 +2393,7 @@ fn lines(world: &World) -> Value {
                 "cap": l.cap(),
                 "turnCap": l.turn_cap(),
                 "turnLimit": turn_limit(rail, id),
+                "turnZone": turn_zone(rail, id),
                 "capReason": cap_reason(rail, id),
                 "running": running,
                 "toStart": usize::from(l.allowed()).saturating_sub(running),
@@ -2417,10 +2429,40 @@ fn turn_limit(rail: &chizu_core::Rail, id: chizu_core::LineId) -> Value {
     })
 }
 
-/// 上限が 0 の理由。上限が 0 でなければ null である。
+/// 区画の枠と路線の分け前。
+fn zone_share_json(z: &chizu_core::ZoneShare) -> Value {
+    let shared: Vec<Value> = z
+        .shared_with
+        .iter()
+        .map(|l| id_json(l.index, l.generation))
+        .collect();
+    json!({"room": z.room, "share": z.share, "sharedWith": shared})
+}
+
+/// 終点で折り返せる本数（turnCap）が上限（cap）より小さく、区画の分け直しで路線の分が下がっているとき、その分け前。
+/// そうでなければ null である。
+fn turn_zone(rail: &chizu_core::Rail, id: chizu_core::LineId) -> Value {
+    rail.line_capacity(id)
+        .and_then(|c| c.turn_zone)
+        .map_or(Value::Null, |z| zone_share_json(&z))
+}
+
+/// 上限の理由。上限が 0 のときと、上限が 16 に届かず何かに抑えられているときに出す。16 なら null である。
 fn cap_reason(rail: &chizu_core::Rail, id: chizu_core::LineId) -> Value {
-    let Some(c) = rail.line_capacity(id).filter(|c| c.cap == 0) else {
+    let Some(c) = rail
+        .line_capacity(id)
+        .filter(|c| c.cap == 0 || c.cap_limit.is_some())
+    else {
         return Value::Null;
+    };
+    let limit = match &c.cap_limit {
+        None => Value::Null,
+        Some(chizu_core::CapLimit::WaitPlaces) => json!({"kind": "waitPlaces"}),
+        Some(chizu_core::CapLimit::Zone(z)) => {
+            let mut v = zone_share_json(z);
+            v["kind"] = json!("zone");
+            v
+        }
     };
     let shared: Vec<Value> = c
         .shared_with
@@ -2445,6 +2487,7 @@ fn cap_reason(rail: &chizu_core::Rail, id: chizu_core::LineId) -> Value {
         "minWaitLengthMm": chizu_core::TRAIN_BLOCK_LEN_MM,
         "shortSpans": short,
         "shortSpanCount": c.short_spans.len(),
+        "limit": limit,
     })
 }
 
@@ -2628,6 +2671,25 @@ fn compare_lines(out: &mut Value, world: &World, before: &LineStates, after: &Li
                 "turnCap": a.turn_cap,
                 "turnCapBefore": before.get(id).map(|b| b.turn_cap),
                 "turnLimit": turn_limit(rail, *id),
+                "turnZone": turn_zone(rail, *id),
+            })
+        })
+        .collect();
+    // 決めた本数を、上限（cap）で抑えている路線。コマンドで本数か上限が変わったものだけを出す。
+    let capped: Vec<Value> = after
+        .iter()
+        .filter(|(id, a)| {
+            let b = before.get(*id);
+            a.runs() && a.set > a.cap && b.is_none_or(|b| b.set != a.set || b.cap != a.cap)
+        })
+        .map(|(id, a)| {
+            json!({
+                "line": id_json(id.index, id.generation),
+                "trains": a.set,
+                "cap": a.cap,
+                "capBefore": before.get(id).map(|b| b.cap),
+                "allowed": a.allowed,
+                "capReason": cap_reason(rail, *id),
             })
         })
         .collect();
@@ -2656,6 +2718,9 @@ fn compare_lines(out: &mut Value, world: &World, before: &LineStates, after: &Li
     }
     if !turn_capped.is_empty() {
         out["turnCappedLines"] = json!(turn_capped);
+    }
+    if !capped.is_empty() {
+        out["cappedLines"] = json!(capped);
     }
     if !gone.is_empty() {
         out["removedLines"] = json!(gone);

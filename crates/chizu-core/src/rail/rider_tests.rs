@@ -1217,10 +1217,15 @@ fn a_terminal_on_a_through_line_does_not_stretch_its_round_trip() {
         let rail = w.rail();
         let (la, lb) = (rail.line(a).unwrap(), rail.line(b).unwrap());
         // B の終点 S3 のホームは、A も止まって使うので、2 路線で分け合う。
-        let limit = rail.line_capacity(b).unwrap().turn_limit.unwrap();
+        let capacity = rail.line_capacity(b).unwrap();
+        let limit = capacity.turn_limit.unwrap();
         assert_eq!(limit.platforms, 1);
         assert_eq!(limit.shared_with, vec![a]);
         assert!(lb.allowed() < 3);
+        // B の区画の分は折り返せる本数まで下がっていて、その分け前が出る（A と枠を分ける）。
+        let share = capacity.turn_zone.unwrap();
+        assert_eq!(share.share, u32::from(lb.turn_cap()));
+        assert_eq!(share.shared_with, vec![a]);
         // B は自分だけの待てる所を持たないので、区画の分は折り返せる本数まででよく、余りは A に回る。
         let zone = lb.plan.quota.keys().next().copied().unwrap();
         assert_eq!(lb.plan.quota[&zone], u32::from(lb.turn_cap()));

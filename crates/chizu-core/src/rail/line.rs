@@ -157,6 +157,23 @@ pub(crate) struct LinePlan {
     /// （折り返す前と、折り返して入る要素）だけが真になりうる。駅の線路をほかの路線も、同じ路線のほかの要素も
     /// 通らないときだけ真である（`make_plans`）。
     pub(crate) alt: Vec<bool>,
+    /// `cap` を共有の区画の分で下げたとき、その区画（`make_plans`）。自分だけの待てる所の数で決まる路線は `None`。
+    /// 読み取り用で、走らせ方には使わない。
+    pub(crate) cap_zone: Option<CapZone>,
+    /// 区画の分け直しで分が下がり、`cap` を分け直す前の値に戻した路線の、分け直しで分を決めた区画
+    /// （`plans_for`）。折り返せる本数を分までに抑えた理由を見せるのに使う。
+    pub(crate) split_zone: Option<CapZone>,
+}
+
+/// 共有の区画の枠と、そのうち路線の分。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CapZone {
+    /// 共有の区画の番号。
+    pub(crate) zone: u16,
+    /// 区画の枠。
+    pub(crate) room: u32,
+    /// 区画の枠のうち、路線の分（本数 0 の路線は、本数を 1 以上にしたとしたら配られる分）。
+    pub(crate) share: u32,
 }
 
 impl LinePlan {
@@ -170,6 +187,8 @@ impl LinePlan {
             quota,
             turn_cap: _,
             alt,
+            cap_zone,
+            split_zone: _,
         } = self;
         *cap == other.cap
             && *zone == other.zone
@@ -177,6 +196,7 @@ impl LinePlan {
             && *runs == other.runs
             && *quota == other.quota
             && *alt == other.alt
+            && *cap_zone == other.cap_zone
     }
 }
 
@@ -670,6 +690,8 @@ fn make_plans(lines: &[PlanLine], limits: &BTreeMap<LineId, u8>) -> BTreeMap<Lin
                     quota: BTreeMap::new(),
                     turn_cap: MAX_LINE_TRAINS,
                     alt: vec![false; n],
+                    cap_zone: None,
+                    split_zone: None,
                 },
             );
             continue;
@@ -705,6 +727,8 @@ fn make_plans(lines: &[PlanLine], limits: &BTreeMap<LineId, u8>) -> BTreeMap<Lin
                     quota: BTreeMap::new(),
                     turn_cap: MAX_LINE_TRAINS,
                     alt,
+                    cap_zone: None,
+                    split_zone: None,
                 },
             );
             continue;
@@ -760,6 +784,8 @@ fn make_plans(lines: &[PlanLine], limits: &BTreeMap<LineId, u8>) -> BTreeMap<Lin
                 quota: BTreeMap::new(),
                 turn_cap: MAX_LINE_TRAINS,
                 alt,
+                cap_zone: None,
+                split_zone: None,
             },
         );
     }
@@ -811,10 +837,15 @@ fn make_plans(lines: &[PlanLine], limits: &BTreeMap<LineId, u8>) -> BTreeMap<Lin
             // 自分だけの待てる所を持たない路線の列車は、いつも区画の中にいて枠を持ち続けるので、見込みの分が
             // そのまま上限になる。進路がすべて 1 つの輪の上にあるので、通る区画は 1 つである。
             None if plan.runs.is_empty() && !plan.quota.is_empty() => {
-                plan.cap = mine
-                    .map(|(_, q)| clamp_cap(u64::from(*q)))
-                    .min()
-                    .unwrap_or(0);
+                let lowest = mine
+                    .map(|((_, z), q)| (clamp_cap(u64::from(*q)), *z, *q))
+                    .min_by_key(|(cap, z, _)| (*cap, *z));
+                plan.cap = lowest.map_or(0, |(cap, _, _)| cap);
+                plan.cap_zone = lowest.map(|(_, zone, share)| CapZone {
+                    zone,
+                    room: zone_caps[usize::from(zone)],
+                    share,
+                });
             }
             None => {}
             // 自分だけの区間を持つ路線は、通る区画の枠のうち自分の見込みの分で運べる本数までにする。区画 z の分が q で、
@@ -824,10 +855,20 @@ fn make_plans(lines: &[PlanLine], limits: &BTreeMap<LineId, u8>) -> BTreeMap<Lin
             Some((total, in_zone)) => {
                 let mut cap = plan.cap;
                 for ((_, z), q) in mine {
-                    if *q == 0 {
-                        cap = 0;
+                    let lowered = if *q == 0 {
+                        0
                     } else if *q != u32::MAX {
-                        cap = cap.min(clamp_cap((u64::from(*q) * total).div_ceil(in_zone[z])));
+                        clamp_cap((u64::from(*q) * total).div_ceil(in_zone[z]))
+                    } else {
+                        continue;
+                    };
+                    if lowered < cap {
+                        cap = lowered;
+                        plan.cap_zone = Some(CapZone {
+                            zone: *z,
+                            room: zone_caps[usize::from(*z)],
+                            share: *q,
+                        });
                     }
                 }
                 plan.cap = cap;
@@ -1019,6 +1060,33 @@ pub struct LineCapacity {
     pub turn_cap: u8,
     /// 終点の駅で折り返せる本数が上限より小さいとき、その本数を決めている終点。そうでなければ `None`。
     pub turn_limit: Option<TurnLimit>,
+    /// 上限（[`RailLine::cap`]）を決めているもの。上限が [`MAX_LINE_TRAINS`] なら `None`（上限に抑えられていない）。
+    pub cap_limit: Option<CapLimit>,
+    /// 折り返せる本数が上限より小さく、区画の分け直しで路線の分が上限より下がっているとき、その分け前。
+    /// 走らせる本数は、この分で運べる本数までに抑えられる。終点のホームの時間でも抑えているときは、`turn_limit` も出る。
+    /// `turn_limit` が `None` でこれだけが出る路線は、3 路線以上が数珠つなぎにホームを分け合う形などで起きうる。
+    pub turn_zone: Option<ZoneShare>,
+}
+
+/// 上限（[`RailLine::cap`]）を決めているもの。読み取り用で、状態には持たない。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CapLimit {
+    /// 待てる所の数。ほかの路線と共有しない路線は「待てる所の数 − 1」、自分だけの区間を持つ路線は区間の待てる所の数から決まる。
+    /// 待てる所の数は [`LineCapacity::wait_places`] である。
+    WaitPlaces,
+    /// 共有の区画の枠のうち、この路線の分け前。
+    Zone(ZoneShare),
+}
+
+/// 共有の区画の枠と、そのうち路線の分け前。読み取り用で、状態には持たない。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZoneShare {
+    /// 区画の枠（押さえた範囲の終わりを区画に置ける列車の数）。
+    pub room: u32,
+    /// 枠のうち、この路線の分。本数 0 の路線は、本数を 1 以上にしたとしたら配られる分である。
+    pub share: u32,
+    /// 同じ区画の枠を分ける、本数 1 以上のほかの路線（ID の順）。
+    pub shared_with: Vec<LineId>,
 }
 
 /// 終点の駅で折り返せる本数（[`RailLine::turn_cap`]）を決めている終点。読み取り用で、状態には持たない。
@@ -1075,7 +1143,45 @@ impl Rail {
             short_spans: self.short_spans(line),
             turn_cap: line.turn_cap(),
             turn_limit: self.turn_limit(id),
+            cap_limit: self.cap_limit(line),
+            turn_zone: self.turn_zone(line),
         })
+    }
+
+    /// 路線 `line` の上限を決めているもの。
+    fn cap_limit(&self, line: &RailLine) -> Option<CapLimit> {
+        if line.cap() >= MAX_LINE_TRAINS {
+            return None;
+        }
+        Some(match line.plan.cap_zone {
+            Some(z) => CapLimit::Zone(self.zone_share(line, z)),
+            None => CapLimit::WaitPlaces,
+        })
+    }
+
+    /// 折り返せる本数が上限より小さいとき、区画の分け直しで下がった分け前。
+    fn turn_zone(&self, line: &RailLine) -> Option<ZoneShare> {
+        if line.cap() == 0 || line.turn_cap() >= line.cap() {
+            return None;
+        }
+        line.plan.split_zone.map(|z| self.zone_share(line, z))
+    }
+
+    /// 区画 `z` の枠を、`line` のほかに分ける路線（本数 1 以上で止まっていないもの）と合わせて返す。
+    fn zone_share(&self, line: &RailLine, z: CapZone) -> ZoneShare {
+        let shared_with = self
+            .lines
+            .iter()
+            .filter(|(_, l)| {
+                !std::ptr::eq(*l, line) && l.wants_trains() && l.plan.zone.contains(&Some(z.zone))
+            })
+            .map(|(other, _)| other)
+            .collect();
+        ZoneShare {
+            room: z.room,
+            share: z.share,
+            shared_with,
+        }
     }
 
     /// 路線 `id` の終点の駅で折り返せる本数（[`RailLine::turn_cap`]）が上限より小さいとき、その本数を決めている終点。
@@ -1356,7 +1462,11 @@ impl Rail {
             // 分け直した区画の分で運べる本数。
             let split: BTreeMap<LineId, u8> = plans.iter().map(|(id, p)| (*id, p.cap)).collect();
             for (id, p) in &mut plans {
-                p.cap = p.cap.max(first[id].cap);
+                if first[id].cap > p.cap {
+                    p.split_zone = p.cap_zone;
+                    p.cap = first[id].cap;
+                    p.cap_zone = first[id].cap_zone;
+                }
             }
             for (id, n) in turn_caps(input, &plans) {
                 plans.get_mut(&id).expect("路線がない").turn_cap = n;

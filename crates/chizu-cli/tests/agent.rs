@@ -871,7 +871,31 @@ fn act_reports_lines_that_cannot_run() {
     let lines = o["rail"]["lines"].as_array().unwrap();
     assert_eq!(lines.len(), 4, "{o}");
     assert!(lines[0]["cap"].as_u64().unwrap() > 0, "{o}");
-    assert_eq!(lines[0]["capReason"], serde_json::Value::Null, "{o}");
+    // 上限が 0 でない路線も、上限を決めているものが capReason に出る。区画の枠 3 を、本数 1 以上の 3 本で分ける。
+    assert_eq!(lines[0]["capReason"]["limit"]["kind"], "zone", "{o}");
+    assert_eq!(lines[0]["capReason"]["limit"]["room"], 3, "{o}");
+    assert_eq!(lines[0]["capReason"]["limit"]["share"], 1, "{o}");
+    assert_eq!(
+        lines[0]["capReason"]["limit"]["sharedWith"],
+        serde_json::json!([{"index":1,"generation":0},{"index":2,"generation":0}]),
+        "{o}"
+    );
+    // 本数 2 を決めた路線 0 は、上限 1 に抑えられ、そのことが act の結果の cappedLines に出ている。
+    let capped = acted["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|r| r.get("cappedLines"))
+        .unwrap_or_else(|| panic!("cappedLines がない {acted}"));
+    assert_eq!(
+        capped[0]["line"],
+        serde_json::json!({"index":0,"generation":0}),
+        "{acted}"
+    );
+    assert_eq!(capped[0]["trains"], 2, "{acted}");
+    assert_eq!(capped[0]["cap"], 1, "{acted}");
+    assert_eq!(capped[0]["allowed"], 1, "{acted}");
+    assert_eq!(capped[0]["capReason"]["limit"]["kind"], "zone", "{acted}");
     assert_eq!(lines[3]["cap"], 0, "{o}");
     assert_eq!(
         lines[3]["capReason"]["sharedWith"],
