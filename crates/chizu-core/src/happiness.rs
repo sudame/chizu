@@ -55,7 +55,7 @@ pub const SAVINGS_BONUS_MAX: i64 = 40;
 pub const SAVINGS_FOR_FULL_BONUS: Money = Money(100_000);
 
 /// 幸福度を足すときの、通勤・生活サービス・駐車場・暮らし向きの重み。
-pub const WEIGHTS: [u64; 4] = [1, 1, 1, 3];
+pub const WEIGHTS: [u64; 4] = [1, 1, 1, 4];
 
 /// 共同の駐車場を借りたいのに枠がない（車を持てない）世帯の駐車場の点数。0 にしないのは、歩くことで
 /// 通勤の点がすでに下がるためである。
@@ -297,9 +297,9 @@ mod tests {
 
     #[test]
     fn newcomers_expect_less_under_a_high_tax() {
-        assert_eq!(newcomer_happiness(100), 90);
-        assert_eq!(newcomer_happiness(200), 60);
-        assert_eq!(newcomer_happiness(300), 50);
+        assert_eq!(newcomer_happiness(100), 88);
+        assert_eq!(newcomer_happiness(200), 54);
+        assert_eq!(newcomer_happiness(300), 42);
     }
 
     #[test]
@@ -311,15 +311,15 @@ mod tests {
             wealth,
         };
         assert_eq!(total(h(100, 100, 100, 100)), 100);
-        assert_eq!(total(h(100, 100, 100, 0)), 50);
-        assert_eq!(total(h(0, 100, 100, 100)), 83);
-        // 駐車場だけで下がるのは、通勤と同じく最大で 6 分の 1 である。
-        assert_eq!(total(h(100, 100, 0, 100)), 83);
-        assert_eq!(total(h(100, 100, PARKING_CARLESS, 100)), 88);
+        assert_eq!(total(h(100, 100, 100, 0)), 42);
+        assert_eq!(total(h(0, 100, 100, 100)), 85);
+        // 駐車場だけで下がるのは、通勤と同じく最大で 7 分の 1 である。
+        assert_eq!(total(h(100, 100, 0, 100)), 85);
+        assert_eq!(total(h(100, 100, PARKING_CARLESS, 100)), 90);
         // 生活サービスが 0 点なら 40 点、50 点なら 70 点が上限になる。
         assert_eq!(total(h(100, 0, 100, 100)), 40);
         assert_eq!(total(h(100, 50, 100, 100)), 70);
-        assert_eq!(total(h(0, 50, 0, 0)), 8);
+        assert_eq!(total(h(0, 50, 0, 0)), 7);
         assert_eq!(total(HappinessParts::NEUTRAL), 50);
     }
 

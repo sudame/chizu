@@ -723,9 +723,10 @@ pub(crate) mod tests {
             .find(|(b, x)| *b != old && x.zone.kind() == ZoneKind::Industrial)
             .map(|(b, _)| b)
             .expect("ほかの職場がない");
-        // update_jobs と同じく、職場を変えて予定を立て直す。
+        // update_jobs と同じく、職場を変えて予定を立て直す。新しい職場へ出る時刻が前の職場へ着くより先に来ると、
+        // その出発で前の移動がやめになり、着かずに終わる。歩いて向かう住民は着くのが遅いので、出発は翌日にずらす。
         w.set_workplace(id, Some(other));
-        let at = w.next_leave_home(id, other);
+        let at = Tick(w.next_leave_home(id, other).0 + TICKS_PER_DAY);
         w.population.set_schedule(
             id,
             ScheduleState {
@@ -1178,10 +1179,8 @@ pub(crate) mod tests {
         run_days(&mut w, 2);
         let after = w.city_stats();
         assert!(after.happiness < LEAVE_BELOW, "{after:?}");
-        // 暮らし向きの重みは 6 分の 3 なので、税が上限でも、ほかの要素が満点の世帯の幸福度は 50 にとどまり、
-        // 出ていく境目をわずかに下回るだけである。2 日で 3 割より多く出ていけばよいとする。
         assert!(
-            after.citizens * 10 < before.citizens * 7,
+            after.citizens * 2 < before.citizens,
             "{} 人から {} 人",
             before.citizens,
             after.citizens
@@ -1210,7 +1209,7 @@ pub(crate) mod tests {
             counts.push(w.city_stats().citizens);
         }
         let peak = counts.iter().copied().max().unwrap();
-        assert!(counts[counts.len() - 1] * 2 < peak, "{counts:?}");
+        assert!(counts[counts.len() - 1] * 4 < peak, "{counts:?}");
         // 減り始めてからも、どの 1 段でもその時点の人口の 6 割より多くは減らず、何段にも分かれて減る。
         // 終わりのほうの段は人口が少なく、移動の結果のわずかな違いで減る割合が半分の前後に揺れる。
         let mut falling = 0;

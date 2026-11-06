@@ -544,13 +544,6 @@ mod car_place_tests {
     #[test]
     fn houses_that_become_apartments_take_back_home_places() {
         let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
-        // 住宅の税を上げて需要を抑え、段階 2 の戸建てが段階 3 に上がるまでの日数を延ばす。どの家も埋まって
-        // すぐに段階が上がると、枠を返す世帯の車が段階 2 のうちに家へ向かう晩がなくなる。
-        let tax = Command::SetTaxRate {
-            zone: ZoneKind::Residential,
-            permille: 150,
-        };
-        assert_eq!(w.apply(&tax), ApplyOutcome::Applied);
         // 3 マス以上の段階 2 の戸建てで、段階 3 の台数より多く停めてあるか押さえてあり、段階 3 で枠を返す世帯の
         // 車が、その建物へ向かっているもの。枠を返すのは、自宅の枠を持つ世帯のうち、ID の順で段階 3 の台数を
         // 超える分である。

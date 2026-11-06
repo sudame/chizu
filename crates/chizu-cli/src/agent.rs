@@ -225,7 +225,7 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
 observe の population.happinessParts（幸福度の内訳）:
   家のある住民の、幸福度の 4 つの要素の点数（0〜100）の平均。commute 通勤（commute.time の時間から決まる）、
   services 電気と水道、parking 駐車場、wealth 職、世帯の蓄え、住宅の税率。happiness は
-  commute:services:parking:wealth を 1:1:1:3 の重みで足した値の平均で、電気と水道が欠けると上限で抑えられる。
+  commute:services:parking:wealth を 1:1:1:4 の重みで足した値の平均で、電気と水道が欠けると上限で抑えられる。
   parking は世帯の全員が同じ点で、自宅の枠があれば 100、車を持てない（parking.households.none）なら 30、
   共同の駐車場を借りていれば 100 から遠さと高さを引く。遠さは家の正面のマスから駐車場の正面のマスまでの直線が
   8 マスまでは 0 で、32 マスで 40 になるまで一様に増える。高さは料金が 10 以下なら 0 で、世帯の払える上限で 30 になるまで

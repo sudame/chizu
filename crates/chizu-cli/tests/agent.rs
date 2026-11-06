@@ -1225,9 +1225,6 @@ fn supplied_town(name: &str) -> (PathBuf, i64, i64) {
             {"type":"PaintZone","area":[[x+1,y+1],[x+40,y+6]],"zone":"Residential"},
             {"type":"PlaceBuilding","kind":"PowerPlant","at":[x+30,y-1],"rotation":2},
             {"type":"PlaceBuilding","kind":"WaterPump","at":[x+36,y-1],"rotation":2},
-            // 職場のない町は、職のない住民が多く住宅の需要が 0 前後で止まる。税を下げて需要を正に保ち、
-            // 3 日目にも建物が育って電気の需要が伸びるようにする。
-            {"type":"SetTaxRate","zone":"Residential","permille":60},
         ])
         .to_string(),
     );
