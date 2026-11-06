@@ -2266,3 +2266,42 @@ fn a_full_lot_at_the_destination_adds_to_the_car_cost() {
         PARK_SECONDS + walk_seconds(PARK_RADIUS * 8_000 / 2)
     );
 }
+
+/// 共同の駐車場の枠を借りた世帯は、家から出るときと家に帰るときだけ、家と駐車場のあいだを歩く時間と、1 日の料金の
+/// 半分を蓄えの重さで秒に直した分を、車の費用に足す。家に関わらない移動には足さない。
+#[test]
+fn a_renter_adds_the_walk_and_half_the_fee_to_the_car_cost() {
+    use crate::rail::choice::{PARK_SECONDS, tile_distance_mm, walk_seconds};
+    use crate::rail::money_seconds;
+    let (s, ids) = Street::new(&[50, 5, 10]);
+    let (home, work, shop) = (ids[0], ids[1], ids[2]);
+    let facilities = [shared_lot(&s, 40)];
+    let c = facilities[0].area.min;
+    let h = Household { home };
+    let request = |ends| CommuteRequest {
+        place: Some(CarPlace::Shared(c)),
+        parking_fee: 30,
+        ..h.request(0, ends)
+    };
+    let sites = (&s.buildings, facilities.as_slice());
+    let walk = walk_seconds(tile_distance_mm(
+        s.buildings.get(home).unwrap().front,
+        facilities[0].front,
+    ));
+    let fee = money_seconds(30, Money::ZERO) / 2;
+    assert!(walk > 0 && fee > 0);
+    assert_eq!(
+        s.trips.parking_seconds(&request((home, work)), sites),
+        PARK_SECONDS + walk + fee
+    );
+    // 家に帰る車は借りた枠に停めるので、満車の分は足さない。
+    assert_eq!(
+        s.trips.parking_seconds(&request((work, home)), sites),
+        PARK_SECONDS + walk + fee
+    );
+    // 家に関わらない移動は、停めて出す手間だけである。
+    assert_eq!(
+        s.trips.parking_seconds(&request((work, shop)), sites),
+        PARK_SECONDS
+    );
+}

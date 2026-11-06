@@ -374,7 +374,7 @@ export function setupFinance(
   const fareRow = make("div", "", "finance-row");
   fareRow.dataset.fare = "";
   fareRow.title =
-    "鉄道の 1 回の乗車の運賃。乗ったときに所持金に入る。住民は運賃 1 につき 5 秒の遠回りと同じに見て、歩きや車と比べて鉄道を選ぶので、高いほど乗る人が減る。";
+    "鉄道の 1 回の乗車の運賃。乗ったときに所持金に入る。住民は運賃 1 を 4〜16 秒の遠回り（蓄えの少ない世帯ほど重い）と同じに見て、歩きや車と比べて鉄道を選ぶので、高いほど乗る人が減る。";
   const fareMinus = make("button", "−");
   const farePlus = make("button", "＋");
   fareMinus.type = "button";
