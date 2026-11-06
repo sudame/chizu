@@ -123,7 +123,8 @@ observe の growth（新築が電気か水道の余裕で止まっている間�
 
 observe の人と車の欄（原因が交通にあるかを見分けるためのもの）:
   citizenPlaces  住民のいまの居場所ごとの人数。atHome 家、atWork 職場か学校、atShop 帰りに寄った店、
-                 walking 歩いて移動中（車を降りて歩く区切りを含む）、driving 車で移動中、homeless 家のない世帯の住民。
+                 walking 歩いて移動中（車を降りて歩く区切りと、駅まで歩く区切り、駅から歩く区切りを含む）、driving 車で移動中、
+                 riding 駅で待っているか列車に乗っている、homeless 家のない世帯の住民。
   traffic.cars   車の台数。total 全部、stopped 道路の上で、直前の 100 tick（ゲーム内の約 20 分）のあいだ同じ位置にいる車
                  （道路の種類を下げて車線を外れ、車線に戻るのを待つ車も含む）、
                  waitingAtCurb 建物の駐車場の中で、車線に出る順番を待っている車、moving それ以外。
@@ -150,6 +151,8 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  ゲーム内の日ごとの結果で、arrived 着いた数、abandoned 道路が変わるなどして途中で着けなくなった数、
                  noRoute 出発のときに経路がなく始められなかった数、avgTravelTicks と avgTravelMinutes 着いた移動の平均の移動時間
                  （1 tick は 12 秒）。着いた移動がなければ null。yesterday は始まって 1 日たつまでは null。
+                 byMode 着いた移動の手段ごとの数。walk 歩いて向かった、car 車で走り始めた（駐車場で待ちきれず歩きに
+                 切り替えたものも含む）、rail 鉄道に乗った（駅まで歩き、駅から歩く区切りを含む）。
   parking        建物の駐車場。byZone 区画の種類ごとに、spaces 停められる台数の合計（surface 敷地を切り欠いた平面の駐車場、
                  indoor 建物の中の駐車場の内訳）、parked 停めてある台数、reserved 向かっている車のために押さえた台数、
                  occupiedPermille 停めてある台数と押さえた台数の和の、台数に対する千分率（台数 0 なら null）、
@@ -172,6 +175,7 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  lotsFull 行き先の近くの駐車場がどこも満車で、車で向かうのをやめた数（やめた移動は、歩けるなら歩く）、
                  noCar 車は世帯に 1 台で、ほかの住民が乗っているか、出発の建物から 16 マスより離れた所に停めてあって、車で向かえなかった数（歩けるなら歩く）。
                  本人が停めた車も、16 マスの中になければ使えない。家に帰る住民は、16 マスの中に自分が停めた車があれば、近くても車で帰る。
+                 車を使えずに鉄道を選んだ移動は数えない（鉄道で通う人の車は家の枠に残るので、帰りは車を使えない）。
                  drives、noCar、lotsFull は別々の数で、足すと車で行こうとした移動の数になる（noCar は drives に含まれない）。
                  ただし、道路網が分かれていて車で届かないなど、3 つのどれも増やさずに歩きへ回る場合は数えない。
                  noCarBreakdown noCar の内訳で、4 つの和が noCar に等しい。inUse 世帯の車を家族が乗っている、
@@ -302,6 +306,24 @@ observe の rail（線路と駅）:
   state（Running 走っているか先の閉塞を待っている、Dwell 駅に止まっている、Turnback 終点で折り返している、
   Ready 駅を出るのを待っている）、speed 速さ（mm/tick、25000 が時速 90km）、nextStation 次に止まる駅の id。
   trainCount 列車の数、deadlock 列車が互いを待って止まる輪を見つけ、輪の中の列車を 1 本消した回数（ふつうは 0）。
+  乗る人：住民は、歩きと車をこれまでの距離の決まりで選んだうえで、鉄道の費用が小さければ鉄道に乗る。費用は移動の秒で、
+    鉄道は、駅まで歩く時間（直線 × 1.3 ÷ 秒速 1.389m）、待ち（運転間隔の半分。直前に乗りきれずに人が残った駅と向きでは
+    運転間隔をもう 1 つ足す）、乗る時間、駅から歩く時間に、運賃 × 5 秒を足したもの。歩きは直線 × 1.3 ÷ 秒速 1.389m、
+    車は直線 ÷ 秒速 2.8m。駅は出発と行き先の建物から 64 マス以内の、出入口のある駅を近い順に 3 つずつ試す。
+    走っている列車が 1 本以上あり、止まっていない路線だけを使う。乗り換えはまだしない。150m 未満の移動（車を
+    持つかによらない）と、家の枠でない駐車場に停めた車で出る移動（停めた車を取りに帰る移動を含む）は鉄道と比べない。列車の定員は 600 人で、駅に着いたときと駅を出るときに、
+    待っている人を着いた順に乗せる。駅に止まる時間は、着いたときの乗り降りの人数 ÷ 20（切り上げ）tick と 20 tick の
+    長いほうで、乗り降りが 400 人を超えると延びる。
+    待ち行列の先頭で 600 tick より長く待った人は、歩いて行き先へ向かう。
+  stations の waiting 待っている人、boarded と alighted 始まりからの乗った数と降りた数。
+  lines の measuredRoundTripTicks 測った時間を混ぜた 1 周の時間（tick）、boarded 始まりからの乗った数、waiting 待っている人、
+    leftBehindStops 直前に出た列車に乗りきれず人が残った（駅、向き）の数、loadPermille いちばん混んだ列車の乗車率（‰）。
+  trains の riders 乗っている人。
+  fare 運賃（1 回の乗車の額。乗り換えても 1 回分。SetFare で決める。始めは 5）。運賃は乗ったときに所持金に入り、
+    世帯の蓄えからは引かない。financesPerDay.fares は前の日の運賃の収入。
+  riders 乗る人の数。waiting 駅で待っている人、aboard 列車に乗っている人、boarded と alighted 始まりからの乗った数と
+    降りた数、gaveUp 待ちきれず歩いた人、evicted 路線、駅、列車がなくなって途中で歩きに戻った人、fares 始まりからの
+    運賃の収入、avgWaitTicks 乗った人が駅で待った平均の tick（乗った人がいなければ null）。
   crossings 踏切。count 数、list 踏切ごとの at マス、closed いま閉じているか、closedTicks 閉じてからの tick
   （開いていれば null）。踏切は、走っている列車が押さえた範囲の中で踏切を抜けきれ、16 tick 以内に着く見込みのときと、
   列車の体がかかっているあいだだけ閉じる。駅に止まっている列車では閉じない。車は閉じた踏切の手前で止まり、開いていても
@@ -460,7 +482,8 @@ observe の removedCrosswalks:
       区画の枠の分け前がない路線は cap が 0 で、列車は走らない。
       列車は 4 両 80m、時速 90km で、最初の駅に 1 本ずつ現れる。駅に 20 tick 止まり、終点では 30 tick かけて折り返す。
       同じ駅から前の列車が出てから、運転間隔（1 周の見込みの時間 ÷ 本数）の半分を空けて出る。先の閉塞を押さえてから
-      入るので、2 本が同じ閉塞に入ることはない。本数を減らすと、終点で折り返す列車から消える。まだ乗る人はいない。
+      入るので、2 本が同じ閉塞に入ることはない。本数を減らすと、終点で折り返す列車から消える。消える列車に乗っていた人は、
+      その駅で降りて歩く。
       線路を取り壊して進路を選べなくなった路線は止まり（stopped）、その路線の列車は消える。
       線路を引くか取り壊して cap が下がった路線は、超えた分と、先を押さえ直せない列車がすぐに消える。cap が 0 になった路線は走れなくなる
       （BuildRail と Bulldoze は断らない。act の結果の haltedLines に出る）。進路が変わった直後に、先を押さえ直せない
@@ -474,6 +497,9 @@ observe の removedCrosswalks:
       共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額）を、街で 1 つ決める。始めは 10。範囲の外は Invalid。
       料金が世帯の払える上限（蓄えに応じて 10〜49）を超えると、その世帯は借りない。借りている世帯は、
       ゲーム内の 1 日に 1 回の決め直しで枠を返す。いまの料金は observe の parking.fee にある。
+  {"type":"SetFare","fare":0..20}
+      鉄道の運賃（1 回の乗車の額）を、街で 1 つ決める。始めは 5。範囲の外は Invalid。運賃 1 は、手段を選ぶ費用の
+      20 秒にあたる。いまの運賃は observe の rail.fare にある。
   {"type":"SetSimSpeed","speed":1..288}
       画面での速さの倍率。1 倍は実時間の 1 秒に 5 tick で、288 倍は 1 日を 5 秒で回す。advance の進み方は変わらない。
 
@@ -1397,6 +1423,9 @@ fn day_traffic(d: Option<DayTraffic>) -> Value {
         abandoned,
         no_route,
         travel_ticks,
+        walked,
+        drove,
+        rode,
     } = d;
     let avg = (arrived > 0).then(|| travel_ticks as f64 / arrived as f64);
     json!({
@@ -1404,6 +1433,7 @@ fn day_traffic(d: Option<DayTraffic>) -> Value {
         "arrived": arrived,
         "abandoned": abandoned,
         "noRoute": no_route,
+        "byMode": {"walk": walked, "car": drove, "rail": rode},
         "avgTravelTicks": avg.map(|t| (t * 10.0).round() / 10.0),
         // 1 tick は 12 秒である。
         "avgTravelMinutes": avg.map(|t| (t * 12.0 / 60.0 * 10.0).round() / 10.0),
@@ -1448,6 +1478,7 @@ fn citizen_places(p: CitizenPlaces) -> Value {
         at_shop,
         walking,
         driving,
+        riding,
         homeless,
     } = p;
     json!({
@@ -1456,6 +1487,7 @@ fn citizen_places(p: CitizenPlaces) -> Value {
         "atShop": at_shop,
         "walking": walking,
         "driving": driving,
+        "riding": riding,
         "homeless": homeless,
     })
 }
@@ -1963,6 +1995,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
         // 共同の駐車場の維持費は、facilityUpkeep の駐車場の種類ごとの額の和である。
         parking_upkeep: _,
         rail_upkeep,
+        fares,
     } = finances;
     let upkeep_of = |k: ServiceKind| match k.utility_slot() {
         Some(slot) => facility_upkeep[slot].0,
@@ -2010,6 +2043,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "net": finances.net().0,
             "taxes": by_zone(|z| taxes[z.index()].0),
             "parkingFees": parking_fees.0,
+            "fares": fares.0,
             "roadUpkeep": road_upkeep.0,
             "facilityUpkeep": by_service(upkeep_of),
             "railUpkeep": rail_upkeep.0,
@@ -2103,6 +2137,11 @@ fn rail(world: &World) -> Value {
             _ => {}
         }
     }
+    let rides = rail.ride_tally();
+    let mut waiting_at = std::collections::BTreeMap::<chizu_core::StationId, usize>::new();
+    for ((s, _, _), q) in rail.queues() {
+        *waiting_at.entry(*s).or_default() += q.len();
+    }
     let stations: Vec<Value> = rail
         .stations()
         .map(|(id, s)| {
@@ -2110,15 +2149,21 @@ fn rail(world: &World) -> Value {
                 let (a, b) = (l.start.min(l.end()), l.start.max(l.end()));
                 json!([tile(a), tile(b)])
             });
+            let (boarded, alighted) = rides.station_counts.get(&id).copied().unwrap_or((0, 0));
             json!({
                 "id": {"index": id.index, "generation": id.generation},
                 "at": tile(s.front),
                 "area": [tile(s.area.min), tile(s.area.max)],
                 "ends": ends,
                 "facesRoad": s.entrance.is_some(),
+                "waiting": waiting_at.get(&id).copied().unwrap_or(0),
+                "boarded": boarded,
+                "alighted": alighted,
             })
         })
         .collect();
+    let waiting: usize = waiting_at.values().sum();
+    let aboard: usize = rail.trains().map(|(id, _)| rail.aboard(id).len()).sum();
     // 駅の端のノードのマスは駅の中なので数えない。
     let tiles = rail
         .tracks()
@@ -2139,6 +2184,18 @@ fn rail(world: &World) -> Value {
         "trainCount": rail.train_count(),
         "deadlock": rail.tally().deadlock,
         "crossings": crossings(world),
+        "fare": rail.fare(),
+        "riders": {
+            "waiting": waiting,
+            "aboard": aboard,
+            "boarded": rides.boarded,
+            "alighted": rides.alighted,
+            "gaveUp": rides.gave_up,
+            "evicted": rides.evicted,
+            "fares": rides.fares,
+            "avgWaitTicks": (rides.boarded > 0)
+                .then(|| (rides.wait_ticks as f64 / rides.boarded as f64 * 10.0).round() / 10.0),
+        },
     })
 }
 
@@ -2177,6 +2234,7 @@ fn id_json(index: u32, generation: u16) -> Value {
 /// 路線。
 fn lines(world: &World) -> Value {
     let rail = world.rail();
+    let rides = rail.ride_tally();
     let out: Vec<Value> = rail
         .lines()
         .map(|(id, l)| {
@@ -2186,6 +2244,22 @@ fn lines(world: &World) -> Value {
                 .iter()
                 .map(|s| id_json(s.index, s.generation))
                 .collect();
+            let waiting: usize = rail
+                .queues()
+                .filter(|((_, line, _), _)| *line == id)
+                .map(|(_, q)| q.len())
+                .sum();
+            let left_behind = rail
+                .left_behind()
+                .iter()
+                .filter(|(_, line, _)| *line == id)
+                .count();
+            let fullest = rail
+                .trains()
+                .filter(|(_, t)| t.line == id)
+                .map(|(tid, _)| rail.aboard(tid).len())
+                .max()
+                .unwrap_or(0);
             json!({
                 "id": id_json(id.index, id.generation),
                 "stations": stations,
@@ -2196,7 +2270,12 @@ fn lines(world: &World) -> Value {
                 "running": running,
                 "roundTripTicks": l.round_trip_ticks(),
                 "headwayTicks": l.headway_ticks(),
+                "measuredRoundTripTicks": l.measured_round_trip_ticks(),
                 "stopped": l.stopped,
+                "boarded": rides.line_boarded.get(&id).copied().unwrap_or(0),
+                "waiting": waiting,
+                "leftBehindStops": left_behind,
+                "loadPermille": fullest * 1000 / chizu_core::rail::TRAIN_CAPACITY,
             })
         })
         .collect();
@@ -2345,6 +2424,7 @@ fn trains(world: &World) -> Value {
                 "state": state,
                 "speed": t.speed,
                 "nextStation": next.map(|s| id_json(s.index, s.generation)),
+                "riders": rail.aboard(id).len(),
             })
         })
         .collect();
@@ -2404,6 +2484,7 @@ const WATCHED: &[&str] = &[
     "/financesPerDay/expenses",
     "/financesPerDay/net",
     "/financesPerDay/parkingFees",
+    "/financesPerDay/fares",
     "/parking/fee",
     "/parking/lotsNotOnRoad/count",
     "/population/citizens",
@@ -2416,6 +2497,7 @@ const WATCHED: &[&str] = &[
     "/population/happinessParts/parking",
     "/commute/time/medianMinutes",
     "/citizenPlaces/homeless",
+    "/citizenPlaces/riding",
     "/traffic/cars/total",
     "/traffic/cars/stopped",
     "/traffic/cars/queued",
@@ -2467,6 +2549,13 @@ const WATCHED: &[&str] = &[
     "/rail/crossings/count",
     "/rail/crossings/carWaitTicks",
     "/rail/crossings/overrun",
+    "/rail/fare",
+    "/rail/riders/waiting",
+    "/rail/riders/aboard",
+    "/rail/riders/boarded",
+    "/rail/riders/gaveUp",
+    "/rail/riders/evicted",
+    "/rail/riders/fares",
 ];
 
 /// 前の observe と比べる数を、`/money` を `money`、`/demand/Office` を `demand.Office` と読み替えた名前で集める。

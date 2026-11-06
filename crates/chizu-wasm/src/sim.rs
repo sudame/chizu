@@ -923,7 +923,8 @@ impl Sim {
     }
 
     /// 収支の見込みを次の数で返す。税率の上限（‰）、区画の種類ごとの税率（‰）、区画の種類ごとの税収、
-    /// 道路の維持費、発電所と浄水場の維持費、共同の駐車場の維持費、共同の駐車場の料金、料金の上限、料金の収入、鉄道の維持費。
+    /// 道路の維持費、発電所と浄水場の維持費、共同の駐車場の維持費、共同の駐車場の料金、料金の上限、料金の収入、鉄道の維持費、
+    /// 鉄道の運賃、運賃の上限、前の日の運賃の収入。
     /// 区画の種類の順は住宅、商業、工業、オフィス。金額はどれも 1 日あたりである。
     pub fn finance(&self) -> Vec<f64> {
         let f = self.world.finances();
@@ -937,6 +938,9 @@ impl Sim {
         out.push(f64::from(chizu_core::command::MAX_PARKING_FEE));
         out.push(f.parking_fees.0 as f64);
         out.push(f.rail_upkeep.0 as f64);
+        out.push(f64::from(self.world.rail().fare()));
+        out.push(f64::from(chizu_core::rail::MAX_FARE));
+        out.push(f.fares.0 as f64);
         out
     }
 
@@ -1784,9 +1788,9 @@ mod tests {
             &facilities[facilities.len() - 5..],
             &[3.0, 7.0, 12.0, 9.0, 5.0]
         );
-        // 線路の維持費が収支の最後に出る
+        // 線路の維持費が収支の運賃の手前に出る
         let finance = sim.finance();
-        assert_eq!(finance.len(), 17);
+        assert_eq!(finance.len(), 20);
         assert_eq!(finance[16], sim.world().finances().rail_upkeep.0 as f64);
         assert!(finance[16] > 0.0);
     }
@@ -2023,7 +2027,7 @@ mod tests {
     fn finance_follows_tax_rate_commands_and_the_log() {
         let mut sim = Sim::new(0);
         let before = sim.finance();
-        assert_eq!(before.len(), 17);
+        assert_eq!(before.len(), 20);
         assert_eq!(before[0], f64::from(MAX_TAX_PERMILLE));
         // 住宅、商業、工業、オフィスの順の税率
         assert_eq!(&before[1..5], &[100.0; 4]);
@@ -2393,7 +2397,7 @@ mod tests {
     fn finance_includes_the_parking_fee_and_its_income() {
         let (mut sim, _guard) = crate::test_town::carless_town(1);
         let f = sim.finance();
-        assert_eq!(f.len(), 17);
+        assert_eq!(f.len(), 20);
         assert_eq!(f[13], f64::from(chizu_core::world::INITIAL_PARKING_FEE));
         assert_eq!(f[14], f64::from(chizu_core::command::MAX_PARKING_FEE));
         assert_eq!(f[15], 0.0);
@@ -2411,5 +2415,19 @@ mod tests {
         sim.submit(Command::SetParkingFee { fee: 30 }).unwrap();
         sim.advance(1);
         assert_eq!(sim.finance()[13], 30.0);
+    }
+
+    #[test]
+    fn finance_includes_the_fare_and_its_income() {
+        let (mut sim, _guard) = crate::test_town::carless_town(1);
+        let f = sim.finance();
+        assert_eq!(f[17], f64::from(chizu_core::rail::INITIAL_FARE));
+        assert_eq!(f[18], f64::from(chizu_core::rail::MAX_FARE));
+        assert_eq!(f[19], 0.0);
+        sim.submit(Command::SetFare { fare: 12 }).unwrap();
+        sim.advance(1);
+        let f = sim.finance();
+        assert_eq!(f[17], 12.0);
+        assert_eq!(f[19], sim.world().finances().fares.0 as f64);
     }
 }

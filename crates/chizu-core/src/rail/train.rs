@@ -2,7 +2,7 @@
 //!
 //! 列車は路線の進路（[`RailLine::path`]）の上を、どの速さでも 1 tick ずつ動く。位置は先頭がいる進路の要素と、
 //! その要素に入ってからの距離で持ち、尾は全長ぶん後ろにある（閉塞を押さえる長さは [`TRAIN_BLOCK_LEN_MM`]）。
-//! 乗る人はまだいない。
+//! 乗る人は、駅に着いたときと駅を出るときに乗り降りする（[`super::rider`]）。
 //!
 //! 閉塞は、線路の向きごとのノードとノードのあいだと、分岐のノード（上りと下りをまとめて 1 つ）である
 //! （[`Block`]）。列車は先の閉塞を押さえてから入り、尾が抜けたら返す。押さえている閉塞は、列車の体がかかる
@@ -68,7 +68,7 @@ pub const TRAIN_DECEL: i64 = 1_000;
 /// 45 度の曲がりと分岐を通るときの速さの上限（mm/tick）。時速 40km である。
 pub const TRAIN_SLOW_SPEED: i64 = 11_111;
 
-/// 駅に止まる時間（tick）。乗る人がまだいないので、いつもこの長さである。
+/// 駅に止まる時間（tick）。乗り降りが多ければ延ばす（[`super::rider::BOARDINGS_PER_TICK`]）。
 pub const DWELL_TICKS: u16 = 20;
 
 /// 終点で折り返す時間（tick）。このあいだは終点の駅の両方のホームを押さえる。
@@ -474,7 +474,7 @@ impl Rail {
             .map(|(id, _)| id)
             .collect();
         for id in gone {
-            self.trains.remove(id);
+            self.drop_train(id);
         }
     }
 
@@ -512,7 +512,8 @@ impl Rail {
     /// 置ける要素がなければ列車を消す。先に押さえた要素は、新しい進路では別の要素を指すので、どの列車も返す。
     /// 新しい進路で続けられない状態は直す。駅でない所で止まっている列車は走る状態に戻し、折り返している
     /// 列車は、折り返す先のホームを押さえ直してから折り返すよう、止まって待つ状態に戻す。
-    pub(crate) fn relocate_trains(&mut self, line_id: LineId) {
+    /// 置けずに消える列車の乗客は、前の進路 `old` で次に止まる駅で降りる。
+    pub(crate) fn relocate_trains(&mut self, line_id: LineId, old: &RailLine) {
         let Some(line) = self.lines.get(line_id) else {
             return;
         };
@@ -524,6 +525,8 @@ impl Rail {
             .collect();
         let mut gone = Vec::new();
         for id in ids {
+            // 止まる要素の番号が変わるので、区間の時間は次に止まった所から測り直す。
+            self.last_stop.remove(&id);
             let t = self.trains.get_mut(id).expect("列車がない");
             let at = |i: u32| {
                 let s = line.step(i);
@@ -556,7 +559,7 @@ impl Rail {
             };
         }
         for id in gone {
-            self.trains.remove(id);
+            self.drop_train_on(id, Some(old));
         }
     }
 
@@ -591,7 +594,7 @@ impl Rail {
         }
         // ID の小さい列車から数えて残すので、消えるのは ID の大きい列車である。
         for id in gone {
-            self.trains.remove(id);
+            self.drop_train(id);
         }
         let mut held = BTreeMap::<Block, TrainId>::new();
         let mut gone = Vec::new();
@@ -607,7 +610,7 @@ impl Rail {
             }
         }
         for id in gone {
-            self.trains.remove(id);
+            self.drop_train(id);
         }
         // 押さえ直しは、消す列車がなくなるまで繰り返す。1 回の走査で、ID の小さい列車が、まだ判定していない
         // ID の大きい列車の閉塞に阻まれて消えても、その大きい列車があとで消えれば阻まれなかったことになる。
@@ -676,7 +679,7 @@ impl Rail {
             alive.retain(|a| *a != id);
             #[cfg(test)]
             removed.push(*self.trains.get(id).expect("列車がない"));
-            self.trains.remove(id);
+            self.drop_train(id);
         }
     }
 
@@ -710,13 +713,14 @@ impl Rail {
         if self.lines.is_unused() {
             return;
         }
+        self.give_up(tick.0);
         self.count_down();
         let mut held = self.occupancy();
         let mut quota = self.quota();
         let mut claims = Claims::default();
         let blocked = self.reserve(tick.0, &mut held, &mut quota, &mut claims);
         let stops = self.crossing_stops(tick.0, occupied);
-        self.run(&stops);
+        self.run(tick.0, &stops);
         // 新しい列車は、走っている列車が閉塞を押さえ終えてから出す。行き詰まりの輪から列車を消したとき、
         // 空いたホームを待っていた列車が、出直す列車より先に入れるようにするためである。
         let mut held = self.occupancy();
@@ -828,6 +832,7 @@ impl Rail {
         order.sort_unstable();
         let mut blocked = BTreeMap::new();
         let mut departed = Vec::new();
+        let mut leaving = Vec::new();
         let crossings = self.crossing_map();
         let Rail {
             lines,
@@ -934,6 +939,7 @@ impl Rail {
                         if r == Reserve::Done {
                             t.state = TrainState::Running;
                             departed.push((t.line, t.pos));
+                            leaving.push(id);
                         }
                         Some(r)
                     }
@@ -998,12 +1004,16 @@ impl Rail {
                 l.departed.insert(pos, now);
             }
         }
+        // 駅を出る列車に、着いたあとに並んだ人を乗せる。
+        for id in leaving {
+            self.serve_departure(id, now);
+        }
         blocked
     }
 
     /// 走っている列車を、押さえた範囲の中で進める。次に止まる駅の先の端に着いた列車は止まる。
     /// `stops` の列車は、先頭からその距離より先へは進まない（中に車か人がいる踏切の手前）。
-    fn run(&mut self, stops: &BTreeMap<TrainId, i64>) {
+    fn run(&mut self, now: u64, stops: &BTreeMap<TrainId, i64>) {
         let ids: Vec<TrainId> = self
             .trains
             .iter()
@@ -1025,6 +1035,13 @@ impl Rail {
             }
         }
         for id in arrived {
+            // 降りる人を降ろし、待っている人を乗せる。乗り降りが多ければ止まる時間を延ばす。
+            // ここで消える列車には、待っている人を乗せない。
+            let extra = self.is_extra(id);
+            let left = self.serve_arrival(id, now, !extra);
+            if let Some(t) = self.trains.get_mut(id) {
+                t.state = TrainState::Dwell { left };
+            }
             self.retire_if_extra(id);
         }
     }
@@ -1033,14 +1050,19 @@ impl Rail {
     /// 行き詰まりを防ぐ上限を超えた分は、線路や路線を変えた直後に [`Rail::settle_trains`] がその場で消す。
     /// ここでの上限の判定は、走っているうちに本数が上限を超えた場合の備えである。
     fn retire_if_extra(&mut self, id: TrainId) {
+        if self.is_extra(id) {
+            self.drop_train(id);
+        }
+    }
+
+    /// 駅に着いた列車 `id` が、路線の本数を超えた分で、ここで消えるか（[`Rail::retire_if_extra`]）。
+    fn is_extra(&self, id: TrainId) -> bool {
         let t = *self.trains.get(id).expect("列車がない");
         let line = self.lines.get(t.line).expect("列車の路線がない");
         let count = self.trains.iter().filter(|(_, o)| o.line == t.line).count();
         let count = u8::try_from(count).unwrap_or(u8::MAX);
         let here = line.step(t.pos).kind == StepKind::Terminal || line.looped;
-        if count > line.allowed() && (here || count > line.cap()) {
-            self.trains.remove(id);
-        }
+        count > line.allowed() && (here || count > line.cap())
     }
 
     /// 押さえられずに止まった列車の「待つ相手」を ID の順にたどり、輪になっていれば、輪の中で ID の
@@ -1083,7 +1105,7 @@ impl Rail {
             }
         }
         for v in victims {
-            self.trains.remove(v);
+            self.drop_train(v);
             self.tally.deadlock += 1;
         }
     }

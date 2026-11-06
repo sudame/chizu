@@ -49,11 +49,12 @@
 //! | 15 | `RemoveLine` | line の index `u32`、generation `u16` |
 //! | 16 | `SetLineTrains` | line の index `u32`、generation `u16`、trains `u8`（0〜16） |
 //! | 17 | `InsertLineStation` | line の index `u32`、generation `u16`、after_index `u8`、station の index `u32`、generation `u16` |
+//! | 18 | `SetFare` | fare `u16`（0〜20） |
 //!
 //! 形式を変えるときは版を上げる。種類の番号は使い回さない。種類を足すだけなら、古い記録はそのまま
 //! 読めるので版は上げない。`PaintZone` の区画に低密度の住宅（5）を足したときも、同じ理由で版を上げていない。
 //! 1 は前から住宅で、いまは高密度の住宅と読む。`BuildRail`（12）と、`PlaceBuilding` の駅（施設の種類 5）を足したときも
-//! 同じ理由で版を上げていない。路線のコマンド（13〜17）も同じである。
+//! 同じ理由で版を上げていない。路線のコマンド（13〜17）と運賃（18）も同じである。
 
 use core::fmt;
 
@@ -497,6 +498,10 @@ fn encode_command(w: &mut Writer, c: &Command) {
             w.u16(line.generation);
             w.u8(trains);
         }
+        Command::SetFare { fare } => {
+            w.u8(18);
+            w.u16(fare);
+        }
     }
 }
 
@@ -607,6 +612,7 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
             },
             trains: r.u8()?,
         },
+        18 => Command::SetFare { fare: r.u16()? },
         other => return Err(DecodeError::UnknownCommand(other)),
     };
     Ok(c)
@@ -775,6 +781,9 @@ mod tests {
                     generation: 6,
                 },
             },
+            Command::SetFare {
+                fare: crate::rail::MAX_FARE,
+            },
         ]
     }
 
@@ -883,9 +892,11 @@ mod tests {
         assert!(invalid_command(&rect));
         assert!(invalid_command(&[11, 51, 0])); // 駐車場の料金 51
         assert!(CommandLog::decode(&single(0, 0, &[11, 50, 0])).is_ok());
+        assert!(invalid_command(&[18, 21, 0])); // 運賃 21
+        assert!(CommandLog::decode(&single(0, 0, &[18, 20, 0])).is_ok());
         assert_eq!(
-            CommandLog::decode(&single(0, 0, &[18])),
-            Err(DecodeError::UnknownCommand(18))
+            CommandLog::decode(&single(0, 0, &[19])),
+            Err(DecodeError::UnknownCommand(19))
         );
         // 列車の本数は 0〜16 だけを読む。
         let trains = |n: u8| {
@@ -1139,7 +1150,7 @@ mod tests {
         assert_eq!(
             stats,
             ReplayStats {
-                applied: 8,
+                applied: 9,
                 not_implemented: 0,
                 rejected: 0,
                 denied: 11,
@@ -1283,6 +1294,7 @@ mod tests {
             }),
             line.clone().prop_map(|line| Command::RemoveLine { line }),
             (line, 0_u8..=20).prop_map(|(line, trains)| Command::SetLineTrains { line, trains }),
+            (0_u16..=crate::rail::MAX_FARE).prop_map(|fare| Command::SetFare { fare }),
         ]
     }
 

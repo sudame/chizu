@@ -19,7 +19,7 @@ export const isParking = (service: ServiceName): boolean =>
 /** 施設の種類の値（ServiceKind の値）。 */
 export const serviceCode = (service: ServiceName): number => SERVICE_NAMES.indexOf(service) + 1;
 /** chizu-wasm の finance の数の個数。 */
-export const FINANCE_LENGTH = 17;
+export const FINANCE_LENGTH = 20;
 
 /** chizu-wasm の carless の、固定の並びの個数。そのあとに世帯の多い区切りの `[x, y, 世帯の数]` が続く。 */
 export const CARLESS_FIXED = 6;
@@ -71,6 +71,8 @@ export type CommandMessage =
   | { kind: "SetTaxRate"; zone: Exclude<ZoneName, "Clear" | "ResidentialLow">; permille: number }
   /** 共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額）。上限は chizu-core の MAX_PARKING_FEE で、中核が検証する。 */
   | { kind: "SetParkingFee"; fee: number }
+  /** 鉄道の運賃（1 回の乗車の額）。上限は chizu-core の MAX_FARE で、中核が検証する。 */
+  | { kind: "SetFare"; fare: number }
   | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number }
   /** マス (x, y) の交差点に信号を置くか（on が true）、外す。chizu-wasm がマスのノードを引く。 */
   | { kind: "SetSignal"; x: number; y: number; on: boolean }

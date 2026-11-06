@@ -162,6 +162,13 @@ fn scenarios() -> Vec<Scenario> {
             money: None,
         },
         Scenario {
+            name: "rail_riders",
+            seed: rail_riders_seed(),
+            ticks: RAIL_RIDERS_TICKS,
+            log: rail_riders(rail_riders_seed()),
+            money: Some(Money(10_000_000)),
+        },
+        Scenario {
             name: "land_slots",
             seed: 42,
             ticks: 2 * TICKS_PER_DAY + 600,
@@ -239,6 +246,107 @@ fn rail_lines() -> CommandLog {
         },
     );
     rec(3_000, Command::SetLineTrains { line, trains: 2 });
+    log
+}
+
+const RAIL_RIDERS_TICKS: u64 = 2 * TICKS_PER_DAY;
+
+/// [`rail_riders`] の種。高速道路が北から入る、いちばん小さい種である。
+fn rail_riders_seed() -> u64 {
+    (0..)
+        .find(|s| chizu_core::world::highway_line(*s).start.y < 0)
+        .unwrap()
+}
+
+/// 西の住宅と東の工場を東西の通りで結び、通りの南の駅 2 つを線路でつないで列車を走らせる記録。
+/// 住民は、費用で比べて駅まで歩き、列車に乗り、降りて歩く。途中で運賃を変え、本数を変える。
+fn rail_riders(seed: u64) -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let at = TilePos::new;
+    let road = |from: TilePos, to: TilePos| Command::BuildRoad {
+        from,
+        to,
+        kind: RoadKind::Medium,
+    };
+    rec(1, road(at(-64, 0), at(127, 0)));
+    let inner = chizu_core::world::highway_line(seed).start;
+    rec(1, road(inner, at(inner.x, 0)));
+    // 駅の線路は y = 2 の x -50〜-41 と x 100〜109 である。
+    for x in [-50, 100] {
+        rec(
+            2,
+            Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: at(x, 1),
+                rotation: 0,
+            },
+        );
+    }
+    rec(
+        3,
+        Command::BuildRail {
+            from: at(-41, 2),
+            to: at(100, 2),
+        },
+    );
+    rec(
+        4,
+        Command::PaintZone {
+            area: TileRect::from_corners(at(-64, -6), at(-30, -1)),
+            zone: Some(Zone::Residential),
+        },
+    );
+    rec(
+        4,
+        Command::PaintZone {
+            area: TileRect::from_corners(at(90, -6), at(127, -1)),
+            zone: Some(Zone::Industrial),
+        },
+    );
+    let xs: Vec<i64> = [-20, 0, 20, 40, 60]
+        .into_iter()
+        .filter(|x| (x - inner.x).abs() > 14)
+        .collect();
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, xs[0]),
+        (ServiceKind::WaterPump, xs[1]),
+        (ServiceKind::WaterPump, xs[2]),
+    ] {
+        rec(
+            5,
+            Command::PlaceBuilding {
+                kind,
+                at: at(x, -1),
+                rotation: 2,
+            },
+        );
+    }
+    let line = LineId {
+        index: 0,
+        generation: 0,
+    };
+    rec(
+        6,
+        Command::CreateLine {
+            from: StationId {
+                index: 0,
+                generation: 0,
+            },
+            to: StationId {
+                index: 1,
+                generation: 0,
+            },
+        },
+    );
+    rec(7, Command::SetLineTrains { line, trains: 2 });
+    rec(TICKS_PER_DAY, Command::SetFare { fare: 10 });
+    rec(
+        TICKS_PER_DAY + 900,
+        Command::SetLineTrains { line, trains: 1 },
+    );
     log
 }
 
@@ -1280,6 +1388,22 @@ fn rail_lines_cover_the_trains() {
     replay(&mut world, &s.log, s.ticks - 2_100);
     assert_eq!(world.rail().train_count(), 2);
     assert_eq!(world.rail().tally().deadlock, 0);
+}
+
+/// 乗る人の記録で、住民が列車に乗り、降りて着き、運賃が入ることを確かめる。
+#[test]
+fn rail_riders_cover_the_riders() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "rail_riders")
+        .unwrap();
+    let mut world = s.start();
+    let stats = replay(&mut world, &s.log, s.ticks);
+    assert_eq!(stats.denied, 0, "{stats:?}");
+    let t = world.rail().ride_tally();
+    assert!(t.boarded > 20 && t.alighted > 0, "{t:?}");
+    assert!(world.traffic().yesterday.unwrap().rode > 0);
+    assert_eq!(world.rail().fare(), 10);
 }
 
 /// 踏切の記録が、どちらの順でも踏切を作り、列車が通るあいだだけ閉じることを確かめる。

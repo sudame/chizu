@@ -1,13 +1,15 @@
 //! テストとベンチマークに使う、種から決定論的に作る街。
 
 use chizu_core::citizens::draw_household;
+use chizu_core::rail::choice::{LineLive, StopInfo, line_stops_of};
 use chizu_core::routing::{ROUTE_VARIANTS, RouteRequest};
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network,
     Population, Rail, RngPurpose, RoadKind, ServiceKind, Tick, TilePos, TileRect, World, ZoneKind,
     rng,
 };
-use chizu_core::{LaneOffset, SidewalkPos};
+use chizu_core::{LaneOffset, LineId, SidewalkPos, StationId};
+use std::collections::BTreeMap;
 
 pub mod perf;
 
@@ -168,6 +170,257 @@ pub fn rail_trains_running(seed: u64, lines: usize) -> Rail {
 /// 列車が出そろってから、測り始めるまでに回す tick。出そろった直後は、駅で間を空けて待つ列車が
 /// 同じ tick に出るので、ふだんより重い。
 pub const RAIL_BENCH_WARMUP: u64 = 3_000;
+
+/// [`rail_choice_inputs`] の駅の数。
+pub const RAIL_CHOICE_STATIONS: u32 = 200;
+
+/// 手段の選び方のベンチマークに使う、[`city_grid_100k`] の上の駅と路線。
+pub struct RailChoiceInputs {
+    /// 駅の ID の順の、出入口のマスと位置。
+    pub doors: Vec<(StationId, TilePos, SidewalkPos)>,
+    /// 路線ごとの止まる所。
+    pub lines: Vec<(LineId, Vec<StopInfo>)>,
+    /// 路線ごとの、走っている本数と区間の時間。
+    pub live: BTreeMap<LineId, LineLive>,
+}
+
+/// [`city_grid_100k`]（約 4.6km 四方）に、駅 [`RAIL_CHOICE_STATIONS`] 個と路線 [`RAIL_BENCH_LINES`] 本を置いた形。
+///
+/// 駅は 15 × 14 の格子（約 330m おき）から 200 個を選んで置く。路線は、ある駅から格子の隣の駅へ種で選んで
+/// 進み、まだ通っていない駅を 12〜32 個つないだもので、4 本に 1 本は環状にする。線路は引かず、路線の形
+/// （止まる所の並び）と、走っている本数（4〜8 本）と、区間の時間（40〜120 tick）だけを作る。
+pub fn rail_choice_inputs(seed: u64) -> RailChoiceInputs {
+    const COLS: i64 = 15;
+    const ROWS: i64 = 14;
+    const STEP: i64 = 41;
+    let station = |i: u32| StationId {
+        index: i,
+        generation: 0,
+    };
+    let pos = |i: u32| {
+        let i = i64::from(i);
+        TilePos::new(6 + (i % COLS) * STEP, 6 + (i / COLS) * STEP)
+    };
+    let doors = (0..RAIL_CHOICE_STATIONS)
+        .map(|i| {
+            let t = pos(i);
+            let door = SidewalkPos {
+                tile: t,
+                step: (1, 0),
+                along: LaneOffset(0),
+            };
+            (station(i), t, door)
+        })
+        .collect();
+    let n = i64::from(RAIL_CHOICE_STATIONS);
+    let mut lines = Vec::new();
+    let mut live = BTreeMap::new();
+    for k in 0..u32::try_from(RAIL_BENCH_LINES).expect("路線が多すぎる") {
+        let mut r = rng(seed, RngPurpose::JobAssignment, u64::from(k), Tick(7));
+        let want = 12 + r.below(21) as usize;
+        let mut at = i64::from(r.below(RAIL_CHOICE_STATIONS));
+        let mut seq = vec![at];
+        while seq.len() < want {
+            let (c, row) = (at % COLS, at / COLS);
+            let next: Vec<i64> = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .into_iter()
+                .map(|(dc, dr)| (c + dc, row + dr))
+                .filter(|(c, row)| (0..COLS).contains(c) && (0..ROWS).contains(row))
+                .map(|(c, row)| row * COLS + c)
+                .filter(|j| *j < n && !seq.contains(j))
+                .collect();
+            if next.is_empty() {
+                break;
+            }
+            let len = u32::try_from(next.len()).expect("隣が多すぎる");
+            at = next[r.below(len) as usize];
+            seq.push(at);
+        }
+        if seq.len() < 2 {
+            continue;
+        }
+        let stations: Vec<StationId> = seq
+            .iter()
+            .map(|i| station(u32::try_from(*i).expect("駅の番号")))
+            .collect();
+        let id = LineId {
+            index: k,
+            generation: 0,
+        };
+        let stops = line_stops_of(&stations, k % 4 == 3);
+        let segments: Vec<u32> = stops.iter().map(|_| 40 + r.below(81)).collect();
+        live.insert(id, LineLive::new(4 + r.below(5), &segments));
+        lines.push((id, stops));
+    }
+    RailChoiceInputs { doors, lines, live }
+}
+
+/// `count` 件の、家から職場への移動の出発と行き先の建物の正面のマス。[`commute_requests`] のリンクの真ん中のマスである。
+pub fn commute_tiles(seed: u64, net: &Network, count: u32) -> Vec<(TilePos, TilePos)> {
+    let mid = |l: LinkId| {
+        let line = net.segment_line(l.segment).expect("リンクがない");
+        line.tile(line.len / 2)
+    };
+    commute_requests(seed, net, count, 8)
+        .into_iter()
+        .map(|r| (mid(r.from), mid(r.to)))
+        .collect()
+}
+
+/// 東西に約 2km 離れた住宅（西）と工場（東）を通りで結び、通りの南の駅 2 つを線路でつないで、本数 `trains` の
+/// 路線を走らせる街。chizu-core の `rail_town` と同じ形で、住宅と工場の区画を通りに沿って広げてある。
+/// 本数が少ないほど 1 本の列車に乗る人が増える。
+pub fn rail_riders_town(trains: u8) -> World {
+    let seed = (5..)
+        .find(|s| chizu_core::world::highway_line(*s).start.y < 0)
+        .expect("北から入る種がない");
+    let mut w = World::new_with_money(seed, Money(1_000_000_000)).with_unlimited_land();
+    let at = TilePos::new;
+    let apply = |w: &mut World, c: Command| {
+        let out = w.apply(&c);
+        assert!(
+            matches!(out, ApplyOutcome::Applied | ApplyOutcome::AppliedPartly(_)),
+            "{c:?}: {out:?}"
+        );
+    };
+    let road = |from: TilePos, to: TilePos| Command::BuildRoad {
+        from,
+        to,
+        kind: RoadKind::Medium,
+    };
+    // 内側から外へ、まわりのチャンクを買い広げる。
+    for ring in 2_i32..=4 {
+        for cy in -ring..=ring {
+            for cx in -ring..=ring {
+                if i32::max(cx.abs(), cy.abs()) == ring {
+                    w.apply(&Command::BuyChunk {
+                        coord: ChunkCoord::new(cx, cy),
+                    });
+                }
+            }
+        }
+    }
+    apply(&mut w, road(at(-200, 0), at(200, 0)));
+    let inner = chizu_core::world::highway_line(w.seed()).start;
+    let corner = at(inner.x, 0);
+    if inner != corner {
+        apply(&mut w, road(inner, corner));
+    }
+    if !(-200..=200).contains(&corner.x) {
+        apply(&mut w, road(corner, at(corner.x.clamp(-200, 200), 0)));
+    }
+    for x in [-140, 125] {
+        apply(
+            &mut w,
+            Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: at(x, 1),
+                rotation: 0,
+            },
+        );
+    }
+    let west = w.rail().station_at(at(-140, 2)).expect("西の駅がない");
+    let east = w.rail().station_at(at(125, 2)).expect("東の駅がない");
+    apply(
+        &mut w,
+        Command::BuildRail {
+            from: at(-131, 2),
+            to: at(125, 2),
+        },
+    );
+    for (a, b, zone) in [
+        ((-200, -6), (-110, -1), chizu_core::Zone::Residential),
+        ((110, -6), (190, -1), chizu_core::Zone::Industrial),
+    ] {
+        apply(
+            &mut w,
+            Command::PaintZone {
+                area: TileRect::from_corners(at(a.0, a.1), at(b.0, b.1)),
+                zone: Some(zone),
+            },
+        );
+    }
+    let xs: Vec<i64> = [-80, -60, -40, -20, 20, 40, 60, 80]
+        .into_iter()
+        .filter(|x| (x - inner.x).abs() > 14)
+        .collect();
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, xs[0]),
+        (ServiceKind::WaterPump, xs[1]),
+        (ServiceKind::WaterPump, xs[2]),
+    ] {
+        apply(
+            &mut w,
+            Command::PlaceBuilding {
+                kind,
+                at: at(x, -1),
+                rotation: 2,
+            },
+        );
+    }
+    apply(
+        &mut w,
+        Command::CreateLine {
+            from: west,
+            to: east,
+        },
+    );
+    let line = w.rail().lines().next().expect("路線がない").0;
+    apply(&mut w, Command::SetLineTrains { line, trains });
+    w
+}
+
+/// 乗る人のいちばん多く降りる 1 tick の直前の街と、乗る人のいちばん多い時点の街。
+pub struct RidersPeak {
+    /// 降りた人のいちばん多い tick の直前の街。読み戻して 1 tick 進めると、その tick になる。
+    pub before_peak: Vec<u8>,
+    /// その tick に鉄道を離れた人数。
+    pub alighted: u64,
+    /// 駅で待つ人と列車に乗る人の和がいちばん多い時点の街。
+    pub crowded: Vec<u8>,
+    /// その時点の乗る人の数。
+    pub riders: usize,
+}
+
+/// [`rail_riders_town`] を `days` 日回し、鉄道を離れた人（降りた人、待ちきれずに歩いた人、途中で降ろされた人）が
+/// いちばん多かった tick の直前の街と、乗る人のいちばん多かった時点の街を書き出す。
+pub fn rail_riders_peak(trains: u8, days: u64) -> RidersPeak {
+    let left = |w: &World| {
+        let t = w.rail().ride_tally();
+        t.alighted + t.gave_up + t.evicted
+    };
+    let mut w = rail_riders_town(trains);
+    let (mut peak, mut crowd) = ((0, 0), (0, 0));
+    for _ in 0..days * chizu_core::TICKS_PER_DAY {
+        let before = left(&w);
+        w.step();
+        let n = left(&w) - before;
+        if n > peak.0 {
+            peak = (n, w.tick().0);
+        }
+        let r = w.rail().rider_count();
+        if r > crowd.0 {
+            crowd = (r, w.tick().0);
+        }
+    }
+    let mut w = rail_riders_town(trains);
+    let mut out = RidersPeak {
+        before_peak: Vec::new(),
+        alighted: peak.0,
+        crowded: Vec::new(),
+        riders: crowd.0,
+    };
+    while out.before_peak.is_empty() || out.crowded.is_empty() {
+        if w.tick().0 + 1 == peak.1 {
+            out.before_peak = w.to_snapshot();
+        }
+        if w.tick().0 == crowd.1 {
+            out.crowded = w.to_snapshot();
+        }
+        w.step();
+    }
+    out
+}
 
 pub use chizu_core::citizens::MAX_HOUSEHOLD_SIZE;
 

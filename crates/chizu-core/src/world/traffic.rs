@@ -6,7 +6,7 @@
 use super::World;
 use crate::citizens::Activity;
 use crate::clock::TICKS_PER_DAY;
-use crate::movement::{Congestion, CurbWait, Finished};
+use crate::movement::{Congestion, CurbWait, Finished, Via};
 use crate::network::SegmentId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -28,6 +28,12 @@ pub struct DayTraffic {
     pub no_route: u64,
     /// 着いた移動にかかった時間の合計（tick）。
     pub travel_ticks: u64,
+    /// 着いた移動のうち、歩いて向かったものの数。車を使おうとして歩きに切り替えた移動は車に数える。
+    pub walked: u64,
+    /// 着いた移動のうち、車で走り始めたものの数。
+    pub drove: u64,
+    /// 着いた移動のうち、鉄道に乗ったものの数。
+    pub rode: u64,
 }
 
 /// 通勤の移動の結果の集計。今日と前の日だけを持つ。状態ハッシュには入れない。
@@ -181,6 +187,8 @@ pub struct CitizenPlaces {
     pub walking: u64,
     /// 車に乗って移動している。
     pub driving: u64,
+    /// 駅で待っているか、列車に乗っている。駅まで歩く人と駅から歩く人は `walking` に数える。
+    pub riding: u64,
     /// 家がない世帯の住民。
     pub homeless: u64,
 }
@@ -213,6 +221,11 @@ impl World {
         if f.reached {
             day.arrived += 1;
             day.travel_ticks += now.0.saturating_sub(f.departed.0);
+            match f.via {
+                Via::Walk => day.walked += 1,
+                Via::Car => day.drove += 1,
+                Via::Rail => day.rode += 1,
+            }
         } else {
             day.abandoned += 1;
         }
@@ -319,6 +332,10 @@ impl World {
                 }
                 continue;
             }
+            if row.trip.is_some_and(|t| self.rail.rider_of(t).is_some()) {
+                out.riding += 1;
+                continue;
+            }
             if p.home(row.household).flatten().is_none() {
                 out.homeless += 1;
                 continue;
@@ -356,7 +373,7 @@ mod tests {
             w.step();
         }
         let p = w.citizen_places();
-        let sum = p.at_home + p.at_work + p.at_shop + p.walking + p.driving + p.homeless;
+        let sum = p.at_home + p.at_work + p.at_shop + p.walking + p.driving + p.riding + p.homeless;
         assert_eq!(sum, w.population().citizen_count() as u64);
         assert!(p.walking + p.driving > 0, "朝の通勤で誰も移動していない");
         assert!(p.at_home > 0 && p.at_work > 0);

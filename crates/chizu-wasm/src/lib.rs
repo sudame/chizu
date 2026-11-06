@@ -324,7 +324,7 @@ impl Simulation {
         self.0.lot_shortage()
     }
 
-    /// 収支の見込みの 17 個の数。並びは `sim::Sim::finance` にある。
+    /// 収支の見込みの 20 個の数。並びは `sim::Sim::finance` にある。
     pub fn finance(&self) -> Vec<f64> {
         self.0.finance()
     }

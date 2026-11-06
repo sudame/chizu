@@ -2432,3 +2432,30 @@ fn act_reports_lines_removed_by_demolishing_a_station() {
         "{acted}"
     );
 }
+
+/// act で運賃を決め、observe の rail に運賃と乗る人の数が出る。範囲の外の運賃は断る。
+#[test]
+fn act_sets_the_fare() {
+    let dir = session("agent-fare");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "8"]);
+    let seen = json(&cli(&["agent", "observe", d]));
+    assert_eq!(seen["rail"]["fare"], 5);
+    assert_eq!(seen["rail"]["riders"]["waiting"], 0);
+    assert_eq!(seen["rail"]["riders"]["boarded"], 0);
+    assert_eq!(seen["citizenPlaces"]["riding"], 0);
+    assert_eq!(seen["financesPerDay"]["fares"], 0);
+    let cmd = write(
+        &dir.join("fare.json"),
+        r#"[{"type":"SetFare","fare":12},{"type":"SetFare","fare":21}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmd]));
+    assert_eq!(acted["results"][0]["outcome"], "Applied");
+    assert_eq!(
+        acted["results"][1]["message"],
+        "運賃 21 は 0 から 20 の外にある"
+    );
+    let seen = json(&cli(&["agent", "observe", d]));
+    assert_eq!(seen["rail"]["fare"], 12);
+    assert_eq!(seen["sinceLastObserve"]["changes"]["rail.fare"]["delta"], 7);
+}

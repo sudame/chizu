@@ -22,7 +22,7 @@
 //!
 //! 路線と列車（設計 3.10 の 3）は [`line`] と [`train`] にある。線路を引くか取り壊すと、路線ごとに進路を選び直す。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
@@ -91,14 +91,27 @@ pub struct TrainId {
     pub generation: u16,
 }
 
-impl_arena_id!(RailNodeId, TrackId, StationId, LineId, TrainId);
+/// 乗る人の ID。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct RiderId {
+    pub index: u32,
+    pub generation: u16,
+}
 
+impl_arena_id!(RailNodeId, TrackId, StationId, LineId, TrainId, RiderId);
+
+pub mod choice;
 pub mod crossing;
 pub mod line;
+pub mod rider;
 pub mod train;
 
 pub use crossing::{CROSSING_WARN_TICKS, CrossingTally};
 pub use line::{LineCapacity, RailLine, ShortSpan, Step, StepKind};
+pub use rider::{
+    Exit, ExitFrom, FARE_SECONDS, INITIAL_FARE, MAX_FARE, QueueKey, RAIL_GIVE_UP, RidePlan,
+    RideTally, Rider, TRAIN_CAPACITY, Transfer,
+};
 pub use train::{Block, RailTally, TRAIN_BLOCK_LEN_MM, Train, TrainState};
 
 /// 線路の網のノード。
@@ -191,6 +204,28 @@ pub struct Rail {
     crossings: BTreeMap<TilePos, Option<u64>>,
     /// 踏切の読み取り用の数。状態ハッシュには入れない。
     crossing_tally: CrossingTally,
+    /// 駅で待っている人と、列車に乗っている人。
+    riders: Arena<RiderId, Rider>,
+    /// 休ませている移動から、乗る人を引く表。`riders` から作り直せるので、状態ハッシュには入れない。
+    by_trip: BTreeMap<crate::id::TripId, RiderId>,
+    /// 駅の待ち行列。（駅、路線、向き）ごとに、着いた順に並べる。
+    queues: BTreeMap<QueueKey, VecDeque<RiderId>>,
+    /// 列車ごとの、乗っている人。乗った順に並べる。
+    aboard: BTreeMap<TrainId, Vec<RiderId>>,
+    /// 直前に出た列車に乗りきれずに人が残った（駅、路線、向き）。待ちの見積もりに運転間隔を 1 つ足す。
+    left_behind: BTreeSet<QueueKey>,
+    /// 列車ごとの、前に止まった所（止まる要素の順の番号）と着いた tick。区間の時間を測るのに使う。
+    last_stop: BTreeMap<TrainId, (usize, u64)>,
+    /// 運賃。1 回の乗車ごとに街で 1 つの額である。
+    fare: u16,
+    /// この前に取り出してから集めた運賃。`World` が tick ごとに所持金へ移すので、書き出さない。
+    #[serde(skip)]
+    fare_due: i64,
+    /// 歩きに戻る人。`World` がすぐに取り出すので、書き出さない。
+    #[serde(skip)]
+    exits: Vec<Exit>,
+    /// 乗る人の読み取り用の数。状態ハッシュには入れない。
+    ride_tally: RideTally,
 }
 
 impl Default for Rail {
@@ -267,6 +302,16 @@ impl Rail {
             tally: RailTally::default(),
             crossings: BTreeMap::new(),
             crossing_tally: CrossingTally::default(),
+            riders: Arena::new(),
+            by_trip: BTreeMap::new(),
+            queues: BTreeMap::new(),
+            aboard: BTreeMap::new(),
+            left_behind: BTreeSet::new(),
+            last_stop: BTreeMap::new(),
+            fare: INITIAL_FARE,
+            fare_due: 0,
+            exits: Vec::new(),
+            ride_tally: RideTally::default(),
         }
     }
 
@@ -274,6 +319,11 @@ impl Rail {
     /// 状態ハッシュは、これが真のとき鉄道の欄を書かない。
     pub fn is_unused(&self) -> bool {
         self.nodes.is_unused() && self.tracks.is_unused() && self.stations.is_unused()
+    }
+
+    /// 状態ハッシュに鉄道の欄を書かなくてよいか。線路も駅も一度も置いておらず、運賃が初期値のときである。
+    pub fn is_blank(&self) -> bool {
+        self.is_unused() && self.fare == INITIAL_FARE
     }
 
     pub fn node(&self, id: RailNodeId) -> Option<&RailNode> {
@@ -705,6 +755,12 @@ impl StateHash for Rail {
         if !self.crossings.is_empty() {
             h.write(&self.crossings);
         }
+        h.write(&self.riders);
+        rider::write_queues(&self.queues, h);
+        h.write(&self.aboard);
+        h.write(&self.left_behind);
+        h.write(&self.last_stop);
+        h.write(&self.fare);
     }
 }
 
@@ -716,3 +772,6 @@ mod train_tests;
 
 #[cfg(test)]
 mod crossing_tests;
+
+#[cfg(test)]
+pub(crate) mod rider_tests;

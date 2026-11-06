@@ -187,6 +187,9 @@ enum CommandJson {
         line: NodeJson,
         trains: u8,
     },
+    SetFare {
+        fare: u16,
+    },
 }
 
 /// `SetSignal` と `SetCrosswalk` をマス `at` で書いたものを、そのマスのノードの ID で書いた形に直す。
@@ -314,6 +317,7 @@ impl From<Command> for CommandJson {
                 line: line_json(line),
                 trains,
             },
+            Command::SetFare { fare } => CommandJson::SetFare { fare },
         }
     }
 }
@@ -403,6 +407,7 @@ impl CommandJson {
                 line: line_id(line),
                 trains,
             },
+            CommandJson::SetFare { fare } => Command::SetFare { fare },
         })
     }
 }
@@ -463,6 +468,7 @@ fn explain_out_of_range(value: &Value) -> Option<String> {
             0,
             chizu_core::rail::line::MAX_LINE_TRAINS.into(),
         ),
+        "SetFare" => int_field("fare", "運賃", 0, chizu_core::rail::MAX_FARE.into()),
         _ => None,
     }
 }
@@ -500,6 +506,7 @@ mod tests {
             json!({"type":"InsertLineStation","line":{"index":0,"generation":0},"after_index":0,"station":{"index":2,"generation":1}}),
             json!({"type":"RemoveLine","line":{"index":0,"generation":0}}),
             json!({"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":16}),
+            json!({"type":"SetFare","fare":20}),
         ];
         for c in &cases {
             assert!(parse(c).is_ok(), "{c}");
@@ -656,6 +663,7 @@ mod tests {
                 },
                 trains: 16,
             },
+            Command::SetFare { fare: 7 },
         ];
         // 種類ごとに 1 つはあることを、ワイルドカードなしの match で確かめる。
         #[deny(clippy::wildcard_enum_match_arm)]
@@ -678,9 +686,10 @@ mod tests {
                 Command::RemoveLine { .. } => 14,
                 Command::SetLineTrains { .. } => 15,
                 Command::InsertLineStation { .. } => 16,
+                Command::SetFare { .. } => 17,
             }
         }
-        let mut seen = [false; 17];
+        let mut seen = [false; 18];
         for c in commands {
             seen[kind(&c)] = true;
             let json = to_json(c);
@@ -728,6 +737,10 @@ mod tests {
                 json!({"type":"PlaceBuilding","kind":"ParkingLot","at":[0,0],"rotation":-1}),
                 "建物の向き -1 は 0 から 3 の外にある",
             ),
+            (
+                json!({"type":"SetFare","fare":21}),
+                "運賃 21 は 0 から 20 の外にある",
+            ),
         ];
         for (c, expected) in &cases {
             assert_eq!(parse(c).unwrap_err(), *expected, "{c}");
@@ -759,6 +772,8 @@ mod tests {
             json!({"type":"CreateLine","from":{"index":0,"generation":0}}),
             json!({"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":-1}),
             json!({"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":256}),
+            json!({"type":"SetFare","fare":-1}),
+            json!({"type":"SetFare","fare":21}),
         ];
         for c in &cases {
             assert!(parse(c).is_err(), "{c}");

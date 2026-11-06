@@ -32,6 +32,7 @@ use crate::clock::TICKS_PER_DAY;
 use crate::command::ZoneKind;
 use crate::id::{BuildingId, TripId};
 use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId, TILE_MM};
+use crate::rail::RidePlan;
 use crate::routing::AstarRouter;
 use crate::service::Facility;
 use crate::state_hash::{StateHash, StateHasher};
@@ -56,13 +57,15 @@ pub(super) enum Then {
     },
     /// 車を駐車場 `lot` に停めて、`to` まで歩く。`lot` が `None` のときは [`Then::Drive`] と同じ。
     Walk { lot: Option<LotId>, to: SidewalkPos },
+    /// 駅の出入口に着いたら、移動を休ませて駅の待ち行列に入る（[`crate::rail::rider`]）。
+    Ride(RidePlan),
 }
 
 impl Then {
     /// 押さえている駐車場。
     pub(super) fn lot(&self) -> Option<LotId> {
         match self {
-            Then::Arrive => None,
+            Then::Arrive | Then::Ride(_) => None,
             Then::Drive { lot, .. } | Then::Walk { lot, .. } => *lot,
         }
     }
@@ -76,7 +79,7 @@ impl Then {
             }
         };
         match self {
-            Then::Arrive => {}
+            Then::Arrive | Then::Ride(_) => {}
             Then::Drive { lot, .. } | Then::Walk { lot, .. } => gone(lot),
         }
     }
@@ -114,6 +117,10 @@ impl StateHash for Then {
             Then::Walk { lot: None, to } => {
                 h.write(&4_u8);
                 h.write(to);
+            }
+            Then::Ride(plan) => {
+                h.write(&5_u8);
+                h.write(plan);
             }
         }
     }
@@ -1174,14 +1181,13 @@ impl Trips {
             .then_some((lot, at))
         })?;
         let id = self.spawn_many(net, router, &[(door, origin)], now)[0]?;
-        self.rows[id.slot()]
-            .as_mut()
-            .expect("作った主体がない")
-            .then = Then::Drive {
+        let t = self.rows[id.slot()].as_mut().expect("作った主体がない");
+        t.then = Then::Drive {
             park_at,
             lot: Some(lot),
             to: dest,
         };
+        t.via = super::Via::Car;
         self.parking.reserve(lot);
         let tally = &mut self.parking_tally;
         tally.drives = tally.drives.saturating_add(1);
@@ -1251,11 +1257,12 @@ impl Trips {
 
     /// 主体を消す。押さえていた駐車場の空きは返す。
     pub(super) fn remove(&mut self, id: TripId) {
-        if self.slots.release(id.index, id.generation) {
-            let t = self.rows[id.slot()].take().expect("消す主体がない");
-            if let Some(lot) = t.then.lot() {
-                self.parking.release(lot);
-            }
+        // 駅で休ませている移動は、行がない。
+        if self.slots.release(id.index, id.generation)
+            && let Some(t) = self.rows[id.slot()].take()
+            && let Some(lot) = t.then.lot()
+        {
+            self.parking.release(lot);
         }
     }
 
@@ -1285,7 +1292,7 @@ impl Trips {
             }
             .and_then(|(l, o)| SidewalkPos::on_link(net, l, o))
             .unwrap_or_else(|| t.position());
-            let departed = t.departed;
+            let (departed, via) = (t.departed, t.via);
             if let Some(lot) = lot {
                 self.parking.release(lot);
             }
@@ -1296,7 +1303,9 @@ impl Trips {
                 ends.and_then(|e| plan(router, net, LaneMode::Sidewalk, &[e], false).remove(0));
             match found {
                 Some((route, e, jay)) => {
-                    self.rows[i] = Some(make_trip(net, route, e, to, departed, jay));
+                    let mut t = make_trip(net, route, e, to, departed, jay);
+                    t.via = via;
+                    self.rows[i] = Some(t);
                     self.rescues.walked_instead = self.rescues.walked_instead.saturating_add(1);
                 }
                 None => ended.push(i),
@@ -1319,6 +1328,17 @@ impl Trips {
             let t = self.rows[i].as_mut().expect("着いた主体がない");
             match t.then {
                 Then::Arrive => ended.push(i),
+                Then::Ride(plan) => {
+                    // 駅の出入口に着いた。移動を休ませ、駅の待ち行列に入れてもらう。ID はそのまま持ち続ける。
+                    let (index, generation) = self.slots.current(i).expect("着いた主体がない");
+                    let t = self.rows[i].take().expect("着いた主体がない");
+                    self.boarding.push(super::Boarding {
+                        trip: TripId { index, generation },
+                        plan,
+                        started: t.departed,
+                        door: t.dest,
+                    });
+                }
                 Then::Drive { park_at, lot, to } => {
                     legs[0].push((i, t.dest, park_at, Then::Walk { lot, to }));
                 }
@@ -1370,12 +1390,13 @@ impl Trips {
                     continue;
                 };
                 let old = self.rows[i].as_ref().expect("着いた主体がない");
-                let departed = old.departed;
+                let (departed, via) = (old.departed, old.via);
                 // 歩道から車線へ、車線から歩道へ移るときも、それまで描いていたずれから少しずつ移す。
                 // 車は道路のどちらの側の車線からも出るので、移る幅は道路の幅ほどになりうる。
                 let shown = old.shift_on_leg(net, old.leg as usize);
                 let mut t: Trip = make_trip(net, route, e, to, departed, jay);
                 t.then = then;
+                t.via = via;
                 self.rows[i] = Some(t);
                 // 出発と同じく、空いた車線に置き、前の車と重なるなら下げ、空きがなければ待たせる。
                 if let Some(ix) = ix.as_mut() {

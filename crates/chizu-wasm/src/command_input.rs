@@ -170,6 +170,12 @@ pub fn parse(
                 .and_then(|v| u16::try_from(v).map_err(|_| InputError::BadInteger("fee")))?;
             Ok(Command::SetParkingFee { fee })
         }
+        "SetFare" => {
+            // 上限の検査は Command::validate に任せる
+            let fare = integer(&field, "fare")
+                .and_then(|v| u16::try_from(v).map_err(|_| InputError::BadInteger("fare")))?;
+            Ok(Command::SetFare { fare })
+        }
         "Bulldoze" => Ok(Command::Bulldoze {
             area: TileRect {
                 min: tile(&field, "minX", "minY")?,
@@ -751,6 +757,15 @@ mod tests {
             Field::Missing,
         ] {
             assert_eq!(fee(bad), Err(InputError::BadInteger("fee")));
+        }
+    }
+
+    #[test]
+    fn accepts_set_fare() {
+        let fare = |fare: Field| object(&[("kind", Field::Text("SetFare".into())), ("fare", fare)]);
+        assert_eq!(fare(Field::Number(12.0)), Ok(Command::SetFare { fare: 12 }));
+        for bad in [Field::Number(-1.0), Field::Number(0.5), Field::Missing] {
+            assert_eq!(fare(bad), Err(InputError::BadInteger("fare")));
         }
     }
 

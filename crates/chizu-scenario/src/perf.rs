@@ -11,9 +11,11 @@ use chizu_core::{
     ScheduleState, TICKS_PER_DAY, Tick, Trips, bucket_at, rng,
 };
 
+use chizu_core::rail::choice::{RailPlanner, RideChoice};
+
 use crate::{
-    RAIL_BENCH_LINES, city_grid_100k, commute_requests, rail_trains_running, synthetic_population,
-    walk_ends, zoned_grid_city,
+    RAIL_BENCH_LINES, city_grid_100k, commute_requests, commute_tiles, rail_choice_inputs,
+    rail_trains_running, synthetic_population, walk_ends, zoned_grid_city,
 };
 
 /// 測定に使う種。
@@ -152,6 +154,70 @@ pub fn rail_trains(ticks: u64, now: &dyn Fn() -> u64) -> TickStats {
     }
 }
 
+/// 手段の選び方の時間。
+#[derive(Clone, Copy, Debug)]
+pub struct ChoiceStats {
+    pub requests: u32,
+    /// 1 件の平均（ns）。
+    pub mean_ns: u64,
+    /// 朝の山の 1 tick ぶん（1,000 件）の、いちばん長かった時間（ns）。
+    pub peak_tick_worst_ns: u64,
+    /// 鉄道の候補があった件数。
+    pub offered: usize,
+}
+
+impl ChoiceStats {
+    pub fn to_json(&self) -> String {
+        format!(
+            r#"{{"requests":{},"mean_ns":{},"peak_tick_worst_ns":{},"offered":{}}}"#,
+            self.requests, self.mean_ns, self.peak_tick_worst_ns, self.offered
+        )
+    }
+}
+
+/// 人口 10 万の規模の格子に、駅 200 と路線 64 本を置き、`requests` 件の移動を鉄道の候補の見積もりに通す。
+/// 設計 3.10 の 7 の `rail_choice_100k` である。1 件は、駅の空間索引を 2 回引き、9 つの駅の組の表を引く。
+pub fn rail_choice(requests: u32, now: &dyn Fn() -> u64) -> ChoiceStats {
+    let net = city_grid_100k();
+    let inputs = rail_choice_inputs(SEED);
+    let planner = RailPlanner::from_parts(inputs.doors, &inputs.lines);
+    let choice = RideChoice::from_parts(&planner, inputs.live, Default::default(), 5);
+    let ends = commute_tiles(SEED, &net, requests);
+    let mut offered = 0;
+    let mut worst = 0;
+    let start = now();
+    for chunk in ends.chunks(1_000) {
+        let t = now();
+        for (a, b) in chunk {
+            offered += usize::from(black_box(choice.offer(*a, *b)).is_some());
+        }
+        worst = u64::max(worst, now() - t);
+    }
+    let total = now() - start;
+    ChoiceStats {
+        requests,
+        mean_ns: total / u64::from(requests.max(1)),
+        peak_tick_worst_ns: worst,
+        offered,
+    }
+}
+
+/// 駅 200 と路線 64 本で、駅の空間索引と駅の組の表を `runs` 回作り直す時間（ns）の平均と、組の数。
+/// 設計 3.10 の 7 の `rail_table_rebuild`（乗り換えを入れる前）である。
+pub fn rail_table_rebuild(runs: u32, now: &dyn Fn() -> u64) -> (u64, usize) {
+    let inputs = rail_choice_inputs(SEED);
+    let mut total = 0;
+    let mut pairs = 0;
+    for _ in 0..runs {
+        let doors = inputs.doors.clone();
+        let t = now();
+        let planner = RailPlanner::from_parts(doors, &inputs.lines);
+        total += now() - t;
+        pairs = black_box(planner).pairs();
+    }
+    (total / u64::from(runs.max(1)), pairs)
+}
+
 /// 経路の一括探索の時間。
 #[derive(Clone, Copy, Debug)]
 pub struct BatchStats {
@@ -203,6 +269,8 @@ pub fn warm_up(now: &dyn Fn() -> u64) {
     black_box(movers(500, 20, now));
     black_box(route_batch(1_000, 1, now));
     black_box(rail_trains(20, now));
+    black_box(rail_choice(2_000, now));
+    black_box(rail_table_rebuild(1, now));
 }
 
 /// 測る項目をすべて回し、JSON の 1 つのオブジェクトにする。
@@ -223,14 +291,17 @@ pub fn run_all(now: &dyn Fn() -> u64, memory: &dyn Fn() -> Option<u64>) -> Strin
     let batch_1k = route_batch(1_000, 20, now);
     let batch_100k = route_batch(100_000, 3, now);
     let trains_512 = rail_trains(1_000, now);
+    let choice_100k = rail_choice(250_000, now);
+    let (rebuild_ns, pairs) = rail_table_rebuild(10, now);
     format!(
-        r#"{{"day_100k":{},"day_1m":{},"movers_20k":{},"route_batch_1k":{},"route_batch_100k":{},"rail_trains":{},"memory_bytes":{{"start":{},"after_100k":{},"after_1m":{}}}}}"#,
+        r#"{{"day_100k":{},"day_1m":{},"movers_20k":{},"route_batch_1k":{},"route_batch_100k":{},"rail_trains":{},"rail_choice_100k":{},"rail_table_rebuild":{{"mean_ns":{rebuild_ns},"pairs":{pairs}}},"memory_bytes":{{"start":{},"after_100k":{},"after_1m":{}}}}}"#,
         day_100k.to_json(),
         day_1m.to_json(),
         movers_20k.to_json(),
         batch_1k.to_json(),
         batch_100k.to_json(),
         trains_512.to_json(),
+        choice_100k.to_json(),
         json_mem(base),
         json_mem(mem_100k),
         json_mem(mem_1m),

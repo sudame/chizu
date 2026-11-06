@@ -106,6 +106,9 @@ pub struct RailLine {
     pub stopped: bool,
     /// 出る要素の番号ごとの、最後に列車が出た tick。進路を選び直したら消す。
     pub(crate) departed: BTreeMap<u32, u64>,
+    /// 止まる要素ごとの、そこに着いてから次に止まる要素に着くまでの時間（tick）。進路から見積もった値に、
+    /// 列車が走って測った値を 1/4 の重みで混ぜる。進路を選び直したら見積もりに戻す。乗る時間の見積もりに使う。
+    pub(crate) seg_ticks: Vec<u32>,
     /// 待てる所の区分けと本数の上限。すべての路線の進路から作り直せるので、書き出さず、状態ハッシュにも入れない。
     #[serde(skip)]
     pub(crate) plan: LinePlan,
@@ -154,21 +157,35 @@ impl RailLine {
     /// 1 周の見込みの時間（tick）。進路を最高の速さで走る時間に、止まる駅ごとの止まる時間と減速と加速の遅れ、
     /// 終点ごとの折り返しの時間を足す。
     pub fn round_trip_ticks(&self) -> u64 {
-        self.path
-            .iter()
-            .map(|s| {
-                let run =
-                    u64::try_from(round::div_ceil(s.len, TRAIN_MAX_SPEED)).expect("線路の長さが負");
-                let stop = match s.kind {
-                    StepKind::Pass => 0,
-                    StepKind::Stop => u64::from(DWELL_TICKS) + STOP_LOSS_TICKS,
-                    StepKind::Terminal => {
-                        u64::from(DWELL_TICKS) + STOP_LOSS_TICKS + u64::from(TURNBACK_TICKS)
-                    }
-                };
-                run + stop
-            })
+        (0..self.len())
+            .map(|i| self.run_ticks(i) + self.stop_ticks(i))
             .sum()
+    }
+
+    /// 要素 `i` を最高の速さで走る時間の見込み（tick）。
+    pub(crate) fn run_ticks(&self, i: u32) -> u64 {
+        u64::try_from(round::div_ceil(self.step(i).len, TRAIN_MAX_SPEED)).expect("線路の長さが負")
+    }
+
+    /// 要素 `i` で止まる時間と、減速と加速の遅れと、折り返しの時間の見込み（tick）。止まらない要素は 0 である。
+    pub(crate) fn stop_ticks(&self, i: u32) -> u64 {
+        match self.step(i).kind {
+            StepKind::Pass => 0,
+            StepKind::Stop => u64::from(DWELL_TICKS) + STOP_LOSS_TICKS,
+            StepKind::Terminal => {
+                u64::from(DWELL_TICKS) + STOP_LOSS_TICKS + u64::from(TURNBACK_TICKS)
+            }
+        }
+    }
+
+    /// 測った値を混ぜた 1 周の時間（tick）。
+    pub fn measured_round_trip_ticks(&self) -> u64 {
+        self.seg_ticks.iter().map(|t| u64::from(*t)).sum()
+    }
+
+    /// 止まる要素ごとの、次に止まる要素に着くまでの時間（tick）。
+    pub fn segment_ticks(&self) -> &[u32] {
+        &self.seg_ticks
     }
 
     /// 運転間隔の見込み（tick）。1 周の見込みの時間を走らせる本数で割る。列車がなければ `None`。
@@ -839,9 +856,10 @@ impl Rail {
             .map(|(id, _)| id)
             .collect();
         for id in gone {
-            self.trains.remove(id);
+            self.drop_train(id);
         }
         self.settle_trains();
+        self.settle_riders();
     }
 
     /// 駅 `from` から駅 `to` への路線を作る。ほかの路線の上限を 0 にする（走れなくする）なら断る。
@@ -864,15 +882,18 @@ impl Rail {
         if self.starved_by(self.lines.next_id(), &path).is_some() {
             return Err(DenyReason::LineStarvesOther);
         }
-        let id = self.lines.insert(RailLine {
+        let mut line = RailLine {
             stations,
             looped: false,
             trains: 0,
             path,
             stopped: false,
             departed: BTreeMap::new(),
+            seg_ticks: Vec::new(),
             plan: LinePlan::default(),
-        });
+        };
+        line.seg_ticks = super::rider::estimate_segments(&line);
+        let id = self.lines.insert(line);
         self.mark_waits();
         Ok(id)
     }
@@ -949,8 +970,10 @@ impl Rail {
 
     /// 路線をなくす。走っている列車も消す。
     pub(crate) fn remove_line(&mut self, id: LineId) -> Result<(), DenyReason> {
-        self.lines.remove(id).ok_or(DenyReason::NoSuchLine)?;
+        self.lines.get(id).ok_or(DenyReason::NoSuchLine)?;
+        // 乗っている人が次に止まる駅で降りられるよう、路線を消す前に列車を消す。
         self.remove_trains_where(|t| t.line == id);
+        self.lines.remove(id);
         self.mark_waits();
         Ok(())
     }
@@ -976,9 +999,11 @@ impl Rail {
         if same {
             return;
         }
+        let old = line.clone();
         line.path = path;
         line.departed.clear();
-        self.relocate_trains(id);
+        line.seg_ticks = super::rider::estimate_segments(line);
+        self.relocate_trains(id, &old);
     }
 
     /// 線路を引くか取り壊したあとに、路線の駅と進路を選び直す。消えた駅は路線から外し、駅が 2 つ未満に
@@ -1001,7 +1026,7 @@ impl Rail {
             .map(|(id, _)| id)
             .collect();
         for id in gone {
-            self.trains.remove(id);
+            self.drop_train(id);
         }
         let ids: Vec<LineId> = self.lines.iter().map(|(id, _)| id).collect();
         for id in ids {
@@ -1015,8 +1040,8 @@ impl Rail {
             stations.dedup();
             let looped = line.looped && stations.len() >= 2;
             if stations.len() < 2 {
-                self.lines.remove(id);
                 self.remove_trains_where(|t| t.line == id);
+                self.lines.remove(id);
                 continue;
             }
             let plan = self.plan(&stations, looped);
@@ -1055,5 +1080,6 @@ impl StateHash for RailLine {
         h.write(&self.path);
         h.write(&self.stopped);
         h.write(&self.departed);
+        h.write(&self.seg_ticks);
     }
 }

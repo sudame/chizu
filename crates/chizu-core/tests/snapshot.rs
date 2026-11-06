@@ -5,10 +5,24 @@
 
 use std::path::PathBuf;
 
-use chizu_core::{CommandLog, HouseholdCar, SNAPSHOT_VERSION, SnapshotError, World, replay};
+use chizu_core::{CommandLog, HouseholdCar, Money, SNAPSHOT_VERSION, SnapshotError, World, replay};
 
-/// ゴールデンの記録はすべて種 42 で作ってある。
+/// ゴールデンの記録のほとんどは種 42 で作ってある。
 const SEED: u64 = 42;
+
+/// 記録 `name` を作ったときと同じ種と所持金で始めた街（`tests/golden.rs` の `scenarios` と合わせる）。
+/// 記録と違う街で再生すると、駅や区画を置けずに、確かめたい形（乗る人など）が出ない。
+fn start(name: &str) -> World {
+    let rail_riders_seed = (0..)
+        .find(|s| chizu_core::world::highway_line(*s).start.y < 0)
+        .unwrap();
+    match name {
+        "rail_lines" | "rail_crossing" => World::new(0),
+        "rail_riders" => World::new_with_money(rail_riders_seed, Money(10_000_000)),
+        "land_slots" => World::new_with_money(SEED, Money(10_000_000)),
+        _ => World::new(SEED),
+    }
+}
 
 /// 記録の最後のコマンドのあとに進める tick。
 const AFTER_LAST: u64 = 1_500;
@@ -53,9 +67,10 @@ fn round_trip(world: &World) -> World {
 
 #[test]
 fn snapshot_round_trip_keeps_the_hash() {
+    let mut riders = 0;
     for (name, log) in golden_logs() {
         let (points, _) = points(&log);
-        let mut world = World::new(SEED);
+        let mut world = start(&name);
         replay(&mut world, &log, 0);
         for p in points {
             let ticks = p - world.tick().0;
@@ -72,17 +87,22 @@ fn snapshot_round_trip_keeps_the_hash() {
                 bytes,
                 "{name} の tick {p}：書き出し直すと違う"
             );
+            riders += world.rail().rider_count();
         }
     }
+    assert!(
+        riders > 0,
+        "駅で待つ人か列車に乗る人のいる時点で書き出していない"
+    );
 }
 
 #[test]
 fn continuing_from_a_snapshot_matches_the_replay() {
     for (name, log) in golden_logs() {
         let (points, end) = points(&log);
-        let mut through = World::new(SEED);
+        let mut through = start(&name);
         replay(&mut through, &log, end);
-        let mut world = World::new(SEED);
+        let mut world = start(&name);
         replay(&mut world, &log, 0);
         for p in points {
             let ticks = p - world.tick().0;
