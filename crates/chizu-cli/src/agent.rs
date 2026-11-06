@@ -299,6 +299,13 @@ observe の rail（線路と駅）:
   state（Running 走っているか先の閉塞を待っている、Dwell 駅に止まっている、Turnback 終点で折り返している、
   Ready 駅を出るのを待っている）、speed 速さ（mm/tick、25000 が時速 90km）、nextStation 次に止まる駅の id。
   trainCount 列車の数、deadlock 列車が互いを待って止まる輪を見つけ、輪の中の列車を 1 本消した回数（ふつうは 0）。
+  crossings 踏切。count 数、list 踏切ごとの at マス、closed いま閉じているか、closedTicks 閉じてからの tick
+  （開いていれば null）。踏切は、走っている列車が押さえた範囲の中で踏切を抜けきれ、16 tick 以内に着く見込みのときと、
+  列車の体がかかっているあいだだけ閉じる。駅に止まっている列車では閉じない。車は閉じた踏切の手前で止まり、開いていても
+  踏切の先に抜けきる空きがなければ入らない。歩く人も閉じた踏切の手前で待つ。中に車か人がいる踏切の手前では、
+  止まりきれる列車が止まる。closedTicks（集計）閉じていた延べ tick（踏切ごと）、closures 閉じた回数、
+  longestClosed 1 回に続けて閉じていたいちばん長い tick、carWaitTicks 閉じた踏切の手前で止まった車の延べ tick、
+  overrun 列車の体と車か人が同じ踏切にいた tick の数（ふつうは 0）。
 
 observe の removedCrosswalks:
   横断歩道を外した腕のある交差点ごとに、at マス、node ノードの ID、arms 外した腕の向き（SetCrosswalk の arm と同じ名前）。
@@ -307,7 +314,7 @@ observe の removedCrosswalks:
   observe と同じく何も書かず、フィードバックのディレクトリにも打てる。角 (x0,y0)〜(x1,y1) は両端を含み、順番は問わない。
   1 文字が 1 マスで、先頭に凡例、上に x、行頭に y の目盛りが付く。座標は act のコマンドと同じである。
   --scale N を付けると、N×N マスを 1 文字にまとめる（既定は 1）。まとめた文字は、
-  公共施設、駅（E）、信号のある交差点（S s）、信号のない交差点（Z Y）、道路、線路（T）、駐車場（p）、建物、区画、水辺、買っていない土地、空きマスの順で、
+  公共施設、駅（E）、踏切（F）、信号のある交差点（S s）、信号のない交差点（Z Y）、道路、線路（T）、駐車場（p）、建物、区画、水辺、買っていない土地、空きマスの順で、
   最初に当てはまるものにする。ただし --layer traffic では、道路の混み具合を交差点の文字より先に出す。
   建物は、電気か水が届いていないものが 1 つでもあれば * ^ % にする（まとめた文字では、セルの中の建物のうち 1 つでも届いていなければ印が付く）。
   どの網の電気や水が足りないかは observe の utilities の shortAt を見て、その at を map で眺める。
@@ -405,8 +412,15 @@ observe の removedCrosswalks:
       1 つのノードに集まる線路は 3 本（分岐 1 つ）までで、超えると Denied（RailTooManyBranches）。十字に交わる線路も
       これになる。分岐は、根元の線路から残りの 2 本のどちらへも 45 度までの曲がりで抜けられる形だけを置ける。
       既存の線路に重ねると Denied（Overlap）、斜めの線路や道路とマスの角で交わると Denied（CornerCrossing）。
-      まだ踏切がないので、道路のマスは通れない（Denied（Occupied））。施設と駅のマスも通れない。ただし駅の線路の
-      両端のマスでは、線路を始めても終えてもよい。建物のマスを通ると、その建物は取り壊される。
+      道路の区間の途中のマスを横切る所は踏切になる（act の結果の crossings にマスが出る）。踏切にできないときは断る。
+      道路に沿う（平行な）線路は Denied（Occupied）、道路のノード（交差点、曲がり角、端、つなぎ目）のマスか、線路の端を
+      道路のマスに置くと Denied（NodeOnCrossing）、高速道路は Denied（HighwayCrossing）、まわりの 8 マスにほかの
+      踏切があると Denied（CrossingTooClose）、道路に沿って 2 マス以内に交差点か曲がり角があると
+      Denied（CrossingNearJunction）。道路を引いて線路を横切るときも同じ決まりで、線路の端、分岐、曲がりのノードの
+      マスと、既にある踏切のマスを通る道路は Denied（NodeOnCrossing）、既にある踏切から道路に沿って 2 マス以内に
+      交差点か曲がり角を作る道路も Denied（CrossingNearJunction）。踏切の両隣（線路に沿って）には線路のノードが置かれる。
+      施設と駅のマスは通れない。ただし駅の線路の両端のマスでは、線路を始めても終えてもよい。建物のマスを通ると、
+      その建物は取り壊される。
       ノードのあいだが 50 マス（斜めは 35 マス）を超える線路には、中核が等しい間隔で区切りのノードを置く。
   {"type":"CreateLine","from":{"index":n,"generation":g},"to":{"index":n,"generation":g}}
       駅 from から駅 to への路線を作る。駅は observe の rail.stations の id で指す。列車の本数は 0 で始まる。
@@ -814,12 +828,28 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
             let before_bulldoze = matches!(command, Command::Bulldoze { .. })
                 .then(|| BulldozeSnapshot::take(world));
             let before_lines = line_states(world);
+            let before_crossings: Option<std::collections::BTreeSet<TilePos>> = matches!(
+                command,
+                Command::BuildRoad { .. } | Command::BuildRail { .. }
+            )
+            .then(|| world.rail().crossings().collect());
             // 結果の種類が増えたら、ここで JSON の名前を決めさせる。
             #[deny(clippy::wildcard_enum_match_arm)]
             let outcome = match world.apply_recorded(seq, &command) {
                 ApplyOutcome::Applied => {
                     if let Some(before) = &before_bulldoze {
                         out["bulldozed"] = before.removed(world);
+                    }
+                    if let Some(before) = &before_crossings {
+                        let made: Vec<Value> = world
+                            .rail()
+                            .crossings()
+                            .filter(|t| !before.contains(t))
+                            .map(|t| json!([t.x, t.y]))
+                            .collect();
+                        if !made.is_empty() {
+                            out["crossings"] = json!(made);
+                        }
                     }
                     "Applied"
                 }
@@ -2056,6 +2086,35 @@ fn rail(world: &World) -> Value {
         "trains": trains(world),
         "trainCount": rail.train_count(),
         "deadlock": rail.tally().deadlock,
+        "crossings": crossings(world),
+    })
+}
+
+/// 踏切。
+fn crossings(world: &World) -> Value {
+    let rail = world.rail();
+    let closed = rail.closed_crossings();
+    let now = world.tick().0;
+    let list: Vec<Value> = rail
+        .crossings()
+        .map(|t| {
+            let shut = closed.contains(&t);
+            let ticks = rail
+                .closed_since(t)
+                .filter(|_| shut)
+                .map(|since| now.saturating_sub(since));
+            json!({"at": [t.x, t.y], "closed": shut, "closedTicks": ticks})
+        })
+        .collect();
+    let tally = rail.crossing_tally();
+    json!({
+        "count": rail.crossing_count(),
+        "list": list,
+        "closedTicks": tally.closed_ticks,
+        "closures": tally.closures,
+        "longestClosed": tally.longest_closed,
+        "carWaitTicks": tally.wait,
+        "overrun": tally.overrun,
     })
 }
 
@@ -2325,6 +2384,9 @@ const WATCHED: &[&str] = &[
     "/rail/tiles",
     "/rail/trainCount",
     "/rail/deadlock",
+    "/rail/crossings/count",
+    "/rail/crossings/carWaitTicks",
+    "/rail/crossings/overrun",
 ];
 
 /// 前の observe と比べる数を、`/money` を `money`、`/demand/Office` を `demand.Office` と読み替えた名前で集める。

@@ -16,8 +16,9 @@
 //! - どの線路にもつながっていないノードは残さない。
 //! - 駅の線路（駅の中の真ん中の列）は、駅を置くときに作り、駅を取り壊すときに消す。
 //!
-//! 道路のマスと線路のマスは重ならない（踏切はまだない）。道路と線路を交わらせる置き方は、呼ぶ側の
-//! [`World`](crate::world::World) が断る。
+//! 道路のマスと線路のマスは、踏切（[`crossing`]）のマスでだけ重なる。踏切にできるかは、呼ぶ側の
+//! [`World`](crate::world::World) が確かめる。踏切のマスの両隣（線路に沿って）にはノードを置き、踏切の線路を
+//! 短い区間にする。列車は待てる所でだけ止まって先を待つので、踏切の上で止まることがない。
 //!
 //! 路線と列車（設計 3.10 の 3）は [`line`] と [`train`] にある。線路を引くか取り壊すと、路線ごとに進路を選び直す。
 
@@ -92,9 +93,11 @@ pub struct TrainId {
 
 impl_arena_id!(RailNodeId, TrackId, StationId, LineId, TrainId);
 
+pub mod crossing;
 pub mod line;
 pub mod train;
 
+pub use crossing::{CROSSING_WARN_TICKS, CrossingTally};
 pub use line::{LineCapacity, RailLine, Step, StepKind};
 pub use train::{Block, RailTally, Train, TrainState};
 
@@ -183,6 +186,11 @@ pub struct Rail {
     tiles: BTreeMap<TilePos, SmallVec<[TrackId; 2]>>,
     /// 読み取り用の数。状態ハッシュには入れない。
     tally: RailTally,
+    /// 踏切のマスと、閉じていれば閉じた tick。踏切は道路と線路の網から作り直せ、閉じているかは列車の位置から
+    /// 決まるので、どちらも状態ハッシュには入れない。閉じた tick は、閉じていた長さを数えるためだけにある。
+    crossings: BTreeMap<TilePos, Option<u64>>,
+    /// 踏切の読み取り用の数。状態ハッシュには入れない。
+    crossing_tally: CrossingTally,
 }
 
 impl Default for Rail {
@@ -257,6 +265,8 @@ impl Rail {
             trains: Arena::new(),
             tiles: BTreeMap::new(),
             tally: RailTally::default(),
+            crossings: BTreeMap::new(),
+            crossing_tally: CrossingTally::default(),
         }
     }
 
@@ -379,9 +389,10 @@ impl Rail {
         arms
     }
 
-    /// 直線のうち、ノードを置く歩数。両端と、既存の線路に当たるマスである。
-    fn cuts(&self, line: &Line) -> BTreeSet<u64> {
+    /// 直線のうち、ノードを置く歩数。両端と、既存の線路に当たるマスと、`extra`（踏切の両隣）である。
+    fn cuts(&self, line: &Line, extra: &BTreeSet<u64>) -> BTreeSet<u64> {
         let mut cuts = BTreeSet::from([0, line.len]);
+        cuts.extend(extra.iter().copied().filter(|k| *k <= line.len));
         for k in 1..line.len {
             if self.is_rail_tile(line.tile(k)) {
                 cuts.insert(k);
@@ -391,7 +402,8 @@ impl Rail {
     }
 
     /// 線路を引けるか確かめる。土地、道路、駅、施設とのかかわりは呼ぶ側で確かめる。
-    pub(crate) fn check_rail(&self, line: &Line) -> Result<(), DenyReason> {
+    /// `extra` は、ほかにノードを置く歩数（踏切の両隣）である。
+    pub(crate) fn check_rail(&self, line: &Line, extra: &BTreeSet<u64>) -> Result<(), DenyReason> {
         for k in 0..line.len {
             let (p, q) = (line.tile(k), line.tile(k + 1));
             if self.shares_step(p, q) {
@@ -405,7 +417,7 @@ impl Rail {
         }
         let forward = heading_of(line.step);
         let back = heading_of((-line.step.0, -line.step.1));
-        for k in self.cuts(line) {
+        for k in self.cuts(line, extra) {
             let mut arms = self.arms_at(line.tile(k));
             if k > 0 {
                 arms.push(back);
@@ -424,11 +436,11 @@ impl Rail {
     }
 
     /// 線路を引く。途中で既存の線路に当たれば、そこで分けてつなぐ。長い区間には区切りのノードを置く。
-    /// 引けないときは網を変えない。
-    pub fn build_rail(&mut self, line: &Line) -> Result<(), DenyReason> {
-        self.check_rail(line)?;
+    /// `extra` の歩数（踏切の両隣）にもノードを置く。引けないときは網を変えない。
+    pub fn build_rail(&mut self, line: &Line, extra: &BTreeSet<u64>) -> Result<(), DenyReason> {
+        self.check_rail(line, extra)?;
         let nodes: Vec<(u64, RailNodeId)> = self
-            .cuts(line)
+            .cuts(line, extra)
             .into_iter()
             .map(|k| {
                 let t = line.tile(k);
@@ -697,3 +709,6 @@ mod tests;
 
 #[cfg(test)]
 mod train_tests;
+
+#[cfg(test)]
+mod crossing_tests;

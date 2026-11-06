@@ -25,6 +25,7 @@ pub const LEGEND: &str = "\
 凡例（重なったときは上のものを出す）
   P W L G  公共施設（P 発電所、W 浄水場、L 平面の共同の駐車場、G 駐車場ビル）
   E        駅（駅の中の線路のマスも E にする）
+  F        踏切（道路と線路が交わるマス。交差点と道路より先に出す）
   S s      信号のある交差点（s は横断歩道を外した腕がある。--layer traffic では混み具合の文字を先に出す）
   Z Y      信号のない交差点。Z は高速道路でないどの腕にも横断歩道があり、Y は横断歩道を外した腕がある
            （--layer traffic では混み具合の文字を先に出す）
@@ -104,6 +105,8 @@ struct Cell {
     station: u32,
     /// 線路が通るマスの数（駅の中を除く）。
     rail: u32,
+    /// 踏切のマスの数。
+    crossing: u32,
     /// 共同の駐車場の埋まり具合の段階（0〜3）の最大。駐車場の層でだけ入れる。
     lot_fill: Option<u8>,
     /// 車を持てない世帯のいる住宅のマスの数。駐車場の層でだけ入れる。
@@ -170,7 +173,7 @@ fn facility_letter(k: ServiceKind) -> char {
 }
 
 impl Cell {
-    /// 載せる文字。公共施設、駅、信号、横断歩道のある交差点（この 2 つは交通の層では道路のあと）、道路、線路、私道、駐車場、建物、区画、水辺、買っていない土地、空きマスの順に選び、
+    /// 載せる文字。公共施設、駅、踏切、信号、横断歩道のある交差点（この 2 つは交通の層では道路のあと）、道路、線路、私道、駐車場、建物、区画、水辺、買っていない土地、空きマスの順に選び、
     /// 同じ種類の中では数の多いものを選ぶ（道路は種類の大きいもの）。
     fn glyph(&self) -> char {
         if let Some(i) = argmax(&self.facility) {
@@ -182,6 +185,9 @@ impl Cell {
         }
         if self.station > 0 {
             return facility_letter(ServiceKind::Station);
+        }
+        if self.crossing > 0 {
+            return 'F';
         }
         // 交通の層では、道路の混み具合を信号より先に出す。
         if self.signal && self.congestion.is_none() {
@@ -433,6 +439,11 @@ pub fn render(
             {
                 cell.rail += 1;
             }
+        }
+    }
+    for t in rail.crossings() {
+        if let Some(cell) = grid.cell_mut(t) {
+            cell.crossing += 1;
         }
     }
     if layer == MapLayer::Parking {

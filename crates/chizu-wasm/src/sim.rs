@@ -215,7 +215,7 @@ impl Sim {
             .owned()
             .then(|| self.world.buildable_mask(TileRect { min, max }, None));
         for (i, tile) in tiles.iter_mut().enumerate() {
-            let road = layer.occupancy[i] == TileUse::Road;
+            let road = matches!(layer.occupancy[i], TileUse::Road | TileUse::Crossing);
             if road {
                 *tile |= TILE_ROAD;
             }
@@ -1026,6 +1026,12 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::LineStarvesOther => {
             "ほかの路線の待てる所がなくなり、その路線の列車が走れなくなる"
         }
+        DenyReason::HighwayCrossing => "高速道路には踏切を置けない",
+        DenyReason::CrossingNearJunction => "踏切は交差点と曲がり角から道路に沿って 3 マス以上離す",
+        DenyReason::NodeOnCrossing => {
+            "踏切のマスでは、道路をつなぐ、分ける、曲げることも、線路の端や分岐を置くこともできない"
+        }
+        DenyReason::CrossingTooClose => "すぐ隣にほかの踏切がある",
     }
 }
 
@@ -1589,9 +1595,14 @@ mod tests {
             )
             .0
         );
-        // 道路のマスを通る線路は断る
-        let (reason, _) = sim.rail_probe(TilePos::new(5, 6), TilePos::new(5, 14));
+        // 道路に沿う線路は断る。道路の区間の途中を横切る線路は踏切になる
+        let (reason, _) = sim.rail_probe(TilePos::new(5, 10), TilePos::new(15, 10));
         assert_eq!(reason, Some(deny_text(DenyReason::Occupied)));
+        let (reason, _) = sim.rail_probe(TilePos::new(5, 6), TilePos::new(5, 14));
+        assert_eq!(reason, None);
+        // 道路の端（ノード）で始まる線路は、踏切のマスにノードを置くので断る
+        let (reason, _) = sim.rail_probe(TilePos::new(0, 10), TilePos::new(0, 14));
+        assert_eq!(reason, Some(deny_text(DenyReason::NodeOnCrossing)));
         // 直線でない指定は形の誤りとして断り、建設費は 0
         let (reason, cost) = sim.rail_probe(TilePos::new(0, 0), TilePos::new(5, 2));
         assert!(reason.is_some());
