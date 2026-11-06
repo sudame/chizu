@@ -4,7 +4,8 @@
 //! 決め方は `docs/design.md` の 3.6「台数の決め方」と「敷地の切り欠き方」にある。
 //!
 //! 1. 要る台数を、住宅なら世帯の数、それ以外なら職場の数（税で減らす前）から決める。住宅の台数は自宅の枠の数で、
-//!    1〜2 マスの戸建ての 3 軒に 1 軒は持たず、集合住宅（住宅の段階 3〜5）は世帯の数の 0.5 倍にする
+//!    低密度の住宅のうち 1〜2 マスの戸建ての 3 軒に 1 軒は持たず、高密度の住宅（集合住宅）は段階を問わず
+//!    世帯の数の 0.5 倍にする
 //!    （`docs/design.md` の 3.7「1. 自宅の枠を持たない家」）。
 //! 2. 要る台数を、敷地を切り欠いた平面の駐車場と、建物の中（地下か立体）の駐車場に分ける。平面に入る分を先に平面に置く。
 //!
@@ -15,10 +16,10 @@ use crate::command::{Zone, ZoneKind};
 use crate::network::TILE_MM;
 use crate::rng::{RngPurpose, mix_words};
 
-/// 1〜2 マスの戸建てのうち、自宅の駐車場を持たない家の割合。この数の家に 1 軒は持たない。
+/// 1〜2 マスの戸建て（低密度の住宅）のうち、自宅の駐車場を持たない家の割合。この数の家に 1 軒は持たない。
 pub const NO_HOME_LOT_ONE_IN: u64 = 3;
 
-/// 集合住宅（住宅の段階 3〜5）の自宅の枠の、世帯の数に掛ける割合（分子と分母）。端数は切り上げる。
+/// 集合住宅（高密度の住宅）の自宅の枠の、世帯の数に掛ける割合（分子と分母）。端数は切り上げる。
 pub const APARTMENT_HOME_LOTS: (u64, u64) = (5, 10);
 
 /// 平面の駐車場の、1 マスに並ぶ枠の数。枠は 2.5m × 5m で、8m の幅に 3 つ並ぶ。
@@ -187,7 +188,7 @@ impl Building {
         };
         // 戸建ては建物の中に駐車場を持たず、平面に入りきらない分は切り捨てる。ただし斜めの道路に面した
         // 戸建ては切り欠けないので、建物の中の車庫に持つ。
-        let detached = self.zone.kind() == ZoneKind::Residential && self.level <= 2 && !diagonal;
+        let detached = self.zone == Zone::ResidentialLow && !diagonal;
         let indoor = if detached { 0 } else { needed - surface };
         ParkingLayout {
             needed,
@@ -232,7 +233,9 @@ impl Building {
     fn parking_needed(&self, seed: u64) -> u64 {
         let (base, (num, den)) = match self.zone.kind() {
             ZoneKind::Residential if every_home_lot() => (self.households(), (1, 1)),
-            ZoneKind::Residential if self.level > 2 => (self.households(), APARTMENT_HOME_LOTS),
+            ZoneKind::Residential if self.zone != Zone::ResidentialLow => {
+                (self.households(), APARTMENT_HOME_LOTS)
+            }
             ZoneKind::Residential if !self.has_home_lot(seed) => (0, (1, 1)),
             ZoneKind::Residential => (self.households(), (1, 1)),
             ZoneKind::Commercial | ZoneKind::Industrial => (self.workplaces(), (1, 1)),
@@ -241,11 +244,11 @@ impl Building {
         (base * num).div_ceil(den)
     }
 
-    /// 戸建て（住宅の段階 1〜2）が自宅の駐車場を持つか。1〜2 マスの戸建ての [`NO_HOME_LOT_ONE_IN`] 軒に 1 軒は持たない。
+    /// 戸建て（低密度の住宅）が自宅の駐車場を持つか。1〜2 マスの戸建ての [`NO_HOME_LOT_ONE_IN`] 軒に 1 軒は持たない。
     /// どの家にするかは、種と正面のマスから決める。建て直しても、同じ場所の家は同じになる。
-    /// 3 マス以上の戸建てと、住宅でない建物はいつも `true` である。集合住宅の枠の数は世帯の数で決まり、これを見ない。
+    /// 3 マス以上の戸建てと、高密度の住宅と、住宅でない建物はいつも `true` である。集合住宅の枠の数は世帯の数で決まり、これを見ない。
     pub fn has_home_lot(&self, seed: u64) -> bool {
-        if self.zone.kind() != ZoneKind::Residential || self.tile_count() > STRIP_MAX_TILES {
+        if self.zone != Zone::ResidentialLow || self.tile_count() > STRIP_MAX_TILES {
             return true;
         }
         // 座標は負にもなるので、ビットをそのまま混ぜる。
@@ -275,7 +278,17 @@ mod tests {
     }
 
     /// 間口 `w` マス、奥行き `h` マスの建物。道路は南（y の小さい側）にある。
-    fn building(zone: ZoneKind, (w, h): (i64, i64), level: u8) -> Building {
+    /// 住宅の段階 1〜2 は低密度（戸建て）、段階 3 以上は高密度（集合住宅）にする。高密度の段階 1〜2 は [`high_building`]。
+    fn building(zone: ZoneKind, size: (i64, i64), level: u8) -> Building {
+        let mut b = high_building(zone, size, level);
+        if zone == ZoneKind::Residential && level <= 2 {
+            b.zone = Zone::ResidentialLow;
+        }
+        b
+    }
+
+    /// [`building`] と同じ建物で、住宅は段階を問わず高密度にする。
+    fn high_building(zone: ZoneKind, (w, h): (i64, i64), level: u8) -> Building {
         Building {
             zone: Zone::from(zone),
             area: TileRect::from_corners(TilePos::new(0, 0), TilePos::new(w - 1, h - 1)),
@@ -611,8 +624,8 @@ mod tests {
                                 let n = b.parking_spaces(seed);
                                 let at =
                                     format!("{zone:?} {w}×{h} {road:?} の段階 {level} 種 {seed}");
-                                // 戸建てが集合住宅になると、自宅の枠は世帯の数から 0.5 倍に減りうる。
-                                // 減った分の世帯は枠を返す（`CarPlaces::assign_homes`）。
+                                // このテストの `building` は段階 1〜2 を低密度にするので、段階 3 は密度が変わる。
+                                // 実際の街では、低密度の住宅は段階 3 に上がらず、密度は変わらない。
                                 if zone == Residential && level == 3 {
                                     prev = 0;
                                 }
@@ -627,6 +640,37 @@ mod tests {
         // 4×4 の戸建ての段階 2 は 8 世帯で 8 台、集合住宅の段階 3 は 12 世帯で 6 台になる。
         assert_eq!(building(Residential, (4, 4), 2).parking_spaces(seed()), 8);
         assert_eq!(building(Residential, (4, 4), 3).parking_spaces(seed()), 6);
+    }
+
+    /// 戸建てかどうかは段階でなく密度で決まる。高密度は段階 1〜2 でも集合住宅で、枠は世帯の数の 0.5 倍、
+    /// 平面に入りきらない分は建物の中に持つ。
+    #[test]
+    fn high_density_homes_are_apartments_from_level_one() {
+        for level in [1, 2] {
+            for size in [(1, 1), (2, 2), (3, 3), (4, 4)] {
+                let high = high_building(Residential, size, level);
+                assert_eq!(high.zone, Zone::Residential);
+                let l = high.parking_layout(seed());
+                let want =
+                    (high.households() * APARTMENT_HOME_LOTS.0).div_ceil(APARTMENT_HOME_LOTS.1);
+                assert_eq!(l.needed, want, "{size:?} の段階 {level}");
+                assert_eq!(l.total(), l.needed, "{size:?} の段階 {level}");
+                for s in 0..30 {
+                    assert_eq!(
+                        high.parking_needed(s),
+                        want,
+                        "{size:?} の段階 {level} 種 {s}"
+                    );
+                    assert!(high.has_home_lot(s));
+                }
+                let low = building(Residential, size, level);
+                assert_eq!(low.zone, Zone::ResidentialLow);
+                assert_eq!(low.households(), high.households());
+            }
+        }
+        // 4×4 の高密度の段階 2 は 8 世帯で 4 台。平面に入る 5 マス分は先に平面に置くので、全部が平面に収まる。
+        let l = high_building(Residential, (4, 4), 2).parking_layout(seed());
+        assert_eq!((l.needed, l.surface, l.indoor), (4, 4, 0));
     }
 
     #[test]
