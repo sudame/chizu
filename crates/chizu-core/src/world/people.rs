@@ -27,6 +27,7 @@ use crate::rng::{Pcg32, RngPurpose, rng};
 use crate::service::Components;
 use crate::units::Tick;
 use crate::world::economy::TICKS_PER_HOUR;
+use serde::{Deserialize, Serialize};
 
 /// 移住を見る間隔（tick）。60 tick（ゲーム内 12 分）ごとである。
 pub const MIGRATION_INTERVAL: u64 = 60;
@@ -136,7 +137,30 @@ pub struct MigrationOutlook {
     pub newcomer_parking: u8,
 }
 
+/// 始まりからの転入と転出の積み上げ。読み取り用で、状態ハッシュには入れない。
+/// 日ごとの数は、2 つの時点の差で求める。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationTotals {
+    /// 外から越してきた世帯の数。
+    pub arrived_households: u64,
+    /// 外から越してきた住民の数。
+    pub arrived_citizens: u64,
+    /// 幸福度が低くて街を出た世帯の数。
+    pub left_unhappy_households: u64,
+    /// 幸福度が低くて街を出た住民の数。
+    pub left_unhappy_citizens: u64,
+    /// 家のないまま長くたって街を出た世帯の数。
+    pub left_homeless_households: u64,
+    /// 家のないまま長くたって街を出た住民の数。
+    pub left_homeless_citizens: u64,
+}
+
 impl World {
+    /// 始まりからの転入と転出の積み上げ。
+    pub fn migration_totals(&self) -> MigrationTotals {
+        self.migration_totals
+    }
+
     /// 需要の式に使う、街の人口と働き口の数。
     ///
     /// 住める世帯の数は、家のある世帯の数に、移り住める空き家（[`World::vacant_homes`]）の数を足したものとする。
@@ -350,6 +374,9 @@ impl World {
             .collect();
         let left = !leaving.is_empty();
         for h in leaving {
+            let members = self.population.members(h).map_or(0, |m| m.len() as u64);
+            self.migration_totals.left_unhappy_households += 1;
+            self.migration_totals.left_unhappy_citizens += members;
             self.remove_household(h);
         }
         // 出ていった世帯の枠が空いたので、枠のない世帯に配る。
@@ -494,6 +521,9 @@ impl World {
         for h in homeless {
             match self.population.homeless_since(h).flatten() {
                 Some(since) if self.tick.since(since) >= HOMELESS_LEAVE_TICKS => {
+                    let members = self.population.members(h).map_or(0, |m| m.len() as u64);
+                    self.migration_totals.left_homeless_households += 1;
+                    self.migration_totals.left_homeless_citizens += members;
                     self.remove_household(h);
                 }
                 _ => {
@@ -525,10 +555,12 @@ impl World {
             let (money, ages) = draw_household(&mut r, MAX_HOUSEHOLD_SIZE);
             let h = self.population.add_household(money);
             self.population.set_home(h, Some(home), self.tick);
+            self.migration_totals.arrived_households += 1;
             for age in ages {
                 self.population
                     .add_citizen(h, age)
                     .expect("足したばかりの世帯がない");
+                self.migration_totals.arrived_citizens += 1;
             }
         }
     }
@@ -1385,6 +1417,49 @@ pub(crate) mod tests {
         let before = w.population().household_count();
         w.emigrate();
         assert_eq!(w.population().household_count(), before);
+    }
+
+    /// 転入と転出の積み上げは、いまの世帯と住民の数と食い違わず、状態ハッシュには入らない。
+    #[test]
+    fn migration_totals_account_for_every_household_and_citizen() {
+        let mut w = served_city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 3);
+        let t = w.migration_totals();
+        assert!(t.arrived_households > 0);
+        let left_h = t.left_unhappy_households + t.left_homeless_households;
+        let left_c = t.left_unhappy_citizens + t.left_homeless_citizens;
+        assert_eq!(
+            t.arrived_households - left_h,
+            w.population().household_count() as u64
+        );
+        assert_eq!(
+            t.arrived_citizens - left_c,
+            w.population().citizen_ids().count() as u64
+        );
+        let hash = crate::state_hash_of(&w);
+        w.migration_totals = MigrationTotals::default();
+        assert_eq!(crate::state_hash_of(&w), hash);
+    }
+
+    /// 幸福度が低くて出ていった世帯は、転出の積み上げに入る。
+    #[test]
+    fn unhappy_households_that_leave_are_counted() {
+        let mut w = served_city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        run_days(&mut w, 2);
+        let before = w.migration_totals();
+        // 税率を上限にして点数を下げ、1 時間ごとの判定を何度も回す。
+        w.tax_permille = [crate::command::MAX_TAX_PERMILLE; 4];
+        let households = w.population().household_count();
+        for _ in 0..200 {
+            w.emigrate();
+        }
+        let after = w.migration_totals();
+        let left = after.left_unhappy_households - before.left_unhappy_households;
+        assert!(left > 0, "出ていった世帯がない");
+        assert_eq!(
+            w.population().household_count() as u64,
+            households as u64 - left
+        );
     }
 
     /// 画面に出す幸福度は、要素の平均を通すのでなく、住民ごとの幸福度の平均で、中核の値と一致する。

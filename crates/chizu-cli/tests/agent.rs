@@ -568,7 +568,30 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
     assert_eq!(o["facilities"]["ParkingGarage"], 1);
     let upkeep = &o["financesPerDay"]["facilityUpkeep"];
     assert_eq!(upkeep["ParkingLot"], 96);
-    assert_eq!(upkeep["ParkingGarage"], 2880);
+    assert_eq!(upkeep["ParkingGarage"], 2400);
+    // 道路に面している間は、前の道路がない駐車場はない。
+    assert_eq!(o["parking"]["lotsNotOnRoad"]["count"], 0);
+    assert_eq!(o["parking"]["lotsNotOnRoad"]["lots"], serde_json::json!([]));
+    // 前の道路を消すと、その駐車場の数と場所が出て、sharedLots には残る。
+    let bulldoze = write(
+        &dir.join("b.json"),
+        r#"[{"type":"Bulldoze","area":[[9,0],[18,0]]}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &bulldoze]));
+    assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
+    let o = json(&cli(&["agent", "observe", d]));
+    let off = &o["parking"]["lotsNotOnRoad"];
+    assert_eq!(off["count"], 2, "{off}");
+    let lots = off["lots"].as_array().unwrap();
+    assert_eq!(lots[0]["kind"], "ParkingLot");
+    assert_eq!(lots[0]["at"], serde_json::json!([17, 1]));
+    assert_eq!(lots[1]["kind"], "ParkingGarage");
+    assert_eq!(lots[1]["at"], serde_json::json!([9, -4]));
+    assert_eq!(o["parking"]["sharedLots"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        o["sinceLastObserve"]["changes"]["parking.lotsNotOnRoad.count"]["delta"],
+        2
+    );
 }
 
 /// 駅を置いて線路を引くと、observe の rail と map に出る。取り壊すと bulldozed に駅と線路のマスが出る。
@@ -749,6 +772,23 @@ fn observe_gives_people_and_traffic_counts() {
     assert!(yesterday["avgTravelTicks"].as_f64().unwrap() > 0.0);
     let m = &o["migration"];
     assert!(m["vacantHomes"].is_u64() && m["blockedHouseholds"].is_u64());
+    // 始まりからの転入と転出の積み上げは、いまの世帯の数と食い違わない。
+    assert!(n(&m["arrivedHouseholds"]) > 0, "誰も越してきていない");
+    assert_eq!(
+        n(&m["leftHouseholds"]),
+        n(&m["leftUnhappyHouseholds"]) + n(&m["leftHomelessHouseholds"])
+    );
+    assert_eq!(
+        n(&m["arrivedHouseholds"]) - n(&m["leftHouseholds"]),
+        n(&o["population"]["households"])
+    );
+    assert_eq!(
+        n(&m["arrivedCitizens"]) - n(&m["leftCitizens"]),
+        n(&o["population"]["citizens"])
+    );
+    // 前の observe からの増減にも出る。
+    let arrived = &o["sinceLastObserve"]["changes"]["migration.arrivedHouseholds"];
+    assert_eq!(arrived["to"], m["arrivedHouseholds"], "{arrived}");
     // 通勤した住民は、通勤の時間を測ってある。
     let time = &o["commute"]["time"];
     assert_eq!(n(&time["commuters"]), n(&o["commute"]["commuters"]));
@@ -2011,16 +2051,29 @@ fn act_sets_the_parking_fee() {
     assert_eq!(seen["financesPerDay"]["parkingFees"], 0);
     let cmd = write(
         &dir.join("fee.json"),
-        r#"[{"type":"SetParkingFee","fee":30},{"type":"SetParkingFee","fee":51}]"#,
+        r#"[{"type":"SetParkingFee","fee":30},{"type":"SetParkingFee","fee":51},{"type":"SetParkingFee","fee":-1},{"type":"SetTaxRate","zone":"ResidentialLow","permille":100}]"#,
     );
     let acted = json(&cli(&["agent", "act", d, &cmd]));
+    let messages: Vec<&str> = acted["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .skip(1)
+        .map(|r| r["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(messages[0], "駐車場の料金 51 は 0 から 50 の外にある");
+    assert_eq!(messages[1], "駐車場の料金 -1 は 0 から 50 の外にある");
+    assert!(
+        messages[2].contains("ResidentialLow は選べない"),
+        "{messages:?}"
+    );
     let outcomes: Vec<&str> = acted["results"]
         .as_array()
         .unwrap()
         .iter()
         .map(|r| r["outcome"].as_str().unwrap())
         .collect();
-    assert_eq!(outcomes, ["Applied", "Invalid"]);
+    assert_eq!(outcomes, ["Applied", "Invalid", "Invalid", "Invalid"]);
     let seen = json(&cli(&["agent", "observe", d]));
     assert_eq!(seen["parking"]["fee"], 30);
     assert_eq!(

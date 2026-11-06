@@ -195,6 +195,8 @@ pub struct World {
     errands: errand::Errands,
     /// 通勤の移動の結果の集計。読み取り用で、状態ハッシュには入れない。
     traffic: traffic::TrafficTally,
+    /// 始まりからの転入と転出の世帯と住民の数。読み取り用で、状態ハッシュには入れない。
+    migration_totals: people::MigrationTotals,
     router: RouterSlot,
 }
 
@@ -324,6 +326,7 @@ impl World {
             delays: Delays::default(),
             errands: Default::default(),
             traffic: Default::default(),
+            migration_totals: Default::default(),
             router,
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();

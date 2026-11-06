@@ -13,6 +13,7 @@
 //! 家に帰る住民は、自分が家でない所に停めた車が近くにあれば、近くても車で帰る。近くになければ歩いて帰り、
 //! 翌朝は歩いて職場へ向かって、夕方に職場から車で帰る。
 //! 職場が変わるかなくなった住民が家でない所に停めた車は、どこにもないものに戻す（[`Trips::return_car`]）。
+//! 世帯の枠に停めた車は、家に帰る住民が家でない所から取りに行かない。
 //! ほかの住民が乗っているときや、離れた所に停めてあるときは、車がないものとして歩く。
 //! 車を持つ世帯の車は、枠を得たときから枠に停まっている（[`Trips::place_car`]）。走っているあいだに車をなくした世帯と、
 //! 車を持たない世帯の車はどこにもなく、次に車で出るときに出発の建物から現れる。停めてある台数は世帯の数を超えて増えない。
@@ -20,7 +21,7 @@
 //! 家と借りた枠のあいだは歩く。
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::parking::{lot_exists, lot_near};
 use super::{LotId, Trips, building_spot};
@@ -226,9 +227,12 @@ impl Trips {
                     {
                         None
                     }
+                    // 世帯の枠に停めた車は、家に帰る住民が取りに行かない。枠は家の近くにあり、出発の建物の
+                    // 近くに見えても、そこから乗って 0m だけ走ることになる。
                     Some(HouseholdCar::Parked { lot, by })
                         if Some(lot) == r.own_lot() && r.home == Some(r.from)
                             || by == r.who.citizen
+                                && !(Some(lot) == r.own_lot() && r.who.to == Activity::Home)
                                 && lot_near(lot, r.from, buildings, facilities) =>
                     {
                         Some(lot)
@@ -302,6 +306,15 @@ impl Trips {
         self.commuters.dropped(trip)
     }
 
+    /// 世帯の車をなくしたまま、車で走っている移動のある世帯。その車は着いても停めずに消えるので、
+    /// 走っているあいだに新しい車を置くと、同じ世帯の車が 2 台に見える。
+    pub fn households_with_dropped_drive(&self) -> BTreeSet<HouseholdId> {
+        self.iter()
+            .filter(|(id, t)| t.parking_lot().is_some() && self.commuters.dropped(*id))
+            .filter_map(|(id, _)| Some(self.commuters.by_trip.get(&id)?.household))
+            .collect()
+    }
+
     /// 世帯の車のいる所。
     pub fn household_car(&self, household: HouseholdId) -> Option<HouseholdCar> {
         self.commuters.cars.get(&household).copied()
@@ -339,6 +352,33 @@ impl Trips {
             self.commuters.cars.remove(&household);
             self.parking.unpark(lot);
         }
+    }
+
+    /// 住民 `citizen` が家に着いたとき、自分が家でない所に停めた世帯の車が、家からも職場からも
+    /// [`super::PARK_RADIUS`] マスより離れて置き去りになっていれば、車をどこにもないものにして `true` を返す。
+    /// `own` は世帯の枠のある駐車場、`bases` は家と職場である。近くに残る車は、翌朝か夕方に使えるので外さない。
+    pub fn return_stranded_car(
+        &mut self,
+        household: HouseholdId,
+        citizen: CitizenId,
+        own: Option<LotId>,
+        (buildings, facilities): (&Buildings, &[Facility]),
+        bases: [Option<BuildingId>; 2],
+    ) -> bool {
+        let Some(HouseholdCar::Parked { lot, by }) = self.commuters.cars.get(&household).copied()
+        else {
+            return false;
+        };
+        let near = bases
+            .into_iter()
+            .flatten()
+            .any(|b| lot_near(lot, b, buildings, facilities));
+        if by != citizen || Some(lot) == own || near || !lot_exists(lot, buildings, facilities) {
+            return false;
+        }
+        self.commuters.cars.remove(&household);
+        self.parking.unpark(lot);
+        true
     }
 
     /// 移動を途中でやめさせる。押さえていた駐車場の空きは返す。

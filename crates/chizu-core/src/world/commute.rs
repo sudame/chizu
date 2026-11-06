@@ -22,6 +22,7 @@ impl World {
     /// 住民 `due` の移動を始める。移動を作れなかった住民を ID の順に返す。
     pub(super) fn start_commutes(&mut self, due: Vec<CitizenId>) -> Vec<CitizenId> {
         let mut stuck = Vec::new();
+        let mut stranded = Vec::new();
         let mut requests = Vec::new();
         for id in due {
             let Some(row) = self.population.citizen(id) else {
@@ -68,10 +69,16 @@ impl World {
                 None => {
                     no_route += 1;
                     stuck.push(r.who.citizen);
+                    if r.who.to == Activity::Home {
+                        stranded.push(r.who.citizen);
+                    }
                 }
             }
         }
         self.tally_no_route(no_route);
+        for id in stranded {
+            self.return_stranded_car(id);
+        }
         stuck.sort_unstable();
         stuck
     }
@@ -137,17 +144,48 @@ impl World {
         self.place_new_cars(&before);
     }
 
+    /// 住民 `citizen` が、車で帰れないまま家に着いたものとされるとき、自分が停めた車が置き去りになるなら、
+    /// 車を外して世帯の枠に戻す（[`Self::place_new_cars`] と同じ形）。置き去りとは、家でも職場でもない所に
+    /// 停めてあり、どちらからも歩いて取りに行けない遠さにあることである（[`crate::movement::Trips::return_stranded_car`]）。
+    /// 店を取り壊して家に着いたことにしたときと、店から家へ車で向かう経路を作れなかったときに呼ぶ。
+    pub(super) fn return_stranded_car(&mut self, citizen: CitizenId) {
+        let Some(row) = self.population.citizen(citizen) else {
+            return;
+        };
+        let h = row.household;
+        let home = self.population.home(h).flatten();
+        let own = self.own_lot(h);
+        let sites = (&self.buildings, self.facilities.as_slice());
+        if !self
+            .trips
+            .return_stranded_car(h, citizen, own, sites, [home, row.workplace])
+        {
+            return;
+        }
+        if let Some(lot) = own
+            && self.owns_car(h)
+            && !self.trips.households_with_dropped_drive().contains(&h)
+        {
+            self.trips.place_car(h, citizen, lot);
+        }
+    }
+
     /// 枠が `before` から変わった世帯（枠を得たか、借りた枠から自宅の枠に移った世帯）のうち、車を持つ世帯
     /// （[`CAR_OWNERSHIP_PERCENT`]）の車を、その枠に停めた状態にする。車がもうどこかにある世帯はそのままにする。
-    /// 停めた住民は、世帯の住民で ID のいちばん小さい人とする。車を持たない世帯は、今までどおり車で出るときに
+    /// 停めた住民は、世帯の住民で ID のいちばん小さい人とする。車をなくしたまま走っている世帯には置かない。車を持たない世帯は、今までどおり車で出るときに
     /// 出発の建物から車が現れる。世帯の枠を変えて [`Self::sync_rented`] を呼んだあとに呼ぶ。
     fn place_new_cars(&mut self, before: &CarPlaces) {
+        // 車をなくしたまま走っている世帯には置かない。走っている車は着いたら消えるので、いま置くと 2 台になる。
+        // この世帯の車は、次に車で出るときに出発の建物から現れる。
+        let driving = self.trips.households_with_dropped_drive();
         let p = &self.population;
         let placing: Vec<(HouseholdId, CitizenId, LotId)> = self
             .car_places
             .iter()
             .filter(|(h, place)| before.get(*h) != Some(*place))
-            .filter(|(h, _)| self.owns_car(*h) && self.trips.household_car(*h).is_none())
+            .filter(|(h, _)| {
+                self.owns_car(*h) && self.trips.household_car(*h).is_none() && !driving.contains(h)
+            })
             .filter_map(|(h, _)| {
                 let by = p.members(h)?.iter().min().copied()?;
                 Some((h, by, self.own_lot(h)?))
@@ -872,6 +910,84 @@ mod car_place_tests {
             "駐車場ビルを借りた世帯が少ない: {counts:?}"
         );
         HOME_SPACES_LIMIT.with(|l| l.set(None));
+    }
+
+    /// 借りた枠から自宅の枠に移る tick に家族が車で走っていても、同じ世帯の車が 2 台にならない。
+    /// 走っている車は着いたら消えるので、その世帯には新しい車を置かず、次に車で出るときに現れる。
+    #[test]
+    fn a_driving_renter_moving_home_gets_no_second_car() {
+        HOME_SPACES_LIMIT.with(|l| l.set(Some(0)));
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        place(&mut w, ServiceKind::ParkingGarage, (-20, 9));
+        let driving = |w: &World| -> Vec<_> {
+            w.car_places()
+                .iter()
+                .filter(|(h, p)| {
+                    matches!(p, CarPlace::Shared(_))
+                        && matches!(w.trips().household_car(*h), Some(HouseholdCar::InUse(_)))
+                })
+                .map(|(h, _)| h)
+                .collect()
+        };
+        while w.tick.0 < 3 * TICKS_PER_DAY && driving(&w).is_empty() {
+            w.step();
+        }
+        let moving = driving(&w);
+        assert!(!moving.is_empty(), "借りた枠の世帯が走っていない");
+        // 自宅の枠が増えて、借りていた世帯が自宅の枠に移る。
+        HOME_SPACES_LIMIT.with(|l| l.set(None));
+        w.assign_car_places();
+        let mut moved = 0;
+        for h in moving {
+            if w.car_places().get(h) != Some(CarPlace::Home) {
+                continue;
+            }
+            moved += 1;
+            assert_eq!(w.trips().household_car(h), None, "{h:?} の車が 2 台になる");
+        }
+        assert!(moved > 0, "自宅の枠に移った世帯がない");
+        HOME_SPACES_LIMIT.with(|l| l.set(None));
+    }
+
+    /// 家からも職場からも遠い建物に停めて置き去りになった車は、外して世帯の枠に戻す。
+    #[test]
+    fn a_stranded_car_goes_back_to_the_place() {
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        crate::world::people::tests::run_days(&mut w, 2);
+        let far = |a: BuildingId, b: BuildingId| {
+            let (a, b) = (
+                w.buildings().get(a).unwrap().front,
+                w.buildings().get(b).unwrap().front,
+            );
+            a.x.abs_diff(b.x).max(a.y.abs_diff(b.y)) > crate::movement::PARK_RADIUS
+        };
+        let found = w.population().citizen_ids().find_map(|id| {
+            let row = w.population().citizen(id)?;
+            let home = w.population().home(row.household).flatten()?;
+            let work = row.workplace?;
+            let lot =
+                w.buildings().iter().map(|(b, _)| b).find(|b| {
+                    w.buildings().parking_spaces(*b) > 0 && far(*b, home) && far(*b, work)
+                })?;
+            (w.owns_car(row.household) && w.own_lot(row.household).is_some()).then_some((
+                id,
+                row.household,
+                lot,
+            ))
+        });
+        let (id, h, lot) = found.expect("置き去りにできる住民がいない");
+        w.trips.forget_car(h);
+        w.trips.place_car(h, id, LotId::Building(lot));
+        let before = w.trips().lot(lot).parked;
+        w.return_stranded_car(id);
+        assert_eq!(
+            w.trips().household_car(h),
+            Some(HouseholdCar::Parked {
+                lot: w.own_lot(h).unwrap(),
+                by: id
+            })
+        );
+        assert_eq!(w.trips().lot(lot).parked, before - 1);
     }
 
     /// 車を持つ世帯の車は、自宅の枠か借りた枠を得た tick から、その枠に停まっている。同じ tick に乗って出ていれば、
