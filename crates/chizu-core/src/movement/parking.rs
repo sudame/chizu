@@ -24,8 +24,8 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Ends, RailCrossings, SidewalkPos, Trip, Trips, candidates, car, junction, lane_shift, make_trip,
-    plan, pos,
+    Ends, RailCrossings, SidewalkPos, Trip, Trips, candidates, car, junction, lane_shift,
+    make_trip, plan, pos,
 };
 use crate::building::{Building, Buildings, LANE_WIDTH_MM, ParkingCut, SLOT_WIDTH_MM};
 use crate::clock::TICKS_PER_DAY;
