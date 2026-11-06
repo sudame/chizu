@@ -200,7 +200,7 @@ impl Trip {
         let Some((lot, to)) = (match self.then {
             parking::Then::Arrive => None,
             parking::Then::Drive { lot, to, .. } | parking::Then::Walk { lot, to } => {
-                Some((lot, to))
+                lot.map(|lot| (lot, to))
             }
         }) else {
             return false;
