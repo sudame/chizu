@@ -10,6 +10,7 @@ use crate::rng::{RngPurpose, rng};
 use crate::service::Facility;
 use crate::state_hash::state_hash_of;
 use crate::tile::TileRect;
+use crate::units::Money;
 
 /// 東西の道路と、その北側に並べた 1 マスの建物。
 struct Street {
@@ -651,6 +652,8 @@ fn between_150_and_500_m_only_households_with_a_car_drive() {
         home: None,
         place: Some(CarPlace::Home),
         owns_car,
+        savings: Money::ZERO,
+        parking_fee: 0,
     };
     let requests = [request(0, true), request(1, false)];
     let (net, router) = (&s.net, &mut s.router);
@@ -1014,6 +1017,8 @@ impl Household {
             home: Some(self.home),
             place: Some(CarPlace::Home),
             owns_car: true,
+            savings: Money::ZERO,
+            parking_fee: 0,
         }
     }
 
@@ -1849,6 +1854,8 @@ fn at_2km_the_cheaper_of_car_and_rail_wins() {
                 home: Some(home),
                 place: Some(CarPlace::Home),
                 owns_car,
+                savings: Money::ZERO,
+                parking_fee: 0,
             };
             let (net, router) = (&s.net, &mut s.router);
             let id = s.trips.start_commutes_with_rides(
@@ -2053,21 +2060,27 @@ fn the_train_wins_only_when_strictly_cheaper() {
         let (planner, line, _) = rail_planner(&s, &doors);
         let front = |b: BuildingId| s.buildings.get(b).unwrap().front;
         let (from_tile, to_tile) = (front(home), front(to));
-        let target = base(tile_distance_mm(from_tile, to_tile));
-        // 費用がちょうど `target` と `target - 1` になる区間の時間を探す。
+        // 車を持たない世帯で、300m は歩き、2km は仮の扱いの車になる。
+        let mut r = h.request(0, (home, to));
+        r.owns_car = false;
+        // 車の見積もりには、停める手間を足して比べる。
+        let extra = if want == "car" {
+            s.trips.parking_seconds(&r, (&s.buildings, &[]))
+        } else {
+            0
+        };
+        let target = base(tile_distance_mm(from_tile, to_tile)) + extra;
+        // 費用がちょうど `target` と `target - 1` になる区間の時間を探す。運賃は依頼の世帯の重さで足す。
         let segs_for = |cost: u64| {
             (0..20_000_u32)
                 .flat_map(|a| (0..4_u32).map(move |b| [a, b]))
                 .find(|segs| {
                     rail_choice(&planner, line, segs)
-                        .offer(&WalkEnd::at(from_tile), &WalkEnd::at(to_tile))
+                        .offer_for(&WalkEnd::at(from_tile), &WalkEnd::at(to_tile), r.savings)
                         .is_some_and(|o| o.cost == cost)
                 })
                 .expect("費用の合う区間の時間がない")
         };
-        // 車を持たない世帯で、300m は歩き、2km は仮の扱いの車になる。
-        let mut r = h.request(0, (home, to));
-        r.owns_car = false;
         for (cost, expect) in [(target, want), (target - 1, "rail")] {
             let segs = segs_for(cost);
             let choice = rail_choice(&planner, line, &segs);
@@ -2186,4 +2199,109 @@ fn a_rider_who_cannot_reach_the_station_walks_instead() {
     r.place = None;
     let id = start_with_rides(&mut s, r, &choice).expect("移動を作れない");
     assert_eq!(mode_of(&s, id), "walk");
+}
+
+/// 同じ移動でも、蓄えの多い世帯は運賃を軽く感じて鉄道に乗り、蓄えのない世帯は歩く。
+#[test]
+fn poorer_households_feel_the_fare_more() {
+    use crate::happiness::SAVINGS_FOR_FULL_BONUS;
+    use crate::rail::choice::{tile_distance_mm, walk_seconds};
+    // 家（x = 0）、300m 先の職場（x = 38）と、駅の出入口（x = 1、37）。
+    let (mut s, ids) = Street::with_roads(&[0, 38, 1, 37], &[(0, 60)]);
+    let (home, work) = (ids[0], ids[1]);
+    let (planner, line, _) = rail_planner(&s, &[ids[2], ids[3]]);
+    let front = |b: BuildingId| s.buildings.get(b).unwrap().front;
+    let (a, b) = (front(home), front(work));
+    let target = walk_seconds(tile_distance_mm(a, b));
+    let (poor, rich) = (Money::ZERO, SAVINGS_FOR_FULL_BONUS);
+    // 蓄えの多い世帯には歩きより安く、蓄えのない世帯には歩きより高い区間の時間を探す。
+    let segs = (0..20_000_u32)
+        .map(|t| [t, 1])
+        .find(|segs| {
+            let c = rail_choice(&planner, line, segs);
+            let cost = |m| {
+                c.offer_for(&WalkEnd::at(a), &WalkEnd::at(b), m)
+                    .unwrap()
+                    .cost
+            };
+            cost(rich) < target && cost(poor) >= target
+        })
+        .expect("運賃の重さで手段の分かれる区間の時間がない");
+    let choice = rail_choice(&planner, line, &segs);
+    let h = Household { home };
+    for (savings, want) in [(rich, "rail"), (poor, "walk")] {
+        let mut r = h.request(0, (home, work));
+        r.owns_car = false;
+        r.savings = savings;
+        let id = start_with_rides(&mut s, r, &choice).unwrap();
+        assert_eq!(mode_of(&s, id), want, "蓄え {savings:?}");
+        s.trips.cancel(id);
+    }
+}
+
+/// 車の費用に足す停める手間は、行き先の駐車場に空きがあれば [`PARK_SECONDS`] だけで、満車なら近くの駐車場から
+/// 歩く分が足される。
+#[test]
+fn a_full_lot_at_the_destination_adds_to_the_car_cost() {
+    use crate::rail::choice::{PARK_SECONDS, walk_seconds};
+    let (mut s, ids) = Street::with_roads(&[0, 250], &[(0, 260)]);
+    let (home, work) = (ids[0], ids[1]);
+    let h = Household { home };
+    let r = h.request(0, (home, work));
+    assert_eq!(
+        s.trips.parking_seconds(&r, (&s.buildings, &[])),
+        PARK_SECONDS
+    );
+    let spaces = s
+        .buildings
+        .get(work)
+        .unwrap()
+        .parking_spaces(s.buildings.seed());
+    assert!(spaces > 0, "職場に駐車場がない");
+    for _ in 0..spaces {
+        s.trips.parking.reserve(LotId::Building(work));
+    }
+    assert_eq!(
+        s.trips.parking_seconds(&r, (&s.buildings, &[])),
+        PARK_SECONDS + walk_seconds(PARK_RADIUS * 8_000 / 2)
+    );
+}
+
+/// 共同の駐車場の枠を借りた世帯は、家から出るときと家に帰るときだけ、家と駐車場のあいだを歩く時間と、1 日の料金の
+/// 半分を蓄えの重さで秒に直した分を、車の費用に足す。家に関わらない移動には足さない。
+#[test]
+fn a_renter_adds_the_walk_and_half_the_fee_to_the_car_cost() {
+    use crate::rail::choice::{PARK_SECONDS, tile_distance_mm, walk_seconds};
+    use crate::rail::money_seconds;
+    let (s, ids) = Street::new(&[50, 5, 10]);
+    let (home, work, shop) = (ids[0], ids[1], ids[2]);
+    let facilities = [shared_lot(&s, 40)];
+    let c = facilities[0].area.min;
+    let h = Household { home };
+    let request = |ends| CommuteRequest {
+        place: Some(CarPlace::Shared(c)),
+        parking_fee: 30,
+        ..h.request(0, ends)
+    };
+    let sites = (&s.buildings, facilities.as_slice());
+    let walk = walk_seconds(tile_distance_mm(
+        s.buildings.get(home).unwrap().front,
+        facilities[0].front,
+    ));
+    let fee = money_seconds(30, Money::ZERO) / 2;
+    assert!(walk > 0 && fee > 0);
+    assert_eq!(
+        s.trips.parking_seconds(&request((home, work)), sites),
+        PARK_SECONDS + walk + fee
+    );
+    // 家に帰る車は借りた枠に停めるので、満車の分は足さない。
+    assert_eq!(
+        s.trips.parking_seconds(&request((work, home)), sites),
+        PARK_SECONDS + walk + fee
+    );
+    // 家に関わらない移動は、停めて出す手間だけである。
+    assert_eq!(
+        s.trips.parking_seconds(&request((work, shop)), sites),
+        PARK_SECONDS
+    );
 }

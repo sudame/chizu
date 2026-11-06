@@ -411,7 +411,7 @@ impl Parking {
         }
     }
 
-    fn reserve(&mut self, lot: LotId) {
+    pub(super) fn reserve(&mut self, lot: LotId) {
         match lot {
             LotId::Building(b) => self.update(b, |l| {
                 l.reserved = l.reserved.checked_add(1).expect("押さえた台数があふれた");
@@ -554,6 +554,28 @@ impl Parking {
             && u64::from(l.parked) + u64::from(l.reserved) < b.parking_spaces(seed)
     }
 
+    /// 世帯の枠が駐車場 `own` にある運転する人が、行き先 `to` に着いて最初に試す駐車場。行き先そのものの駐車場に
+    /// 空きがあればそこで、家（`home`）に帰る借りた枠の世帯なら借りた枠である。どちらでもなければ `None` で、
+    /// [`PARK_RADIUS`] マスの中のほかの駐車場を探すことになる。
+    pub(super) fn first_choice(
+        &self,
+        (buildings, facilities): (&Buildings, &[Facility]),
+        (to, dest): (BuildingId, &Building),
+        own: Option<LotId>,
+        home: Option<BuildingId>,
+    ) -> Option<LotId> {
+        match own {
+            Some(LotId::Rented(c))
+                if home == Some(to) && shared_facility(facilities, c).is_some() =>
+            {
+                Some(LotId::Rented(c))
+            }
+            _ => self
+                .is_free((to, dest), buildings.seed(), own.and_then(LotId::building))
+                .then_some(LotId::Building(to)),
+        }
+    }
+
     /// 世帯の枠が駐車場 `own` にある運転する人が停められる、行き先 `to` の近くの駐車場を、試す順に返す。行き先そのものを
     /// 先に、そのあとは [`PARK_RADIUS`] マスの中の建物を近い順に並べる。同じ距離なら番号の小さい建物を先にする。
     ///
@@ -581,16 +603,7 @@ impl Parking {
             .filter(|(id, b)| self.is_free((*id, b), buildings.seed(), own_building))
             .map(|(id, b)| (dist(b.front), LotId::Building(id)))
             .collect();
-        let first = match own {
-            Some(LotId::Rented(c))
-                if home == Some(to) && shared_facility(facilities, c).is_some() =>
-            {
-                Some(LotId::Rented(c))
-            }
-            _ => self
-                .is_free((to, dest), buildings.seed(), own_building)
-                .then_some(LotId::Building(to)),
-        };
+        let first = self.first_choice((buildings, facilities), (to, dest), own, home);
         for f in facilities.iter().filter(|f| f.kind.is_parking()) {
             let (c, d) = (f.area.min, dist(f.front));
             let lot = if own == Some(LotId::Rented(c)) {

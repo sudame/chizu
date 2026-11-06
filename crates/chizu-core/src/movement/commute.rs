@@ -23,7 +23,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::parking::{lot_exists, lot_near};
+use super::PARK_RADIUS;
+use super::parking::{lot_exists, lot_near, shared_facility};
 use super::{LotId, Trips, building_spot};
 use crate::building::Buildings;
 use crate::car_place::CarPlace;
@@ -32,13 +33,14 @@ use crate::id::{BuildingId, CitizenId, HouseholdId, TripId};
 use crate::network::{Network, TILE_MM};
 use crate::rail::RidePlan;
 use crate::rail::choice::{
-    RideChoice, RideOffer, WalkEnd, car_seconds, tile_distance_mm, walk_seconds,
+    PARK_SECONDS, RideChoice, RideOffer, WalkEnd, car_seconds, tile_distance_mm, walk_seconds,
 };
+use crate::rail::money_seconds;
 use crate::routing::AstarRouter;
 use crate::service::Facility;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::TilePos;
-use crate::units::Tick;
+use crate::units::{Money, Tick};
 
 /// 車を持たない世帯の住民が車で向かう、建物どうしの直線の距離の下限（mm）。500m である。
 pub const DRIVE_MIN_MM: i64 = 500_000;
@@ -157,6 +159,10 @@ pub struct CommuteRequest {
     pub place: Option<CarPlace>,
     /// 住民の世帯が車を持つか。
     pub owns_car: bool,
+    /// 住民の世帯の蓄え。運賃と駐車場の料金を、手段を選ぶ費用の秒に直す重さを決める。
+    pub savings: Money,
+    /// 共同の駐車場の料金（借りた枠 1 つの 1 日の額）。枠を借りた世帯の車の費用に足す。
+    pub parking_fee: u16,
 }
 
 impl CommuteRequest {
@@ -208,6 +214,38 @@ enum Pick {
 }
 
 impl Trips {
+    /// 依頼 `r` を車で行くときに、車の費用（[`car_seconds`]）に足す停める手間（移動の秒）。鉄道と比べるときだけ使う。
+    ///
+    /// - 停めて出す手間 [`PARK_SECONDS`]。
+    /// - 行き先の駐車場がいま満車か、行き先に駐車場がない（家に帰る世帯は自分の枠がない）とき、[`PARK_RADIUS`] マスの
+    ///   中のほかの駐車場に停めて歩く分。半分の距離を歩く時間で見込む。
+    /// - 共同の駐車場の枠を借りた世帯が家から出るか家に帰るときは、家と借りた駐車場のあいだを歩く時間と、1 日の料金の
+    ///   半分（行きと帰りで割る）を運賃と同じ重さ（[`money_seconds`]）で秒に直した分。
+    pub(super) fn parking_seconds(
+        &self,
+        r: &CommuteRequest,
+        (buildings, facilities): (&Buildings, &[Facility]),
+    ) -> u64 {
+        let mut s = PARK_SECONDS;
+        if let Some(dest) = buildings.get(r.to)
+            && self
+                .parking
+                .first_choice((buildings, facilities), (r.to, dest), r.own_lot(), r.home)
+                .is_none()
+        {
+            s += walk_seconds(PARK_RADIUS * TILE_MM.unsigned_abs() / 2);
+        }
+        if let (Some(CarPlace::Shared(c)), Some(h)) = (r.place, r.home)
+            && (r.from == h || r.to == h)
+        {
+            if let (Some(f), Some(home)) = (shared_facility(facilities, c), buildings.get(h)) {
+                s += walk_seconds(tile_distance_mm(home.front, f.front));
+            }
+            s += money_seconds(u64::from(r.parking_fee), r.savings) / 2;
+        }
+        s
+    }
+
     /// 通勤の移動をまとめて作り、依頼の順に ID を返す。車で向かう依頼から 1 件ずつ作り、
     /// 車で行けなかった依頼と近い依頼は、歩く移動としてまとめて作る。どちらでも行けなければ `None`。
     /// 同じ世帯の依頼が並んだら、先の依頼が世帯の車を使う。
@@ -242,8 +280,8 @@ impl Trips {
         let picks: Vec<Pick> = requests
             .iter()
             .map(|r| {
-                // 鉄道の候補。費用 `base` より小さいときだけ返す。
-                let ride = |base: fn(u64) -> u64| -> Option<RideOffer> {
+                // 鉄道の候補。費用 `base` に `extra` を足したものより小さいときだけ返す。
+                let ride = |base: fn(u64) -> u64, extra: u64| -> Option<RideOffer> {
                     let c = rides?;
                     let (a, b, d) = front_distance(buildings, r.from, r.to)?;
                     if d < OWNER_DRIVE_MIN_MM.unsigned_abs() {
@@ -259,10 +297,10 @@ impl Trips {
                             WalkEnd::on_link(net, tile, b.entrance, b.entrance_at)
                         })
                     };
-                    c.offer(&end(r.from, a)?, &end(r.to, b)?)
-                        .filter(|o| o.cost < base(d))
+                    c.offer_for(&end(r.from, a)?, &end(r.to, b)?, r.savings)
+                        .filter(|o| o.cost < base(d) + extra)
                 };
-                let walk = || ride(walk_seconds).map_or(Pick::Walk, Pick::Ride);
+                let walk = || ride(walk_seconds, 0).map_or(Pick::Walk, Pick::Ride);
                 // 家に帰る住民は、自分が家でない所に停めた車が近くにあれば、近くても車で帰る。歩いて帰ると、
                 // 車がその駐車場に残り、翌朝からも使えないためである。
                 let fetch = r.who.to == Activity::Home
@@ -329,7 +367,13 @@ impl Trips {
                 // 家の枠でない駐車場に停めた車で出る移動は、車をそこに残さないよう鉄道と比べない。停めた車を
                 // 取りに帰る移動（`fetch`）も、職場から店へ向かう移動もここに入る。
                 let leaves_car = take.is_some_and(|lot| Some(lot) != r.own_lot());
-                if !leaves_car && let Some(o) = ride(car_seconds) {
+                if !leaves_car
+                    && rides.is_some()
+                    && let Some(o) = ride(
+                        car_seconds,
+                        self.parking_seconds(r, (buildings, facilities)),
+                    )
+                {
                     return Pick::Ride(o);
                 }
                 let Some(id) = self.spawn_drive_taking(

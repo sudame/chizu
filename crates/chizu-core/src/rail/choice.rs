@@ -25,13 +25,13 @@ use smallvec::SmallVec;
 use rayon::prelude::*;
 
 use super::line::{RailLine, StepKind};
-use super::rider::{FARE_SECONDS, QueueKey, Transfer, estimate_segments};
+use super::rider::{FARE_SECONDS, QueueKey, Transfer, estimate_segments, money_seconds};
 use super::{LineId, Rail, StationId};
 use crate::movement::{SidewalkPos, facility_spot, walk_spots, walk_spots_on_link};
 use crate::network::{LinkId, Network, SegmentId, TILE_MM};
 use crate::routing::{Graph, Scratch, Toward, WALK_SPEED, reach_within, walk_ms};
 use crate::tile::TilePos;
-use crate::units::LaneOffset;
+use crate::units::{LaneOffset, Money};
 
 /// 駅まで歩く範囲（マス）。乗る駅と降りる駅の候補を探す範囲である。
 pub const STATION_WALK_RADIUS: i64 = 64;
@@ -61,6 +61,10 @@ pub const WALK_DETOUR: (u64, u64) = (13, 10);
 /// 車の移動の時間を直線の距離から見積もる速さ（mm/秒）。車で通勤した人だけの「直線距離 ÷ 測った通勤の時間」の
 /// 中央値で決めた（設計 3.10 の「作る順の 6 で決めた細部」）。
 pub const CAR_STRAIGHT_LINE_MM_PER_SECOND: u64 = 2_800;
+
+/// 車で行く費用に足す、停めて出す手間（移動の秒）。CS2 の経路の費用が車に駐車の手間を足すのと同じく、鉄道と比べるときに
+/// 車の側に足す（設計 3.10 の「釣り合いの決め直し（#342）」）。
+pub const PARK_SECONDS: u64 = 60;
 
 /// 直線の距離 `mm` を歩く時間の見積もり（移動の秒）。歩きの手段の費用と、歩く表を持たない [`RailPlanner`]
 /// （ベンチマークとテストで、駅の出入口と路線の形だけから作ったもの）の駅まで歩く時間に使う。
@@ -1035,7 +1039,7 @@ pub struct RideChoice<'a> {
     planner: &'a RailPlanner,
     live: BTreeMap<LineId, LineLive>,
     left_behind: BTreeSet<QueueKey>,
-    fare_seconds: u64,
+    fare: u16,
 }
 
 impl<'a> RideChoice<'a> {
@@ -1067,7 +1071,7 @@ impl<'a> RideChoice<'a> {
             planner,
             live,
             left_behind,
-            fare_seconds: u64::from(fare) * FARE_SECONDS,
+            fare,
         }
     }
 
@@ -1089,10 +1093,22 @@ impl<'a> RideChoice<'a> {
         Some(wait + ride)
     }
 
-    /// 出入口が `from` の建物から、出入口が `to` の建物へ向かう鉄道の候補。乗り換え 1 回の進路も比べる。
-    /// 費用の同じ組は、乗る駅、降りる駅の ID の小さい順に選び、同じ組なら乗り換えない進路を先にして、
-    /// そのあとは（路線、乗り換える駅、乗り換え先の路線）の ID の小さい順に選ぶ。
+    /// 出入口が `from` の建物から、出入口が `to` の建物へ向かう鉄道の候補。運賃は基準の重み（[`FARE_SECONDS`]）で
+    /// 費用に足す。世帯の蓄えで運賃の重さを変えるときは [`RideChoice::offer_for`] を使う。
     pub fn offer(&self, from: &WalkEnd, to: &WalkEnd) -> Option<RideOffer> {
+        self.offer_paying(from, to, u64::from(self.fare) * FARE_SECONDS)
+    }
+
+    /// [`RideChoice::offer`] と同じだが、運賃を蓄え `savings` の世帯の重さ（[`money_seconds`]）で費用に足す。
+    pub fn offer_for(&self, from: &WalkEnd, to: &WalkEnd, savings: Money) -> Option<RideOffer> {
+        self.offer_paying(from, to, money_seconds(u64::from(self.fare), savings))
+    }
+
+    /// 出入口が `from` の建物から、出入口が `to` の建物へ向かう鉄道の候補。運賃を秒に直した `fare_seconds` を費用に
+    /// 足す。乗り換え 1 回の進路も比べる。費用の同じ組は、乗る駅、降りる駅の ID の小さい順に選び、同じ組なら
+    /// 乗り換えない進路を先にして、そのあとは（路線、乗り換える駅、乗り換え先の路線）の ID の小さい順に選ぶ。
+    /// 運賃はどの組にも同じだけ足すので、どの組を選ぶかは運賃の重さによらない。
+    fn offer_paying(&self, from: &WalkEnd, to: &WalkEnd, fare_seconds: u64) -> Option<RideOffer> {
         if self.is_empty() {
             return None;
         }
@@ -1114,7 +1130,7 @@ impl<'a> RideChoice<'a> {
                 let Some(routes) = self.planner.routes(sa, sb) else {
                     continue;
                 };
-                let walk = wa + wb + self.fare_seconds;
+                let walk = wa + wb + fare_seconds;
                 for d in &routes.direct {
                     let Some(leg) = self.leg_cost(sa, d) else {
                         continue;

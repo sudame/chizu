@@ -979,3 +979,23 @@ fn measure_transfers() {
         }
     }
 }
+
+/// 運賃の重さは、蓄えのない世帯で基準の 2 倍、蓄えが `SAVINGS_FOR_FULL_BONUS` に届いた世帯で半分になり、
+/// あいだは蓄えの割合に比例する。
+#[test]
+fn the_fare_weighs_less_on_richer_households() {
+    use crate::happiness::SAVINGS_FOR_FULL_BONUS;
+    let full = SAVINGS_FOR_FULL_BONUS.0;
+    assert_eq!(fare_weight_permille(Money(0)), FARE_WEIGHT_POOR_PERMILLE);
+    assert_eq!(fare_weight_permille(Money(-5)), FARE_WEIGHT_POOR_PERMILLE);
+    assert_eq!(fare_weight_permille(Money(full / 2)), 1_250);
+    assert_eq!(fare_weight_permille(Money(full)), FARE_WEIGHT_RICH_PERMILLE);
+    assert_eq!(
+        fare_weight_permille(Money(full * 3)),
+        FARE_WEIGHT_RICH_PERMILLE
+    );
+    // 運賃 5 は、蓄えのない世帯で 80 秒、蓄えの多い世帯で 20 秒になる。
+    assert_eq!(money_seconds(5, Money(0)), 80);
+    assert_eq!(money_seconds(5, Money(full)), 20);
+    assert_eq!(money_seconds(0, Money(0)), 0);
+}

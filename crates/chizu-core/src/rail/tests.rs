@@ -265,9 +265,9 @@ fn bulldozing_removes_whole_tracks_and_lonely_nodes() {
 
 #[test]
 fn rail_cost_is_per_tile_and_longer_on_diagonals() {
-    assert_eq!(rail_cost(&line(0, 0, 10, 0)), Money(15_000));
-    // 斜め 1 歩は 11,314 mm なので、10 歩で 21,214 を切り上げる。
-    assert_eq!(rail_cost(&line(0, 0, 10, 10)), Money(21_214));
+    assert_eq!(rail_cost(&line(0, 0, 10, 0)), Money(5_000));
+    // 斜め 1 歩は 11,314 mm なので、10 歩で 7,071.25 を切り上げる。
+    assert_eq!(rail_cost(&line(0, 0, 10, 10)), Money(7_072));
 }
 
 // ここから下は、街の中で線路と駅を置く決まりを確かめる。
@@ -334,14 +334,17 @@ fn building_a_rail_charges_and_marks_the_tiles() {
     let money = w.money();
     let hash = w.state_hash();
     assert_eq!(rail(&mut w, (0, 0), (40, 0)), ApplyOutcome::Applied);
-    assert_eq!(w.money(), money - Money(60_000));
+    assert_eq!(w.money(), money - Money(RAIL_COST_PER_TILE.0 * 40));
     assert_ne!(w.state_hash(), hash);
     for x in 0..=40 {
         assert_eq!(tile_use(&w, x, 0), TileUse::Rail);
     }
     assert_eq!(tile_use(&w, 0, 1), TileUse::Empty);
     // 維持費は道路と同じく建設費の 1%（1 日）。
-    assert_eq!(w.finances().rail_upkeep, Money(600));
+    assert_eq!(
+        w.finances().rail_upkeep,
+        Money(RAIL_COST_PER_TILE.0 * 40 / 100)
+    );
     let broke = World::new_with_money(0, Money(1_000));
     let mut broke = broke;
     let before = broke.clone();
@@ -431,7 +434,7 @@ fn a_station_sits_in_the_rail_network_not_in_the_facilities() {
     let mut w = street();
     let money = w.money();
     assert_eq!(station(&mut w), ApplyOutcome::Applied);
-    assert_eq!(w.money(), money - Money(40_000));
+    assert_eq!(w.money(), money - ServiceKind::Station.cost());
     assert!(w.facilities().is_empty());
     let (id, s) = w.rail().stations().next().unwrap();
     assert_eq!(s.area, TileRect::from_corners(at(3, 7), at(12, 9)));
