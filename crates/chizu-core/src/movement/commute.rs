@@ -8,7 +8,10 @@
 //!
 //! 車は世帯ごとに 1 台で、世帯の中で同時に車を使えるのは 1 人だけである。世帯の車のいる所
 //! （[`HouseholdCar`]）を覚え、次に車で出るときはそこから車を出す。車を使えるのは、車が家に停めてあって
-//! 家から出るときか、自分で停めた車のとき（満車で近くの別の建物に停めたときも含む）だけである。
+//! 家から出るときか、自分で停めた車が出発の建物から [`super::PARK_RADIUS`] マスの中にあるとき（満車で近くの
+//! 別の建物に停めたときも含む）だけである。出発の建物の駐車場でない所から出るときは、そこまで歩いて乗る。
+//! 家に帰る住民は、自分が家でない所に停めた車が近くにあれば、近くても車で帰る。近くになければ歩いて帰り、
+//! 翌朝は歩いて職場へ向かって、夕方に職場から車で帰る。
 //! 職場が変わるかなくなった住民が家でない所に停めた車は、どこにもないものに戻す（[`Trips::return_car`]）。
 //! ほかの住民が乗っているときや、離れた所に停めてあるときは、車がないものとして歩く。
 //! 世帯の車がまだどこにもなければ、車は出発の建物から現れる。停めてある台数は世帯の数を超えて増えない。
@@ -18,7 +21,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::parking::lot_exists;
+use super::parking::{lot_exists, lot_near};
 use super::{LotId, Trips, building_spot};
 use crate::building::Buildings;
 use crate::car_place::CarPlace;
@@ -193,7 +196,18 @@ impl Trips {
         let mut out: Vec<Option<TripId>> = requests
             .iter()
             .map(|r| {
-                if !far_enough(buildings, r.from, r.to, r.owns_car) {
+                // 家に帰る住民は、自分が家でない所に停めた車が近くにあれば、近くても車で帰る。歩いて帰ると、
+                // 車がその駐車場に残り、翌朝からも使えないためである。
+                let fetch = r.who.to == Activity::Home
+                    && matches!(
+                        self.commuters.cars.get(&r.who.household),
+                        Some(HouseholdCar::Parked { lot, by })
+                            if *by == r.who.citizen
+                                && Some(*lot) != r.own_lot()
+                                && lot_exists(*lot, buildings, facilities)
+                                && lot_near(*lot, r.from, buildings, facilities)
+                    );
+                if !fetch && !far_enough(buildings, r.from, r.to, r.owns_car) {
                     return None;
                 }
                 if r.place.is_none() {
@@ -212,8 +226,9 @@ impl Trips {
                         None
                     }
                     Some(HouseholdCar::Parked { lot, by })
-                        if by == r.who.citizen
-                            || Some(lot) == r.own_lot() && r.home == Some(r.from) =>
+                        if Some(lot) == r.own_lot() && r.home == Some(r.from)
+                            || by == r.who.citizen
+                                && lot_near(lot, r.from, buildings, facilities) =>
                     {
                         Some(lot)
                     }
