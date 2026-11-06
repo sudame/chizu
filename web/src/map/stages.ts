@@ -17,6 +17,11 @@ export const BLOCK_BAND: Band = [3, 5];
 export const DETAIL_BAND: Band = [10, 14];
 /** 車と人が現れる幅。 */
 export const MOVER_BAND: Band = [12, 16];
+/**
+ * 列車が点から 4 両の形に替わる幅。80m の編成は倍率 4（標準の始まり）で 40px になり、形が見分けられる。
+ * 引きでは編成ごとに 1 つの点で示す。
+ */
+export const TRAIN_BAND: Band = [3, 5];
 /** 交通の主題図の「空いている」（緑）が現れる幅。引きでは、やや混んでいる以上だけを描く。 */
 export const TRAFFIC_FREE_BAND: Band = [4, 6];
 /**
@@ -54,6 +59,10 @@ export type StageWeights = {
   trafficFree: number;
   /** 細部の段で描き足すものの濃さ。寄りで 0、細部で 1。 */
   fine: number;
+  /** 列車の点の濃さ。引きで 1、標準に入ると 0。 */
+  trainDot: number;
+  /** 列車の 4 両の形の濃さ。引きで 0、標準で 1。 */
+  trains: number;
 };
 
 export function stageWeights(zoom: number): StageWeights {
@@ -68,6 +77,8 @@ export function stageWeights(zoom: number): StageWeights {
     marks: block,
     trafficFree: weight(TRAFFIC_FREE_BAND, zoom),
     fine: showsFine(zoom) ? weight(FINE_BAND, zoom) : 0,
+    trainDot: 1 - weight(TRAIN_BAND, zoom),
+    trains: weight(TRAIN_BAND, zoom),
   };
 }
 

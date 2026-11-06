@@ -62,6 +62,9 @@ pub struct Sim {
     /// 最後に集めた移動体と、その基準のチャンク。
     movers: Vec<Mover>,
     movers_base: ChunkCoord,
+    /// 公開のたびに集め直す列車の車両と、その基準のチャンク。範囲によらず全部書く。
+    cars: Vec<Mover>,
+    cars_base: ChunkCoord,
     /// その前の回に集めた移動体。集め直すたびに `movers` と入れ替える。
     movers_before: Vec<Mover>,
     /// 移動体を描くために覚えておく、車ごとの覚え書きと道筋。描画のためだけに覚え、状態には入れない。
@@ -102,6 +105,8 @@ impl Sim {
             mover_view: None,
             movers: Vec::new(),
             movers_base: ChunkCoord::default(),
+            cars: Vec::new(),
+            cars_base: ChunkCoord::default(),
             movers_before: Vec::new(),
             mover_memory: crate::movers::Memory::default(),
             movers_key: None,
@@ -148,7 +153,13 @@ impl Sim {
         let outcome = self.world.apply_recorded(seq, &command);
         if matches!(
             command,
-            Command::BuildRail { .. } | Command::Bulldoze { .. } | Command::PlaceBuilding { .. }
+            Command::BuildRail { .. }
+                | Command::Bulldoze { .. }
+                | Command::PlaceBuilding { .. }
+                | Command::CreateLine { .. }
+                | Command::ExtendLine { .. }
+                | Command::RemoveLine { .. }
+                | Command::SetLineTrains { .. }
         ) {
             self.rail_revision += 1;
         }
@@ -631,6 +642,50 @@ impl Sim {
         out
     }
 
+    /// 路線を、1 路線につき
+    /// `[添え字, 世代, 環状か, 決めた本数, 本数の上限, 走らせる本数, 止まっているか, 運転間隔(tick。なければ 0), 1 周の見込み(tick),
+    /// 駅の数, 線路の数]` の 11 個の数に、駅ごとの `[敷地の min の x, y]` と、線路ごとの `[a の x, y, b の x, y]` を続けて返す。
+    /// 線路は進路に出てくるものを、重ならないよう最初に出てきた順に並べる。駅は路線の順である。
+    /// 路線の添え字と世代は、路線のコマンドで路線を指すのにそのまま使う。
+    pub fn rail_lines(&self) -> Vec<f64> {
+        let rail = self.world.rail();
+        let mut out = Vec::new();
+        for (id, line) in rail.lines() {
+            let mut seen = BTreeSet::new();
+            let mut tracks = Vec::new();
+            for step in &line.path {
+                if seen.insert(step.track)
+                    && let Some(l) = rail.track_line(step.track)
+                {
+                    let e = l.end();
+                    tracks.push([l.start.x, l.start.y, e.x, e.y]);
+                }
+            }
+            let stations: Vec<[i64; 2]> = line
+                .stations
+                .iter()
+                .filter_map(|s| rail.station(*s))
+                .map(|st| [st.area.min.x, st.area.min.y])
+                .collect();
+            out.extend([
+                f64::from(id.index),
+                f64::from(id.generation),
+                f64::from(u8::from(line.looped)),
+                f64::from(line.trains),
+                f64::from(line.cap()),
+                f64::from(line.allowed()),
+                f64::from(u8::from(line.stopped)),
+                line.headway_ticks().unwrap_or(0) as f64,
+                line.round_trip_ticks() as f64,
+                stations.len() as f64,
+                tracks.len() as f64,
+            ]);
+            out.extend(stations.iter().flatten().map(|v| *v as f64));
+            out.extend(tracks.iter().flatten().map(|v| *v as f64));
+        }
+        out
+    }
+
     /// 線路を `from` から `to` に引けるかを、状態を変えずに調べる。引けないときは理由の文を、
     /// 引けるなら `None` を返し、どちらも建設費を添える。直線の形が正しくないときの建設費は 0 である。
     pub fn rail_probe(&self, from: TilePos, to: TilePos) -> (Option<&'static str>, i64) {
@@ -907,6 +962,7 @@ impl Sim {
     /// 移動体が動くので、どの速度でも送る。
     pub fn publish(&mut self) {
         self.collect_movers();
+        self.cars_base = crate::trains::collect_cars(&self.world, &mut self.cars);
         let base = self.movers_base;
         let tick = self.world.tick();
         let time = GameTime::at(tick);
@@ -920,8 +976,10 @@ impl Sim {
             paused: self.paused,
             base_cx: base.cx,
             base_cy: base.cy,
+            train_base_cx: self.cars_base.cx,
+            train_base_cy: self.cars_base.cy,
         };
-        self.snapshot.publish(&header, &self.movers);
+        self.snapshot.publish(&header, &self.movers, &self.cars);
     }
 }
 

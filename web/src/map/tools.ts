@@ -20,6 +20,8 @@ export type Tool =
   | { kind: "road"; road: RoadKindName }
   /** 線路を、始点と終点のマスを押して直線に引く。 */
   | { kind: "rail" }
+  /** 駅を 1 つずつ押して、路線を作る・延ばす。 */
+  | { kind: "line" }
   /** なぞった直線が通る既存の道路を、区間ごと road の種類に変える。 */
   | { kind: "upgrade"; road: RoadKindName }
   | { kind: "bulldoze" }

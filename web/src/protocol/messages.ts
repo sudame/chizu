@@ -74,6 +74,13 @@ export type CommandMessage =
   | { kind: "PlaceBuilding"; service: ServiceName; atX: number; atY: number; rotation: number }
   /** マス (x, y) の交差点に信号を置くか（on が true）、外す。chizu-wasm がマスのノードを引く。 */
   | { kind: "SetSignal"; x: number; y: number; on: boolean }
+  /** 駅 (fromX, fromY) から駅 (toX, toY) への路線を作る。駅は敷地のどのマスでも指せる。 */
+  | { kind: "CreateLine"; fromX: number; fromY: number; toX: number; toY: number }
+  /** 路線の終点の先に駅 (atX, atY) を足す。最初の駅を指せば環状にする。路線は rail_lines が添える添え字と世代で指す。 */
+  | { kind: "ExtendLine"; lineIndex: number; lineGeneration: number; atX: number; atY: number }
+  | { kind: "RemoveLine"; lineIndex: number; lineGeneration: number }
+  /** 路線を走らせる列車の本数（0〜16）。行き詰まりを防ぐ上限を超える分は、中核が上限に抑える。 */
+  | { kind: "SetLineTrains"; lineIndex: number; lineGeneration: number; trains: number }
   /**
    * マス (x, y) の交差点の、(dx, dy) の向きの腕の横断歩道を戻すか（on が true）、外す。
    * 向きは交差点から出ていく 1 歩で、chizu-wasm がマスのノードと腕の向きを引く。
@@ -275,9 +282,16 @@ export type WorkerToMain =
     }
   /**
    * 線路と駅の形。線路や駅が変わったときだけ、全体を送り直す。配列は移譲して送る。
-   * tracks は chizu-wasm の rail_tracks、stations は rail_stations である。
+   * tracks は chizu-wasm の rail_tracks、stations は rail_stations、lines は rail_lines である。
+   * 路線のコマンドも版を上げるので、路線の一覧も同じメッセージで送る。
    */
-  | { kind: "rail"; revision: number; tracks: Float64Array; stations: Float64Array }
+  | {
+      kind: "rail";
+      revision: number;
+      tracks: Float64Array;
+      stations: Float64Array;
+      lines: Float64Array;
+    }
   /** inspect の答え。query は問い合わせの写しで、info は chizu-wasm の inspect の数。何もなければ空。 */
   | { kind: "inspect"; query: InspectQuery; info: number[] }
   /** bulldoze-preview の答え。x0〜y1 は問い合わせの写しで、info は chizu-wasm の bulldoze_preview の数。 */
@@ -502,7 +516,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.tracks instanceof Float64Array &&
         v.tracks.length % RAIL_TRACK_STRIDE === 0 &&
         v.stations instanceof Float64Array &&
-        v.stations.length % RAIL_STATION_STRIDE === 0
+        v.stations.length % RAIL_STATION_STRIDE === 0 &&
+        v.lines instanceof Float64Array
       );
     case "rail-probe":
       return (

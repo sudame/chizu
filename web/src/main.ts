@@ -30,6 +30,7 @@ import {
 import { setupHudPanel, trackHeight } from "./hud-panel.ts";
 import { applyInspectReply, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
+import { renderLines } from "./line-panel.ts";
 import {
   type BulldozePreview,
   bulldozeSummary,
@@ -48,6 +49,19 @@ import {
 import { ChunkStore } from "./map/chunk-sync.ts";
 import { DetailCache, roofBody } from "./map/detail.ts";
 import { LabelLayer } from "./map/label-layer.ts";
+import {
+  abandonPending,
+  adoptCreated,
+  clickStation,
+  EMPTY_DRAFT,
+  extendTarget,
+  type LineDraft,
+  type LineRef,
+  lineKey,
+  lineToolHint,
+  stationAt,
+} from "./map/line-tool.ts";
+import { lineColorCode, lineMeshes, lineName, parseLines, type RailLineInfo } from "./map/lines.ts";
 import { homeCount, lotKey, parseLots, siteOf } from "./map/lots.ts";
 import { MoverPaths } from "./map/mover-interpolation.ts";
 import { KIND_CAR, KIND_WALK, moverArea } from "./map/movers.ts";
@@ -58,6 +72,7 @@ import {
   CLEAR_ZONE_COLOR,
   HINT_EDGE_COLOR,
   HINT_FILL_COLOR,
+  hex,
   PREVIEW_BAD_COLOR,
   PREVIEW_BAD_EDGE_COLOR,
   PREVIEW_LINE_COLOR,
@@ -71,6 +86,7 @@ import {
   parseTracks,
   RAIL_MID_COLOR,
   type RailMeshes,
+  type RailStation,
   railMeshes,
 } from "./map/rail.ts";
 import { MapRenderer } from "./map/renderer.ts";
@@ -304,6 +320,13 @@ let buildings: BuildingMeshes | null = null;
 let signals: Geometry | null = null;
 // 最後に届いた線路と駅
 let rail: RailMeshes | null = null;
+// 最後に届いた駅と路線。路線の道具が駅を指すのと、路線の一覧に使う
+let railStations: RailStation[] = [];
+let railLines: RailLineInfo[] = [];
+let lineMeshesLast: { far: Geometry; near: Geometry } | null = null;
+// 路線の道具の途中の状態。路線を作るコマンドを送った時点で知っていた路線を覚え、できた路線を見分ける
+let lineDraft: LineDraft = EMPTY_DRAFT;
+let knownLines = new Set<string>();
 // 細部の段で描き足すもの。細部の段に入っているときだけ、見えている範囲のぶんを作る
 const detail = new DetailCache();
 // 駐車場に停まっている車の頂点（寄りの段から、見えている範囲のぶんだけ作る）
@@ -434,6 +457,9 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
   if (rail !== null) {
     renderer?.roads.setRail(rail);
   }
+  if (lineMeshesLast !== null) {
+    renderer?.roads.setRailLines(lineMeshesLast);
+  }
   detail.invalidate();
   parkedCars.invalidate();
   applyTheme();
@@ -491,7 +517,20 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
           performance.now(),
           moverPaths,
         ) ?? 0);
+  const trains =
+    header === null
+      ? 0
+      : (renderer?.trains.draw(
+          camera,
+          vp,
+          header,
+          reader.cars(header.trainCarCount),
+          performance.now(),
+        ) ?? 0);
   // test:wasm が読む
+  mapCanvas.dataset.drawnTrainCars = String(trains);
+  const firstTrain = renderer?.trains.first;
+  mapCanvas.dataset.firstTrainCar = firstTrain ? `${firstTrain.x},${firstTrain.y}` : "";
   mapCanvas.dataset.drawnMovers = String(movers);
   mapCanvas.dataset.moverPaths = String(moverPaths.size);
   mapCanvas.dataset.moversAlongPath = String(renderer?.movers.alongPaths.along ?? 0);
@@ -778,6 +817,35 @@ function updatePreview(): void {
       mapCanvas.dataset.previewCost = String(answer?.cost ?? 0);
     }
     geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK_COLOR, MIN_PX);
+  } else if (tool.kind === "line") {
+    const g = new Geometry(railStations[0]?.min ?? { x: 0, y: 0 });
+    geometry = g;
+    const target = extendTarget(lineDraft, railLines);
+    // 延ばしている路線の駅は、路線の色で縁取る。最初に押した駅は濃く、指している駅は薄く塗る
+    const box = (st: RailStation, fill: Color, edge: Color) => {
+      g.rect(st.min, st.max, fill);
+      g.outline(st.min.x, st.min.y, st.max.x + 1, st.max.y + 1, edge, AREA_EDGE_PX);
+    };
+    const same = (a: Tile, b: Tile) => a.x === b.x && a.y === b.y;
+    if (target !== null) {
+      const edge = hex(lineColorCode(target.index));
+      for (const s of railStations) {
+        if (target.stations.some((t) => same(t, s.min))) {
+          box(s, hex(lineColorCode(target.index), 0.25), edge);
+        }
+      }
+    }
+    const first = lineDraft.first;
+    for (const s of railStations) {
+      if (first !== null && same(first, s.min)) {
+        box(s, PREVIEW_OK_COLOR, PREVIEW_OK_EDGE_COLOR);
+      }
+    }
+    const hovered = cursor === null ? null : stationAt(railStations, cursor);
+    if (hovered !== null && !(first !== null && same(first, hovered.min))) {
+      box(hovered, HINT_FILL_COLOR, HINT_EDGE_COLOR);
+    }
+    info = lineToolHint(lineDraft, stationLabel, (line) => lineName(line.index));
   } else if (tool.kind === "road" && cursor !== null) {
     const { from, to } = roadEndpoints(roadIndex, roadStart, cursor, noSnap);
     shownRoad = { start: roadStart, cursor, noSnap, from, to };
@@ -1059,8 +1127,44 @@ function requestInspect(): void {
 }
 setInterval(requestInspect, INSPECT_INTERVAL_MS);
 
+const lineList = element<HTMLElement>("#line-list");
+let lineListShown = "";
+/** 駅の名前。地図に出している施設の名前を引き、まだ名前がないあいだは「駅」とする。 */
+function stationLabel(min: Tile): string {
+  const st = railStations.find((s) => s.min.x === min.x && s.min.y === min.y);
+  return st === undefined ? "駅" : (labels.stationName(st.min, st.max) ?? "駅");
+}
+/** 路線の一覧を書き直す。中身が変わっていないときは、押している途中のボタンを作り直さない。 */
+function showLines(): void {
+  const key = JSON.stringify([
+    railLines,
+    railLines.flatMap((l) => l.stations.map(stationLabel)),
+    lineDraft.extend,
+  ]);
+  if (key === lineListShown) {
+    return;
+  }
+  lineListShown = key;
+  renderLines(lineList, railLines, stationLabel, lineDraft.extend, {
+    send: sendCommand,
+    extend: (line: LineRef) => {
+      const button = toolButtons.find((b) => b.dataset.tool === "line");
+      if (button !== undefined) {
+        selectTool({ kind: "line" }, button);
+        lineDraft = { ...EMPTY_DRAFT, extend: line };
+        showLines();
+        updatePreview();
+      }
+    },
+  });
+}
+// 駅の名前は、地図の名前の置き場所を求めたあとに決まるので、遅れて届いたぶんを直す
+setInterval(showLines, 1000);
+
 function cancelTool(): void {
   roadStart = null;
+  lineDraft = EMPTY_DRAFT;
+  showLines();
   if (pointer?.mode === "area") {
     pointer = null;
   }
@@ -1112,6 +1216,23 @@ function clickTile(at: Tile): void {
         roadStart = end;
       }
     }
+  } else if (tool.kind === "line") {
+    const station = stationAt(railStations, at);
+    if (station === null) {
+      toolMessage.textContent = "駅を押す";
+      return;
+    }
+    const known = new Set(railLines.map(lineKey));
+    const step = clickStation(lineDraft, station.min);
+    lineDraft = step.draft;
+    if (step.command?.kind === "CreateLine") {
+      knownLines = known;
+    }
+    if (step.command !== null) {
+      sendCommand(step.command);
+    }
+    showLines();
+    updatePreview();
   } else if (tool.kind === "buy") {
     sendCommand(buyChunkCommand(at));
   } else if (tool.kind === "signal") {
@@ -1137,7 +1258,12 @@ function clickTile(at: Tile): void {
 /** Esc 1 回ぶん。順は escape.ts が決める */
 function escapeOnce(): void {
   const step = nextEscapeStep({
-    drawing: roadStart !== null || pointer?.mode === "area" || devWalks.pending(),
+    drawing:
+      roadStart !== null ||
+      lineDraft.first !== null ||
+      lineDraft.extend !== null ||
+      pointer?.mode === "area" ||
+      devWalks.pending(),
     popoverOpen: popovers.anyOpen(),
     toolSelected: mapCanvas.dataset.tool !== "none",
     inspectorOpen: inspected !== null,
@@ -1330,7 +1456,7 @@ for (const button of toolButtons) {
                 ? { kind: "signal", on: name === "signal-on" }
                 : name === "crosswalk-on" || name === "crosswalk-off"
                   ? { kind: "crosswalk", on: name === "crosswalk-on" }
-                  : name === "bulldoze" || name === "buy" || name === "rail"
+                  : name === "bulldoze" || name === "buy" || name === "rail" || name === "line"
                     ? { kind: name }
                     : { kind: "none" };
     selectTool(next, button);
@@ -1340,6 +1466,10 @@ for (const button of toolButtons) {
 const DONE: Record<CommandMessage["kind"], string> = {
   BuildRoad: "道路を引いた",
   BuildRail: "線路を引いた",
+  CreateLine: "路線を引いた",
+  ExtendLine: "路線に駅を足した",
+  RemoveLine: "路線を消した",
+  SetLineTrains: "本数を変えた",
   UpgradeRoad: "道路の種類を変えた",
   Bulldoze: "取り壊した",
   BuyChunk: "土地を買った",
@@ -1430,9 +1560,20 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     const stations = parseStations(message.stations);
     rail = railMeshes(tracks, stations);
     renderer?.roads.setRail(rail);
+    railStations = stations;
+    railLines = parseLines(message.lines);
+    lineMeshesLast = lineMeshes(railLines);
+    renderer?.roads.setRailLines(lineMeshesLast);
+    lineDraft = adoptCreated(lineDraft, railLines, knownLines);
+    // 延ばしていた路線が消えたら、延ばすのをやめる
+    if (lineDraft.extend !== null && extendTarget(lineDraft, railLines) === null) {
+      lineDraft = EMPTY_DRAFT;
+    }
+    showLines();
     // test:wasm が読む
     mapCanvas.dataset.railTracks = String(tracks.length);
     mapCanvas.dataset.railStations = String(stations.length);
+    mapCanvas.dataset.railLines = String(railLines.length);
     mapCanvas.dataset.railRevision = String(message.revision);
     return;
   }
@@ -1540,6 +1681,12 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     railSent = "";
     railShown = null;
     if (tool.kind === "service" || tool.kind === "bulldoze" || tool.kind === "rail") {
+      updatePreview();
+    }
+    // 路線を作れなかったら、最初の駅を選んだ状態に戻す
+    if (command === "CreateLine" && message.outcome !== "Applied") {
+      lineDraft = abandonPending(lineDraft);
+      showLines();
       updatePreview();
     }
     if (

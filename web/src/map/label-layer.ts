@@ -38,6 +38,10 @@ import {
   type Viewport,
 } from "./labels.ts";
 import { chunkOf } from "./names.ts";
+import type { Tile } from "./roads.ts";
+
+/** 施設の種類の番号のうち駅（ServiceKind::Station）。 */
+const STATION_KIND = 5;
 
 const FONT_FAMILY = '"Hiragino Sans", "Noto Sans JP", system-ui, sans-serif';
 const HALO = "#ffffff";
@@ -184,6 +188,19 @@ export class LabelLayer {
   // マスが届く前のチャンクは水辺か分からず、「浜」の地区が別の名前で出てしまうので、届くまで出さない
   readonly #known = (x: number, y: number) =>
     this.#water.has(`${chunkOf(Math.floor(x))},${chunkOf(Math.floor(y))}`);
+
+  /**
+   * 駅の名前。`min` は駅の敷地の左上のマスで、`max` は右下のマスである。駅の名前は同じ地区の駅のまとまりで決まる
+   * ので、地図に出している名前（施設の名前）を引く。マスが届く前のチャンクの駅など、まだ名前がないときは null。
+   */
+  stationName(min: Tile, max: Tile): string | null {
+    const cx = (min.x + max.x + 1) / 2;
+    const cy = (min.y + max.y + 1) / 2;
+    const found = this.#facilityLabels.find(
+      (f) => f.kind === STATION_KIND && f.members.some((m) => m.x === cx && m.y === cy),
+    );
+    return found?.name ?? null;
+  }
 
   /** 毎フレーム呼ぶ。要るときだけ置き場所を求め直し、描き直す。 */
   frame(camera: CameraView, viewport: Viewport, now: number): void {
