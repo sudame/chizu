@@ -125,6 +125,16 @@ describe("bulldozeSummary", () => {
     expect(none && bulldozeSummary(none)).toBe("");
   });
 
+  test("踏切のマスを含むと、線路も消えると添える", () => {
+    // 道路 2 マス（1,5 と 2,5）と線路 1 マス（2,5）が重なる
+    const p = parseBulldozePreview([
+      2, 0, 0, 0, 1, 1, 0, 1, 1, 5, 2, 5, 2, 5, 2, 5, 1, 5, 2, 5, 2, 5,
+    ]);
+    expect(p && bulldozeSummary(p)).toBe(
+      "消える：道路 2 マス・線路 1 マス（踏切のマスを含むので線路も消える）",
+    );
+  });
+
   test("線路のマスと駅の数を出す", () => {
     const p = parseBulldozePreview(RAIL);
     expect(p && isEmptyPreview(p)).toBe(false);

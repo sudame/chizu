@@ -158,6 +158,7 @@ impl Sim {
                 | Command::PlaceBuilding { .. }
                 | Command::CreateLine { .. }
                 | Command::ExtendLine { .. }
+                | Command::InsertLineStation { .. }
                 | Command::RemoveLine { .. }
                 | Command::SetLineTrains { .. }
         ) {

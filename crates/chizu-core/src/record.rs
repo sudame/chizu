@@ -48,11 +48,12 @@
 //! | 14 | `ExtendLine` | line の index `u32`、generation `u16`、station の index `u32`、generation `u16` |
 //! | 15 | `RemoveLine` | line の index `u32`、generation `u16` |
 //! | 16 | `SetLineTrains` | line の index `u32`、generation `u16`、trains `u8`（0〜16） |
+//! | 17 | `InsertLineStation` | line の index `u32`、generation `u16`、after_index `u8`、station の index `u32`、generation `u16` |
 //!
 //! 形式を変えるときは版を上げる。種類の番号は使い回さない。種類を足すだけなら、古い記録はそのまま
 //! 読めるので版は上げない。`PaintZone` の区画に低密度の住宅（5）を足したときも、同じ理由で版を上げていない。
 //! 1 は前から住宅で、いまは高密度の住宅と読む。`BuildRail`（12）と、`PlaceBuilding` の駅（施設の種類 5）を足したときも
-//! 同じ理由で版を上げていない。路線のコマンド（13〜16）も同じである。
+//! 同じ理由で版を上げていない。路線のコマンド（13〜17）も同じである。
 
 use core::fmt;
 
@@ -473,6 +474,18 @@ fn encode_command(w: &mut Writer, c: &Command) {
             w.u32(station.index);
             w.u16(station.generation);
         }
+        Command::InsertLineStation {
+            line,
+            after_index,
+            station,
+        } => {
+            w.u8(17);
+            w.u32(line.index);
+            w.u16(line.generation);
+            w.u8(after_index);
+            w.u32(station.index);
+            w.u16(station.generation);
+        }
         Command::RemoveLine { line } => {
             w.u8(15);
             w.u32(line.index);
@@ -565,6 +578,17 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
                 index: r.u32()?,
                 generation: r.u16()?,
             },
+            station: StationId {
+                index: r.u32()?,
+                generation: r.u16()?,
+            },
+        },
+        17 => Command::InsertLineStation {
+            line: LineId {
+                index: r.u32()?,
+                generation: r.u16()?,
+            },
+            after_index: r.u8()?,
             station: StationId {
                 index: r.u32()?,
                 generation: r.u16()?,
@@ -727,6 +751,17 @@ mod tests {
                     generation: 4,
                 },
             },
+            Command::InsertLineStation {
+                line: LineId {
+                    index: 1,
+                    generation: 2,
+                },
+                after_index: 3,
+                station: StationId {
+                    index: 5,
+                    generation: 6,
+                },
+            },
             Command::SetLineTrains {
                 line: LineId {
                     index: 0,
@@ -849,8 +884,8 @@ mod tests {
         assert!(invalid_command(&[11, 51, 0])); // 駐車場の料金 51
         assert!(CommandLog::decode(&single(0, 0, &[11, 50, 0])).is_ok());
         assert_eq!(
-            CommandLog::decode(&single(0, 0, &[17])),
-            Err(DecodeError::UnknownCommand(17))
+            CommandLog::decode(&single(0, 0, &[18])),
+            Err(DecodeError::UnknownCommand(18))
         );
         // 列車の本数は 0〜16 だけを読む。
         let trains = |n: u8| {
@@ -1107,7 +1142,7 @@ mod tests {
                 applied: 8,
                 not_implemented: 0,
                 rejected: 0,
-                denied: 10,
+                denied: 11,
                 denied_by: {
                     let mut by = [0; DenyReason::ALL.len()];
                     by[DenyReason::NotJunction.index()] = 2;
@@ -1116,7 +1151,7 @@ mod tests {
                     by[DenyReason::NotAdjacent.index()] = 1;
                     // 駅を置けていないので、路線を作れず、路線もない。
                     by[DenyReason::NoSuchStation.index()] = 1;
-                    by[DenyReason::NoSuchLine.index()] = 3;
+                    by[DenyReason::NoSuchLine.index()] = 4;
                     by
                 },
             }
@@ -1237,8 +1272,15 @@ mod tests {
         prop_oneof![
             (station.clone(), station.clone())
                 .prop_map(|(from, to)| Command::CreateLine { from, to }),
-            (line.clone(), station)
+            (line.clone(), station.clone())
                 .prop_map(|(line, station)| Command::ExtendLine { line, station }),
+            (line.clone(), 0_u8..40, station.clone()).prop_map(|(line, after_index, station)| {
+                Command::InsertLineStation {
+                    line,
+                    after_index,
+                    station,
+                }
+            }),
             line.clone().prop_map(|line| Command::RemoveLine { line }),
             (line, 0_u8..=20).prop_map(|(line, trains)| Command::SetLineTrains { line, trains }),
         ]

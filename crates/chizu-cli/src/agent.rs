@@ -356,6 +356,8 @@ observe の removedCrosswalks:
       範囲の道路、線路、施設、駅、建物を取り壊す。道路は、範囲にかかった区間（交差点から交差点まで）ごと消える。
       線路も、範囲にかかった区間（ノードからノードまで）ごと消える。駅は、範囲にかかれば駅の中の線路ごと消え、
       駅の端につないだ外の線路は残る。
+      踏切のマス（道路の区間を線路が横切るマス）を範囲に含めると、道路の区間と線路が両方消え、その線路を使う路線も止まる。
+      線路を残して道路だけを消したいときは、同じ区間の踏切でない別のマスに打つ（線路は残る）。
       範囲が 1 マスでも、その区間の全体が消え、沿道の建物（住んでいた世帯は家をなくす）も消える。
       施設と建物は、範囲にかかったものが消える。Applied のときの結果に、消えた数が bulldozed で付く（下の「act の結果」）。
   {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"ResidentialLow"|"Commercial"|"Industrial"|"Office"|null}
@@ -439,6 +441,11 @@ observe の removedCrosswalks:
       届かなければ Denied（RailNoRoute）。駅がもう路線にあれば Denied（StationInLine）、路線の駅が 32 あるか
       環状にした路線なら Denied（LineLimit）、路線がなければ Denied（NoSuchLine）。ほかの路線の cap を 0 にするなら
       Denied（LineStarvesOther）。
+  {"type":"InsertLineStation","line":{"index":n,"generation":g},"after_index":i,"station":{"index":n,"generation":g}}
+      路線の途中に駅を挿す。路線の駅の並び（observe の rail.lines の stations）の i 番目（0 始まり）の次に station を入れる。
+      取り壊した駅を建て直したあとに、元の位置へ戻すのに使う。環状の路線にも挿せる。
+      断る理由は ExtendLine と同じ（RailNoRoute、StationInLine、LineLimit、NoSuchLine、NoSuchStation、LineStarvesOther）。
+      i が駅の並びの外（駅の数以上）なら Denied（NoSuchStation）。
   {"type":"RemoveLine","line":{"index":n,"generation":g}}
       路線をなくす。走っている列車も消える。
   {"type":"SetLineTrains","line":{"index":n,"generation":g},"trains":0..16}

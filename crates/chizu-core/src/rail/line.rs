@@ -557,7 +557,7 @@ impl Rail {
             .collect()
     }
 
-    /// コマンド `command`（`CreateLine` か `ExtendLine`）が `LineStarvesOther` で断られるなら、そのせいで上限が 0 に
+    /// コマンド `command`（`CreateLine`、`ExtendLine`、`InsertLineStation`）が `LineStarvesOther` で断られるなら、そのせいで上限が 0 に
     /// なる路線のうち、ID のいちばん小さいもの。断られないコマンドと、路線のコマンドでないものは `None`。状態を変えない。
     pub fn starved_by_command(&self, command: &crate::command::Command) -> Option<LineId> {
         use crate::command::Command;
@@ -577,6 +577,22 @@ impl Rail {
                     stations.push(*station);
                 }
                 let path = self.plan(&stations, closes)?;
+                self.starved_by(*line, &path)
+            }
+            Command::InsertLineStation {
+                line,
+                after_index,
+                station,
+            } => {
+                let l = self.lines.get(*line)?;
+                self.stations.get(*station)?;
+                let at = usize::from(*after_index) + 1;
+                if at > l.stations.len() {
+                    return None;
+                }
+                let mut stations = l.stations.clone();
+                stations.insert(at, *station);
+                let path = self.plan(&stations, l.looped)?;
                 self.starved_by(*line, &path)
             }
             _ => None,
@@ -887,6 +903,45 @@ impl Rail {
         let line = self.lines.get_mut(id).expect("路線がない");
         line.stations = stations;
         line.looped = closes;
+        self.replace_path(id, path);
+        self.mark_waits();
+        Ok(())
+    }
+
+    /// 路線の `after_index` 番目の駅の次に駅を挿す。`ExtendLine` と同じく、進路がなければ `RailNoRoute`、
+    /// ほかの路線の上限を 0 にするなら `LineStarvesOther`、駅が上限なら `LineLimit`、すでに入っている駅は `StationInLine` で断る。
+    /// `after_index` が駅の並びの外なら `NoSuchStation` で断る。環状の路線にも挿せる。
+    pub(crate) fn insert_line_station(
+        &mut self,
+        id: LineId,
+        after_index: u8,
+        station: StationId,
+    ) -> Result<(), DenyReason> {
+        let line = self.lines.get(id).ok_or(DenyReason::NoSuchLine)?;
+        if self.stations.get(station).is_none() {
+            return Err(DenyReason::NoSuchStation);
+        }
+        let at = usize::from(after_index) + 1;
+        if at > line.stations.len() {
+            return Err(DenyReason::NoSuchStation);
+        }
+        if line.stations.len() >= MAX_LINE_STATIONS {
+            return Err(DenyReason::LineLimit);
+        }
+        if line.stations.contains(&station) {
+            return Err(DenyReason::StationInLine);
+        }
+        let mut stations = line.stations.clone();
+        stations.insert(at, station);
+        let looped = line.looped;
+        let path = self
+            .plan(&stations, looped)
+            .ok_or(DenyReason::RailNoRoute)?;
+        if self.starved_by(id, &path).is_some() {
+            return Err(DenyReason::LineStarvesOther);
+        }
+        let line = self.lines.get_mut(id).expect("路線がない");
+        line.stations = stations;
         self.replace_path(id, path);
         self.mark_waits();
         Ok(())

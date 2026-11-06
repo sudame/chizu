@@ -353,6 +353,13 @@ pub enum Command {
         line: LineId,
         station: StationId,
     },
+    /// 路線 `line` の `after_index` 番目（0 始まり）の駅の次に、駅 `station` を挿す。環状の路線にも挿せる。
+    /// `after_index` が駅の並びの外なら断る。
+    InsertLineStation {
+        line: LineId,
+        after_index: u8,
+        station: StationId,
+    },
     /// 路線をなくす。走っている列車も消える。
     RemoveLine {
         line: LineId,
@@ -454,6 +461,7 @@ impl Command {
             | Command::SetSimSpeed { .. }
             | Command::CreateLine { .. }
             | Command::ExtendLine { .. }
+            | Command::InsertLineStation { .. }
             | Command::RemoveLine { .. }
             | Command::SetLineTrains { .. } => true,
         }
@@ -519,6 +527,7 @@ impl Command {
             | Command::SetSimSpeed { .. }
             | Command::CreateLine { .. }
             | Command::ExtendLine { .. }
+            | Command::InsertLineStation { .. }
             | Command::RemoveLine { .. } => Ok(()),
         }
     }
