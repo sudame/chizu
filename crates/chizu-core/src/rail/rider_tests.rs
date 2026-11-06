@@ -289,7 +289,7 @@ fn stops_from_the_path_match_the_station_order() {
 }
 
 /// 乗る人を測る街（[`rail_town`]）を、列車を走らせない版と 3 本走らせる版で回し、4 日目からの 3 日の
-/// 手段ごとの移動、通勤、幸福度、車、止まった車、救済を出す。
+/// 手段ごとの移動、通勤、幸福度、車、止まった車、救済と、列車にいちばん多く乗った人数と駅でいちばん長い待ち行列を出す。
 /// `cargo test -p chizu-core --release measure_riders -- --ignored --nocapture` で回す。
 #[test]
 #[ignore]
@@ -303,9 +303,17 @@ fn measure_riders() {
         for _ in 0..3 {
             let r0 = w.trips().rescues();
             let (mut cars, mut stopped, mut samples, mut happy) = (0_u64, 0_u64, 0_u64, 0_u64);
+            let (mut max_aboard, mut max_queue) = (0, 0);
             let mut before = CarSample::default();
             for k in 0..crate::TICKS_PER_DAY {
                 w.step();
+                let rail = w.rail();
+                for (t, _) in rail.trains() {
+                    max_aboard = max_aboard.max(rail.aboard(t).len());
+                }
+                for (_, q) in rail.queues() {
+                    max_queue = max_queue.max(q.len());
+                }
                 if k % 100 == 0 {
                     let s = w.car_sample();
                     stopped += s.stopped_on_road_since(&before) as u64;
@@ -321,7 +329,7 @@ fn measure_riders() {
             let ct = w.commute_times();
             let r1 = w.trips().rescues();
             println!(
-                "trains {trains} day {} pop {} walk {} car {} rail {} commute_med {:?} p90 {:?} happy_x12 {} cars_x100 {} stopped_x100 {} teleported {} walked_instead {} gave_up {} fares {}",
+                "trains {trains} day {} pop {} walk {} car {} rail {} commute_med {:?} p90 {:?} happy_x12 {} cars_x100 {} stopped_x100 {} teleported {} walked_instead {} gave_up {} fares {} max_aboard {max_aboard} max_queue {max_queue}",
                 w.tick().0 / crate::TICKS_PER_DAY,
                 w.population().citizen_count(),
                 y.walked,
