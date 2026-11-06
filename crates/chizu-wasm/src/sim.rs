@@ -1787,9 +1787,9 @@ mod tests {
             &facilities[facilities.len() - 5..],
             &[3.0, 7.0, 12.0, 9.0, 5.0]
         );
-        // 線路の維持費が収支の最後に出る
+        // 線路の維持費が収支の運賃の手前に出る
         let finance = sim.finance();
-        assert_eq!(finance.len(), 17);
+        assert_eq!(finance.len(), 20);
         assert_eq!(finance[16], sim.world().finances().rail_upkeep.0 as f64);
         assert!(finance[16] > 0.0);
     }
@@ -2026,7 +2026,7 @@ mod tests {
     fn finance_follows_tax_rate_commands_and_the_log() {
         let mut sim = Sim::new(0);
         let before = sim.finance();
-        assert_eq!(before.len(), 17);
+        assert_eq!(before.len(), 20);
         assert_eq!(before[0], f64::from(MAX_TAX_PERMILLE));
         // 住宅、商業、工業、オフィスの順の税率
         assert_eq!(&before[1..5], &[100.0; 4]);
