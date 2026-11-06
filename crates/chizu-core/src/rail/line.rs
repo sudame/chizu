@@ -116,14 +116,7 @@ impl RailLine {
     /// 同じ線路の同じ向きが進路に 2 度出るときは 1 つに数える。終点の両方のホームは、折り返したあとの要素
     /// だけが待てる所なので 1 つに数える。
     pub fn cap(&self) -> u8 {
-        let places: BTreeSet<(TrackId, Dir)> = self
-            .path
-            .iter()
-            .filter(|s| s.wait)
-            .map(|s| (s.track, s.dir))
-            .collect();
-        let room = places.len().saturating_sub(1);
-        u8::try_from(room.min(usize::from(MAX_LINE_TRAINS))).expect("上限は 16 以下")
+        cap_for(wait_places(self.path.iter().filter(|s| s.wait)))
     }
 
     /// 走らせる本数。遊ぶ人が決めた本数を、行き詰まりを防ぐ上限に抑えたものである。
@@ -219,6 +212,48 @@ fn flip(d: Dir) -> Dir {
     }
 }
 
+/// （線路、向き）ごとの、それを進路に持つ路線。まだない路線（作ろうとしている路線）は `None` で表す。
+type Users = BTreeMap<Vertex, BTreeSet<Option<LineId>>>;
+
+fn path_users<'a>(paths: impl Iterator<Item = (Option<LineId>, &'a [Step])>) -> Users {
+    let mut users = Users::new();
+    for (id, path) in paths {
+        for s in path {
+            users.entry((s.track, s.dir)).or_default().insert(id);
+        }
+    }
+    users
+}
+
+/// 要素が待てる所（[`Step::wait`]）になるか。
+fn is_wait(s: &Step, users: &Users) -> bool {
+    s.kind != StepKind::Terminal
+        && s.len >= TRAIN_BLOCK_LEN_MM
+        && users.get(&(s.track, s.dir)).is_some_and(|u| u.len() == 1)
+}
+
+/// 待てる所の要素から、待てる所の数を数えるための（線路、向き）の組。同じ線路の同じ向きは 1 つにまとまる。
+fn wait_places<'a>(steps: impl Iterator<Item = &'a Step>) -> BTreeSet<Vertex> {
+    steps.map(|s| (s.track, s.dir)).collect()
+}
+
+/// 待てる所から求める本数の上限（[`RailLine::cap`]）。
+fn cap_for(places: BTreeSet<Vertex>) -> u8 {
+    let room = places.len().saturating_sub(1);
+    u8::try_from(room.min(usize::from(MAX_LINE_TRAINS))).expect("上限は 16 以下")
+}
+
+/// 路線の本数の上限と、その内訳。読み取り用で、状態には持たない。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineCapacity {
+    /// 行き詰まりを防ぐ本数の上限（[`RailLine::cap`]）。
+    pub cap: u8,
+    /// 待てる所の数。上限は 16 と「これ − 1」の小さいほうである。2 つ未満なら上限は 0 で、列車は走らない。
+    pub wait_places: usize,
+    /// 進路の線路を同じ向きに使う、ほかの路線（ID の順）。共有する線路の向きは待てる所にならない。
+    pub shared_with: Vec<LineId>,
+}
+
 impl Rail {
     /// 路線を ID の順に返す。
     pub fn lines(&self) -> impl Iterator<Item = (LineId, &RailLine)> {
@@ -227,6 +262,43 @@ impl Rail {
 
     pub fn line(&self, id: LineId) -> Option<&RailLine> {
         self.lines.get(id)
+    }
+
+    /// 路線の本数の上限と、その内訳。上限が 0 の理由（待てる所が足りない、どの路線と共有しているか）を見せるのに使う。
+    pub fn line_capacity(&self, id: LineId) -> Option<LineCapacity> {
+        let line = self.lines.get(id)?;
+        let mine: BTreeSet<Vertex> = line.path.iter().map(|s| (s.track, s.dir)).collect();
+        let shared_with = self
+            .lines
+            .iter()
+            .filter(|(other, l)| {
+                *other != id && l.path.iter().any(|s| mine.contains(&(s.track, s.dir)))
+            })
+            .map(|(other, _)| other)
+            .collect();
+        Some(LineCapacity {
+            cap: line.cap(),
+            wait_places: wait_places(line.path.iter().filter(|s| s.wait)).len(),
+            shared_with,
+        })
+    }
+
+    /// 路線 `id`（新しく作る路線なら `None`）の進路を `path` にしたとき、上限が 0 でなかったのに 0 になる
+    /// ほかの路線のうち、ID のいちばん小さいもの。止まった路線は数えない。
+    fn starved_by(&self, id: Option<LineId>, path: &[Step]) -> Option<LineId> {
+        let others = || self.lines.iter().filter(move |(l, _)| Some(*l) != id);
+        let users = path_users(
+            others()
+                .map(|(l, line)| (Some(l), line.path.as_slice()))
+                .chain([(id, path)]),
+        );
+        others()
+            .find(|(_, line)| {
+                !line.stopped
+                    && line.cap() > 0
+                    && cap_for(wait_places(line.path.iter().filter(|s| is_wait(s, &users)))) == 0
+            })
+            .map(|(l, _)| l)
     }
 
     /// 線路 `t` を向き `d` に進むときに入るノードと出るノード。
@@ -412,21 +484,19 @@ impl Rail {
     }
 
     /// すべての路線の待てる所（[`Step::wait`]）を決め直し、止まった路線と、待てる所が足りずに上限が 0 になった
-    /// 路線の列車を消す。消えた列車の押さえていた閉塞は、それで返る。
+    /// 路線の列車を消す。消えた列車の押さえていた閉塞は、それで返る。残った列車は [`Rail::settle_trains`] で
+    /// 続けられる形に直す。
     fn mark_waits(&mut self) {
-        let mut users = BTreeMap::<(TrackId, Dir), BTreeSet<LineId>>::new();
-        for (id, l) in self.lines.iter() {
-            for s in &l.path {
-                users.entry((s.track, s.dir)).or_default().insert(id);
-            }
-        }
+        let users = path_users(
+            self.lines
+                .iter()
+                .map(|(id, l)| (Some(id), l.path.as_slice())),
+        );
         let ids: Vec<LineId> = self.lines.iter().map(|(id, _)| id).collect();
         for id in ids {
             let line = self.lines.get_mut(id).expect("路線がない");
             for s in &mut line.path {
-                s.wait = s.kind != StepKind::Terminal
-                    && s.len >= TRAIN_BLOCK_LEN_MM
-                    && users.get(&(s.track, s.dir)).is_some_and(|u| u.len() == 1);
+                s.wait = is_wait(s, &users);
             }
         }
         let lines = &self.lines;
@@ -439,9 +509,10 @@ impl Rail {
         for id in gone {
             self.trains.remove(id);
         }
+        self.settle_trains();
     }
 
-    /// 駅 `from` から駅 `to` への路線を作る。
+    /// 駅 `from` から駅 `to` への路線を作る。ほかの路線の上限を 0 にする（走れなくする）なら断る。
     pub(crate) fn create_line(
         &mut self,
         from: StationId,
@@ -458,6 +529,9 @@ impl Rail {
         }
         let stations = vec![from, to];
         let path = self.plan(&stations, false).ok_or(DenyReason::RailNoRoute)?;
+        if self.starved_by(None, &path).is_some() {
+            return Err(DenyReason::LineStarvesOther);
+        }
         let id = self.lines.insert(RailLine {
             stations,
             looped: false,
@@ -470,7 +544,7 @@ impl Rail {
         Ok(id)
     }
 
-    /// 路線の終点の先に駅を 1 つ足す。最初の駅を指せば環状にする。
+    /// 路線の終点の先に駅を 1 つ足す。最初の駅を指せば環状にする。ほかの路線の上限を 0 にするなら断る。
     pub(crate) fn extend_line(&mut self, id: LineId, station: StationId) -> Result<(), DenyReason> {
         let line = self.lines.get(id).ok_or(DenyReason::NoSuchLine)?;
         if self.stations.get(station).is_none() {
@@ -490,6 +564,9 @@ impl Rail {
         let path = self
             .plan(&stations, closes)
             .ok_or(DenyReason::RailNoRoute)?;
+        if self.starved_by(Some(id), &path).is_some() {
+            return Err(DenyReason::LineStarvesOther);
+        }
         let line = self.lines.get_mut(id).expect("路線がない");
         line.stations = stations;
         line.looped = closes;

@@ -291,6 +291,8 @@ observe の rail（線路と駅）:
   stations 駅ごとの id、at（置いたときの at）、area 敷地の角、ends 駅の線路の両端のマス（ここから外へ線路を引く）、
   facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅と列車の 1 日の維持費である。
   lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、trains 決めた本数、cap 行き詰まりを防ぐ本数の上限、
+  capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
+    sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有する線路の向きは待てる所にならない）。
   running 走っている本数、roundTripTicks 1 周の見込みの時間（tick）、headwayTicks 運転間隔の見込み（tick、列車がなければ null）、
   stopped 線路が変わって進路を選べず止まっているか（止まった路線の列車は消え、新しい列車も現れない）。
   trains 列車ごとの id、line 路線の id、at 先頭のマス、heading 進む向き（E、SE、S、SW、W、NW、N、NE）、
@@ -411,11 +413,14 @@ observe の removedCrosswalks:
       進路は線路の上の最短の道のりで選び、ノードで 45 度より大きく曲がる所と、途中で向きを変える所は通らない。
       そうしないと届かなければ Denied（RailNoRoute）。路線は往復し、両端の駅で折り返す。途中の駅は通り過ぎてよい。
       駅がなければ Denied（NoSuchStation）、同じ駅なら Denied（StationInLine）、路線が 64 本あれば Denied（LineLimit）。
+      作るとほかの路線の待てる所が足りなくなり、その路線の cap が 0 になる（走れなくなる）なら Denied（LineStarvesOther）。
+      cap が下がるが 0 にはならないなら受け付け、超えた分と、先を押さえ直せない列車はすぐに消える（act の結果の removedTrains）。
       作った路線の id は observe の rail.lines にある（作った順に、空いた番号から使う）。
   {"type":"ExtendLine","line":{"index":n,"generation":g},"station":{"index":n,"generation":g}}
       路線の終点の先に駅を足す。最初の駅を指すと環状の路線になり、列車は折り返さずに回る。終点から向きを変えずに
       届かなければ Denied（RailNoRoute）。駅がもう路線にあれば Denied（StationInLine）、路線の駅が 32 あるか
-      環状にした路線なら Denied（LineLimit）、路線がなければ Denied（NoSuchLine）。
+      環状にした路線なら Denied（LineLimit）、路線がなければ Denied（NoSuchLine）。ほかの路線の cap を 0 にするなら
+      Denied（LineStarvesOther）。
   {"type":"RemoveLine","line":{"index":n,"generation":g}}
       路線をなくす。走っている列車も消える。
   {"type":"SetLineTrains","line":{"index":n,"generation":g},"trains":0..16}
@@ -428,6 +433,9 @@ observe の removedCrosswalks:
       同じ駅から前の列車が出てから、運転間隔（1 周の見込みの時間 ÷ 本数）の半分を空けて出る。先の閉塞を押さえてから
       入るので、2 本が同じ閉塞に入ることはない。本数を減らすと、終点で折り返す列車から消える。まだ乗る人はいない。
       線路を取り壊して進路を選べなくなった路線は止まり（stopped）、その路線の列車は消える。
+      線路を引くか取り壊して cap が下がった路線は、超えた分と、先を押さえ直せない列車がすぐに消える。cap が 0 になった路線は走れなくなる
+      （BuildRail と Bulldoze は断らない。act の結果の haltedLines に出る）。進路が変わった直後に、先を押さえ直せない
+      列車も消える。
   {"type":"BuyChunk","chunk":[cx,cy]}
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
   {"type":"SetTaxRate","zone":"Residential"|"Commercial"|"Industrial"|"Office","permille":0..300}
@@ -455,6 +463,10 @@ act の結果:
       notOwned 買っていない土地、water 水辺、building 建物か施設のマス、
       beyondDepth 道路から 6 マスを超えた奥（道路のない所を含む）、notFronted 道路から 6 マス以内だが、間口から続かない空き
       （道路の端の外、間口との間に塗れないマスを挟んだ、別の種類の区画の奥など）。
+  コマンドで走れなくなった（stopped になったか cap が 0 になった）路線があれば haltedLines が付く。
+    路線ごとの id、stopped、capReason（observe の rail.lines と同じ）。
+  コマンドで路線そのものが消えたら（駅の取り壊しなど。RemoveLine も含む）、removedLines にその id の並びが付く。
+  コマンドで列車が消えたら removedTrains にその数が付く（上限が下がった、路線が止まった、進路が変わって先を押さえ直せないなど）。
   Bulldoze の Applied には bulldozed が付く。
     roadTiles 消えた道路のマスの数、railTiles 消えた線路のマスの数（駅の中を含む）、facilities 消えた施設の数、
     stations 消えた駅の数、buildings 消えた建物の数、
@@ -801,6 +813,7 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
             }
             let before_bulldoze = matches!(command, Command::Bulldoze { .. })
                 .then(|| BulldozeSnapshot::take(world));
+            let before_lines = line_states(world);
             // 結果の種類が増えたら、ここで JSON の名前を決めさせる。
             #[deny(clippy::wildcard_enum_match_arm)]
             let outcome = match world.apply_recorded(seq, &command) {
@@ -836,6 +849,7 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                 }
             };
             out["outcome"] = json!(outcome);
+            note_line_changes(&mut out, world, &before_lines);
             if isolated
                 && outcome == "Applied"
                 && let Command::BuildRoad { from, to, .. } = command
@@ -2067,6 +2081,7 @@ fn lines(world: &World) -> Value {
                 "looped": l.looped,
                 "trains": l.trains,
                 "cap": l.cap(),
+                "capReason": cap_reason(rail, id),
                 "running": running,
                 "roundTripTicks": l.round_trip_ticks(),
                 "headwayTicks": l.headway_ticks(),
@@ -2075,6 +2090,71 @@ fn lines(world: &World) -> Value {
         })
         .collect();
     json!(out)
+}
+
+/// 上限が 0 の理由。上限が 0 でなければ null である。
+fn cap_reason(rail: &chizu_core::Rail, id: chizu_core::LineId) -> Value {
+    let Some(c) = rail.line_capacity(id).filter(|c| c.cap == 0) else {
+        return Value::Null;
+    };
+    let shared: Vec<Value> = c
+        .shared_with
+        .iter()
+        .map(|l| id_json(l.index, l.generation))
+        .collect();
+    json!({"waitPlaces": c.wait_places, "sharedWith": shared})
+}
+
+/// 走れる（止まっておらず、上限が 0 でない）路線と、路線ごとの列車の数。コマンドの前後で比べるのに使う。
+fn line_states(world: &World) -> std::collections::BTreeMap<chizu_core::LineId, (bool, usize)> {
+    let rail = world.rail();
+    rail.lines()
+        .map(|(id, l)| {
+            let running = rail.trains().filter(|(_, t)| t.line == id).count();
+            (id, (!l.stopped && l.cap() > 0, running))
+        })
+        .collect()
+}
+
+/// コマンドの前後の路線を比べ、走れなくなった路線（haltedLines）と、なくなった路線（removedLines）と、消えた列車の数（removedTrains）を `out` に足す。
+/// どちらもなければ何も足さない。
+fn note_line_changes(
+    out: &mut Value,
+    world: &World,
+    before: &std::collections::BTreeMap<chizu_core::LineId, (bool, usize)>,
+) {
+    let after = line_states(world);
+    let rail = world.rail();
+    let halted: Vec<Value> = before
+        .iter()
+        .filter(|(id, (ran, _))| *ran && after.get(*id).is_some_and(|(runs, _)| !runs))
+        .map(|(id, _)| {
+            let l = rail.line(*id).expect("路線がない");
+            json!({
+                "id": id_json(id.index, id.generation),
+                "stopped": l.stopped,
+                "capReason": cap_reason(rail, *id),
+            })
+        })
+        .collect();
+    let removed: usize = before
+        .iter()
+        .map(|(id, (_, n))| n.saturating_sub(after.get(id).map_or(0, |(_, m)| *m)))
+        .sum();
+    let gone: Vec<Value> = before
+        .keys()
+        .filter(|id| !after.contains_key(*id))
+        .map(|id| id_json(id.index, id.generation))
+        .collect();
+    if !halted.is_empty() {
+        out["haltedLines"] = json!(halted);
+    }
+    if !gone.is_empty() {
+        out["removedLines"] = json!(gone);
+    }
+    if removed > 0 {
+        out["removedTrains"] = json!(removed);
+    }
 }
 
 /// 列車。
@@ -2866,6 +2946,67 @@ mod tests {
                 .any(|a| a["reasons"]["full"].as_u64().unwrap() > 0),
             "{areas:?}"
         );
+    }
+
+    /// 上限が 0 になった路線は、止まっていなくても haltedLines に理由つきで出る。
+    /// 3 つの駅に路線 c–a と a–b を作ると、あとから作った a–b は c–a と待てる所を共有して上限が 0 になる。
+    /// コマンドの前に a–b が走っていたことにして、前後の比べを確かめる。
+    #[test]
+    fn halted_lines_show_a_line_whose_cap_became_zero() {
+        use chizu_core::{Money, RoadKind, ServiceKind, StationId};
+        let mut w = World::new_with_money(0, Money(100_000_000));
+        let mut apply = |c: Command| assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+        let t = |x, y| TilePos::new(x, y);
+        apply(Command::BuildRoad {
+            from: t(0, 10),
+            to: t(100, 10),
+            kind: RoadKind::Small,
+        });
+        for x in [12, 62, 92] {
+            apply(Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: t(x, 9),
+                rotation: 2,
+            });
+        }
+        apply(Command::BuildRail {
+            from: t(12, 8),
+            to: t(53, 8),
+        });
+        apply(Command::BuildRail {
+            from: t(62, 8),
+            to: t(83, 8),
+        });
+        let st = |index| StationId {
+            index,
+            generation: 0,
+        };
+        apply(Command::CreateLine {
+            from: st(2),
+            to: st(0),
+        });
+        apply(Command::CreateLine {
+            from: st(0),
+            to: st(1),
+        });
+        let mut before = line_states(&w);
+        let lines: Vec<_> = w.rail().lines().map(|(id, _)| id).collect();
+        assert_eq!(lines.len(), 2);
+        before.insert(lines[1], (true, 0));
+        let mut out = json!({});
+        note_line_changes(&mut out, &w, &before);
+        let halted = out["haltedLines"].as_array().unwrap();
+        assert_eq!(halted.len(), 1, "{out}");
+        assert_eq!(
+            halted[0]["id"],
+            id_json(lines[1].index, lines[1].generation)
+        );
+        assert_eq!(halted[0]["stopped"], false);
+        assert_eq!(
+            halted[0]["capReason"]["sharedWith"],
+            json!([id_json(lines[0].index, lines[0].generation)])
+        );
+        assert!(out.get("removedTrains").is_none() && out.get("removedLines").is_none());
     }
 
     /// 1 日前（tick 0）の需要が 1,000 の控えで、いま tick 7200 の主の網を見る。
