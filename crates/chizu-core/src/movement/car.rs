@@ -1127,7 +1127,11 @@ pub(super) fn signal_demand(rows: &[Option<Trip>], net: &Network) -> signal::Dem
             for s in t.departure(net).1 {
                 if t.offset.0 == at {
                     if let Some(l) = net.segment_line(s) {
-                        d.note(node, signal::axis(l.step), |a| a.walkers = true);
+                        let patient = t.waited >= crossing::PED_WAIT;
+                        d.note(node, signal::axis(l.step), |a| {
+                            a.walkers = true;
+                            a.patient |= patient;
+                        });
                     }
                     break;
                 }

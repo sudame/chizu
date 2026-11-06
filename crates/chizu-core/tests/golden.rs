@@ -504,6 +504,16 @@ fn signals() -> CommandLog {
         },
     )
     .unwrap();
+    // 南北の道路の北の端の両側に住宅を塗る。そこから南へ来る車と、通りを東へ向かう車が、信号の交差点で
+    // 交わり、交わる向きに車がいるときに赤で止まる。
+    log.record(
+        Tick(4),
+        Command::PaintZone {
+            area: TileRect::from_corners(TilePos::new(30, 21), TilePos::new(50, 29)),
+            zone: Some(Zone::from(ZoneKind::Residential)),
+        },
+    )
+    .unwrap();
     // ノードの ID は網の作り方で決まるので、ここまでを再生して引く。
     let mut world = World::new(42);
     replay(&mut world, &log, 5);

@@ -375,6 +375,8 @@ observe の removedCrosswalks:
       マスにノードがなければ Invalid、交差点でなければ Denied（NotJunction）、変わらなければ Denied（SignalUnchanged）。
       信号は交差点の腕を向き（東西、南北、2 つの斜め）ごとにまとめ、順に青（30 tick まで）、黄 3 tick、全方向の赤 2 tick にする。
       感応式で、青の向きに交差点の手前まで来た車がいなければ、車の来ている向きへ早めに青を渡す。
+      ほかの向きに車が来ていなければ、青の向きの車と人のために青を続ける。車の来ていない交差点で、
+      青の向きの腕を渡ろうと待つ人がいれば、ほかの向きを青にして渡らせる。
       黄と赤の腕の車は、止まれるかぎり交差点の手前で止まる。いまの灯火は observe の signals にある。
   {"type":"SetCrosswalk","at":[x,y],"arm":"E"|"SE"|"S"|"SW"|"W"|"NW"|"N"|"NE","on":true|false}
       マス at の交差点の、向き arm の腕の横断歩道を外す（on が false）か、戻す（on が true）。費用はかからない。
