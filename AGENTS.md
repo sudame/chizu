@@ -15,10 +15,12 @@ chizu は、Cities: Skylines II（CS2）の軽量版として作る 2D の都市
 ## 作業の手順
 
 1. 作業は、マネージャーが用意した worktree の中で行う。すでに worktree の中にいるので、新しく worktree を作らず、本体のディレクトリにも移らない。`git worktree add` と `gwq` は使わない。
-2. 作業の途中は、変えたところに絞って確かめる。`mise run test` と `mise run lint` は重いビルドとテストを何本も回すので、PR を作る直前に 1 回だけ回し、両方が通ることを確かめる。
+2. 手元では、変えたところに絞って確かめる。`mise run test` 全体は重いビルドとテストを何本も回すので手元では回さず、CI に任せる。PR を作る直前に、絞ったテストと lint を 1 回回して通ることを確かめる。lint は軽いので、`mise run lint` 全体でもよい。
    - Rust：`RAYON_NUM_THREADS=2 mise run cargo -- nextest run -p <クレート>`、`mise run cargo -- clippy -p <クレート> --all-targets -- -D warnings`。cargo を直接打つと sccache を通らないことがあるので、`mise run cargo` から呼ぶ。`RAYON_NUM_THREADS=2` は test:rust と同じく、rayon のスレッドが待つあいだに CPU を使い切らないようにする
    - 画面：`mise run test:web`、`mise run lint:web`
-   - WASM の境目や描画を変えたときだけ：`mise run test:wasm`
+   - WASM の境目や描画を変えたときだけ：`mise run test:wasm`。CI でも回るが、画面の不具合は手元で見つけたいので、変えたときは PR を作る前に 1 回回す
+   - ゴールデンを変えるときは、書き直しのために `mise run golden:update` を手元で回す（後の「ゴールデンの書き直しと main との衝突」）
+   - PR を作ったら CI の結果を見る。落ちたら、担当がログを読んで直す。マネージャーには、直せなかったときと判断に迷ったときだけ報告する
 3. コミットメッセージは日本語で書き、末尾に `Co-Authored-By:` の行を付ける。
 4. `git push -u origin <branch>` のあと `gh pr create --base main` で PR を作る。本文は日本語で短く書く。
 
@@ -53,6 +55,7 @@ mise run build:web-test   # test:wasm が使う。build:wasm-test の WASM で�
 mise run dev           # WASM をビルドしてから Vite の開発サーバーを立てる
 mise run play          # 遊ぶ用の開発サーバーを立てっぱなしにし、origin の main が進んだら立て直す
 mise run test:play     # scripts/play.sh の小さな関数を確かめる
+mise run golden:update # ゴールデンと書き出しをまとめて書き直す。CI では回さない
 mise run bench         # ネイティブのベンチマーク（criterion）。CI では回さない
 mise run build:bench   # ベンチマークをビルドだけする。CI はこれでベンチが壊れていないかを見る
 mise run bench:wasm    # スレッドつきの WASM をヘッドレスの Chrome で測り、ネイティブと並べた JSON を出す。CI では回さない
@@ -167,6 +170,20 @@ Issue にそのまま貼れる markdown で出す。何も書かないので、�
 - 記録の形式の版が違う保存データは読めないものとして断る。版の運用は `crates/chizu-core/src/record.rs` の先頭にある。
 - 街の状態は `World::to_snapshot` で書き出す。形式と版の運用は `crates/chizu-core/src/snapshot.rs` の先頭にある。`World` に欄を足したり、欄の型や順番を変えたりしたら版を上げる。書き出したバイト列のハッシュは `tests/golden/snapshot.hash` に固定してあり、形が変わるとゴールデンのテストが落ちる。
 - 保存データには状態ハッシュを添えてあり、読み込んで作り直した街のハッシュと食い違えば画面に示す。
+
+## ゴールデンの書き直しと main との衝突
+
+並行した PR がそれぞれ `SNAPSHOT_VERSION` を上げ、ゴールデンを書き直すので、後から入る PR は main と衝突しやすい。衝突は次の手順で機械的に解く。
+
+1. `git fetch origin` のあと `git merge origin/main` で取り込む。
+2. `crates/chizu-core/tests/golden/` の `*.hash` と `*.rec`、`web/src/protocol/` の `snapshot-layout.json`、`city-stats-layout.json`、`snapshot-fixture.bin` の衝突は、どちらの側でもよいので解く。中身は次で書き直す。
+3. `SNAPSHOT_VERSION`（`crates/chizu-core/src/snapshot.rs` の 1 行）が衝突したら、main の値の次にする。自分の PR で版を上げていないなら、main の値のままにする。
+4. `mise run golden:update` を回す。chizu-core のゴールデン（`snapshot.hash` を含む）を書き直してから、chizu-wasm の書き出しを書き直す。
+5. 書き直したものをコミットする。そのうえで、変えたクレートに絞ったテストを回し、push する。
+
+`golden:update` は意図した変更を取り込むための道具である。ゴールデンが意図しない形で変わったときは、書き直さずに原因を直す。ゴールデンが変わる理由は、これまでどおり PR の本文に書く。
+
+版はバイト列の頭に入って `snapshot.hash` に効く。版だけを後から上げても、ゴールデンを書き直さないと CI は通らない。そのため、版を上げるのは PR の作者とし、マネージャーがマージの直前に上げる形にはしない。
 
 ## 依存の更新
 
