@@ -507,13 +507,16 @@ impl World {
         let mut homes = vacant
             .into_iter()
             .flat_map(|(id, free)| (0..free).map(move |_| id));
+        // 外から来る数は、家を待っていた世帯を入れる前に求める。入れた直後の世帯はまだ車を置く枠を配られておらず、
+        // 見込みの駐車場の点（`newcomer_parking`）に車を持てない世帯として入ってしまうためである。
+        // observe の転入の様子（`migration_outlook`）とも、同じ状態から求めることになる。
+        let count = self.arrivals_per_interval(free);
         for h in staying {
             let Some(home) = homes.next() else {
                 return;
             };
             self.population.set_home(h, Some(home), self.tick);
         }
-        let count = self.arrivals_per_interval(free);
         for k in 0..count {
             let Some(home) = homes.next() else {
                 return;
