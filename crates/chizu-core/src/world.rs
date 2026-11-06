@@ -975,6 +975,7 @@ impl World {
             | Command::BuildRail { .. }
             | Command::CreateLine { .. }
             | Command::ExtendLine { .. }
+            | Command::InsertLineStation { .. }
             | Command::RemoveLine { .. }
             | Command::Bulldoze { .. }
             | Command::PlaceBuilding { .. } => self.planner.forget(),
