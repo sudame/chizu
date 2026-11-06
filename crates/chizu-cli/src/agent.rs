@@ -126,7 +126,9 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
   citizenPlaces  住民のいまの居場所ごとの人数。atHome 家、atWork 職場か学校、atShop 帰りに寄った店、
                  walking 歩いて移動中（車を降りて歩く区切りと、駅まで歩く区切り、駅から歩く区切りを含む）、driving 車で移動中、
                  riding 駅で待っているか列車に乗っている、homeless 家のない世帯の住民。
-  traffic.cars   車の台数。total 全部、stopped 道路の上で、直前の 100 tick（ゲーム内の約 20 分）のあいだ同じ位置にいる車
+  traffic.cars   車の台数。total は moving、stopped、waitingAtCurb の和で、この 3 つは重ならない。queued だけは別の物差しで、
+                 moving や stopped と重なるので足さない（moving + queued が total を超えることがある）。
+                 total 全部、stopped 道路の上で、直前の 100 tick（ゲーム内の約 20 分）のあいだ同じ位置にいる車
                  （道路の種類を下げて車線を外れ、車線に戻るのを待つ車も含む）、
                  waitingAtCurb 建物の駐車場の中で、車線に出る順番を待っている車、moving それ以外。
                  着く車は駐車場の出入りの位置で車線から外れ、車線の上では止まらない。
@@ -341,7 +343,8 @@ observe の rail（線路と駅）:
     （乗り換えも 1 回ずつ数える）、transfers 始まりからこの駅で乗り換えた数、transferWaiting この駅で乗り換えを待つ人、
     households と carless 駅の徒歩圏（出入口のマスから 64 マス以内に、家の正面のマスがある）の世帯の数と、そのうち
     車を持てない世帯の数（出入口がない駅は null）、sharedHouseholds そのうち、ほかの駅の徒歩圏にも入る世帯の数、
-    overlapPermille その千分率（世帯がいなければ null。大きいと、遠いほうの駅は使われにくい）、
+    workers 同じ徒歩圏に職場のある住民の数（職場の建物の正面のマスで数える。働き口の空きは含まない）。households が 0 の職場側の
+    駅が、降りる側として役に立つかを見る（出入口がない駅は null）、overlapPermille その千分率（世帯がいなければ null。大きいと、遠いほうの駅は使われにくい）、
     recentBoarded 直近 recentDays（3）日に乗った人の数（0 が続く駅は使われていない。街がまだ 3 日たっていないか、
     その駅が 3 日前になかったときは null。observe のたびに 3 日前まで記録を再生して求める）、door 出入口のマス（道路に面していない駅は null）、
     walkedIn 始まりからこの駅まで歩いて着き、列に並んだ人（乗り換えは数えない）、avgWalkTicks その人たちが出発から
@@ -2255,6 +2258,7 @@ fn rail(world: &World) -> Value {
                 "door": door.map(tile),
                 "households": near.map(|c| c.households),
                 "carless": near.map(|c| c.carless),
+                "workers": near.map(|c| c.workers),
                 "sharedHouseholds": near.map(|c| c.shared),
                 "overlapPermille": near.and_then(|c| overlap_permille(c.shared, c.households)),
                 "walkedIn": walks.walks,

@@ -12,12 +12,12 @@ import {
 } from "./protocol/messages.ts";
 
 /** chizu-wasm の inspect が返す数の個数。 */
-export const INSPECT_LENGTH = 23;
+export const INSPECT_LENGTH = 24;
 
 /** 駅の欄に並べる、止まる路線の数の上限。chizu-wasm の inspect::STATION_LINES と同じ。 */
 export const STATION_LINES = 10;
 
-/** 駅の欄の、歩いて着いた人の数の位置。止まる路線の並びのあとに、駅まで歩いた時間の平均と、見積もりとのずれが続く。 */
+/** 駅の欄の、歩いて着いた人の数の位置。止まる路線の並びのあとに、駅まで歩いた時間の平均と、見積もりとのずれ、徒歩圏に職場のある住民の数が続く。 */
 const WALK_AT = 8 + STATION_LINES;
 
 /** 幸福度とその要素の満点。chizu-core の HAPPINESS_MAX と同じ。 */
@@ -101,6 +101,8 @@ export type StationView = {
   households: number | null;
   /** そのうち車を持てない世帯の数。 */
   carless: number;
+  /** 職場が出入口の徒歩圏にある住民の数。降りる側の駅として使われる見込みの大きさ。出入口がなければ 0。 */
+  workers: number;
   /** 直前の列車に乗りきれず人が残ったか。 */
   leftBehind: boolean;
   /** 駅に止まる路線の添え字。 */
@@ -149,6 +151,7 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
       alighted: at(3),
       households: at(4) >= 0 ? at(4) : null,
       carless: Math.max(at(5), 0),
+      workers: Math.max(at(WALK_AT + 3), 0),
       leftBehind: at(6) === 1,
       lines: Array.from({ length: count }, (_, i) => at(8 + i)),
       walkedIn: Math.max(at(WALK_AT), 0),
@@ -274,6 +277,10 @@ export function describeInspect(view: InspectView, rides: StationRides | null = 
           view.households === null
             ? "道路に面していないので、歩いて来られない"
             : `${n(view.households)} 世帯（車を持てない ${n(view.carless)}）`,
+      },
+      {
+        label: "徒歩圏の職場の住民",
+        value: view.households === null ? "道路に面していない" : `${n(view.workers)} 人`,
       },
       { label: "駅まで歩いた時間", value: walkText(view) },
       {

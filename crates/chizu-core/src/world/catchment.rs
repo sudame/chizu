@@ -12,7 +12,7 @@ use crate::rail::StationId;
 use crate::rail::choice::{STATION_WALK_RADIUS, in_walk_range};
 use crate::tile::TilePos;
 
-/// 駅の徒歩圏の世帯の数。
+/// 駅の徒歩圏の世帯の数と、徒歩圏に職場のある住民の数。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Catchment {
     /// 家のある世帯の数。
@@ -21,6 +21,9 @@ pub struct Catchment {
     pub carless: u32,
     /// そのうち、ほかの駅の徒歩圏にも入っている世帯の数。この駅がなくても、歩いて乗れる駅が残る世帯である。
     pub shared: u32,
+    /// 職場がこの駅の徒歩圏にある住民の数。降りる側の駅として使われる見込みの大きさである。
+    /// 職場の建物の正面のマスで数え、働き口の空きは含まない。
+    pub workers: u32,
 }
 
 impl World {
@@ -75,6 +78,26 @@ impl World {
             if hits.len() > 1 {
                 for i in hits {
                     out[i].shared += 1;
+                }
+            }
+        }
+        for c in p.citizen_ids() {
+            let Some(front) = p
+                .citizen(c)
+                .and_then(|row| row.workplace)
+                .and_then(|id| self.buildings.get(id))
+                .map(|b| b.front)
+            else {
+                continue;
+            };
+            let (cx, cy) = cell(front);
+            for x in cx - 1..=cx + 1 {
+                for y in cy - 1..=cy + 1 {
+                    for i in cells.get(&(x, y)).into_iter().flatten() {
+                        if in_walk_range(front, doors[*i]) {
+                            out[*i].workers += 1;
+                        }
+                    }
                 }
             }
         }
