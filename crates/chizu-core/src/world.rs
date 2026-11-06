@@ -532,7 +532,7 @@ impl World {
     /// 始点か終点が道路のないマスで、引く向きの 1 歩外のマスに、つなげられる道路（高速道路の内側の端、
     /// ほかの道路の端や途中）があれば、そのマスまで 1 マス延ばす。延ばした先で交差点ができる。
     /// 向きが違う（横や平行に隣り合う）道路には延ばさない。延ばした道路が引けないとき
-    /// （土地を買っていない、重なる、角で交わる、所持金が足りないなど）は延ばさない。
+    /// （土地を買っていない、重なる、道路や線路と角で交わる、所持金が足りないなど）は延ばさない。
     pub fn joined_road(&self, from: TilePos, to: TilePos, kind: RoadKind) -> (TilePos, TilePos) {
         if Line::between(from, to).is_err() {
             return (from, to);
@@ -552,6 +552,7 @@ impl World {
             let (f, t) = (if s { before } else { from }, if e { after } else { to });
             if let Ok(longer) = Line::between(f, t)
                 && self.network.check_road(&longer).is_ok()
+                && !self.rail.crosses_corner(&longer)
                 && road_cost(kind, &longer) <= self.money
             {
                 return (f, t);
@@ -1357,6 +1358,33 @@ mod tests {
         road(&mut w, (0, 1), (1, 0), RoadKind::Small);
         let (from, to) = (t(1, 1), t(6, 6));
         assert_eq!(w.joined_road(from, to, RoadKind::Small), (from, to));
+    }
+
+    /// 延ばした直線が斜めの線路と角で交わるなら延ばさず、延ばさない形のまま引ける。
+    #[test]
+    fn does_not_join_when_the_longer_line_crosses_a_rail_corner() {
+        let t = TilePos::new;
+        let mut w = World::new(0);
+        assert_eq!(
+            road(&mut w, (10, 20), (15, 25), RoadKind::Small),
+            ApplyOutcome::Applied
+        );
+        let rail = Command::BuildRail {
+            from: t(19, 22),
+            to: t(14, 27),
+        };
+        assert_eq!(w.apply(&rail), ApplyOutcome::Applied);
+        let (from, to) = (t(16, 26), t(20, 30));
+        let (f, to2) = w.joined_road(from, to, RoadKind::Small);
+        assert_eq!((f, to2), (from, to));
+        assert_eq!(
+            w.apply(&Command::BuildRoad {
+                from: f,
+                to: to2,
+                kind: RoadKind::Small
+            }),
+            ApplyOutcome::Applied
+        );
     }
 
     #[test]
