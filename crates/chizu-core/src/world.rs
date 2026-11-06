@@ -980,6 +980,11 @@ impl World {
                 outcome(self.rail.create_line(from, to).map(|_| ()))
             }
             Command::ExtendLine { line, station } => outcome(self.rail.extend_line(line, station)),
+            Command::InsertLineStation {
+                line,
+                after_index,
+                station,
+            } => outcome(self.rail.insert_line_station(line, after_index, station)),
             Command::RemoveLine { line } => outcome(self.rail.remove_line(line)),
             Command::SetLineTrains { line, trains } => {
                 outcome(self.rail.set_line_trains(line, trains))

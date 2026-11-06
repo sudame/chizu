@@ -441,6 +441,11 @@ observe の removedCrosswalks:
       届かなければ Denied（RailNoRoute）。駅がもう路線にあれば Denied（StationInLine）、路線の駅が 32 あるか
       環状にした路線なら Denied（LineLimit）、路線がなければ Denied（NoSuchLine）。ほかの路線の cap を 0 にするなら
       Denied（LineStarvesOther）。
+  {"type":"InsertLineStation","line":{"index":n,"generation":g},"after_index":i,"station":{"index":n,"generation":g}}
+      路線の途中に駅を挿す。路線の駅の並び（observe の rail.lines の stations）の i 番目（0 始まり）の次に station を入れる。
+      取り壊した駅を建て直したあとに、元の位置へ戻すのに使う。環状の路線にも挿せる。
+      断る理由は ExtendLine と同じ（RailNoRoute、StationInLine、LineLimit、NoSuchLine、NoSuchStation、LineStarvesOther）。
+      i が駅の並びの外（駅の数以上）なら Denied（NoSuchStation）。
   {"type":"RemoveLine","line":{"index":n,"generation":g}}
       路線をなくす。走っている列車も消える。
   {"type":"SetLineTrains","line":{"index":n,"generation":g},"trains":0..16}

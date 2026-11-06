@@ -223,9 +223,37 @@ describe("路線の道具", () => {
     });
   });
 
+  test("駅を挿すときは、路線の駅で位置を選び、路線にない駅を押して挿す", () => {
+    const line = { index: 2, generation: 1 };
+    const stations = [a, b];
+    const c = { x: 80, y: 7 };
+    const start = { ...EMPTY_DRAFT, insert: { line, after: null } };
+    // 位置を選ぶ前に路線にない駅を押しても何もしない
+    expect(clickStation(start, c, stations)).toEqual({ command: null, draft: start });
+    const chosen = clickStation(start, a, stations);
+    expect(chosen.command).toBeNull();
+    expect(chosen.draft.insert).toEqual({ line, after: 0 });
+    const done = clickStation(chosen.draft, c, stations);
+    expect(done.command).toEqual({
+      kind: "InsertLineStation",
+      lineIndex: 2,
+      lineGeneration: 1,
+      afterIndex: 0,
+      atX: 80,
+      atY: 7,
+    });
+    // 挿したあとは位置を選びなおす
+    expect(done.draft.insert).toEqual({ line, after: null });
+  });
+
   test("路線を作れなかったら最初の駅を選んだ状態に戻す", () => {
     const pending = clickStation(clickStation(EMPTY_DRAFT, a).draft, b).draft;
-    expect(abandonPending(pending)).toEqual({ first: a, pending: null, extend: null });
+    expect(abandonPending(pending)).toEqual({
+      first: a,
+      pending: null,
+      extend: null,
+      insert: null,
+    });
   });
 
   test("本数は 0〜16 に収める", () => {

@@ -1296,3 +1296,91 @@ fn settle_does_not_remove_more_trains_than_needed() {
 }
 
 mod ring;
+
+/// 路線の途中に駅を挿せる。a–c の路線に b を挿すと a、b、c の並びになる。
+#[test]
+fn inserting_a_station_puts_it_in_the_middle_of_the_line() {
+    let (mut w, a, b, c) = three_in_a_row();
+    let id = create(&mut w, a, c);
+    ok(
+        &mut w,
+        Command::InsertLineStation {
+            line: id,
+            after_index: 0,
+            station: b,
+        },
+    );
+    assert_eq!(w.rail().line(id).unwrap().stations, vec![a, b, c]);
+    assert!(!w.rail().line(id).unwrap().stopped);
+}
+
+/// 途中の駅を取り壊すと路線の並びから外れる。建て直したあと、挿せば元の位置に戻る。
+#[test]
+fn a_rebuilt_station_can_be_inserted_back_into_the_line() {
+    let (mut w, a, b, c) = three_in_a_row();
+    let id = line_through(&mut w, &[a, b, c]);
+    let area = w.rail().station(b).unwrap().area;
+    ok(&mut w, Command::Bulldoze { area });
+    assert_eq!(w.rail().line(id).unwrap().stations, vec![a, c]);
+    assert!(w.rail().line(id).unwrap().stopped);
+    let b2 = station(&mut w, (62, 8), 2);
+    // 駅を壊すと、駅の端につないだ外の線路も、範囲にかかったものは消えるので引きなおす。
+    ok(&mut w, rail((12, 8), (53, 8)));
+    ok(&mut w, rail((62, 8), (83, 8)));
+    assert_eq!(w.rail().line(id).unwrap().stations, vec![a, c]);
+    ok(
+        &mut w,
+        Command::InsertLineStation {
+            line: id,
+            after_index: 0,
+            station: b2,
+        },
+    );
+    assert_eq!(w.rail().line(id).unwrap().stations, vec![a, b2, c]);
+    assert!(!w.rail().line(id).unwrap().stopped);
+}
+
+/// 挿せないときは `ExtendLine` と同じ理由で断る。位置が並びの外なら `NoSuchStation` である。
+#[test]
+fn inserting_a_station_is_denied_like_extending() {
+    let (mut w, a, b, c) = three_in_a_row();
+    let id = create(&mut w, a, b);
+    let insert = |after_index, station, line| Command::InsertLineStation {
+        line,
+        after_index,
+        station,
+    };
+    let deny = |w: &mut World, c: Command| w.apply(&c);
+    assert_eq!(
+        deny(&mut w, insert(0, b, id)),
+        ApplyOutcome::Denied(DenyReason::StationInLine)
+    );
+    assert_eq!(
+        deny(&mut w, insert(2, c, id)),
+        ApplyOutcome::Denied(DenyReason::NoSuchStation)
+    );
+    assert_eq!(
+        deny(
+            &mut w,
+            insert(
+                0,
+                c,
+                LineId {
+                    index: 9,
+                    generation: 0
+                }
+            )
+        ),
+        ApplyOutcome::Denied(DenyReason::NoSuchLine)
+    );
+    // 線路でつながっていない駅。
+    ok(&mut w, road((0, 30), (20, 30)));
+    let d = station(&mut w, (12, 28), 2);
+    assert_eq!(
+        deny(&mut w, insert(0, d, id)),
+        ApplyOutcome::Denied(DenyReason::RailNoRoute)
+    );
+    // 並びの最後の駅の次は、足すのと同じ。
+    ok(&mut w, insert(1, c, id));
+    assert_eq!(w.rail().line(id).unwrap().stations, vec![a, b, c]);
+}
