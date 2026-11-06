@@ -89,6 +89,22 @@ impl Step {
     pub fn is_stop(&self) -> bool {
         self.kind != StepKind::Pass
     }
+
+    /// 最高の速さで走る時間の見込み（tick）。
+    fn run_ticks(&self) -> u64 {
+        u64::try_from(round::div_ceil(self.len, TRAIN_MAX_SPEED)).expect("線路の長さが負")
+    }
+
+    /// 止まる時間と、減速と加速の遅れと、折り返しの時間の見込み（tick）。止まらない要素は 0 である。
+    fn stop_ticks(&self) -> u64 {
+        match self.kind {
+            StepKind::Pass => 0,
+            StepKind::Stop => u64::from(DWELL_TICKS) + STOP_LOSS_TICKS,
+            StepKind::Terminal => {
+                u64::from(DWELL_TICKS) + STOP_LOSS_TICKS + u64::from(TURNBACK_TICKS)
+            }
+        }
+    }
 }
 
 /// 路線。
@@ -117,8 +133,8 @@ pub struct RailLine {
 /// 路線の待てる所の区分けと、本数の上限（行き詰まりを防ぐ決まりの 1 と 4）。
 ///
 /// 待てる所は、ほかの路線か、同じ路線のほかの要素と共有するもの（共有の待てる所）と、そうでないもの
-/// （自分だけの待てる所）に分かれる。共有の待てる所は、列車が続けて押さえて移れるものどうしをまとめて、
-/// 共有の区画にする。路線の輪の上で、共有の待てる所に挟まれて続く自分だけの待てる所の並びを、自分だけの区間と呼ぶ。
+/// （自分だけの待てる所）に分かれる。共有の待てる所は、列車が続けて押さえて移る向きをたどって互いに行き来
+/// できるものどうしをまとめて、共有の区画にする。路線の輪の上で、共有の待てる所に挟まれて続く自分だけの待てる所の並びを、自分だけの区間と呼ぶ。
 /// すべての路線の進路から決まるので、進路が変わるたびと、書き出しから読み戻したときに作り直す。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LinePlan {
@@ -142,6 +158,7 @@ impl RailLine {
     ///   空いた待てる所の手前の列車がいつも進める。終点の両方のホームは、折り返したあとの要素だけが待てる所なので
     ///   1 つに数える。
     /// - 自分だけの区間が 1 つの路線は、その区間の待てる所の数。区間が 2 つ以上なら、区間の待てる所の数の和 − 1。
+    ///   さらに、通る共有の区画の枠のうち、この路線の分で運べる本数までにする（`flow_cap`）。
     /// - 自分だけの待てる所を持たない路線（区間運転など）は、通る共有の区画の枠のうち、この路線の分。
     ///
     /// 待てる所が 2 つ未満の路線と、止まった路線と、通る区画の枠の分け前が 0 の路線は 0 である。
@@ -164,18 +181,12 @@ impl RailLine {
 
     /// 要素 `i` を最高の速さで走る時間の見込み（tick）。
     pub(crate) fn run_ticks(&self, i: u32) -> u64 {
-        u64::try_from(round::div_ceil(self.step(i).len, TRAIN_MAX_SPEED)).expect("線路の長さが負")
+        self.step(i).run_ticks()
     }
 
     /// 要素 `i` で止まる時間と、減速と加速の遅れと、折り返しの時間の見込み（tick）。止まらない要素は 0 である。
     pub(crate) fn stop_ticks(&self, i: u32) -> u64 {
-        match self.step(i).kind {
-            StepKind::Pass => 0,
-            StepKind::Stop => u64::from(DWELL_TICKS) + STOP_LOSS_TICKS,
-            StepKind::Terminal => {
-                u64::from(DWELL_TICKS) + STOP_LOSS_TICKS + u64::from(TURNBACK_TICKS)
-            }
-        }
+        self.step(i).stop_ticks()
     }
 
     /// 測った値を混ぜた 1 周の時間（tick）。
@@ -280,6 +291,64 @@ fn runnable(path: &[Step], stopped: bool) -> bool {
     !stopped && wait_places(path.iter().filter(|s| s.wait)).len() >= 2
 }
 
+/// 向きのある図の、強く連結な成分の番号（Kosaraju の方法）。`edges` は頂点ごとの出ていく辺、`into` は入る辺である。
+/// 番号は、成分の中でいちばん小さい頂点の順に 0 から振る。
+fn strong_components(edges: &[BTreeSet<usize>], into: &[Vec<usize>]) -> Vec<u16> {
+    let n = edges.len();
+    // 1 回目：辺をたどり、たどり終えた順に頂点を並べる。
+    let mut seen = vec![false; n];
+    let mut finished = Vec::with_capacity(n);
+    for s in 0..n {
+        if seen[s] {
+            continue;
+        }
+        seen[s] = true;
+        let mut stack = vec![(s, edges[s].iter())];
+        while let Some((a, it)) = stack.last_mut() {
+            let a = *a;
+            match it.next().copied() {
+                Some(b) => {
+                    if !seen[b] {
+                        seen[b] = true;
+                        stack.push((b, edges[b].iter()));
+                    }
+                }
+                None => {
+                    finished.push(a);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    // 2 回目：たどり終えた順の逆に、入る辺を逆向きにたどる。1 回にたどれる頂点が 1 つの成分である。
+    let mut comp = vec![usize::MAX; n];
+    let mut count = 0;
+    for s in finished.into_iter().rev() {
+        if comp[s] != usize::MAX {
+            continue;
+        }
+        comp[s] = count;
+        let mut stack = vec![s];
+        while let Some(a) = stack.pop() {
+            for b in &into[a] {
+                if comp[*b] == usize::MAX {
+                    comp[*b] = count;
+                    stack.push(*b);
+                }
+            }
+        }
+        count += 1;
+    }
+    // 番号を、成分の中でいちばん小さい頂点の順に振り直す。
+    let mut renumber = BTreeMap::<usize, u16>::new();
+    comp.iter()
+        .map(|c| {
+            let next = u16::try_from(renumber.len()).expect("共有の区画が多すぎる");
+            *renumber.entry(*c).or_insert(next)
+        })
+        .collect()
+}
+
 /// 路線ごとの待てる所の区分けと本数の上限（`LinePlan`）を求める。`lines` は（路線、進路、止まっているか）の並びである。
 ///
 /// 共有の区画の枠（押さえた範囲の終わりを区画に置ける列車の数）は、区画の中の待てる所だけを通る輪のうち、
@@ -323,38 +392,21 @@ fn make_plans(lines: &[(LineId, &[Step], bool)]) -> BTreeMap<LineId, LinePlan> {
             }
         }
     }
-    // 辺を向きなしに見てつながるものを、1 つの区画にする。
-    let mut root: Vec<usize> = (0..nodes.len()).collect();
-    fn find(root: &mut [usize], mut x: usize) -> usize {
-        while root[x] != x {
-            root[x] = root[root[x]];
-            x = root[x];
-        }
-        x
-    }
-    for (a, out) in edges.iter().enumerate() {
-        for b in out {
-            let (ra, rb) = (find(&mut root, a), find(&mut root, *b));
-            if ra != rb {
-                root[ra.max(rb)] = ra.min(rb);
-            }
-        }
-    }
-    let mut zone_of = vec![0_u16; nodes.len()];
-    let mut zone_ids = BTreeMap::<usize, u16>::new();
-    for (a, z) in zone_of.iter_mut().enumerate() {
-        let r = find(&mut root, a);
-        let next = u16::try_from(zone_ids.len()).expect("共有の区画が多すぎる");
-        *z = *zone_ids.entry(r).or_insert(next);
-    }
-    // 区画の中のいちばん短い輪。待てる所ごとに、辺をたどってそこへ戻るまでの最短の辺の数を求める。
-    let mut girth = vec![u32::MAX; zone_ids.len()];
     let mut into = vec![Vec::<usize>::new(); nodes.len()];
     for (a, out) in edges.iter().enumerate() {
         for b in out {
             into[*b].push(a);
         }
     }
+    // 辺をたどって互いに行き来できるものを、1 つの区画にする（強く連結な成分）。輪は必ず 1 つの区画に収まる。
+    // 辺が入るだけか出るだけの待てる所は、ほかの待てる所と輪を作らないので、それだけで区画になり、枠に上限はない。
+    // 向きなしにつながるものまでまとめると、ある路線の輪の区画の枠を、輪に入らない待てる所で待つだけの路線
+    // （ほかの路線が終点で折り返すホームから出る路線など）にまで分けることになり、その路線の分け前が 0 になって
+    // 走れなくなる（#356）。
+    let zone_of = strong_components(&edges, &into);
+    let zones = zone_of.iter().max().map_or(0, |z| usize::from(*z) + 1);
+    // 区画の中のいちばん短い輪。待てる所ごとに、辺をたどってそこへ戻るまでの最短の辺の数を求める。
+    let mut girth = vec![u32::MAX; zones];
     for s in 0..nodes.len() {
         let mut dist = vec![u32::MAX; nodes.len()];
         dist[s] = 0;
@@ -497,7 +549,51 @@ fn make_plans(lines: &[(LineId, &[Step], bool)]) -> BTreeMap<LineId, LinePlan> {
             }
         }
     }
+    for (k, p, _) in lines {
+        let plan = plans.get_mut(k).expect("路線がない");
+        if !plan.runs.is_empty() && plan.cap > 0 {
+            plan.cap = plan.cap.min(flow_cap(p, plan));
+        }
+    }
     plans
+}
+
+/// 自分だけの区間を持つ路線を、通る区画の枠のうち自分の路線の分で運べる量より多く走らせない本数。
+///
+/// 区画の枠は、押さえた範囲の終わりを区画に置く列車の数を抑える。区画 z の分が q で、列車が 1 周のうち押さえた
+/// 範囲の終わりを z に置く時間が t_z、1 周の時間が t なら、z を通れるのは t_z のあいだに q 本で、1 周で運べるのは
+/// q × t ÷ t_z 本の分である。これより多く走らせても、増えた列車は区画の手前の自分だけの区間で枠を待つだけで、
+/// 運べる量は増えず、維持費だけがかかる。そこで、枠に上限のある区画ごとに q × t ÷ t_z を切り上げた本数を求め、
+/// いちばん小さいものを返す。
+///
+/// 時間は [`RailLine::round_trip_ticks`] と同じ見込みである。列車は、先頭がいる要素から先で最初の待てる所まで
+/// 押さえるので、要素の時間は、その要素から先で最初の待てる所の区画に数える。
+fn flow_cap(p: &[Step], plan: &LinePlan) -> u8 {
+    let n = p.len();
+    let ticks = |s: &Step| s.run_ticks() + s.stop_ticks();
+    let total: u64 = p.iter().map(ticks).sum();
+    let mut in_zone = BTreeMap::<u16, u64>::new();
+    // 後ろから 2 周たどり、要素ごとに、そこから先で最初の待てる所の区画を求める。
+    let mut next: Option<Option<u16>> = None;
+    for d in (0..2 * n).rev() {
+        let i = d % n;
+        if p[i].wait {
+            next = Some(plan.zone[i]);
+        }
+        if d < n
+            && let Some(Some(z)) = next
+        {
+            *in_zone.entry(z).or_default() += ticks(&p[i]);
+        }
+    }
+    in_zone
+        .iter()
+        .filter_map(|(z, t)| {
+            let q = u64::from(*plan.quota.get(z)?);
+            (q != u64::from(u32::MAX)).then(|| (q * total).div_ceil(*t))
+        })
+        .min()
+        .map_or(MAX_LINE_TRAINS, clamp_cap)
 }
 
 /// 路線の本数の上限と、その内訳。読み取り用で、状態には持たない。
@@ -577,13 +673,35 @@ impl Rail {
     /// コマンド `command`（`CreateLine`、`ExtendLine`、`InsertLineStation`）が `LineStarvesOther` で断られるなら、そのせいで上限が 0 に
     /// なる路線のうち、ID のいちばん小さいもの。断られないコマンドと、路線のコマンドでないものは `None`。状態を変えない。
     pub fn starved_by_command(&self, command: &crate::command::Command) -> Option<LineId> {
+        let (id, path) = self.command_path(command)?;
+        self.starved_by(id, &path)
+    }
+
+    /// コマンド `command`（`CreateLine`、`ExtendLine`、`InsertLineStation`）を受け付けたとしたら上限が下がる、ほかの
+    /// 路線と、その前と後の上限（ID の順）。止まった路線は数えない。`LineStarvesSelf` で断った理由を見せるのに使う。
+    /// 路線のコマンドでないものと、進路を選べないものは空である。状態を変えない。
+    pub fn lowered_by_command(&self, command: &crate::command::Command) -> Vec<(LineId, u8, u8)> {
+        let Some((id, path)) = self.command_path(command) else {
+            return Vec::new();
+        };
+        let plans = self.plans_with(id, &path);
+        self.lines
+            .iter()
+            .filter(|(l, line)| *l != id && !line.stopped && plans[l].cap < line.cap())
+            .map(|(l, line)| (l, line.cap(), plans[&l].cap))
+            .collect()
+    }
+
+    /// 路線のコマンドで進路を変える路線（新しく作る路線なら、作ったときに付く ID）と、変えたあとの進路。
+    /// 路線のコマンドでないものと、駅か路線がないもの、進路を選べないものは `None`。
+    fn command_path(&self, command: &crate::command::Command) -> Option<(LineId, Vec<Step>)> {
         use crate::command::Command;
         match command {
             Command::CreateLine { from, to } => {
                 self.stations.get(*from)?;
                 self.stations.get(*to)?;
                 let path = self.plan(&[*from, *to], false)?;
-                self.starved_by(self.lines.next_id(), &path)
+                Some((self.lines.next_id(), path))
             }
             Command::ExtendLine { line, station } => {
                 let l = self.lines.get(*line)?;
@@ -594,7 +712,7 @@ impl Rail {
                     stations.push(*station);
                 }
                 let path = self.plan(&stations, closes)?;
-                self.starved_by(*line, &path)
+                Some((*line, path))
             }
             Command::InsertLineStation {
                 line,
@@ -610,15 +728,14 @@ impl Rail {
                 let mut stations = l.stations.clone();
                 stations.insert(at, *station);
                 let path = self.plan(&stations, l.looped)?;
-                self.starved_by(*line, &path)
+                Some((*line, path))
             }
             _ => None,
         }
     }
 
-    /// 路線 `id`（新しく作る路線なら、作ったときに付く ID）の進路を `path` にしたとき、上限が 0 でなかったのに
-    /// 0 になるほかの路線のうち、ID のいちばん小さいもの。止まった路線は数えない。
-    fn starved_by(&self, id: LineId, path: &[Step]) -> Option<LineId> {
+    /// 路線 `id`（新しく作る路線なら、作ったときに付く ID）の進路を `path` にしたときの、すべての路線の区分け。
+    fn plans_with(&self, id: LineId, path: &[Step]) -> BTreeMap<LineId, LinePlan> {
         let input: Vec<(LineId, &[Step], bool)> = self
             .lines
             .iter()
@@ -626,12 +743,41 @@ impl Rail {
             .map(|(l, line)| (l, line.path.as_slice(), line.stopped))
             .chain([(id, path, false)])
             .collect();
-        let plans = make_plans(&input);
+        make_plans(&input)
+    }
+
+    /// 区分けを `plans` にしたとき、上限が 0 でなかったのに 0 になる、路線 `id` のほかの路線のうち、ID のいちばん
+    /// 小さいもの。止まった路線は数えない。
+    fn starved_in(&self, id: LineId, plans: &BTreeMap<LineId, LinePlan>) -> Option<LineId> {
         self.lines
             .iter()
             .filter(|(l, _)| *l != id)
             .find(|(l, line)| !line.stopped && line.cap() > 0 && plans[l].cap == 0)
             .map(|(l, _)| l)
+    }
+
+    /// 路線 `id` の進路を `path` にしたとき、上限が 0 になるほかの路線のうち、ID のいちばん小さいもの。
+    fn starved_by(&self, id: LineId, path: &[Step]) -> Option<LineId> {
+        self.starved_in(id, &self.plans_with(id, path))
+    }
+
+    /// 路線 `id` の進路を `path` にするのを断る理由。ほかの路線の上限を 0 にするなら `LineStarvesOther`、
+    /// 路線 `id` そのものの上限が 0 で、ほかの路線の上限を下げるなら `LineStarvesSelf` である。後者は、作っても
+    /// 走らない路線のために、ほかの路線の列車が消えるだけで、遊ぶ人に得がない。
+    fn deny_path(&self, id: LineId, path: &[Step]) -> Result<(), DenyReason> {
+        let plans = self.plans_with(id, path);
+        if self.starved_in(id, &plans).is_some() {
+            return Err(DenyReason::LineStarvesOther);
+        }
+        let lowers_other = self
+            .lines
+            .iter()
+            .filter(|(l, _)| *l != id)
+            .any(|(l, line)| !line.stopped && plans[&l].cap < line.cap());
+        if plans[&id].cap == 0 && lowers_other {
+            return Err(DenyReason::LineStarvesSelf);
+        }
+        Ok(())
     }
 
     /// すべての路線の待てる所の印と区分け（`LinePlan`）を作り直す。
@@ -862,7 +1008,8 @@ impl Rail {
         self.settle_riders();
     }
 
-    /// 駅 `from` から駅 `to` への路線を作る。ほかの路線の上限を 0 にする（走れなくする）なら断る。
+    /// 駅 `from` から駅 `to` への路線を作る。ほかの路線の上限を 0 にする（走れなくする）か、作る路線の上限が
+    /// 0 なのにほかの路線の上限を下げるなら断る（[`Rail::deny_path`]）。
     pub(crate) fn create_line(
         &mut self,
         from: StationId,
@@ -879,9 +1026,7 @@ impl Rail {
         }
         let stations = vec![from, to];
         let path = self.plan(&stations, false).ok_or(DenyReason::RailNoRoute)?;
-        if self.starved_by(self.lines.next_id(), &path).is_some() {
-            return Err(DenyReason::LineStarvesOther);
-        }
+        self.deny_path(self.lines.next_id(), &path)?;
         let mut line = RailLine {
             stations,
             looped: false,
@@ -898,7 +1043,7 @@ impl Rail {
         Ok(id)
     }
 
-    /// 路線の終点の先に駅を 1 つ足す。最初の駅を指せば環状にする。ほかの路線の上限を 0 にするなら断る。
+    /// 路線の終点の先に駅を 1 つ足す。最初の駅を指せば環状にする。ほかの路線の上限を 0 にするなら断る（[`Rail::deny_path`]）。
     pub(crate) fn extend_line(&mut self, id: LineId, station: StationId) -> Result<(), DenyReason> {
         let line = self.lines.get(id).ok_or(DenyReason::NoSuchLine)?;
         if self.stations.get(station).is_none() {
@@ -918,9 +1063,7 @@ impl Rail {
         let path = self
             .plan(&stations, closes)
             .ok_or(DenyReason::RailNoRoute)?;
-        if self.starved_by(id, &path).is_some() {
-            return Err(DenyReason::LineStarvesOther);
-        }
+        self.deny_path(id, &path)?;
         let line = self.lines.get_mut(id).expect("路線がない");
         line.stations = stations;
         line.looped = closes;
@@ -930,7 +1073,8 @@ impl Rail {
     }
 
     /// 路線の `after_index` 番目の駅の次に駅を挿す。`ExtendLine` と同じく、進路がなければ `RailNoRoute`、
-    /// ほかの路線の上限を 0 にするなら `LineStarvesOther`、駅が上限なら `LineLimit`、すでに入っている駅は `StationInLine` で断る。
+    /// ほかの路線の上限を 0 にするなら `LineStarvesOther`、上限が 0 になる路線でほかの路線の上限を下げるなら
+    /// `LineStarvesSelf`、駅が上限なら `LineLimit`、すでに入っている駅は `StationInLine` で断る。
     /// `after_index` が駅の並びの外なら `NoSuchStation` で断る。環状の路線にも挿せる。
     pub(crate) fn insert_line_station(
         &mut self,
@@ -958,9 +1102,7 @@ impl Rail {
         let path = self
             .plan(&stations, looped)
             .ok_or(DenyReason::RailNoRoute)?;
-        if self.starved_by(id, &path).is_some() {
-            return Err(DenyReason::LineStarvesOther);
-        }
+        self.deny_path(id, &path)?;
         let line = self.lines.get_mut(id).expect("路線がない");
         line.stations = stations;
         self.replace_path(id, path);
