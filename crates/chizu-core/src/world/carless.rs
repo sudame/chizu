@@ -559,13 +559,28 @@ mod tests {
             "車を持てない住民の点が 30 でない"
         );
 
+        // 料金 0 なら高さで下げないので、借りている住民の点は初期値の料金のときより上がる
+        assert_eq!(
+            w.apply(&Command::SetParkingFee { fee: 0 }),
+            ApplyOutcome::Applied
+        );
+        let free = parking_scores(&w);
+        for (id, (r, was)) in rented.iter().filter(|(_, (r, _))| *r) {
+            let (still, now) = free[id];
+            assert!(still && *r);
+            assert!(
+                now > *was,
+                "料金を 0 にしても {id:?} の点が {was} から {now}"
+            );
+        }
+
         // 料金を上げても見直しまでは枠を返さないので、同じ住民が借りたまま点だけが下がる
         assert_eq!(
             w.apply(&Command::SetParkingFee { fee: 20 }),
             ApplyOutcome::Applied
         );
         let raised = parking_scores(&w);
-        for (id, (r, was)) in rented.iter().filter(|(_, (r, _))| *r) {
+        for (id, (r, was)) in free.iter().filter(|(_, (r, _))| *r) {
             let (still, now) = raised[id];
             assert!(still && *r);
             assert!(now < *was, "料金を上げても {id:?} の点が {was} から {now}");
