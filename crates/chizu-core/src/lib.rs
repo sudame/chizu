@@ -48,8 +48,8 @@ pub use network::{
 };
 pub use rail::{
     Block, LineCapacity, LineId, RAIL_BLOCK_MAX_TILES, Rail, RailLine, RailNode, RailNodeId,
-    RailTally, Station, StationId, Step, StepKind, Track, TrackId, Train, TrainId, TrainState,
-    rail_cost,
+    RailTally, ShortSpan, Station, StationId, Step, StepKind, TRAIN_BLOCK_LEN_MM, Track, TrackId,
+    Train, TrainId, TrainState, rail_cost,
 };
 pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, SeqGap, replay};
 pub use rng::{Pcg32, RngPurpose, mix_words, rng};
@@ -59,6 +59,7 @@ pub use state_hash::{StateHash, StateHasher, state_hash_of};
 pub use terrain::{TerrainTiles, is_water, terrain};
 pub use tile::{CHUNK_AREA, CHUNK_SIDE, ChunkCoord, TilePos, TileRect};
 pub use units::{LaneOffset, Mm, MmPerTick, Money, Tick, WorldPos};
+pub use world::CrossingDenial;
 pub use world::carless::{CARLESS_AREA_SIDE, Carless, CarlessArea, CarlessReason, carless_areas};
 pub use world::people::{MigrationOutlook, MigrationTotals};
 pub use world::{

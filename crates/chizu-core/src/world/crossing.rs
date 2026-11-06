@@ -26,6 +26,34 @@ use crate::units::Tick;
 /// 踏切から道路に沿って、交差点と曲がり角のノードを置かない範囲（マス）。
 pub const CROSSING_JUNCTION_GAP: i64 = 2;
 
+/// 踏切の決まりで断った理由と、その場所。断る理由を画面や chizu-cli が説明するための読み取り用で、
+/// 状態には入らない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrossingDenial {
+    pub reason: DenyReason,
+    /// 決まりに当たった踏切（になるはずだった）マス。
+    pub crossing: Option<TilePos>,
+    /// [`DenyReason::CrossingNearJunction`] なら近い交差点か曲がり角のマス、
+    /// [`DenyReason::CrossingTooClose`] なら近いほかの踏切のマス。
+    pub near: Option<TilePos>,
+}
+
+impl CrossingDenial {
+    fn plain(reason: DenyReason) -> Self {
+        Self {
+            reason,
+            crossing: None,
+            near: None,
+        }
+    }
+}
+
+impl From<DenyReason> for CrossingDenial {
+    fn from(reason: DenyReason) -> Self {
+        Self::plain(reason)
+    }
+}
+
 fn heading(step: (i64, i64)) -> Heading {
     Heading::of_step(step).expect("1 歩が 8 方向でない")
 }
@@ -82,7 +110,7 @@ impl World {
         c: TilePos,
         step: (i64, i64),
         line: Option<&Line>,
-    ) -> Result<(), DenyReason> {
+    ) -> Result<(), CrossingDenial> {
         for sign in [1, -1] {
             for d in 1..=CROSSING_JUNCTION_GAP {
                 let t = TilePos::new(c.x + sign * d * step.0, c.y + sign * d * step.1);
@@ -90,7 +118,13 @@ impl World {
                     Some(arms) => match arms.as_slice() {
                         [_] | [] => break,
                         [a, b] if opposite(*a, *b) => {}
-                        _ => return Err(DenyReason::CrossingNearJunction),
+                        _ => {
+                            return Err(CrossingDenial {
+                                reason: DenyReason::CrossingNearJunction,
+                                crossing: Some(c),
+                                near: Some(t),
+                            });
+                        }
                     },
                     None => {
                         let road = self.network.is_road_tile(t)
@@ -105,19 +139,44 @@ impl World {
         Ok(())
     }
 
-    /// マス `c` のまわりの 8 マスに、既にある踏切か、`fresh` の踏切があるか。
-    fn crossing_nearby(&self, c: TilePos, fresh: &[TilePos]) -> bool {
-        (-1..=1).any(|dx| {
-            (-1..=1).any(|dy| {
+    /// マス `c` のまわりの 8 マスにある、既にある踏切か `fresh` の踏切。複数あれば走査の順で最初のもの。
+    fn crossing_nearby(&self, c: TilePos, fresh: &[TilePos]) -> Option<TilePos> {
+        (-1..=1).find_map(|dx| {
+            (-1..=1).find_map(|dy| {
                 let t = TilePos::new(c.x + dx, c.y + dy);
-                (dx, dy) != (0, 0) && (self.rail.is_crossing(t) || fresh.contains(&t))
+                ((dx, dy) != (0, 0) && (self.rail.is_crossing(t) || fresh.contains(&t)))
+                    .then_some(t)
             })
         })
+    }
+
+    /// `command` が踏切の決まりで断られるなら、その理由と場所。踏切の決まりに関わらないコマンドと、
+    /// 断られないコマンドは `None`。状態を変えない。
+    /// 断られたあとの街で呼ぶと、断った決まりに当たったマスが分かる。
+    pub fn crossing_denial(&self, command: &crate::command::Command) -> Option<CrossingDenial> {
+        use crate::command::Command;
+        match command {
+            Command::BuildRoad { from, to, .. } => {
+                let line = Line::between(*from, *to).ok()?;
+                self.check_road_crossings_detailed(&line).err()
+            }
+            Command::BuildRail { from, to } => {
+                let line = Line::between(*from, *to).ok()?;
+                self.check_rail_crossings_detailed(&line).err()
+            }
+            _ => None,
+        }
     }
 
     /// 線路の直線 `line` が道路を横切る所を確かめ、踏切の両隣としてノードを置く歩数を返す。
     /// 道路のマスはまだ確かめていない前提で、踏切にできない横切り方なら理由を返す。
     pub(crate) fn check_rail_crossings(&self, line: &Line) -> Result<BTreeSet<u64>, DenyReason> {
+        self.check_rail_crossings_detailed(line)
+            .map_err(|d| d.reason)
+    }
+
+    /// [`Self::check_rail_crossings`] で、断る場所も返すもの。
+    fn check_rail_crossings_detailed(&self, line: &Line) -> Result<BTreeSet<u64>, CrossingDenial> {
         let ks: Vec<u64> = (0..=line.len)
             .filter(|k| self.network.is_road_tile(line.tile(*k)))
             .collect();
@@ -127,7 +186,7 @@ impl World {
             let seg = self.network.segments_through(c)[0];
             let step = self.network.segment_line(seg).expect("区間がない").step;
             if parallel(step, line.step) {
-                return Err(DenyReason::Occupied);
+                return Err(DenyReason::Occupied.into());
             }
             // 既にある踏切のマスを通ると、そこに線路のノードができる。
             if k == 0
@@ -135,15 +194,19 @@ impl World {
                 || self.network.node_at(c).is_some()
                 || self.rail.is_crossing(c)
             {
-                return Err(DenyReason::NodeOnCrossing);
+                return Err(DenyReason::NodeOnCrossing.into());
             }
             let s = self.network.segment(seg).expect("区間がない");
             if s.kind == crate::network::SegmentKind::Highway {
-                return Err(DenyReason::HighwayCrossing);
+                return Err(DenyReason::HighwayCrossing.into());
             }
             let others: Vec<TilePos> = tiles.iter().copied().filter(|t| *t != c).collect();
-            if self.crossing_nearby(c, &others) {
-                return Err(DenyReason::CrossingTooClose);
+            if let Some(near) = self.crossing_nearby(c, &others) {
+                return Err(CrossingDenial {
+                    reason: DenyReason::CrossingTooClose,
+                    crossing: Some(c),
+                    near: Some(near),
+                });
             }
             self.check_crossing_gap(c, step, None)?;
             extra.insert(k - 1);
@@ -155,6 +218,12 @@ impl World {
     /// 道路の直線 `line` が線路を横切る所を確かめ、踏切になるマスを返す。道路を引いて、既にある踏切の近くに
     /// 交差点か曲がり角ができないことも確かめる。
     pub(crate) fn check_road_crossings(&self, line: &Line) -> Result<Vec<TilePos>, DenyReason> {
+        self.check_road_crossings_detailed(line)
+            .map_err(|d| d.reason)
+    }
+
+    /// [`Self::check_road_crossings`] で、断る場所も返すもの。
+    fn check_road_crossings_detailed(&self, line: &Line) -> Result<Vec<TilePos>, CrossingDenial> {
         let ks: Vec<u64> = (0..=line.len)
             .filter(|k| self.rail.is_rail_tile(line.tile(*k)))
             .collect();
@@ -163,14 +232,18 @@ impl World {
         for (&k, &c) in ks.iter().zip(&tiles) {
             let step = self.rail.rail_step_at(c).expect("線路がない");
             if parallel(step, line.step) {
-                return Err(DenyReason::Occupied);
+                return Err(DenyReason::Occupied.into());
             }
             if k == 0 || k == line.len || self.rail.is_crossing(c) || !self.rail.crossing_fits(c) {
-                return Err(DenyReason::NodeOnCrossing);
+                return Err(DenyReason::NodeOnCrossing.into());
             }
             let others: Vec<TilePos> = tiles.iter().copied().filter(|t| *t != c).collect();
-            if self.crossing_nearby(c, &others) {
-                return Err(DenyReason::CrossingTooClose);
+            if let Some(near) = self.crossing_nearby(c, &others) {
+                return Err(CrossingDenial {
+                    reason: DenyReason::CrossingTooClose,
+                    crossing: Some(c),
+                    near: Some(near),
+                });
             }
             self.check_crossing_gap(c, line.step, Some(line))?;
             fresh.push(c);

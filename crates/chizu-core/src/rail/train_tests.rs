@@ -970,6 +970,19 @@ fn a_line_that_would_starve_another_is_denied() {
         ApplyOutcome::Denied(DenyReason::LineStarvesOther)
     );
     assert_eq!(w.state_hash(), before);
+    // 断る原因の路線を、状態を変えずに読める。
+    let command = Command::CreateLine {
+        from: mid,
+        to: west,
+    };
+    let starved = w.rail().starved_by_command(&command).expect("原因がある");
+    assert!([short, one, two].contains(&starved));
+    assert_eq!(
+        w.rail()
+            .starved_by_command(&Command::RemoveLine { line: short }),
+        None
+    );
+    assert_eq!(w.state_hash(), before);
     run(&mut w, 3_000, 3_000);
 }
 
