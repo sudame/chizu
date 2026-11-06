@@ -65,7 +65,7 @@ observe の sinceLastObserve（前の observe からの増減）:
   new の直後の observe は、new が見た街との増減になる。前の observe がないとき（フィードバックのディレクトリなど）は null で、何も書かない。
 
 observe の buildings.lanes: 行き止まりの私道の脇に一軒家を並べた住宅。低密度の住宅の、間口 2 マスで奥行き 3 マス以上の敷地はすべてこれになる。
-  高密度の住宅では、段階 1〜2 の、間口 2 マスで奥行き 4 マス以上の住宅の一部（25%）がこれになる。
+  高密度の住宅には私道の敷地は建たない（古い保存データに残る高密度の私道の敷地は、通りに面した建物として振る舞う）。
   lots その建物の数、houses その家の数（世帯の数と同じ）。私道は map で = になる。住民と車は私道の入口から出入りする。
 observe の buildings.byZone は区画の大きな種類ごとの建物の数で、Residential は低密度と高密度の和である。
 observe の buildings.residentialByDensity: 住宅を密度で分けた数。high は高密度（PaintZone の Residential）、low は低密度（ResidentialLow）。
