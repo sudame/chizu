@@ -15,6 +15,8 @@
 //!   進んだとして [`CROSSING_WARN_TICKS`] tick 以内に先頭が踏切に着く。駅に止まっている列車と、駅を出るのを
 //!   待つ列車は閉じない。
 //!
+//! 走っている列車は、閉じる見込みに入る前に、踏切を抜けきる先まで押さえておく（[`Rail::wants_crossing_ahead`]）。
+//!
 //! 列車は、閉じてから [`CROSSING_WARN_TICKS`] tick たっていない踏切には入らない（警報が鳴ってから列車が来る）。
 //! 駅を出る列車と、先の閉塞を待って止まっていた列車は、踏切のすぐ手前から走り出せる。こうした列車は、
 //! 走り出すと上の 2 つ目の決まりで踏切を閉じ、閉じてから 16 tick たつまで手前で待つ。閉じた tick は踏切の表に
@@ -57,6 +59,9 @@ pub struct CrossingTally {
     /// 1 回に続けて閉じていた tick のいちばん長い値。
     pub longest_closed: u64,
 }
+
+/// 線路ごとの踏切。列車が先を押さえるときに、押さえ足すかを決めるのに使う。
+pub(super) struct CrossingMap(BTreeMap<super::TrackId, SmallVec<[OnTrack; 2]>>);
 
 /// 線路の上の踏切。
 #[derive(Clone, Copy, Debug)]
@@ -177,6 +182,11 @@ impl Rail {
         }
     }
 
+    /// 線路ごとの踏切。踏切がなければ `None`。
+    pub(super) fn crossing_map(&self) -> Option<CrossingMap> {
+        (!self.crossings.is_empty()).then(|| CrossingMap(self.crossings_by_track()))
+    }
+
     /// 線路ごとの踏切。
     fn crossings_by_track(&self) -> BTreeMap<super::TrackId, SmallVec<[OnTrack; 2]>> {
         let mut out = BTreeMap::<_, SmallVec<[OnTrack; 2]>>::new();
@@ -211,6 +221,16 @@ impl Rail {
         line: &RailLine,
         t: &Train,
     ) -> SmallVec<[Ahead; 2]> {
+        Self::crossings_within(by_track, line, t, 0)
+    }
+
+    /// [`Rail::crossings_near`] に、押さえた範囲の先で、先頭から `beyond` までに始まる要素の踏切を足す。
+    fn crossings_within(
+        by_track: &BTreeMap<super::TrackId, SmallVec<[OnTrack; 2]>>,
+        line: &RailLine,
+        t: &Train,
+        beyond: i64,
+    ) -> SmallVec<[Ahead; 2]> {
         let mut out = SmallVec::new();
         let tail = line.tail(t.pos, t.offset);
         let mut i = t.pos;
@@ -219,8 +239,11 @@ impl Rail {
             i = line.prev(i);
             d -= line.step(i).len;
         }
-        let count = (line.distance(tail, t.pos) + t.ahead).min(line.len() - 1);
-        for _ in 0..=count {
+        let held = line.distance(tail, t.pos) + t.ahead;
+        for k in 0..line.len() {
+            if k > held && d > beyond {
+                break;
+            }
             let s = line.step(i);
             if let Some(list) = by_track.get(&s.track) {
                 for c in list {
@@ -268,6 +291,20 @@ impl Rail {
             }
         }
         closed
+    }
+
+    /// 走っている列車 `t` が、閉じる見込みに入る前に、踏切の先まで押さえ足すべきか。先頭から
+    /// `CROSSING_WARN_TICKS + 1` tick で進める距離のうちに、押さえた範囲では抜けきれない踏切があれば真である。
+    /// 列車は止まりきれる距離の分だけ先を押さえるので、そのままでは踏切に近づいてから閉じることになり、
+    /// 閉じてから 16 tick たつまで踏切の手前で減速してしまう。
+    pub(super) fn wants_crossing_ahead(map: &CrossingMap, line: &RailLine, t: &Train) -> bool {
+        let within = reach(t.speed, CROSSING_WARN_TICKS + 1);
+        let limit = run_limit(line, t);
+        Self::crossings_within(&map.0, line, t, within + NOSE_MM)
+            .iter()
+            .any(|c| {
+                c.near >= NOSE_MM && c.near - NOSE_MM <= within && limit < c.far + BODY_BACK_MM
+            })
     }
 
     /// 走っている列車のうち、踏切の手前で止まる列車と、先頭から止まる所までの距離。止まるのは次の踏切の手前である。

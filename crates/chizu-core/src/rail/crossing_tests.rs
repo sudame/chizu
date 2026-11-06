@@ -207,6 +207,31 @@ fn a_crossing_closes_only_while_a_train_passes() {
     closes_briefly(30);
 }
 
+/// 駅から離れた踏切を通る列車は、踏切のない線路と同じに走る。踏切を閉じる見込みに入る前に先を押さえ、
+/// 閉じてから 16 tick たつ前に着くことがないので、踏切の手前で減速しない。
+#[test]
+fn a_running_train_does_not_slow_down_for_a_crossing() {
+    let run = |cross: bool| {
+        let (mut w, a, b) = crossing_world();
+        if cross {
+            ok(road(&mut w, (30, 0), (30, 20)));
+        }
+        ok(w.apply(&Command::CreateLine { from: a, to: b }));
+        let line = w.rail().lines().next().unwrap().0;
+        ok(w.apply(&Command::SetLineTrains { line, trains: 1 }));
+        let mut speeds = Vec::new();
+        for _ in 0..3_000 {
+            w.step();
+            speeds.extend(w.rail().trains().map(|(_, t)| (t.speed, t.state)));
+        }
+        (speeds, w.rail().crossing_tally())
+    };
+    let (plain, _) = run(false);
+    let (crossed, tally) = run(true);
+    assert!(tally.closures > 5, "{tally:?}");
+    assert_eq!(plain, crossed);
+}
+
 /// 駅の端のすぐ先の踏切も、駅に止まっている列車では閉じたままにならない。
 #[test]
 fn a_crossing_next_to_a_station_does_not_stay_closed() {

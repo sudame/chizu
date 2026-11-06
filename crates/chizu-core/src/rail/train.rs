@@ -591,6 +591,7 @@ impl Rail {
         order.sort_unstable();
         let mut blocked = BTreeMap::new();
         let mut departed = Vec::new();
+        let crossings = self.crossing_map();
         let Rail {
             lines,
             trains,
@@ -672,13 +673,17 @@ impl Rail {
                         let room = line.distance_to_end(t, t.ahead);
                         let need =
                             t.speed * t.speed / (2 * TRAIN_DECEL) + 2 * (t.speed + TRAIN_ACCEL);
-                        if room >= need {
+                        // 踏切は、閉じる見込みに入る前に、抜けきる先まで押さえておく。
+                        let crossing = crossings
+                            .as_ref()
+                            .is_some_and(|c| Rail::wants_crossing_ahead(c, line, t));
+                        if room >= need && !crossing {
                             break;
                         }
                         let next = t.ahead + 1;
                         let got = grant(t, next, line.run_ahead(t.pos, next));
                         r = Some(got);
-                        if got != Reserve::Done {
+                        if got != Reserve::Done || t.ahead < next {
                             break;
                         }
                     }
