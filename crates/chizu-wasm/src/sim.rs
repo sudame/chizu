@@ -815,6 +815,25 @@ impl Sim {
         out
     }
 
+    /// 日の変わり目に画面が控える、乗り降りの積み上げを返す。先頭は待ちきれず歩いた人（積み上げ）、
+    /// 続いて駅ごとに `[添え字, 世代, 乗った人（積み上げ）, 降りた人（積み上げ）]` を並べる。
+    /// [`Sim::rail_stats`] と違って徒歩圏の世帯を数えないので軽い。状態は変えない。
+    pub fn rail_tally(&self) -> Vec<f64> {
+        let rail = self.world.rail();
+        let rides = rail.ride_tally();
+        let mut out = vec![rides.gave_up as f64];
+        for (id, _) in rail.stations() {
+            let (boarded, alighted) = rides.station_counts.get(&id).copied().unwrap_or((0, 0));
+            out.extend([
+                f64::from(id.index),
+                f64::from(id.generation),
+                boarded as f64,
+                alighted as f64,
+            ]);
+        }
+        out
+    }
+
     /// 駅を間口のマス `at` に向き 0〜3 で置いたときの、`[出入口の x, y, 徒歩圏の世帯, そのうち車を持てない世帯]` を、
     /// 向きの順に返す。置けない向きは空にする。駅を置く前の円と世帯の数に使う。状態は変えない。
     pub fn station_probe(&self, at: TilePos) -> [Option<[f64; 4]>; 4] {

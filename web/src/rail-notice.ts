@@ -26,10 +26,16 @@ export const GAVE_UP_MIN_SPAN = TICKS_PER_DAY / 4;
 
 /**
  * 待ちきれずに歩いた人の積み上げから、1 日あたりの数を求める。
- * 直近 1 日の差を取る。見ている長さが短いうちは null にし、tick が戻ったら（読み込み、新しい街）捨てて数え直す。
+ * 直近 1 日の差を取る。見ている長さが短いうちは null にする。別の街になるときは `reset` で捨てて数え直す
+ * （tick も積み上げも前の街より大きい街を開くと、標本だけでは別の街と気づけない）。tick や積み上げが戻ったときも捨てる。
  */
 export class GaveUpWindow {
   #samples: { tick: number; gaveUp: number }[] = [];
+
+  /** 標本を捨てる。別の街（読み込み、新しい街）になるときに呼ぶ。 */
+  reset(): void {
+    this.#samples = [];
+  }
 
   update(tick: number, gaveUp: number): void {
     const last = this.#samples[this.#samples.length - 1];

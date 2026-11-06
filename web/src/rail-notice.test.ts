@@ -180,4 +180,16 @@ describe("1 日あたりの歩いた人の数", () => {
     w.update(100, 0);
     expect(w.perDay()).toBeNull();
   });
+
+  test("reset すると、tick も積み上げも前の街より大きい街の値と混ざらない", () => {
+    const w = new GaveUpWindow();
+    w.update(1000, 0);
+    w.update(1000 + GAVE_UP_MIN_SPAN, 0);
+    // 別の街（tick 1500、歩いた人 500）を開く
+    w.reset();
+    w.update(1500, 500);
+    expect(w.perDay()).toBeNull();
+    w.update(1500 + GAVE_UP_MIN_SPAN, 500);
+    expect(w.perDay()).toBeCloseTo(0);
+  });
 });

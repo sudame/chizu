@@ -125,6 +125,27 @@ describe("その日の乗り降り", () => {
     expect(days.today(first(at(100, 5)))).toEqual({ boarded: 0, alighted: 0 });
   });
 
+  test("reset すると、前の街の控えを引きずらない", () => {
+    const days = new RideDays();
+    days.update(at(1000, 100));
+    // 別の街（tick は大きく、積み上げも多い）を開く
+    days.reset();
+    days.update(at(1500, 900));
+    expect(days.today(first(at(1500, 900)))).toEqual({ boarded: 0, alighted: 0 });
+    expect(days.fullDay).toBe(false);
+  });
+
+  test("日の変わり目の積み上げを起点にすると、日の頭の数が今日に入る", () => {
+    const days = new RideDays();
+    days.update(at(7000, 100));
+    // 日が変わった tick（7200）の値。駅 3.0 は乗った 120、降りた 90
+    days.markDay(7200, [0, 3, 0, 120, 90]);
+    expect(days.fullDay).toBe(true);
+    // 約 1 秒あと（tick 7300）に届いた rail_stats でも、日の頭からの数になる
+    days.update(at(7300, 150));
+    expect(days.today(first(at(7300, 150)))).toEqual({ boarded: 30, alighted: 60 });
+  });
+
   test("控えのない駅は、積み上げの数をそのまま今日の数にする", () => {
     const days = new RideDays();
     days.update(parseRailStats(1000, data([], [])));
