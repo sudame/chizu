@@ -1048,7 +1048,12 @@ fn lines_ending_at_the_same_station_share_its_turns() {
         assert!(u64::from(line.turn_cap()) * turn_share(line) <= TURN_FULL);
         assert!(u64::from(line.turn_cap() + 1) * turn_share(line) > TURN_FULL);
     }
-    assert_eq!(w.rail().line_capacity(first).unwrap().turn_cap, alone[0]);
+    let c = w.rail().line_capacity(first).unwrap();
+    assert_eq!(c.turn_cap, alone[0]);
+    // 折り返せる本数を決めているのは、ホーム 1 つの M である。ほかの路線とホームを分け合っていない。
+    let limit = c.turn_limit.unwrap();
+    assert_eq!((limit.station, limit.platforms), (mid, 1));
+    assert!(limit.shared_with.is_empty());
     // もう一方の路線を本数 0 にしても、折り返せる本数は変わらない。
     ok(w.apply(&Command::SetLineTrains {
         line: second,
@@ -1075,6 +1080,15 @@ fn lines_ending_at_the_same_station_share_its_turns() {
     assert!(a.turn_cap() < alone[0]);
     // W の線路も 2 路線が通るので、W でももう 1 つのホームは使わない。
     assert!(a.plan.alt.iter().all(|x| !x));
+    // 折り返せる本数を決めている終点には、ホームを分け合う路線が出る。
+    let limit = rail.line_capacity(first).unwrap().turn_limit.unwrap();
+    assert_eq!(limit.platforms, 1);
+    assert_eq!(limit.shared_with, vec![third]);
+    // ほかの路線が通らない終点は、ホーム 2 つで折り返す。
+    let (w, line) = short_town(1);
+    let c = w.rail().line_capacity(line).unwrap();
+    assert!(c.turn_cap < c.cap);
+    assert_eq!(c.turn_limit.unwrap().platforms, 2);
 }
 
 /// 本数を多く決めても、列車は終点の手前に並ばず、1 周は見込みの時間で回る（#369）。前は、真ん中の駅で

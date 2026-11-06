@@ -33,6 +33,8 @@ function encode(
     shared?: number[][];
     waitPlaces?: number;
     turnCap?: number;
+    /** 折り返せる本数を決めている終点の [ホームの数, 駅の x, y, 分け合う路線の数]。 */
+    turnLimit?: [number, number, number, number];
   } = {},
 ) {
   const trains = opts.trains ?? 2;
@@ -54,6 +56,7 @@ function encode(
       opts.waitPlaces ?? 4,
       opts.shared?.length ?? 0,
       turnCap,
+      ...(opts.turnLimit ?? [0, 0, 0, 0]),
     ],
     ...[0, 0, 30, 0],
     ...[3, 5, 25, 5],
@@ -154,7 +157,27 @@ describe("路線の一覧", () => {
       canAdd: false,
       warning: "",
     });
-    expect(lineRow(over, () => "").warning).toContain("終点の駅で折り返せる本数まで");
+    expect(lineRow(over, () => "").warning).toContain("終点の駅で折り返せるのは 2 本まで");
+    expect(over.turnLimit).toBeNull();
+  });
+
+  test("走らせる本数を抑えている終点と、そのホームの数と、分け合う路線を出す", () => {
+    const name = (s: { x: number; y: number }) => (s.x === 30 ? "東駅" : "西駅");
+    const [one] = parseLines(
+      encode(0, { trains: 3, cap: 5, turnCap: 2, turnLimit: [1, 30, 0, 1] }),
+    );
+    const [two] = parseLines(encode(0, { trains: 6, cap: 9, turnCap: 4, turnLimit: [2, 0, 0, 0] }));
+    if (!one || !two) throw new Error("読めない");
+    expect(one.turnLimit).toEqual({ platforms: 1, station: { x: 30, y: 0 }, sharedLines: 1 });
+    const w1 = lineRow(one, name).warning;
+    expect(w1).toContain("走らせるのは 2 本");
+    expect(w1).toContain("終点の東駅で折り返せるのは 2 本まで");
+    expect(w1).toContain("着いたホーム 1 つで折り返す");
+    expect(w1).toContain("ほかの路線（1 本）と分け合っている");
+    const w2 = lineRow(two, name).warning;
+    expect(w2).toContain("終点の西駅で折り返せるのは 4 本まで");
+    expect(w2).toContain("ホーム 2 つを交互に使っても足りない");
+    expect(w2).not.toContain("分け合って");
   });
 
   test("上限が 0 の路線と 0 でない路線が混ざった並びを続けて読む", () => {

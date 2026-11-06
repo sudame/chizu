@@ -937,6 +937,19 @@ pub struct LineCapacity {
     pub short_spans: Vec<ShortSpan>,
     /// 終点の駅で折り返せる本数（[`RailLine::turn_cap`]）。走らせる本数はこれまでに抑える。
     pub turn_cap: u8,
+    /// 終点の駅で折り返せる本数が上限より小さいとき、その本数を決めている終点。そうでなければ `None`。
+    pub turn_limit: Option<TurnLimit>,
+}
+
+/// 終点の駅で折り返せる本数（[`RailLine::turn_cap`]）を決めている終点。読み取り用で、状態には持たない。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnLimit {
+    /// 終点の駅。
+    pub station: StationId,
+    /// 列車が折り返せるホームの数（1 か 2）。駅の線路をほかの路線も通る終点は 1 である。
+    pub platforms: u8,
+    /// 同じホームに着いて折り返す、本数 1 以上のほかの路線（ID の順）。このホームの時間を分け合う。
+    pub shared_with: Vec<LineId>,
 }
 
 /// 待てる所になれない短い線路 1 本。端のマスは線路のノードのマスである。
@@ -980,6 +993,51 @@ impl Rail {
             shared_with,
             short_spans: self.short_spans(line),
             turn_cap: line.turn_cap(),
+            turn_limit: self.turn_limit(id),
+        })
+    }
+
+    /// 路線 `id` の終点の駅で折り返せる本数（[`RailLine::turn_cap`]）が上限より小さいとき、その本数を決めている終点。
+    /// 列車をもう 1 本走らせると、ホームを使う割合の和がホームの数を超える終点のうち、進路で先に出てくるものである
+    /// （`turn_caps` と同じ数え方）。
+    fn turn_limit(&self, id: LineId) -> Option<TurnLimit> {
+        let line = self.lines.get(id)?;
+        if line.cap() == 0 || line.turn_cap() >= line.cap() {
+            return None;
+        }
+        // 路線ごとの、列車 1 本が終点の着くホームを使う割合。
+        let share = |l: &RailLine, s: &Step| {
+            (turn_ticks(s.len) * TURN_FULL).div_ceil(l.round_trip_ticks().max(1))
+        };
+        line.path.iter().enumerate().find_map(|(i, s)| {
+            if s.kind != StepKind::Terminal {
+                return None;
+            }
+            let v = vertex(s);
+            let platforms = 1 + u8::from(line.alt_ok(u32::try_from(i).ok()?));
+            let mut load = share(line, s) * (u64::from(line.turn_cap()) + 1);
+            let mut shared_with = Vec::new();
+            for (other, l) in self.lines.iter() {
+                if other == id || l.trains == 0 || l.cap() == 0 {
+                    continue;
+                }
+                let mut uses = false;
+                for t in l.path.iter().filter(|t| t.kind == StepKind::Terminal) {
+                    if vertex(t) == v {
+                        load += share(l, t) * u64::from(l.turn_cap());
+                        uses = true;
+                    }
+                }
+                if uses {
+                    shared_with.push(other);
+                }
+            }
+            let station = s.station?;
+            (load > u64::from(platforms) * TURN_FULL).then_some(TurnLimit {
+                station,
+                platforms,
+                shared_with,
+            })
         })
     }
 

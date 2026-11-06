@@ -985,9 +985,39 @@ fn act_and_observe_show_lowered_caps_and_trains_to_start() {
         ),
     );
     let acted = json(&cli(&["agent", "act", d, &cmds]));
-    for r in acted["results"].as_array().unwrap() {
+    let results = acted["results"].as_array().unwrap();
+    for r in results {
         assert_eq!(r["outcome"], "Applied", "{acted}");
     }
+    // 本数を 3 にした路線は、終点の駅で折り返せる 2 本に抑えられ、そのことと終点が turnCappedLines に出る。
+    // a–m を決めているのは、m の駅の線路を m–e も通るので着いたホーム 1 つで折り返す m である。
+    let set: Vec<&serde_json::Value> = results
+        .iter()
+        .filter(|r| r["type"] == "SetLineTrains")
+        .collect();
+    assert_eq!(set.len(), 3, "{acted}");
+    for (k, r) in set.iter().enumerate() {
+        let capped = r["turnCappedLines"].as_array().unwrap();
+        assert_eq!(capped.len(), 1, "{r}");
+        let c = &capped[0];
+        assert_eq!(
+            c["line"],
+            serde_json::json!({"index": k, "generation": 0}),
+            "{r}"
+        );
+        assert_eq!(c["trains"], 3, "{r}");
+        assert_eq!(c["allowed"], 2, "{r}");
+        assert_eq!(c["turnCap"], 2, "{r}");
+        assert_eq!(c["turnCapBefore"], 2, "{r}");
+        assert_eq!(c["turnLimit"]["platforms"], 1, "{r}");
+        assert_eq!(c["turnLimit"]["sharedWith"], serde_json::json!([]), "{r}");
+    }
+    assert_eq!(
+        set[0]["turnCappedLines"][0]["turnLimit"]["station"],
+        serde_json::json!({"index": 1, "generation": 0})
+    );
+    // 抑えが変わらないコマンドの結果には出ない。
+    assert!(results[0].get("turnCappedLines").is_none(), "{acted}");
     cli(&["agent", "advance", d, "600"]);
     // a–f は 4 本で区画の枠を分けて自分の分け前が 0 になり、ほかの 3 本の cap を 1 に下げるので断る。
     let cmds = write(
@@ -1018,6 +1048,7 @@ fn act_and_observe_show_lowered_caps_and_trains_to_start() {
     for l in lines {
         assert_eq!(l["turnCap"], 2, "{o}");
         assert_eq!(l["running"], 2, "{o}");
+        assert_eq!(l["turnLimit"]["platforms"], 1, "{o}");
     }
     // m–e を本数 0 にしても、ほかの路線の turnCap は変わらない。m–e の列車が終点で消えたあとに本数を戻すと、
     // 走らせる本数に足りない分が toStart に出て、最初の駅から 1 本ずつ出直す。
