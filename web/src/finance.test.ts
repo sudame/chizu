@@ -26,9 +26,7 @@ import { FINANCE_LENGTH, isWorkerToMain } from "./protocol/messages.ts";
 const SAMPLE = [
   300, 100, 120, 100, 0, 1_000, 400, 300, 0, 180, 1_200, 0, 96, 10, 50, 120, 24, 5, 20, 60,
 ];
-const DEFICIT = [
-  300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0, 96, 10, 50, 0, 0, 5, 20, 0,
-];
+const DEFICIT = [300, 100, 100, 100, 100, 0, 0, 0, 0, 180, 1_200, 0, 96, 10, 50, 0, 0, 5, 20, 0];
 
 describe("parseFinance", () => {
   it("長さの違う配列は読まない", () => {
