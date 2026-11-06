@@ -395,6 +395,122 @@ mod car_tests {
             "車を持つ世帯が {percent}%"
         );
     }
+
+    /// 停めてある世帯の車は、停めた駐車場から出る。出発の建物の前へ移って出ることはない。
+    /// 車が車線に入った位置は、停めてあった駐車場の建物の正面のマスの近くにある。
+    #[test]
+    fn cars_leave_from_the_lot_they_are_parked_in() {
+        use crate::id::{BuildingId, HouseholdId, TripId};
+        use crate::movement::{HouseholdCar, LotId};
+        use crate::network::{LaneMode, TILE_MM};
+        use std::collections::BTreeMap;
+
+        let mut w = city(&[
+            ZoneKind::Residential,
+            ZoneKind::Industrial,
+            ZoneKind::Commercial,
+        ]);
+        run_days(&mut w, 1);
+        let mut prev: BTreeMap<HouseholdId, Option<HouseholdCar>> = BTreeMap::new();
+        // 建物の駐車場から出した車の移動と、その建物。車線に入るまで覚える。
+        let mut leaving: BTreeMap<TripId, BuildingId> = BTreeMap::new();
+        let (mut checked, mut walked_to_car) = (0, 0);
+        for _ in 0..2 * crate::clock::TICKS_PER_DAY {
+            w.step();
+            let p = w.population();
+            let mut next = BTreeMap::new();
+            for h in p.household_ids() {
+                let car = w.trips().household_car(h);
+                if let (
+                    Some(Some(HouseholdCar::Parked {
+                        lot: LotId::Building(b),
+                        ..
+                    })),
+                    Some(HouseholdCar::InUse(t)),
+                ) = (prev.get(&h), car)
+                {
+                    leaving.insert(t, *b);
+                }
+                next.insert(h, car);
+            }
+            prev = next;
+            leaving.retain(|t, b| {
+                let Some(trip) = w.trips().get(*t) else {
+                    return false;
+                };
+                let Some(lot) = w.buildings().get(*b) else {
+                    return false;
+                };
+                let at = trip.position().world();
+                let tile = |v: i64| v.div_euclid(TILE_MM);
+                let d = |x: i64, y: i64| {
+                    (tile(x) - lot.front.x)
+                        .abs()
+                        .max((tile(y) - lot.front.y).abs())
+                };
+                if trip.mode() != LaneMode::Car {
+                    if d(at.x.0, at.y.0) > 8 {
+                        walked_to_car += 1;
+                    }
+                    return true;
+                }
+                checked += 1;
+                assert!(
+                    d(at.x.0, at.y.0) <= 8,
+                    "建物 {b:?} に停めてあった車が、離れた所から車線に入った"
+                );
+                false
+            });
+        }
+        assert!(checked > 50, "確かめた車が少ない: {checked}");
+        assert!(walked_to_car > 0, "車まで歩いて乗った住民がいない");
+    }
+
+    /// 車で店に寄った住民は、店から家が近くても車で帰る。夜に家にいる住民の車が、店の駐車場に残らない。
+    #[test]
+    fn shoppers_drive_their_car_home() {
+        use crate::citizens::Activity;
+        use crate::movement::{HouseholdCar, LotId};
+
+        let mut w = city(&[
+            ZoneKind::Residential,
+            ZoneKind::Industrial,
+            ZoneKind::Commercial,
+        ]);
+        let (mut nights, mut left, mut driven_home) = (0, 0, 0);
+        let before = w.trips().parking_tally().drives;
+        while w.tick().0 < 4 * crate::clock::TICKS_PER_DAY {
+            w.step();
+            if w.tick().0 % crate::clock::TICKS_PER_DAY != 600 {
+                continue;
+            }
+            nights += 1;
+            let p = w.population();
+            for h in p.household_ids() {
+                let Some(HouseholdCar::Parked {
+                    lot: LotId::Building(b),
+                    by,
+                }) = w.trips().household_car(h)
+                else {
+                    continue;
+                };
+                let shop = w
+                    .buildings()
+                    .get(b)
+                    .is_some_and(|b| b.zone.kind() == ZoneKind::Commercial);
+                let row = p.citizen(by).unwrap();
+                let home = row.schedule.next == Activity::Work && row.trip.is_none();
+                if shop && home && row.workplace != Some(b) {
+                    left += 1;
+                }
+                driven_home += u32::from(p.home(h).flatten() == Some(b));
+            }
+        }
+        assert_eq!(nights, 4);
+        assert!(w.trips().parking_tally().drives > before);
+        assert!(driven_home > 20, "家に停めてある車が少ない: {driven_home}");
+        assert_eq!(left, 0, "家にいる住民の車が店に残っている");
+    }
 }
 
 #[cfg(test)]

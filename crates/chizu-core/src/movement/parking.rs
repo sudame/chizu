@@ -347,6 +347,27 @@ pub(super) fn lot_exists(lot: LotId, buildings: &Buildings, facilities: &[Facili
     }
 }
 
+/// 駐車場 `lot` が、建物 `from` から歩いて車を取りに行ける近さにあるか。どちらの正面のマスも、
+/// [`PARK_RADIUS`] マスの中（縦と横の大きいほうの差）にあるときである。建物 `from` の駐車場はいつも近い。
+pub(super) fn lot_near(
+    lot: LotId,
+    from: BuildingId,
+    buildings: &Buildings,
+    facilities: &[Facility],
+) -> bool {
+    if lot == LotId::Building(from) {
+        return true;
+    }
+    let Some(at) = buildings.get(from).map(|b| b.front) else {
+        return false;
+    };
+    let front = match lot {
+        LotId::Building(b) => buildings.get(b).map(|b| b.front),
+        LotId::Shared(c) | LotId::Rented(c) => shared_facility(facilities, c).map(|f| f.front),
+    };
+    front.is_some_and(|f| f.x.abs_diff(at.x).max(f.y.abs_diff(at.y)) <= PARK_RADIUS)
+}
+
 /// 建物ごとの駐車場と、共同の駐車場ごとの台数。どの台数も 0 の駐車場は持たない。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Parking {
@@ -1063,7 +1084,8 @@ impl Trips {
     /// [`Trips::spawn_drive`] と同じだが、停めてある車を出す駐車場を `take` で決め、運転する人の世帯の枠のある
     /// 駐車場と家を `(own, home)` で渡す。`take` が `None` ならどの駐車場からも出さない。
     ///
-    /// 車が共同の駐車場から出るときは、出発の建物の出入口からその駐車場の出入りの位置まで歩いて乗る。
+    /// 車が共同の駐車場か、出発の建物でない建物の駐車場から出るときは、出発の建物の出入口からその駐車場の
+    /// 出入りの位置まで歩いて乗る。車は停めてあった駐車場から出て、出発の建物の前へ移らない。
     /// 共同の駐車場の枠を借りた世帯の車がまだどこにもなく、家から出るときは、借りた枠から車が出る。
     #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_drive_taking(
@@ -1083,9 +1105,17 @@ impl Trips {
             Some(LotId::Rented(c)) if home == Some(from) => Some(LotId::Rented(c)),
             _ => None,
         });
-        let origin = match start.and_then(LotId::shared_corner) {
-            Some(c) => facility_spot(net, shared_facility(facilities, c)?)?,
-            None => reachable_lot_spot(net, router, from_b, buildings.seed())?,
+        // 車は停めてある駐車場から出る。出発の建物の駐車場でなければ、出入口からその駐車場まで歩いて乗る。
+        let origin = match start {
+            Some(LotId::Shared(c) | LotId::Rented(c)) => {
+                facility_spot(net, shared_facility(facilities, c)?)?
+            }
+            Some(LotId::Building(b)) if b != from => {
+                reachable_lot_spot(net, router, buildings.get(b)?, buildings.seed())?
+            }
+            Some(LotId::Building(_)) | None => {
+                reachable_lot_spot(net, router, from_b, buildings.seed())?
+            }
         };
         let dest = building_spot(net, buildings.get(to)?)?;
         let took = take.filter(|lot| self.parking.unpark(*lot));
