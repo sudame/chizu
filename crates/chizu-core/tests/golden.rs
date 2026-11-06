@@ -1448,10 +1448,11 @@ fn rail_lines_cover_the_trains() {
     let mut world = s.start();
     let stats = replay(&mut world, &s.log, 1_400);
     assert_eq!((stats.applied, stats.denied), (6, 0), "{stats:?}");
-    // 駅 2 つの短い往復は、行き詰まりを防ぐ上限（3 本）より少ない、終点で折り返せる本数（2 本）までに抑える。
+    // 駅 2 つの短い往復は、両端の駅のホーム 2 つに列車が入れるので、行き詰まりを防ぐ上限も、終点で折り返せる
+    // 本数も 5 本で、決めた 4 本が走る（#371）。
     let line = world.rail().lines().next().unwrap().1;
-    assert_eq!((line.cap(), line.turn_cap()), (3, 2));
-    assert_eq!(world.rail().train_count(), 2);
+    assert_eq!((line.cap(), line.turn_cap()), (5, 5));
+    assert_eq!(world.rail().train_count(), 4);
     replay(&mut world, &s.log, 700);
     assert_eq!(world.rail().train_count(), 1);
     // 分岐を引いて線路が分かれても、列車は消えない。駅の線路 2 つと、分けた 2 本と分岐の 1 本である。

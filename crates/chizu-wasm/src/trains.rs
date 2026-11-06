@@ -41,9 +41,12 @@ pub fn line_color(index: u32) -> u32 {
 }
 
 /// 進路の要素 `i` の、入るところから `s`（mm）進んだ点の位置（マス、ワールド座標）と、進む向きの角度。
-/// 左側通行に合わせて、進む向きの左へ [`LANE_OFFSET`] ずらす。
-fn point_on(world: &World, line: &RailLine, i: usize, s: i64) -> (f64, f64, f64) {
+/// 左側通行に合わせて、進む向きの左へ [`LANE_OFFSET`] ずらす。終点の駅で、列車が押さえるホーム
+/// （[`RailLine::lane`]）が進む向きと逆の線なら、右へずらす。その場で折り返した列車を、着いたホームに描くためである。
+fn point_on(world: &World, line: &RailLine, train: &Train, i: usize, s: i64) -> (f64, f64, f64) {
     let step = &line.path[i];
+    let (_, lane) = line.lane(i as u32, train.bays);
+    let side = if lane == step.dir { 1.0 } else { -1.0 };
     let track = world
         .rail()
         .track_line(step.track)
@@ -64,8 +67,8 @@ fn point_on(world: &World, line: &RailLine, i: usize, s: i64) -> (f64, f64, f64)
     // 画面は y が下向きなので、東へ進むときの左（北）は (0, -1) になる
     let (lx, ly) = (uy, -ux);
     (
-        ax + dx * t + lx * LANE_OFFSET,
-        ay + dy * t + ly * LANE_OFFSET,
+        ax + dx * t + lx * LANE_OFFSET * side,
+        ay + dy * t + ly * LANE_OFFSET * side,
         uy.atan2(ux),
     )
 }
@@ -78,13 +81,13 @@ fn car_point(world: &World, line: &RailLine, train: &Train, behind: i64) -> (f64
     let mut rest = behind;
     for _ in 0..=n {
         if rest <= s {
-            return point_on(world, line, i, s - rest);
+            return point_on(world, line, train, i, s - rest);
         }
         rest -= s;
         i = (i + n - 1) % n;
         s = line.path[i].len;
     }
-    point_on(world, line, i, 0)
+    point_on(world, line, train, i, 0)
 }
 
 /// いま閉じている踏切のマスを、マスの順に返す。車両と同じ枠に書いて、列車の位置と食い違わないようにする。

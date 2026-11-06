@@ -1030,39 +1030,51 @@ fn turn_share(line: &RailLine) -> u64 {
         .div_ceil(line.round_trip_ticks())
 }
 
-/// 乗り換えの駅を終点にする 2 路線は、その駅で折り返せる本数を分け合う（#369）。本数を上限より多く決めても、
-/// 走らせる本数は折り返せる本数までである。
+/// 乗り換えの駅を終点にする 2 路線は、列車が着いたホームで折り返すので、駅の別々のホームを使い、折り返せる本数を
+/// 分け合わない（#371）。同じホームに着いて折り返す路線（同じ駅の組を結ぶ 2 路線）は、そのホームの時間を分け合う
+/// （#369）。本数を上限より多く決めても、走らせる本数は折り返せる本数までである。
 #[test]
 fn lines_ending_at_the_same_station_share_its_turns() {
-    let (mut w, [first, second], _) = transfer_town(6);
-    let rail = w.rail();
-    let (a, b) = (rail.line(first).unwrap(), rail.line(second).unwrap());
-    // 真ん中の駅を、2 路線の列車がそれぞれ 1 周に 1 度ずつ使う。割合の和は 1 を超えず、1 本足すと超える。
-    let used = u64::from(a.turn_cap()) * turn_share(a) + u64::from(b.turn_cap()) * turn_share(b);
-    assert!(used <= crate::rail::line::TURN_FULL, "{used}");
-    assert!(used + turn_share(a).min(turn_share(b)) > crate::rail::line::TURN_FULL);
-    // ID の順に 1 本ずつ配るので、余りは先の路線に行く。
-    assert_eq!((a.turn_cap(), b.turn_cap()), (2, 1));
-    assert!(a.cap() > a.turn_cap() && b.cap() > b.turn_cap());
-    assert_eq!((a.allowed(), b.allowed()), (2, 1));
-    assert_eq!(rail.line_capacity(first).unwrap().turn_cap, 2);
-    // 本数 0 の路線は駅の時間を使わないので、もう一方の路線は 3 本まで折り返せる。本数 0 の路線には、
-    // 走らせたとしたら配られる本数を見せる。
+    use crate::rail::line::TURN_FULL;
+    let (mut w, [first, second], [west, mid, _]) = transfer_town(6);
+    let caps = |w: &World| [first, second].map(|l| w.rail().line(l).unwrap().turn_cap());
+    let alone = caps(&w);
+    // 真ん中の駅 M では、どちらの路線もホーム 1 つで折り返す。M の線路はもう一方の路線も通るので、もう 1 つの
+    // ホームは使わない。折り返せる本数は、ホーム 1 つの時間に収まる数である。
+    for l in [first, second] {
+        let line = w.rail().line(l).unwrap();
+        assert!(line.cap() > line.turn_cap());
+        assert_eq!(line.allowed(), line.turn_cap());
+        assert!(u64::from(line.turn_cap()) * turn_share(line) <= TURN_FULL);
+        assert!(u64::from(line.turn_cap() + 1) * turn_share(line) > TURN_FULL);
+    }
+    assert_eq!(w.rail().line_capacity(first).unwrap().turn_cap, alone[0]);
+    // もう一方の路線を本数 0 にしても、折り返せる本数は変わらない。
     ok(w.apply(&Command::SetLineTrains {
         line: second,
         trains: 0,
     }));
-    let rail = w.rail();
-    assert_eq!(rail.line(first).unwrap().turn_cap(), 3);
-    assert_eq!(rail.line(second).unwrap().turn_cap(), 1);
-    // 走らせ直すと、もう一方の路線の折り返せる本数は戻る。
+    assert_eq!(caps(&w), alone);
+    // 同じ駅 W と M を結ぶ路線を足すと、W と M の同じホームの時間を分け合う。本数 0 のうちは、走らせたとしたら
+    // 配られる本数を見せ、前からある路線の本数は変えない。
+    ok(w.apply(&Command::CreateLine {
+        from: west,
+        to: mid,
+    }));
+    let third = w.rail().lines().last().unwrap().0;
+    assert_eq!(caps(&w)[0], alone[0]);
     ok(w.apply(&Command::SetLineTrains {
-        line: second,
+        line: third,
         trains: 6,
     }));
     let rail = w.rail();
-    assert_eq!(rail.line(first).unwrap().turn_cap(), 2);
-    assert_eq!(rail.line(second).unwrap().turn_cap(), 1);
+    let (a, c) = (rail.line(first).unwrap(), rail.line(third).unwrap());
+    let used = u64::from(a.turn_cap()) * turn_share(a) + u64::from(c.turn_cap()) * turn_share(c);
+    assert!(used <= TURN_FULL, "{used}");
+    assert!(used + turn_share(a).min(turn_share(c)) > TURN_FULL);
+    assert!(a.turn_cap() < alone[0]);
+    // W の線路も 2 路線が通るので、W でももう 1 つのホームは使わない。
+    assert!(a.plan.alt.iter().all(|x| !x));
 }
 
 /// 本数を多く決めても、列車は終点の手前に並ばず、1 周は見込みの時間で回る（#369）。前は、真ん中の駅で
@@ -1071,7 +1083,12 @@ fn lines_ending_at_the_same_station_share_its_turns() {
 fn many_trains_do_not_queue_before_a_shared_terminal() {
     let (mut w, lines, _) = transfer_town(6);
     run(&mut w, crate::TICKS_PER_DAY);
-    assert_eq!(w.rail().train_count(), 3);
+    let allowed: usize = lines
+        .iter()
+        .map(|id| usize::from(w.rail().line(*id).unwrap().allowed()))
+        .sum();
+    assert!(allowed < 12, "{allowed}");
+    assert_eq!(w.rail().train_count(), allowed);
     for id in lines {
         let l = w.rail().line(id).unwrap();
         assert!(
@@ -1080,5 +1097,69 @@ fn many_trains_do_not_queue_before_a_shared_terminal() {
             l.measured_round_trip_ticks(),
             l.round_trip_ticks()
         );
+    }
+}
+
+/// 乗り換えの街の西の半分（駅 W と M）だけを、本数 `trains` の往復の路線で結んだ街。
+fn short_town(trains: u8) -> (World, LineId) {
+    let (mut w, s) = street_town(5, &[-140, -5], &[(-131, -5)]);
+    ok(w.apply(&Command::CreateLine {
+        from: s[0],
+        to: s[1],
+    }));
+    let line = w.rail().lines().next().unwrap().0;
+    ok(w.apply(&Command::SetLineTrains { line, trains }));
+    (w, line)
+}
+
+/// 終点の駅で折り返せる本数（#369、#371）を測る。乗り換えの街（[`transfer_town`]）と、その西の半分だけの短い往復の
+/// 路線（[`short_town`]）と、住宅と工場を結ぶ長い往復の路線（[`rail_town`]）で、決めた本数ごとに、走る本数、4 日目からの 3 日の駅を出た数、乗った人（乗り換えを
+/// 1 人に数える）、通勤の時間の中央値、いちばん重い 1 tick の時間を出す。
+/// `cargo test -p chizu-core --release measure_turns -- --ignored --nocapture` で回す。
+#[test]
+#[ignore]
+fn measure_turns() {
+    for name in ["transfer", "short", "long"] {
+        for trains in [1, 2, 3, 4, 6, 8, 16] {
+            let mut w = match name {
+                "transfer" => transfer_town(trains).0,
+                "short" => short_town(trains).0,
+                _ => rail_town(5, trains).0,
+            };
+            for _ in 0..3 * crate::TICKS_PER_DAY {
+                w.step();
+            }
+            let before = w.rail().ride_tally().clone();
+            let mut departures = 0_u64;
+            let mut worst = std::time::Duration::ZERO;
+            for _ in 0..3 * crate::TICKS_PER_DAY {
+                let now = w.tick().0;
+                let t0 = std::time::Instant::now();
+                w.step();
+                worst = worst.max(t0.elapsed());
+                departures += w
+                    .rail()
+                    .lines()
+                    .map(|(_, l)| l.departed.values().filter(|t| **t == now).count() as u64)
+                    .sum::<u64>();
+            }
+            let t = w.rail().ride_tally();
+            let running: Vec<String> = w
+                .rail()
+                .lines()
+                .map(|(id, l)| {
+                    let n = w.rail().trains().filter(|(_, x)| x.line == id).count();
+                    format!("{n}/{}/{}/{}", l.allowed(), l.cap(), l.turn_cap())
+                })
+                .collect();
+            println!(
+                "RESULT {name} trains {trains} running(n/allowed/cap/turn) {} departures {departures} riders {} commute_med {:?} worst_tick_us {} deadlock {}",
+                running.join(" "),
+                (t.boarded - before.boarded) - (t.transfers - before.transfers),
+                w.commute_times().median_seconds,
+                worst.as_micros(),
+                w.rail().tally().deadlock,
+            );
+        }
     }
 }
