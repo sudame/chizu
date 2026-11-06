@@ -1296,3 +1296,56 @@ fn settle_does_not_remove_more_trains_than_needed() {
 }
 
 mod ring;
+
+/// 共有の区画の枠を分けきれず上限が 0 になっていた路線は、ほかの路線を消せば、上限が戻る。
+#[test]
+fn removing_a_line_restores_the_cap_of_a_starved_line() {
+    let (mut w, [west, mid, _, _]) = two_line_world();
+    let ids: Vec<LineId> = (0..4).map(|_| line_through(&mut w, &[west, mid])).collect();
+    assert_eq!(w.rail().line(ids[3]).unwrap().cap(), 0);
+    ok(&mut w, Command::RemoveLine { line: ids[0] });
+    assert!(w.rail().line(ids[3]).unwrap().cap() > 0);
+    assert!(w.rail().line_capacity(ids[3]).unwrap().cap > 0);
+}
+
+/// 路線と線路のコマンドをどう打っても、路線の上限は、書き出して読み戻して求め直した上限と同じになる
+/// （求め直し忘れがない）。
+#[test]
+fn line_caps_always_match_a_fresh_plan() {
+    for seed in 0..60u64 {
+        let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let (mut w, st) = two_line_world();
+        let mut ids: Vec<LineId> = Vec::new();
+        for step in 0..30 {
+            let cmd = match r.below(5) {
+                0 | 1 => Command::CreateLine {
+                    from: st[r.below(4) as usize],
+                    to: st[r.below(4) as usize],
+                },
+                2 if !ids.is_empty() => Command::ExtendLine {
+                    line: ids[r.below(ids.len() as u64) as usize],
+                    station: st[r.below(4) as usize],
+                },
+                3 if !ids.is_empty() => Command::RemoveLine {
+                    line: ids[r.below(ids.len() as u64) as usize],
+                },
+                _ => Command::Bulldoze {
+                    area: TileRect::from_corners(
+                        at(r.below(80) as i64, 8),
+                        at(r.below(80) as i64, 8),
+                    ),
+                },
+            };
+            let _ = w.apply(&cmd);
+            ids = w.rail().lines().map(|(i, _)| i).collect();
+            let c = World::from_snapshot(&w.to_snapshot()).unwrap();
+            for (id, l) in w.rail().lines() {
+                assert_eq!(
+                    l.cap(),
+                    c.rail().line(id).unwrap().cap(),
+                    "seed {seed} step {step} {cmd:?}"
+                );
+            }
+        }
+    }
+}
