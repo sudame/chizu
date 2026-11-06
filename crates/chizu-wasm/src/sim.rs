@@ -644,7 +644,9 @@ impl Sim {
 
     /// 路線を、1 路線につき
     /// `[添え字, 世代, 環状か, 決めた本数, 本数の上限, 走らせる本数, 止まっているか, 運転間隔(tick。なければ 0), 1 周の見込み(tick),
-    /// 駅の数, 線路の数]` の 11 個の数に、駅ごとの `[敷地の min の x, y]` と、線路ごとの `[a の x, y, b の x, y]` を続けて返す。
+    /// 駅の数, 線路の数, 待てる所の数, 理由に挙げる路線の数]` の 13 個の数に、駅ごとの `[敷地の min の x, y]` と、
+    /// 線路ごとの `[a の x, y, b の x, y]` と、理由に挙げる路線ごとの `[添え字, 世代]` を続けて返す。
+    /// 理由に挙げる路線は、上限が 0 の路線が進路を共有するほかの路線である。上限が 0 でなければ 0 本にする。
     /// 線路は進路に出てくるものを、重ならないよう最初に出てきた順に並べる。駅は路線の順である。
     /// 路線の添え字と世代は、路線のコマンドで路線を指すのにそのまま使う。
     pub fn rail_lines(&self) -> Vec<f64> {
@@ -667,6 +669,12 @@ impl Sim {
                 .filter_map(|s| rail.station(*s))
                 .map(|st| [st.area.min.x, st.area.min.y])
                 .collect();
+            let capacity = rail.line_capacity(id).expect("路線がある");
+            let shared: &[chizu_core::LineId] = if capacity.cap == 0 {
+                &capacity.shared_with
+            } else {
+                &[]
+            };
             out.extend([
                 f64::from(id.index),
                 f64::from(id.generation),
@@ -679,9 +687,16 @@ impl Sim {
                 line.round_trip_ticks() as f64,
                 stations.len() as f64,
                 tracks.len() as f64,
+                capacity.wait_places as f64,
+                shared.len() as f64,
             ]);
             out.extend(stations.iter().flatten().map(|v| *v as f64));
             out.extend(tracks.iter().flatten().map(|v| *v as f64));
+            out.extend(
+                shared
+                    .iter()
+                    .flat_map(|l| [f64::from(l.index), f64::from(l.generation)]),
+            );
         }
         out
     }
@@ -1609,6 +1624,46 @@ mod tests {
         assert_eq!(cost, 0);
         assert_eq!(sim.world().money(), money);
         assert_eq!(sim.world().rail().tracks().count(), 0);
+    }
+
+    #[test]
+    fn rail_lines_carry_the_wait_places_and_no_reason_when_the_cap_is_positive() {
+        let world =
+            World::new_with_money(0, chizu_core::Money(1_000_000_000)).with_unlimited_land();
+        let mut sim = Sim::from_parts(world, CommandLog::new());
+        sim.submit(road((0, 10), (70, 10))).unwrap();
+        for x in [12, 62] {
+            sim.submit(Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: TilePos::new(x, 9),
+                rotation: 2,
+            })
+            .unwrap();
+        }
+        sim.submit(Command::BuildRail {
+            from: TilePos::new(12, 8),
+            to: TilePos::new(53, 8),
+        })
+        .unwrap();
+        let ids: Vec<_> = sim.world().rail().stations().map(|(id, _)| id).collect();
+        sim.submit(Command::CreateLine {
+            from: ids[0],
+            to: ids[1],
+        })
+        .unwrap();
+        let data = sim.rail_lines();
+        let (id, line) = {
+            let rail = sim.world().rail();
+            let (id, line) = rail.lines().next().unwrap();
+            (id, line.cap())
+        };
+        let c = sim.world().rail().line_capacity(id).unwrap();
+        assert!(line > 0);
+        // 見出しの 12 番目が待てる所の数、13 番目が理由に挙げる路線の数
+        assert_eq!(data[11], c.wait_places as f64);
+        assert_eq!(data[12], 0.0);
+        // 見出し 13 個、駅 2 つ、線路 n 本のあとに理由の路線が続かない
+        assert_eq!(data.len(), 13 + 4 + data[10] as usize * 4);
     }
 
     #[test]

@@ -29,13 +29,22 @@ export type LineRow = {
   canSubtract: boolean;
 };
 
+/** 上限が 0 の理由の文。ほかの路線と進路を共有しているか、待てる所が足りないかを言う。 */
+export function capZeroReason(line: RailLineInfo): string {
+  const names = line.sharedWith.map((l) => lineName(l.index)).join("、");
+  if (names !== "") {
+    return `この路線は${names}と進路を共有していて、待てる所が足りないので走れない（待てる所 ${line.waitPlaces}、2 つ以上いる）`;
+  }
+  return `待てる所が足りないので走れない（待てる所 ${line.waitPlaces}、2 つ以上いる）`;
+}
+
 /** 路線 1 本の一覧の行に出す文。 */
 export function lineRow(line: RailLineInfo, nameOf: (station: Tile) => string): LineRow {
   let warning = "";
   if (line.stopped) {
     warning = "止まっている（線路がつながっていない）";
   } else if (line.cap === 0) {
-    warning = "列車を走らせられない（本数の上限が 0）";
+    warning = `列車を走らせられない（本数の上限が 0）。${capZeroReason(line)}`;
   } else if (line.trains > line.allowed) {
     warning = `決めた本数 ${line.trains} のうち、走らせるのは ${line.allowed} 本`;
   }
