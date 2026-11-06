@@ -28,7 +28,7 @@ import {
   trackLotShortage,
 } from "./growth-notice.ts";
 import { setupHudPanel, trackHeight } from "./hud-panel.ts";
-import { applyInspectReply, setupInspector } from "./inspector.ts";
+import { applyInspectReply, type InspectView, setupInspector } from "./inspector.ts";
 import { renderLegend } from "./legend.ts";
 import { renderLines } from "./line-panel.ts";
 import {
@@ -166,6 +166,14 @@ import {
   upgradeRoadCommand,
 } from "./map/tools.ts";
 import { TrafficLines } from "./map/traffic.ts";
+import {
+  householdsText,
+  parseRailStats,
+  type RailStats,
+  RideDays,
+  transitMeshes,
+  transitTexts,
+} from "./map/transit.ts";
 import { setupNoticeCenter } from "./notice-center.ts";
 import { parseOverview, renderOverview } from "./overview.ts";
 import { createPopovers } from "./popover.ts";
@@ -186,6 +194,7 @@ import {
   type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
+import { GaveUpWindow, railNotices } from "./rail-notice.ts";
 import { setupSaves } from "./save/main-side.ts";
 import { setupScaleBar } from "./scale-bar.ts";
 import { BAR_SPEEDS, describeSpeed, nearestSpeed } from "./speed.ts";
@@ -335,6 +344,10 @@ let closedKey: string | null = null;
 let railStations: RailStation[] = [];
 let railLines: RailLineInfo[] = [];
 let lineMeshesLast: { far: Geometry; near: Geometry } | null = null;
+// 最後に届いた、駅と路線の読み取り用の数。公共交通の主題図、駅の検査の欄、鉄道の知らせが読む
+let railStats: RailStats | null = null;
+const rideDays = new RideDays();
+const gaveUpWindow = new GaveUpWindow();
 // 路線の道具の途中の状態。路線を作るコマンドを送った時点で知っていた路線を覚え、できた路線を見分ける
 let lineDraft: LineDraft = EMPTY_DRAFT;
 const LOOPED_NOTICE = "環状にした路線は、これ以上駅を足せない";
@@ -430,7 +443,23 @@ function applyTheme(): void {
   send({ kind: "layers", active: activeLayers });
   trafficLines.clear();
   updateDemandTheme();
+  rebuildTransit();
   updateThemeLegend();
+}
+/** 公共交通の主題図を選んでいるあいだだけ、徒歩圏の円、路線、駅と、駅の下の世帯の数を作り直して渡す。 */
+function rebuildTransit(): void {
+  const on = theme === "transit";
+  if (renderer !== null) {
+    renderer.transit = on;
+    renderer.roads.setTransit(
+      on ? transitMeshes(railLines, railStations, railStats, (s) => rideDays.today(s)) : null,
+    );
+  }
+  labels.setTransit(on ? transitTexts(railStations, railStats) : []);
+}
+/** 鉄道の知らせを出し直す。 */
+function updateRailNotices(): void {
+  noticeCenter.set("rail", railNotices(railLines, railStats, gaveUpWindow.perDay(), stationLabel));
 }
 function updateDemandTheme(): void {
   if (renderer !== null) {
@@ -742,6 +771,8 @@ let probe: {
   y: number;
   results: ServiceProbe;
   carless: number;
+  /** 駅だけ。向きごとの `[出入口の x, y, 徒歩圏の世帯, 車を持てない世帯]`。 */
+  doors: (number[] | null)[];
 } | null = null;
 let probeSent = "";
 // 取り壊しで消えるものの、中核の答え。範囲が変わるたびに Worker に問い合わせ、答えを待つあいだは次を送らない
@@ -984,21 +1015,32 @@ function updatePreview(): void {
         AREA_EDGE_PX,
       );
     }
+    // 駅は、中核が乗る駅を探す物差し（家の正面から駅の出入口まで）と同じ出入口から円を描く。出入口は中核の答えから受ける
+    let stationDoor: number[] | null = null;
     if (tool.service === "Station") {
-      // 乗る駅を探す範囲を、施設の丸の色の円で見せる。敷地の真ん中から測る
-      geometry.circle(
-        (min.x + max.x + 1) / 2,
-        (min.y + max.y + 1) / 2,
-        STATION_WALK_RADIUS,
-        [base[0], base[1], base[2], PARKING_RANGE_FILL_ALPHA],
-        [base[0], base[1], base[2], 1],
-        AREA_EDGE_PX,
-      );
+      const fresh = probe?.service === tool.service && probe.x === cursor.x && probe.y === cursor.y;
+      stationDoor = fresh && probe !== null ? (probe.doors[choice.rotation] ?? null) : null;
+      if (stationDoor !== null) {
+        geometry.circle(
+          (stationDoor[0] ?? 0) + 0.5,
+          (stationDoor[1] ?? 0) + 0.5,
+          STATION_WALK_RADIUS,
+          [base[0], base[1], base[2], PARKING_RANGE_FILL_ALPHA],
+          [base[0], base[1], base[2], 1],
+          AREA_EDGE_PX,
+        );
+      }
     }
     geometry.rect(min, max, color);
     let cost = `費用 ${info.cost.toLocaleString("ja-JP")}・R で回す`;
     if (tool.service === "Station") {
-      cost = `徒歩圏 ${STATION_WALK_RADIUS} マス・${cost}`;
+      const near =
+        stationDoor === null
+          ? ""
+          : `・${householdsText({ households: stationDoor[2] ?? 0, carless: stationDoor[3] ?? 0 })}`;
+      cost = `徒歩圏 ${STATION_WALK_RADIUS} マス${near}・${cost}`;
+      // test:wasm が読む
+      mapCanvas.dataset.stationCatchment = stationDoor === null ? "" : stationDoor.join(",");
     }
     if (parking) {
       const fresh = probe?.service === tool.service && probe.x === cursor.x && probe.y === cursor.y;
@@ -1103,7 +1145,11 @@ function refreshProbe(tick: number): void {
     railSent = "";
     updatePreview();
   }
-  if (tool.kind === "service" && isParking(tool.service) && cursor !== null) {
+  if (
+    tool.kind === "service" &&
+    (isParking(tool.service) || tool.service === "Station") &&
+    cursor !== null
+  ) {
     if (tick - probeAskedTick >= PROBE_REFRESH_TICKS) {
       probeSent = "";
       updatePreview();
@@ -1154,6 +1200,19 @@ let inspected: InspectQuery | null = null;
 const inspector = setupInspector(element<HTMLElement>("#inspector"), () => {
   inspected = null;
 });
+/** 検査の欄に出す駅は、その日の乗り降りを添える。駅以外は null。 */
+function stationRides(view: InspectView | null) {
+  if (view === null || view.kind !== "station") {
+    return null;
+  }
+  const stat = railStats?.stations.find(
+    (s) => s.index === view.target[1] && s.generation === view.target[2],
+  );
+  if (stat === undefined) {
+    return null;
+  }
+  return { ...rideDays.today(stat), fullDay: rideDays.fullDay };
+}
 function closeInspector(): void {
   inspected = null;
   inspector.close();
@@ -1656,12 +1715,26 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
       lineDraft = EMPTY_DRAFT;
     }
     showLines();
+    rebuildTransit();
+    updateRailNotices();
     // test:wasm が読む
     mapCanvas.dataset.railTracks = String(tracks.length);
     mapCanvas.dataset.railStations = String(stations.length);
     mapCanvas.dataset.railCrossings = String(crossings.length);
     mapCanvas.dataset.railLines = String(railLines.length);
     mapCanvas.dataset.railRevision = String(message.revision);
+    return;
+  }
+  if (message.kind === "rail-stats") {
+    railStats = parseRailStats(message.tick, message.stats);
+    rideDays.update(railStats);
+    gaveUpWindow.update(railStats.tick, railStats.gaveUp);
+    rebuildTransit();
+    updateRailNotices();
+    // test:wasm が読む
+    mapCanvas.dataset.railStats = railStats.stations
+      .map((st) => `${st.households}/${st.carless}/${st.waiting}`)
+      .join(",");
     return;
   }
   if (message.kind === "rail-probe") {
@@ -1809,7 +1882,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     const result = applyInspectReply(inspected, message.query, message.info);
     if (!result.stale) {
       inspected = result.query;
-      inspector.show(result.view);
+      inspector.show(result.view, stationRides(result.view));
     }
     return;
   }

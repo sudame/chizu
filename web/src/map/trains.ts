@@ -19,6 +19,12 @@ import { stageWeights } from "./stages.ts";
 
 /** 種類の番号。chizu-wasm の trains::KIND_TRAIN と同じ。種類の上位 16 ビットの下位 2 ビットが種類で、残りが路線の色の番号。 */
 export const KIND_TRAIN = 3;
+/**
+ * 混み具合の段階（0〜3）を置く位置。種類の上位 16 ビットのうち、路線の色の番号（3 ビット）の上の 2 ビットである。
+ * chizu-wasm の trains::LOAD_SHIFT と同じ。窓の色が段階とともに車体の色へ寄る（空いた列車は明るく、混んだ列車は濃い窓）。
+ */
+export const LOAD_SHIFT = 5;
+
 /** 1 編成の両数。chizu-wasm の trains::CARS_PER_TRAIN と同じ。 */
 export const CARS_PER_TRAIN = 4;
 
@@ -32,6 +38,8 @@ export const DOT_RADIUS_PX = 3.2;
 const WINDOW_BAND = [0.8, 0.55] as const;
 const CAB_WINDOW = [0.78, 0.62] as const;
 const WINDOW_MIX = "0.55";
+/** 混み具合の段階 3 で、窓の明るさを車体の色へ寄せる割合。 */
+const LOAD_DARKEN = "0.6";
 const ROOF_LIGHTEN = "0.12";
 
 const glslVec3 = ([r, g, b]: readonly number[]) => `vec3(${r}, ${g}, ${b})`;
@@ -49,12 +57,14 @@ out vec2 v_local;
 out vec2 v_half_px;
 flat out vec3 v_color;
 flat out float v_car;
+flat out float v_load;
 const vec3 LINE[${LINE_COLORS.length}] = vec3[${LINE_COLORS.length}](
   ${LINE_COLORS.map((c) => glslVec3(hexRgb(c))).join(",\n  ")}
 );
 void main() {
   uint raw = a_heading_kind >> 16u;
-  uint color = raw >> 2u;
+  uint color = (raw >> 2u) & 7u;
+  uint load = (raw >> ${LOAD_SHIFT}u) & 3u;
   uint car = a_id & 3u;
   // 点は編成ごとに 1 つ（前から 2 両目）だけ描く。ほかの車両は画面の外へ追い出す
   if (u_dot > 0.5 && car != 1u) {
@@ -63,6 +73,7 @@ void main() {
     v_half_px = vec2(1.0);
     v_color = vec3(0.0);
     v_car = 0.0;
+    v_load = 0.0;
     return;
   }
   float angle = float(a_heading_kind & 0xffffu) * (6.2831853 / 65536.0);
@@ -79,6 +90,7 @@ void main() {
   v_half_px = half_px;
   v_color = LINE[color % ${LINE_COLORS.length}u];
   v_car = float(car);
+  v_load = float(load);
 }`;
 
 // 縁は 1px の暗い線。四角は 1px 広げて描き、縁のなめらかな端を入れる。
@@ -89,6 +101,7 @@ in vec2 v_local;
 in vec2 v_half_px;
 flat in vec3 v_color;
 flat in float v_car;
+flat in float v_load;
 uniform float u_alpha;
 uniform float u_detail;
 uniform float u_fine;
@@ -125,7 +138,9 @@ void main() {
     float window = mix(band, segments, u_fine) * u_detail;
     // 先頭の車両の、進む向きの端の運転席の窓
     float cab = (v_car < 0.5 ? 1.0 : 0.0) * step(${CAB_WINDOW[0]}, k.x) * step(abs(k.y), ${CAB_WINDOW[1]}) * u_detail;
-    body = mix(body, mix(c, vec3(1.0), ${WINDOW_MIX}), max(window, cab));
+    // 窓は、混んだ列車ほど車体の色へ寄せて濃くする（段階 3 で窓の明るさの差が 0.4 倍ほどになる）
+    float windowMix = ${WINDOW_MIX} * (1.0 - ${LOAD_DARKEN} * v_load / 3.0);
+    body = mix(body, mix(c, vec3(1.0), windowMix), max(window, cab));
     float roof = (1.0 - band) * (1.0 - step(${CAB_WINDOW[0]}, k.x)) * u_fine;
     body = mix(body, mix(c, vec3(1.0), ${ROOF_LIGHTEN}), roof);
   }

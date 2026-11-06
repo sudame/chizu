@@ -195,6 +195,20 @@ void main() {
   }
 }`;
 
+// 下の地図を白で薄めるだけの全画面の四角。公共交通の主題図が、地図の上に路線と駅を重ねる前に引く
+const WASH_VERTEX = `#version 300 es
+in vec2 a_corner;
+void main() {
+  gl_Position = vec4(a_corner * 2.0 - 1.0, 0.0, 1.0);
+}`;
+const WASH_FRAGMENT = `#version 300 es
+precision mediump float;
+uniform float u_wash;
+out vec4 color;
+void main() {
+  color = vec4(1.0, 1.0, 1.0, u_wash);
+}`;
+
 function compile(gl: WebGL2RenderingContext, type: GLenum, source: string): WebGLShader {
   const shader = gl.createShader(type);
   if (shader === null) {
@@ -251,6 +265,11 @@ export class MapRenderer {
   showZonable = false;
   /** 需要の主題図の、住宅・商業・工業・オフィスの需要の高さ（0〜1）。null なら需要の主題図を出さない。 */
   demand: readonly number[] | null = null;
+  /** 公共交通の主題図を出すか。出すあいだは下の地図を薄め、路線と駅と徒歩圏の円を重ねる。 */
+  transit = false;
+  readonly #washProgram: WebGLProgram;
+  readonly #washVao: WebGLVertexArrayObject;
+  readonly #washU: WebGLUniformLocation;
   readonly #demandProgram: WebGLProgram;
   readonly #du: Record<
     "offset" | "size" | "viewport" | "tiles" | "owned" | "share" | "wash",
@@ -306,6 +325,17 @@ export class MapRenderer {
     };
     gl.uniform1i(this.#du.tiles, 0);
     gl.uniform3fv(uniform(gl, demand, "u_deep"), DEMAND_PALETTE);
+    const wash = link(gl, WASH_VERTEX, WASH_FRAGMENT);
+    this.#washProgram = wash;
+    this.#washU = uniform(gl, wash, "u_wash");
+    this.#washVao = gl.createVertexArray();
+    gl.bindVertexArray(this.#washVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0, 1, 0, 0, 1, 1, 1]), gl.STATIC_DRAW);
+    const washCorner = gl.getAttribLocation(wash, "a_corner");
+    gl.enableVertexAttribArray(washCorner);
+    gl.vertexAttribPointer(washCorner, 2, gl.FLOAT, false, 0, 0);
+    gl.bindVertexArray(null);
     this.roads = new RoadLayer(gl, (v, f) => link(gl, v, f));
     this.layers = new LayerOverlay(gl, (v, f) => link(gl, v, f));
     this.movers = new MoverLayer(gl, (v, f) => link(gl, v, f));
@@ -400,9 +430,25 @@ export class MapRenderer {
     if (this.demand !== null) {
       this.#drawDemand(camera, viewport, range, this.demand);
     }
+    if (this.transit) {
+      this.#drawWash();
+      this.roads.draw(camera, viewport, "theme");
+    }
     // 道具の仮の表示は、主題図に隠れないよう最後に描く
     this.roads.draw(camera, viewport, "preview");
     return drawn;
+  }
+
+  #drawWash(): void {
+    const gl = this.#gl;
+    gl.useProgram(this.#washProgram);
+    gl.bindVertexArray(this.#washVao);
+    gl.enable(gl.BLEND);
+    gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
+    gl.uniform1f(this.#washU, WASH);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.disable(gl.BLEND);
+    gl.bindVertexArray(null);
   }
 
   #drawDemand(

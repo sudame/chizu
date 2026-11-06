@@ -179,3 +179,64 @@ fn closed_crossings_follow_the_train() {
     assert!(closed_ticks > 0);
     assert!(open_ticks > closed_ticks);
 }
+
+#[test]
+fn the_kind_carries_the_line_color_and_the_load_level() {
+    assert_eq!(load_level(0), 0);
+    assert_eq!(load_level(249), 0);
+    assert_eq!(load_level(250), 1);
+    assert_eq!(load_level(999), 3);
+    assert_eq!(load_level(4_000), 3);
+    let mut sim = shuttle(1);
+    sim.advance(100);
+    let mut cars = Vec::new();
+    collect_cars(sim.world(), &mut cars);
+    let kind = cars[0].kind;
+    // 乗っている人はいないので、混み具合は 0。路線の色は kind の 2〜4 ビット目で、画面の 8 色の剰余と同じ
+    assert_eq!(kind & 3, KIND_TRAIN);
+    assert_eq!((kind >> 2) & 7, 0);
+    assert_eq!(kind >> LOAD_SHIFT, 0);
+}
+
+#[test]
+fn rail_stats_lists_stations_and_lines_in_the_documented_strides() {
+    use crate::sim::{RAIL_STATS_HEADER, RAIL_STATS_LINE, RAIL_STATS_STATION};
+    let mut sim = shuttle(1);
+    sim.advance(50);
+    let stats = sim.rail_stats();
+    assert_eq!(
+        stats.len(),
+        RAIL_STATS_HEADER + 2 * RAIL_STATS_STATION + RAIL_STATS_LINE
+    );
+    assert_eq!(&stats[..2], &[2.0, 1.0]);
+    for k in 0..2 {
+        let st = &stats[RAIL_STATS_HEADER + k * RAIL_STATS_STATION..][..RAIL_STATS_STATION];
+        // 道路に面しているので出入口がある。世帯も待つ人もいない
+        assert_eq!(st[6], 1.0);
+        assert_eq!(&st[7..10], &[0.0, 0.0, 0.0]);
+        // 出入口は y = 10 の道路の上
+        assert_eq!(st[5], 10.0);
+    }
+    let line = &stats[RAIL_STATS_HEADER + 2 * RAIL_STATS_STATION..];
+    assert_eq!(line[2], 0.0);
+    assert_eq!(line[7], 1.0);
+}
+
+#[test]
+fn station_probe_gives_the_door_for_the_rotations_that_can_be_placed() {
+    let world = World::new_with_money(0, Money(1_000_000_000)).with_unlimited_land();
+    let mut sim = Sim::from_parts(world, CommandLog::new());
+    sim.submit(Command::BuildRoad {
+        from: at(0, 10),
+        to: at(70, 10),
+        kind: RoadKind::Small,
+    })
+    .unwrap();
+    let probe = sim.station_probe(at(30, 9));
+    // 道路は y = 10 なので、南へ向く向き 2 だけ置ける
+    assert!(probe[0].is_none() && probe[1].is_none() && probe[3].is_none());
+    let [x, y, households, carless] = probe[2].expect("置けるはず");
+    assert_eq!(y, 10.0);
+    assert!((20.0..=40.0).contains(&x));
+    assert_eq!((households, carless), (0.0, 0.0));
+}

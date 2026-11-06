@@ -228,6 +228,25 @@ function sendFinance(sim: Simulation, now: number, force = false): void {
   }
 }
 
+// 駅と路線の読み取り用の数。徒歩圏の世帯を数え直すので、間引いて送る。駅も路線もなければ送らない
+// （前に送ったあとで全部なくなったときは、空の数を 1 回送って画面に消させる）
+const RAIL_STATS_INTERVAL_MS = 1000;
+let railStatsAt = Number.NEGATIVE_INFINITY;
+let sentRailStats = false;
+function sendRailStats(sim: Simulation, now: number, force = false): void {
+  if (!force && now - railStatsAt < RAIL_STATS_INTERVAL_MS) {
+    return;
+  }
+  railStatsAt = now;
+  const stats = sim.rail_stats();
+  const empty = stats[0] === 0 && stats[1] === 0;
+  if (empty && !sentRailStats) {
+    return;
+  }
+  sentRailStats = !empty;
+  reply({ kind: "rail-stats", tick: sim.current_tick(), stats }, [stats.buffer]);
+}
+
 // 人口と幸福度は建物の表が変わらなくても動く。住民の数だけ数え直すので、間引いて送る。
 // 一時停止中は街が進まないので、最初の 1 回のあとは送らない。最初の 1 回を画面は基準にする
 const OVERVIEW_INTERVAL_MS = 500;
@@ -279,6 +298,7 @@ function run(sim: Simulation): {
       sendCityStats(sim, now);
     }
     sendFinance(sim, now);
+    sendRailStats(sim, now);
     sendOverview(sim, now, paused);
     sendChunks(sim);
     layerSender.send(sim, reply, CHUNKS_PER_FRAME, now);
@@ -360,7 +380,9 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         const results = [...sim.service_probe(code, x, y)] as (string | null)[];
         // 共同の駐車場は、届く範囲の中の車を持てない世帯の数も添える
         const carless = isParking(service) ? sim.carless_in_range(x, y) : 0;
-        reply({ kind: "service-probe", service, x, y, results, carless });
+        // 駅は、向きごとの出入口と徒歩圏の世帯の数も添える
+        const doors = service === "Station" ? (sim.station_probe(x, y) as (number[] | null)[]) : [];
+        reply({ kind: "service-probe", service, x, y, results, carless, doors });
         break;
       }
       case "probe-rail": {

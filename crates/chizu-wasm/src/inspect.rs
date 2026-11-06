@@ -4,7 +4,7 @@
 
 use chizu_core::clock::GAME_SECONDS_PER_TICK;
 use chizu_core::happiness::{commute_time, total};
-use chizu_core::{BuildingId, CarPlace, TilePos, TileRect, World, Zone, ZoneKind};
+use chizu_core::{BuildingId, CarPlace, StationId, TilePos, TileRect, World, Zone, ZoneKind};
 
 /// 住宅の住民の様子。住民が 1 人もいなければ `None` にする項目が多い。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,10 +79,27 @@ pub struct ParkingInfo {
     pub visitors: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// 押された駅の様子。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StationInfo {
+    /// 駅で待っている人。
+    pub waiting: u64,
+    /// 始まりからの乗った人と降りた人。1 日の数は画面が日の変わり目の差で求める。
+    pub boarded: u64,
+    pub alighted: u64,
+    /// 出入口の徒歩圏の世帯の数と、そのうち車を持てない世帯の数。出入口がなければ `None`。
+    pub catchment: Option<(u32, u32)>,
+    /// 直前に乗りきれず人が残ったか。
+    pub left_behind: bool,
+    /// 駅に止まる路線の添え字。
+    pub lines: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Inspected {
     Building(BuildingInfo),
     Facility(FacilityInfo),
+    Station(StationInfo),
 }
 
 fn contains(r: TileRect, t: TilePos) -> bool {
@@ -96,10 +113,12 @@ pub enum Target {
     Building(BuildingId),
     /// 施設には ID がないので、占めるマスの min で見分ける。
     Facility(TilePos),
+    /// 駅。世代つきの ID で、置き直された駅とは区別できる。
+    Station(StationId),
 }
 
 /// 見つけたものと、その識別子。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub target: Target,
     pub info: Inspected,
@@ -126,6 +145,36 @@ fn facility_info(world: &World, f: &chizu_core::service::Facility) -> Found {
     }
 }
 
+fn station_info(world: &World, id: StationId) -> Option<Found> {
+    let rail = world.rail();
+    rail.station(id)?;
+    let (boarded, alighted) = rail
+        .ride_tally()
+        .station_counts
+        .get(&id)
+        .copied()
+        .unwrap_or((0, 0));
+    let catchment = world
+        .station_door(id)
+        .and_then(|door| world.catchments(&[door]).pop())
+        .map(|c| (c.households, c.carless));
+    Some(Found {
+        target: Target::Station(id),
+        info: Inspected::Station(StationInfo {
+            waiting: rail.waiting_at(id) as u64,
+            boarded,
+            alighted,
+            catchment,
+            left_behind: rail.left_behind().iter().any(|(s, _, _)| *s == id),
+            lines: rail
+                .lines()
+                .filter(|(_, l)| l.stations.contains(&id))
+                .map(|(lid, _)| lid.index)
+                .collect(),
+        }),
+    })
+}
+
 fn found_building(world: &World, id: BuildingId) -> Option<Found> {
     building_info(world, id).map(|b| Found {
         target: Target::Building(id),
@@ -138,11 +187,13 @@ pub fn inspect(world: &World, at: TilePos) -> Option<Found> {
     if let Some((id, _)) = world.buildings().iter().find(|(_, b)| contains(b.area, at)) {
         return found_building(world, id);
     }
+    if let Some(f) = world.facilities().iter().find(|f| contains(f.area, at)) {
+        return Some(facility_info(world, f));
+    }
     world
-        .facilities()
-        .iter()
-        .find(|f| contains(f.area, at))
-        .map(|f| facility_info(world, f))
+        .rail()
+        .station_at(at)
+        .and_then(|id| station_info(world, id))
 }
 
 /// 識別子で調べる。消えていれば `None`。
@@ -154,10 +205,11 @@ pub fn inspect_target(world: &World, target: Target) -> Option<Found> {
             .iter()
             .find(|f| f.area.min == min)
             .map(|f| facility_info(world, f)),
+        Target::Station(id) => station_info(world, id),
     }
 }
 
-/// 画面から届いた識別子 `[種類, a, b]` を読む。種類 1 は建物（a が添え字、b が世代）、2 は施設（a, b が min のマス）。
+/// 画面から届いた識別子 `[種類, a, b]` を読む。種類 1 は建物（a が添え字、b が世代）、2 は施設（a, b が min のマス）、3 は駅（a が添え字、b が世代）。
 pub fn decode_target(kind: f64, a: f64, b: f64) -> Option<Target> {
     let int = |v: f64| (v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0).then_some(v as i64);
     match kind as i64 {
@@ -166,6 +218,10 @@ pub fn decode_target(kind: f64, a: f64, b: f64) -> Option<Target> {
             generation: u16::try_from(int(b)?).ok()?,
         })),
         2 => Some(Target::Facility(TilePos::new(int(a)?, int(b)?))),
+        3 => Some(Target::Station(StationId {
+            index: u32::try_from(int(a)?).ok()?,
+            generation: u16::try_from(int(b)?).ok()?,
+        })),
         _ => None,
     }
 }
@@ -250,6 +306,9 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
 /// 画面に渡す数の個数。
 pub const INSPECT_LENGTH: usize = 20;
 
+/// 駅の欄に並べる、止まる路線の数の上限。
+pub const STATION_LINES: usize = 10;
+
 /// 数に直す。要素がないものは -1 にする。なければ空の配列。
 ///
 /// 建物：`[1, 区画の種類, 段階, 電気, 水道, 上限, 埋まっている数, 住民の数, 幸福度, 通勤の点数,
@@ -258,7 +317,9 @@ pub const INSPECT_LENGTH: usize = 20;
 /// 住宅だけで、ほかは -1 である。駐車場の点数は、住民のいる住宅だけで、ほかは -1 である。
 /// 施設：`[2, 施設の種類, 供給量, 1 日の維持費, 台数, 貸した枠, 停まっている台数, 外来の車, -1, ...]`。
 /// 台数からあとの 4 つは共同の駐車場だけで、ほかの施設は -1 である。
-/// どちらも最後の 2 つは識別子の a と b で、建物なら ID の添え字と世代、施設なら min のマスの x と y である。
+/// 駅：`[3, 待っている人, 乗った人（積み上げ）, 降りた人（積み上げ）, 徒歩圏の世帯（出入口がなければ -1）, そのうち車を持てない世帯,
+/// 乗りきれず人が残ったか（0 か 1）, 止まる路線の数 n（最大 [`STATION_LINES`]）, 路線の添え字 × n, -1, ...]`。
+/// どれも最後の 2 つは識別子の a と b で、建物なら ID の添え字と世代、施設なら min のマスの x と y、駅なら ID の添え字と世代である。
 /// 先頭の値が識別子の種類を兼ねる。
 pub fn encode(found: Option<Found>) -> Vec<f64> {
     let mut out = vec![-1.0; INSPECT_LENGTH];
@@ -268,10 +329,27 @@ pub fn encode(found: Option<Found>) -> Vec<f64> {
     let (a, b) = match found.target {
         Target::Building(id) => (f64::from(id.index), f64::from(id.generation)),
         Target::Facility(min) => (min.x as f64, min.y as f64),
+        Target::Station(id) => (f64::from(id.index), f64::from(id.generation)),
     };
     out[INSPECT_LENGTH - 2] = a;
     out[INSPECT_LENGTH - 1] = b;
     match found.info {
+        Inspected::Station(st) => {
+            out[0] = 3.0;
+            out[1] = st.waiting as f64;
+            out[2] = st.boarded as f64;
+            out[3] = st.alighted as f64;
+            if let Some((households, carless)) = st.catchment {
+                out[4] = f64::from(households);
+                out[5] = f64::from(carless);
+            }
+            out[6] = f64::from(u8::from(st.left_behind));
+            let lines = &st.lines[..st.lines.len().min(STATION_LINES)];
+            out[7] = lines.len() as f64;
+            for (slot, index) in out[8..].iter_mut().zip(lines) {
+                *slot = f64::from(*index);
+            }
+        }
         Inspected::Facility(f) => {
             out[0] = 2.0;
             out[1] = f64::from(f.kind as u8);
@@ -707,5 +785,44 @@ mod tests {
         let plant = sim.inspect(TilePos::new(16, 8));
         assert_eq!(plant[2], ServiceKind::PowerPlant.capacity() as f64);
         assert_eq!(plant[4..8], [-1.0; 4]);
+    }
+    /// 駅は、待っている人、乗り降りの数、徒歩圏の世帯、止まる路線を出す。識別子で引き直せる。
+    #[test]
+    fn a_station_shows_its_waiting_riders_catchment_and_lines() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 10), (70, 10))).unwrap();
+        for x in [12, 62] {
+            sim.submit(Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: TilePos::new(x, 9),
+                rotation: 2,
+            })
+            .unwrap();
+        }
+        sim.submit(Command::BuildRail {
+            from: TilePos::new(12, 8),
+            to: TilePos::new(53, 8),
+        })
+        .unwrap();
+        let ids: Vec<_> = sim.world().rail().stations().map(|(id, _)| id).collect();
+        sim.submit(Command::CreateLine {
+            from: ids[0],
+            to: ids[1],
+        })
+        .unwrap();
+        let line = sim.world().rail().lines().next().unwrap().0;
+        let found = sim.inspect(TilePos::new(12, 8));
+        assert_eq!(found.len(), INSPECT_LENGTH);
+        assert_eq!(found[0], 3.0);
+        // 待つ人も乗り降りもなく、徒歩圏に世帯もなく、路線は 1 本
+        assert_eq!(found[1..7], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(found[7], 1.0);
+        assert_eq!(found[8], f64::from(line.index));
+        assert_eq!(found[9], -1.0);
+        // 識別子（最後の 2 つ）で引き直すと同じ答えになる
+        let again = sim.inspect_target(found[0], found[18], found[19]);
+        assert_eq!(again, found);
+        // 駅のない所は空
+        assert!(sim.inspect(TilePos::new(40, 30)).is_empty());
     }
 }

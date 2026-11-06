@@ -236,6 +236,7 @@ pub struct World {
 
 mod bulldoze;
 pub mod carless;
+mod catchment;
 mod commute;
 mod crossing;
 pub mod economy;
@@ -246,6 +247,7 @@ mod ride;
 mod traffic;
 
 pub use bulldoze::BulldozePreview;
+pub use catchment::Catchment;
 pub use crossing::CrossingDenial;
 pub use traffic::{CarSample, CitizenPlaces, CommuteDistances, CommuteTimes, DayTraffic, Traffic};
 

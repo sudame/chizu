@@ -30,6 +30,11 @@ pub const CARLESS_FIXED: usize = 6;
 /// [`Sim::carless`] が並べる、世帯の多い区切りの数の上限。
 pub const CARLESS_AREAS: usize = 10;
 
+/// [`Sim::rail_stats`] の先頭の見出しの数と、駅 1 つ、路線 1 本の数の個数。画面の側の `RAIL_STATS_*` と合わせる。
+pub const RAIL_STATS_HEADER: usize = 4;
+pub const RAIL_STATS_STATION: usize = 13;
+pub const RAIL_STATS_LINE: usize = 8;
+
 /// [`Sim::city_stats`] が返す数のうち、固定の並びの個数。そのあとに需要の内訳が続く。
 /// 画面の側は `city-stats-layout.json` から読むので、変えたら `CHIZU_UPDATE_LAYOUT=1 cargo test -p chizu-wasm` で書き直す。
 pub const CITY_STATS_FIXED: usize = 27;
@@ -730,6 +735,99 @@ impl Sim {
             );
         }
         out
+    }
+
+    /// 駅と路線の読み取り用の数を返す。画面の主題図「公共交通」、駅の検査の欄、知らせが読む。毎 tick は変わらないので、
+    /// 画面へは間引いて送る。先頭は [`RAIL_STATS_HEADER`] 個の `[駅の数, 路線の数, 待ちきれず歩いた人（積み上げ）,
+    /// 途中で歩きに戻った人（積み上げ）]`、続いて駅ごとに [`RAIL_STATS_STATION`] 個の
+    /// `[添え字, 世代, 敷地の min の x, y, 出入口のマスの x, y, 出入口があるか（0 か 1）, 徒歩圏の世帯, そのうち車を持てない世帯,
+    /// 待っている人, 乗った人（積み上げ）, 降りた人（積み上げ）, 直前に乗りきれず人が残ったか（0 か 1）]`、
+    /// 路線ごとに [`RAIL_STATS_LINE`] 個の
+    /// `[添え字, 世代, いちばん混んだ列車の乗車率（‰）, 乗った人（積み上げ）, 待っている人, 乗りきれず人が残った（駅、向き）の数,
+    /// 列車に乗っている人, 走っている列車]` を並べる。状態は変えない。
+    pub fn rail_stats(&self) -> Vec<f64> {
+        let rail = self.world.rail();
+        let rides = rail.ride_tally();
+        let ids: Vec<chizu_core::StationId> = rail.stations().map(|(id, _)| id).collect();
+        let doors: Vec<Option<TilePos>> =
+            ids.iter().map(|id| self.world.station_door(*id)).collect();
+        // 出入口のある駅だけ、徒歩圏の世帯を数える
+        let with_door: Vec<TilePos> = doors.iter().flatten().copied().collect();
+        let mut counted = self.world.catchments(&with_door).into_iter();
+        let mut out = vec![
+            ids.len() as f64,
+            rail.lines().count() as f64,
+            rides.gave_up as f64,
+            rides.evicted as f64,
+        ];
+        for (id, door) in ids.iter().zip(&doors) {
+            let Some(st) = rail.station(*id) else {
+                continue;
+            };
+            let near = door.and_then(|_| counted.next()).unwrap_or_default();
+            let (boarded, alighted) = rides.station_counts.get(id).copied().unwrap_or((0, 0));
+            let left = rail.left_behind().iter().any(|(s, _, _)| s == id);
+            let at = door.unwrap_or(st.area.min);
+            out.extend([
+                f64::from(id.index),
+                f64::from(id.generation),
+                st.area.min.x as f64,
+                st.area.min.y as f64,
+                at.x as f64,
+                at.y as f64,
+                f64::from(u8::from(door.is_some())),
+                f64::from(near.households),
+                f64::from(near.carless),
+                rail.waiting_at(*id) as f64,
+                boarded as f64,
+                alighted as f64,
+                f64::from(u8::from(left)),
+            ]);
+        }
+        for (id, _) in rail.lines() {
+            let running = rail.trains().filter(|(_, t)| t.line == id).count();
+            let aboard: usize = rail
+                .trains()
+                .filter(|(_, t)| t.line == id)
+                .map(|(tid, _)| rail.aboard(tid).len())
+                .sum();
+            let waiting: usize = rail
+                .queues()
+                .filter(|((_, line, _), _)| *line == id)
+                .map(|(_, q)| q.len())
+                .sum();
+            let left = rail
+                .left_behind()
+                .iter()
+                .filter(|(_, line, _)| *line == id)
+                .count();
+            out.extend([
+                f64::from(id.index),
+                f64::from(id.generation),
+                rail.line_load_permille(id) as f64,
+                rides.line_boarded.get(&id).copied().unwrap_or(0) as f64,
+                waiting as f64,
+                left as f64,
+                aboard as f64,
+                running as f64,
+            ]);
+        }
+        out
+    }
+
+    /// 駅を間口のマス `at` に向き 0〜3 で置いたときの、`[出入口の x, y, 徒歩圏の世帯, そのうち車を持てない世帯]` を、
+    /// 向きの順に返す。置けない向きは空にする。駅を置く前の円と世帯の数に使う。状態は変えない。
+    pub fn station_probe(&self, at: TilePos) -> [Option<[f64; 4]>; 4] {
+        [0, 1, 2, 3].map(|r| {
+            let door = self.world.station_door_if_placed(at, r)?;
+            let near = self.world.catchments(&[door]).pop().unwrap_or_default();
+            Some([
+                door.x as f64,
+                door.y as f64,
+                f64::from(near.households),
+                f64::from(near.carless),
+            ])
+        })
     }
 
     /// 線路を `from` から `to` に引けるかを、状態を変えずに調べる。引けないときは理由の文を、

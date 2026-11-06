@@ -1371,9 +1371,20 @@ const MESH_NAMES = [
   "trafficBusy",
   "trafficBands",
   "trafficFineBands",
+  "transitCircles",
+  "transitLines",
+  "transitStations",
   "preview",
 ] as const;
 export type MeshName = (typeof MESH_NAMES)[number];
+
+/** メッシュを描く順の区分。 */
+function drawPart(name: MeshName): "map" | "theme" | "preview" {
+  if (name === "preview") {
+    return "preview";
+  }
+  return name.startsWith("transit") ? "theme" : "map";
+}
 
 /** 踏切の警報灯が交互に点く間隔（ミリ秒）。日本の踏切は毎分 40〜50 回ほど点滅する。 */
 export const CROSSING_BLINK_MS = 600;
@@ -1434,6 +1445,10 @@ export function roadDrawOrder(zoom: number, blink: 0 | 1 = 0): [MeshName, number
     ["trafficBusy", 1 - w.detail],
     ["trafficBands", w.detail * (1 - w.fine)],
     ["trafficFineBands", w.fine],
+    // 公共交通の主題図（transit.ts）。徒歩圏の円、路線、駅の順に重ねる。主題図を選んでいないあいだは空にしておく
+    ["transitCircles", 1],
+    ["transitLines", 1],
+    ["transitStations", 1],
     ["preview", 1],
   ];
   // 小の道路は不透明に描き、色を地面の色に寄せて薄くする
@@ -1595,15 +1610,26 @@ export class RoadLayer {
     }
   }
 
+  /** 公共交通の主題図（transit.ts）。null なら消す。 */
+  setTransit(
+    meshes: { circles: MeshSource; lines: MeshSource; stations: MeshSource } | null,
+  ): void {
+    const empty = new Geometry({ x: 0, y: 0 });
+    this.#upload("transitCircles", meshes?.circles ?? empty);
+    this.#upload("transitLines", meshes?.lines ?? empty);
+    this.#upload("transitStations", meshes?.stations ?? empty);
+  }
+
   setPreview(geometry: Geometry | null): void {
     this.#upload("preview", geometry ?? new Geometry({ x: 0, y: 0 }));
   }
 
   /**
-   * メッシュを下から順に描く。`part` が "map" なら道具の仮の表示を除いて描き、"preview" なら仮の表示だけを描く。
+   * メッシュを下から順に描く。`part` が "map" なら道具の仮の表示と公共交通の主題図を除いて描き、"theme" なら
+   * 公共交通の主題図だけを、"preview" なら仮の表示だけを描く。公共交通の主題図は、下の地図を薄めたあとに描く。
    * 仮の表示は、主題図（電気、水道、需要の面）より上に出すので、主題図のあとに分けて描く。
    */
-  draw(camera: Camera, viewport: Viewport, part: "map" | "preview" = "map"): void {
+  draw(camera: Camera, viewport: Viewport, part: "map" | "theme" | "preview" = "map"): void {
     const gl = this.#gl;
     gl.useProgram(this.#program);
     gl.uniform1f(this.#u.zoom, camera.zoom);
@@ -1614,7 +1640,7 @@ export class RoadLayer {
     // 踏切の警報灯は、実時間で交互に点く。止めていても点滅する
     const blink = Math.floor(performance.now() / CROSSING_BLINK_MS) % 2 === 0 ? 0 : 1;
     for (const [name, alpha, fade] of roadDrawOrder(camera.zoom, blink)) {
-      if ((name === "preview") !== (part === "preview")) {
+      if (drawPart(name) !== part) {
         continue;
       }
       const mesh = this.#meshes[name];
