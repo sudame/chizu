@@ -768,11 +768,13 @@ pub struct RideOffer {
     pub transfer: Option<Transfer>,
 }
 
-/// 費用の同じ候補を選ぶ順。（費用、乗る駅、降りる駅、路線、乗り換える駅、乗り換え先の路線）。
+/// 費用の同じ候補を選ぶ順。（費用、乗る駅、降りる駅、乗り換えるか、路線、乗り換える駅、乗り換え先の路線）。
+/// 乗り換えるかを路線より先に比べるので、費用が同じなら、路線の ID にかかわらず乗り換えない進路を選ぶ。
 type OfferKey = (
     u64,
     StationId,
     StationId,
+    bool,
     LineId,
     Option<StationId>,
     Option<LineId>,
@@ -839,8 +841,8 @@ impl<'a> RideChoice<'a> {
     }
 
     /// 正面のマスが `from` の建物から、正面のマスが `to` の建物へ向かう鉄道の候補。乗り換え 1 回の進路も比べる。
-    /// 費用の同じ組は、（乗る駅、降りる駅、路線、乗り換える駅、乗り換え先の路線）の ID の小さい順に選ぶ。
-    /// 乗り換えのない進路は、乗り換える駅と路線を持たないので、同じ費用の乗り換える進路より先になる。
+    /// 費用の同じ組は、乗る駅、降りる駅の ID の小さい順に選び、同じ組なら乗り換えない進路を先にして、
+    /// そのあとは（路線、乗り換える駅、乗り換え先の路線）の ID の小さい順に選ぶ。
     pub fn offer(&self, from: TilePos, to: TilePos) -> Option<RideOffer> {
         if self.is_empty() {
             return None;
@@ -870,7 +872,7 @@ impl<'a> RideChoice<'a> {
                     };
                     let cost = walk + leg;
                     consider(
-                        (cost, sa, sb, d.line, None, None),
+                        (cost, sa, sb, false, d.line, None, None),
                         RideOffer {
                             cost,
                             board: sa,
@@ -892,7 +894,15 @@ impl<'a> RideChoice<'a> {
                 };
                 let cost = walk + first + TRANSFER_SECONDS + second;
                 consider(
-                    (cost, sa, sb, t.first.line, Some(t.at), Some(t.second.line)),
+                    (
+                        cost,
+                        sa,
+                        sb,
+                        true,
+                        t.first.line,
+                        Some(t.at),
+                        Some(t.second.line),
+                    ),
                     RideOffer {
                         cost,
                         board: sa,
@@ -1053,6 +1063,18 @@ mod tests {
             .unwrap();
         assert_eq!(o.cost, via + 5 * FARE_SECONDS);
         assert_eq!(o.transfer, None);
+        // 直接の路線の ID が、乗り換える進路の路線の ID より大きくても、同じ費用なら乗り換えない。
+        let lines = [
+            shape(0, &[0, 1], 100),
+            shape(1, &[1, 3], 100),
+            shape(2, &[0, 3], u32::try_from(via / 2).unwrap()),
+        ];
+        let planner = RailPlanner::from_shapes(far_doors(), &lines);
+        let o = choice(&planner, &lines)
+            .offer(TilePos::new(0, 0), TilePos::new(1_000, 0))
+            .unwrap();
+        assert_eq!(o.cost, via + 5 * FARE_SECONDS);
+        assert_eq!((o.line, o.transfer), (line(2), None));
     }
 
     /// 乗り換えの進路を絞っても、組ごとの見込みの費用は、すべての（乗る路線、乗り換える駅、乗り換え先の路線）を
@@ -1119,13 +1141,16 @@ mod tests {
                     if a == b {
                         continue;
                     }
-                    let mut want: Option<u64> = None;
+                    // 費用の同じ進路は、（乗る路線、乗り換える駅、乗り換え先の路線）の ID の小さい順に選ぶ。
+                    // [`RideChoice::offer`] の選ぶ順のうち、乗り換える進路どうしを比べる部分と同じである。
+                    let mut want: Option<(u64, LineId, StationId, LineId)> = None;
                     for l1 in &lines {
                         for (x, c1) in hop(l1, station(a)) {
                             for l2 in lines.iter().filter(|l| l.line != l1.line) {
                                 for (to, c2) in hop(l2, x) {
-                                    if to == station(b) {
-                                        want = Some(want.map_or(c1 + c2, |w| w.min(c1 + c2)));
+                                    let key = (c1 + c2, l1.line, x, l2.line);
+                                    if to == station(b) && want.is_none_or(|w| key < w) {
+                                        want = Some(key);
                                     }
                                 }
                             }
@@ -1141,7 +1166,12 @@ mod tests {
                                 let live = LineLive::new(l.trains, &l.segments);
                                 live.headway() / 2 + live.ride(d.board, d.alight).unwrap()
                             };
-                            cost(&t.first) + cost(&t.second)
+                            (
+                                cost(&t.first) + cost(&t.second),
+                                t.first.line,
+                                t.at,
+                                t.second.line,
+                            )
                         });
                     assert_eq!(got, want, "駅 {a} から {b}");
                 }

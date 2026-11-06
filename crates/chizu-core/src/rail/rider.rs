@@ -137,7 +137,8 @@ pub struct Exit {
     pub started: Tick,
     pub to: SidewalkPos,
     pub from: ExitFrom,
-    /// 列車に乗ったか。待ちきれずに歩いた人と、乗る前に路線がなくなった人は偽である。
+    /// 列車に乗ったか。待ちきれずに歩いた人と、乗る前に路線がなくなった人は偽である。乗り換える駅で待っていて
+    /// 歩いた人は、1 本目に乗ったので真である。
     pub rode: bool,
 }
 
@@ -616,8 +617,9 @@ impl Rail {
                 .into_iter()
                 .partition(|r| self.riders.get(*r).is_some_and(|x| x.leg > 0));
             for r in gone {
+                // 乗り換えを待つ人だけなので、1 本目には乗った。
                 self.ride_tally.evicted += 1;
-                self.evict(r, ExitFrom::Site(site), false);
+                self.evict(r, ExitFrom::Site(site), true);
             }
             if !keep.is_empty() {
                 self.queues.insert(key, keep);
@@ -655,9 +657,9 @@ impl Rail {
                     break;
                 }
                 q.pop_front();
-                let from = r.waiting_exit();
+                let (from, rode) = (r.waiting_exit(), r.leg > 0);
                 self.ride_tally.gave_up += 1;
-                self.evict(head, from, false);
+                self.evict(head, from, rode);
             }
         }
     }
@@ -689,9 +691,10 @@ impl Rail {
                 }
             }
             for r in gone {
-                let from = self.riders.get(r).expect("乗る人がいない").waiting_exit();
+                let x = self.riders.get(r).expect("乗る人がいない");
+                let (from, rode) = (x.waiting_exit(), x.leg > 0);
                 self.ride_tally.evicted += 1;
-                self.evict(r, from, false);
+                self.evict(r, from, rode);
             }
             if !keep.is_empty() {
                 self.queues.insert(key, keep);

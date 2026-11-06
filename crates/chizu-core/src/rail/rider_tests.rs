@@ -606,6 +606,28 @@ pub(crate) fn transfer_town(trains: u8) -> (World, [LineId; 2], [StationId; 3]) 
     (w, [lines[0], lines[1]], [s[0], s[1], s[2]])
 }
 
+/// 本数を変えても、上限で抑えられて走らせる本数が変わらなければ、駅の組の表を捨てない。走らせる本数が変われば
+/// 捨てる。
+#[test]
+fn setting_trains_above_the_cap_keeps_the_table() {
+    let (mut w, [line, _], _) = transfer_town(3);
+    let cap = w.rail().line(line).unwrap().cap();
+    assert!(cap >= 2, "上限が小さすぎる: {cap}");
+    ok(w.apply(&Command::SetLineTrains { line, trains: cap }));
+    assert!(w.rail_planner().is_some());
+    ok(w.apply(&Command::SetLineTrains {
+        line,
+        trains: crate::rail::line::MAX_LINE_TRAINS,
+    }));
+    assert_eq!(w.rail().line(line).unwrap().allowed(), cap);
+    assert!(w.has_rail_planner(), "走らせる本数が同じなのに表を捨てた");
+    ok(w.apply(&Command::SetLineTrains {
+        line,
+        trains: cap - 1,
+    }));
+    assert!(!w.has_rail_planner(), "走らせる本数が変わったのに表を捨てなかった");
+}
+
 /// 乗り換える駅で待っている人（2 回目の乗車）と、乗り換える前の路線の列車に乗っていて、同じ路線へ乗り換える人。
 /// 移動の ID と、乗り換え先の路線である。
 fn transfer_pair(rail: &Rail) -> Option<(crate::id::TripId, crate::id::TripId, LineId)> {
@@ -669,7 +691,8 @@ fn riders_walk_from_the_transfer_station_when_the_next_line_is_removed() {
         .find(|e| e.trip == waiting)
         .expect("待っていた人が歩いていない");
     assert_eq!(e.from, ExitFrom::Station(mid));
-    assert!(!e.rode);
+    // 1 本目には乗ったので、鉄道で移動したと数える。
+    assert!(e.rode);
     assert!(rail.rider_of(aboard).is_some(), "乗り換える前の人が降りた");
     let mut tick = w.tick();
     for _ in 0..2_000 {
@@ -711,7 +734,7 @@ fn riders_waiting_at_a_bulldozed_transfer_station_walk_from_its_site() {
         .find(|e| e.trip == waiting)
         .expect("待っていた人が歩いていない");
     assert_eq!(e.from, ExitFrom::Site(site));
-    assert!(!e.rode);
+    assert!(e.rode);
     ok(w.apply(&Command::Bulldoze { area: site.area }));
     check(&w);
     run(&mut w, 600);

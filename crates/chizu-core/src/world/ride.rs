@@ -62,6 +62,12 @@ impl World {
         self.planner.forget();
     }
 
+    /// 駅の組の表をいま持っているか。表を捨てたかを確かめるテストで使う。
+    #[cfg(test)]
+    pub(crate) fn has_rail_planner(&self) -> bool {
+        self.planner.planner.is_some()
+    }
+
     /// 駅の組の表。路線がなければ `None`。
     pub fn rail_planner(&mut self) -> Option<&RailPlanner> {
         self.ensure_planner();
