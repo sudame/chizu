@@ -1073,7 +1073,7 @@ fn not_owned(world: &World, command: &Command) -> Value {
 /// 塗る種類が `null`（消す）のコマンドと、`PaintZone` 以外は `None` を返す。
 ///
 /// `painted` はその区画が載っているマスの数（もとから載っていたマスを含む）で、`unpainted` は載っていないマスを理由ごとに数える。
-/// 道路のマスは、どちらにも数えない。
+/// 道路、線路、踏切のマスは、どちらにも数えない。
 /// 理由は上から順に当てはめ、最初に当たったものに数える。中核の `DenyReason` は増やさず、買った土地や道路、建物と照らして求める。
 fn paint_breakdown(world: &World, command: &Command) -> Option<Value> {
     let Command::PaintZone {
@@ -1105,9 +1105,13 @@ fn paint_breakdown(world: &World, command: &Command) -> Option<Value> {
             water += 1;
         } else if matches!(
             use_,
-            Some(chizu_core::TileUse::Road | chizu_core::TileUse::Rail)
+            Some(
+                chizu_core::TileUse::Road
+                    | chizu_core::TileUse::Rail
+                    | chizu_core::TileUse::Crossing
+            )
         ) {
-            // 道路と線路のマスは区画を載せる所ではないので、塗れなかったマスに数えない。
+            // 道路、線路、踏切のマスは区画を載せる所ではないので、塗れなかったマスに数えない。
         } else if matches!(
             use_,
             Some(

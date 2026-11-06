@@ -707,6 +707,17 @@ fn act_makes_a_crossing_and_observe_and_map_show_it() {
     assert_eq!(c["overrun"], 0, "{c}");
     let map = cli(&["agent", "map", d, "18", "10", "22", "10"]);
     assert_eq!(grid_rows(&map, 1, 5), ["11F11"], "{map}");
+    // 踏切のマスは、道路と線路のマスと同じく、塗れなかったマスに数えない。道路から 7 マス目の 2 マスだけが残る。
+    let paint = write(
+        &dir.join("paint.json"),
+        r#"[{"type":"PaintZone","area":[[19,9],[21,17]],"zone":"Residential"}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &paint]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "AppliedPartly", "{acted}");
+    assert_eq!(r["paint"]["unpainted"]["beyondDepth"], 2, "{acted}");
+    assert_eq!(r["paint"]["unpainted"]["notFronted"], 0, "{acted}");
+    assert_eq!(r["paint"]["unpainted"]["total"], 2, "{acted}");
 }
 
 /// 駅 2 つを結ぶ路線を作って列車を走らせると、observe の rail に路線と列車が出て、鉄道の維持費に列車の分が入る。
