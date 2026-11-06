@@ -97,13 +97,59 @@ pub(super) struct Commuters {
     by_trip: BTreeMap<TripId, Commuter>,
     /// 世帯の車のいる所。どこにもない世帯は持たない。
     cars: BTreeMap<HouseholdId, HouseholdCar>,
-    /// 車で走り始めた通勤の移動ごとの、出発と行き先の建物の正面のマスの直線の距離（mm）。着いたら車の見込みに使う。
-    drives: BTreeMap<TripId, u64>,
+    /// 車で走るのを測る通勤の移動。車を停めたら、走った時間を車の見込みに使う。
+    drives: BTreeMap<TripId, Drive>,
     /// 時間帯ごとの、車で行く時間の見込み。
     pace: CarPace,
 }
 
+/// 車で走るのを測る通勤の移動の、直線の距離と、車に乗って走った時間。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct Drive {
+    /// 出発と行き先の建物の正面のマスの直線の距離（mm）。
+    mm: u64,
+    /// 車の区切りを始めた tick。
+    on_road: Option<Tick>,
+    /// 車を停めるまでに走った時間（移動の秒）。歩きに切り替えた移動は持たない。
+    took: Option<u64>,
+    /// 車線に出られずに車をやめ、歩きに切り替えたか。
+    gave_up: bool,
+}
+
+impl StateHash for Drive {
+    fn write_state(&self, h: &mut StateHasher) {
+        h.write(&self.mm);
+        h.write(&self.on_road);
+        h.write(&self.took);
+        h.write(&self.gave_up);
+    }
+}
+
 impl Commuters {
+    /// 移動 `trip` が `now` に車の区切りを始めた。測る移動でなければ何もしない。
+    pub(super) fn car_started(&mut self, trip: TripId, now: Tick) {
+        if let Some(d) = self.drives.get_mut(&trip) {
+            d.on_road = Some(now);
+        }
+    }
+
+    /// 移動 `trip` が `now` に車を降りた（駐車場に着いた）。測る移動でなければ何もしない。
+    pub(super) fn car_stopped(&mut self, trip: TripId, now: Tick) {
+        if let Some(d) = self.drives.get_mut(&trip)
+            && let Some(on) = d.on_road
+        {
+            d.took = Some(now.0.saturating_sub(on.0));
+        }
+    }
+
+    /// 移動 `trip` が車線に出られずに車をやめ、歩きに切り替えた。行き先に着いたら、車の区切りを始めてから着くまでを
+    /// 測る。混んだ道路に出られずに待った分と、そのあと歩いた分は、車を選んだためにかかった時間である。
+    pub(super) fn car_abandoned(&mut self, trip: TripId) {
+        if let Some(d) = self.drives.get_mut(&trip) {
+            d.gave_up = true;
+        }
+    }
+
     /// 移動 `trip` の車を駐車場 `lot` に停めた。通勤でないか、世帯の車でなければ何もせず `false`。
     pub(super) fn parked(&mut self, trip: TripId, lot: LotId) -> bool {
         let Some(c) = self.by_trip.get(&trip) else {
@@ -403,8 +449,18 @@ impl Trips {
                 self.commuters
                     .cars
                     .insert(r.who.household, HouseholdCar::InUse(id));
-                if let Some((_, _, d)) = front_distance(buildings, r.from, r.to) {
-                    self.commuters.drives.insert(id, d);
+                // 鉄道と比べる移動と同じ条件の移動だけを測る。家の枠でない駐車場から出る移動と、停めた車を
+                // 取りに帰る移動は、鉄道と比べないので測らない。
+                if !leaves_car
+                    && !fetch
+                    && let Some((_, _, d)) = front_distance(buildings, r.from, r.to)
+                    && d >= OWNER_DRIVE_MIN_MM.unsigned_abs()
+                {
+                    let drive = Drive {
+                        mm: d,
+                        ..Drive::default()
+                    };
+                    self.commuters.drives.insert(id, drive);
                 }
                 Pick::Drive(id)
             })
@@ -483,14 +539,20 @@ impl Trips {
         self.commuters.forget_trip(id)
     }
 
-    /// [`Trips::take_commuter`] と同じだが、`now` に着いた移動が世帯の車で走り始めた通勤なら、かかった時間を
-    /// 車で行く時間の見込み（[`CarPace`]）に足す。直前の `step` で終わった移動に使う。
+    /// [`Trips::take_commuter`] と同じだが、`now` に着いた移動が車で走るのを測る通勤なら、車に乗って走った時間
+    /// （歩きに切り替えた移動は、車の区切りを始めてから着くまで）を車で行く時間の見込み（[`CarPace`]）に足す。
+    /// 直前の `step` で終わった移動に使う。
     pub fn end_commute(&mut self, id: TripId, now: Tick) -> Option<Commuter> {
-        if let Some(mm) = self.commuters.drives.remove(&id)
+        if let Some(d) = self.commuters.drives.remove(&id)
+            && let Some(took) = d.took.or_else(|| {
+                d.on_road
+                    .filter(|_| d.gave_up)
+                    .map(|on| now.0.saturating_sub(on.0))
+            })
             && let Some(f) = self.finished.get(&id)
             && f.reached
         {
-            self.commuters.pace.learn(f.departed, now, mm);
+            self.commuters.pace.learn(f.departed, now, (d.mm, took));
         }
         self.commuters.forget_trip(id)
     }
@@ -499,6 +561,12 @@ impl Trips {
     #[cfg(test)]
     pub(super) fn car_pace_mut(&mut self) -> &mut CarPace {
         &mut self.commuters.pace
+    }
+
+    /// 車で走るのを測っている通勤の移動の数。テストで見る。
+    #[cfg(test)]
+    pub(super) fn measured_drives(&self) -> usize {
+        self.commuters.drives.len()
     }
 
     /// 移動している住民。

@@ -1254,7 +1254,7 @@ impl Trips {
     ) -> Vec<TripId> {
         self.finished.clear();
         let done = self.advance(net, router.connectors(), now, rail);
-        let mut ended = self.next_legs(net, router, done, rail);
+        let mut ended = self.next_legs(net, router, done, (rail, now));
         let give_up: Vec<usize> = (0..self.rows.len())
             .filter(|i| self.rows[*i].as_ref().is_some_and(car::given_up))
             .collect();

@@ -2133,13 +2133,17 @@ fn a_slow_hour_for_cars_sends_drivers_to_the_train() {
         )[0]
         .unwrap();
         let mode = mode_of(s, id);
+        // 鉄道を選んだ移動は、車で走るのを測らない。
+        assert_eq!(s.trips.measured_drives(), usize::from(mode == "car"));
         s.trips.cancel(id);
         mode
     };
     assert_eq!(start_at(&mut s, Tick(7 * hour)), "car");
-    // 0 日目の 7 時台に、測る前の見積もりの 3 倍かかった車の移動を測る。見込みを変えるのは次の日からである。
+    // 0 日目の 7 時台に、測る前の見積もりの 3 倍かかった車の移動を 20 件測る。見込みを変えるのは次の日からである。
     let pace = s.trips.car_pace_mut();
-    pace.learn(Tick(7 * hour), Tick(7 * hour + car_seconds(mm) * 3), mm);
+    for _ in 0..20 {
+        pace.learn(Tick(7 * hour), Tick(7 * hour), (mm, car_seconds(mm) * 3));
+    }
     assert_eq!(start_at(&mut s, Tick(7 * hour + 10)), "car");
     assert_eq!(start_at(&mut s, Tick(TICKS_PER_DAY + 7 * hour)), "rail");
     assert_eq!(start_at(&mut s, Tick(TICKS_PER_DAY + 12 * hour)), "car");
@@ -2354,4 +2358,162 @@ fn a_renter_adds_the_walk_and_half_the_fee_to_the_car_cost() {
         s.trips.parking_seconds(&request((work, shop)), sites),
         PARK_SECONDS
     );
+}
+
+/// 時刻 `now` に通勤の移動を始める。
+fn start_at_tick(s: &mut Street, requests: &[CommuteRequest], now: Tick) -> Vec<TripId> {
+    let (net, router) = (&s.net, &mut s.router);
+    s.trips
+        .start_commutes_with_rides(net, router, (&s.buildings, &[]), requests, now, None)
+        .into_iter()
+        .map(|id| id.expect("移動を作れない"))
+        .collect()
+}
+
+/// 時刻 `from` から 1 tick ずつ進めて移動 `id` を終わるまで進め、車の区切りを始めた tick、車を降りた tick、
+/// 移動を終えた tick を返す。車に乗らなければ、始めた tick と降りた tick は `None` である。
+fn run_timed(s: &mut Street, id: TripId, from: u64) -> (Option<u64>, Option<u64>, u64) {
+    let (mut on, mut off) = (None, None);
+    for now in from..from + 2_000 {
+        let before = s.trips.get(id).map(Trip::mode);
+        let ended = s.trips.step(&s.net, &mut s.router, Tick(now));
+        if ended.contains(&id) {
+            return (on, off, now);
+        }
+        let after = s.trips.get(id).map(Trip::mode);
+        if before == Some(LaneMode::Sidewalk) && after == Some(LaneMode::Car) {
+            on = Some(now);
+        }
+        if before == Some(LaneMode::Car) && after == Some(LaneMode::Sidewalk) {
+            off = Some(now);
+        }
+    }
+    panic!("着かない");
+}
+
+/// 0 日目の 7 時台の始め。
+const SEVEN: u64 = 7 * crate::clock::TICKS_PER_DAY / 24;
+
+/// 次の日に回したときの 7 時台の見込みが、測る前の見込みのままか。
+fn pace_unchanged(s: &mut Street) -> bool {
+    use super::car_pace::DEFAULT_PACE;
+    let pace = s.trips.car_pace_mut();
+    pace.roll(Tick(crate::clock::TICKS_PER_DAY));
+    pace.expected(7) == DEFAULT_PACE
+}
+
+/// 車で出た通勤は、車の区切りを始めてから車を降りるまでの時間だけを、出発の時間帯の見込みに足す。
+/// 家から駐車場まで歩く分と、駐車場から職場まで歩く分は入れない。
+#[test]
+fn a_commute_by_car_measures_only_the_time_on_the_road() {
+    use super::car_pace::{DEFAULT_PACE, PRIOR_MM};
+    use crate::rail::choice::tile_distance_mm;
+    let (mut s, ids) = Street::new(&[0, 30]);
+    let (home, work) = (ids[0], ids[1]);
+    let h = Household { home };
+    let id = start_at_tick(&mut s, &[h.request(0, (home, work))], Tick(SEVEN))[0];
+    assert!(Household::drives(&s, id));
+    assert_eq!(s.trips.measured_drives(), 1);
+    let (on, off, end) = run_timed(&mut s, id, SEVEN);
+    let (on, off) = (on.unwrap(), off.unwrap());
+    assert!(SEVEN < on && on < off && off < end, "{on} {off} {end}");
+    s.trips.end_commute(id, Tick(end));
+    assert_eq!(s.trips.measured_drives(), 0);
+    let front = |b: BuildingId| s.buildings.get(b).unwrap().front;
+    let mm = tile_distance_mm(front(home), front(work));
+    let pace = s.trips.car_pace_mut();
+    pace.roll(Tick(crate::clock::TICKS_PER_DAY));
+    let mean = ((off - on) * 1_000_000 + DEFAULT_PACE * PRIOR_MM) / (mm + PRIOR_MM);
+    assert_eq!(pace.expected(7), (DEFAULT_PACE + mean) / 2);
+    assert_ne!(pace.expected(7), DEFAULT_PACE);
+}
+
+/// 車線に出られずに歩きに切り替えた移動は、車の区切りを始めてから行き先に着くまでを測る。車で行こうとして
+/// 混んだ道路に出られなかった分も、車を選んだときにかかる時間だからである。
+#[test]
+fn a_drive_that_walks_instead_is_measured_until_it_arrives() {
+    use super::car_pace::{DEFAULT_PACE, PRIOR_MM};
+    use crate::rail::choice::tile_distance_mm;
+    let (mut s, ids) = Street::new(&[0, 30]);
+    let (home, work) = (ids[0], ids[1]);
+    let h = Household { home };
+    let id = start_at_tick(&mut s, &[h.request(0, (home, work))], Tick(SEVEN))[0];
+    let mut now = SEVEN;
+    while s.trips.get(id).unwrap().mode() != LaneMode::Car {
+        s.trips.step(&s.net, &mut s.router, Tick(now));
+        now += 1;
+        assert!(now < SEVEN + 100, "車に乗らない");
+    }
+    let on = now - 1;
+    let mut ended = Vec::new();
+    s.trips
+        .walk_instead(&s.net, &mut s.router, vec![id.slot()], &mut ended);
+    assert!(ended.is_empty());
+    assert_eq!(s.trips.measured_drives(), 1);
+    let (_, _, end) = run_timed(&mut s, id, now);
+    s.trips.end_commute(id, Tick(end));
+    assert_eq!(s.trips.measured_drives(), 0);
+    let front = |b: BuildingId| s.buildings.get(b).unwrap().front;
+    let mm = tile_distance_mm(front(home), front(work));
+    let pace = s.trips.car_pace_mut();
+    pace.roll(Tick(crate::clock::TICKS_PER_DAY));
+    let mean = ((end - on) * 1_000_000 + DEFAULT_PACE * PRIOR_MM) / (mm + PRIOR_MM);
+    assert_eq!(pace.expected(7), (DEFAULT_PACE + mean) / 2);
+}
+
+/// 車を停めたあと、道路がなくなって行き先に着けずに消えた移動（`reached` が `false`）は測らない。
+#[test]
+fn a_drive_that_never_arrives_is_not_measured() {
+    let (mut s, ids) = Street::new(&[0, 30]);
+    let (home, work) = (ids[0], ids[1]);
+    let h = Household { home };
+    let id = start_at_tick(&mut s, &[h.request(0, (home, work))], Tick(SEVEN))[0];
+    let mut now = SEVEN;
+    let mut drove = false;
+    loop {
+        let mode = s.trips.get(id).expect("移動が終わった").mode();
+        drove |= mode == LaneMode::Car;
+        if drove && mode == LaneMode::Sidewalk {
+            break;
+        }
+        s.trips.step(&s.net, &mut s.router, Tick(now));
+        now += 1;
+        assert!(now < SEVEN + 1_000, "停めない");
+    }
+    s.net
+        .bulldoze(TileRect::from_corners(
+            TilePos::new(15, 0),
+            TilePos::new(40, 0),
+        ))
+        .unwrap();
+    s.router.rebuild(&s.net);
+    assert_eq!(s.trips.reroute(&s.net, &mut s.router), vec![id]);
+    assert_eq!(s.trips.finished(id).map(|f| f.reached), Some(false));
+    s.trips.end_commute(id, Tick(now));
+    assert_eq!(s.trips.measured_drives(), 0);
+    assert!(pace_unchanged(&mut s));
+}
+
+/// 家の枠でない駐車場（職場）に停めた車で出る移動は、鉄道と比べないので測らない。
+#[test]
+fn a_drive_from_a_car_left_at_work_is_not_measured() {
+    let (mut s, ids) = Street::new(&[0, 30]);
+    let (home, work) = (ids[0], ids[1]);
+    let h = Household { home };
+    h.park(&mut s, 0, (home, work));
+    let id = start_at_tick(&mut s, &[h.request(0, (work, home))], Tick(SEVEN))[0];
+    assert!(Household::drives(&s, id));
+    assert_eq!(s.trips.measured_drives(), 0);
+}
+
+/// 取りやめた移動は、測る移動から外す。
+#[test]
+fn a_cancelled_drive_is_forgotten() {
+    let (mut s, ids) = Street::new(&[0, 30]);
+    let (home, work) = (ids[0], ids[1]);
+    let h = Household { home };
+    let id = start_at_tick(&mut s, &[h.request(0, (home, work))], Tick(SEVEN))[0];
+    assert_eq!(s.trips.measured_drives(), 1);
+    s.trips.cancel(id);
+    assert_eq!(s.trips.measured_drives(), 0);
 }
