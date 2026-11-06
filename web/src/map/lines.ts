@@ -28,7 +28,7 @@ export const LINE_COLOR_NAMES: readonly string[] = [
 ];
 
 /** chizu-wasm の rail_lines の、路線ごとの見出しの数の個数。 */
-export const LINE_HEADER = 11;
+export const LINE_HEADER = 13;
 /** 本数の上限。chizu-core の MAX_LINE_TRAINS と同じ。 */
 export const MAX_LINE_TRAINS = 16;
 
@@ -70,7 +70,13 @@ export type RailLineInfo = {
   stations: Tile[];
   /** 通る線路（重ならないもの）。 */
   tracks: { a: Tile; b: Tile }[];
+  /** 待てる所の数。2 つ未満だと上限は 0 になる。 */
+  waitPlaces: number;
+  /** 上限が 0 のとき、進路を共有しているほかの路線。上限が 0 でなければ空。 */
+  sharedWith: LineRef[];
 };
+
+type LineRef = { index: number; generation: number };
 
 /** chizu-wasm の rail_lines の数の並びを読む。壊れていたら、読めたところまでにする。 */
 export function parseLines(data: ArrayLike<number>): RailLineInfo[] {
@@ -80,7 +86,9 @@ export function parseLines(data: ArrayLike<number>): RailLineInfo[] {
     const at = (k: number) => data[i + k] ?? 0;
     const stationCount = at(9);
     const trackCount = at(10);
-    const end = i + LINE_HEADER + stationCount * 2 + trackCount * 4;
+    const sharedCount = at(12);
+    const sharedAt = i + LINE_HEADER + stationCount * 2 + trackCount * 4;
+    const end = sharedAt + sharedCount * 2;
     if (end > data.length) {
       break;
     }
@@ -97,6 +105,13 @@ export function parseLines(data: ArrayLike<number>): RailLineInfo[] {
         b: { x: data[p + 2] ?? 0, y: data[p + 3] ?? 0 },
       });
     }
+    const sharedWith: LineRef[] = [];
+    for (let k = 0; k < sharedCount; k++) {
+      sharedWith.push({
+        index: data[sharedAt + k * 2] ?? 0,
+        generation: data[sharedAt + k * 2 + 1] ?? 0,
+      });
+    }
     out.push({
       index: at(0),
       generation: at(1),
@@ -109,6 +124,8 @@ export function parseLines(data: ArrayLike<number>): RailLineInfo[] {
       roundTrip: at(8),
       stations,
       tracks,
+      waitPlaces: at(11),
+      sharedWith,
     });
     i = end;
   }
