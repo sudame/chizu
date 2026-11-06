@@ -1698,6 +1698,13 @@ fn act_reports_what_a_bulldoze_removed() {
     assert_eq!(r["bulldozed"]["roadTiles"], 0, "{acted}");
     assert_eq!(r["bulldozed"]["buildings"], 0, "{acted}");
 
+    // 住宅はすべて、この道路に面している。取り壊す前に住んでいる世帯を数える。
+    let observed = json(&cli(&["agent", "observe", d]));
+    let by_density = &observed["buildings"]["residentialByDensity"];
+    let housed = by_density["high"]["housedHouseholds"].as_u64().unwrap()
+        + by_density["low"]["housedHouseholds"].as_u64().unwrap();
+    assert!(housed > 0, "{observed}");
+
     // 道路の 1 マスだけを打っても、40 マスの区間が全部消え、沿道の建物も消える。
     let cmds = write(
         &dir.join("b2.json"),
@@ -1708,7 +1715,7 @@ fn act_reports_what_a_bulldoze_removed() {
     assert_eq!(r["outcome"], "Applied", "{acted}");
     assert_eq!(r["bulldozed"]["roadTiles"], 40, "{acted}");
     assert!(r["bulldozed"]["buildings"].as_u64().unwrap() > 0, "{acted}");
-    assert!(r["bulldozed"]["displacedHouseholds"].is_u64(), "{acted}");
+    assert_eq!(r["bulldozed"]["displacedHouseholds"], housed, "{acted}");
 }
 
 /// join:false なら隣にあっても延ばさない。join の書き方が違うときや BuildRoad 以外では Invalid になる。
