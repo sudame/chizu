@@ -940,6 +940,9 @@ try {
   // 取り壊しの道具は、1 マスのドラッグでも、実際に消える区間の全体と数を、取り壊す前に示す
   await page.locator('button[data-tool="bulldoze"]').click();
   const oneTile = tileCenter(20, 32);
+  // 止めた街でも、取り壊した直後に見積もりが新しい街のものに変わることを、このあと見る
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
   await page.mouse.move(oneTile.x, oneTile.y);
   await page.mouse.down();
   await page.mouse.move(oneTile.x + 1, oneTile.y, { steps: 2 });
@@ -967,21 +970,9 @@ try {
     red > green + 40 && red > blue + 40,
     `ドラッグした 1 マスの外の、消える区間も赤く塗られる（${redInside.join(", ")}）`,
   );
+  const beforeOneTile = await outcomeCount();
   await page.mouse.up();
-  await page.keyboard.press("Escape");
-  await page.locator('button[data-tool="bulldoze"]').click();
-  // 止めた街で 1 マスを取り壊した直後は、もうない区間を塗り続けず、新しい見積もり（消えるものなし）に変わる
-  await page.locator("#pause").click();
-  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
-  await page.mouse.move(oneTile.x, oneTile.y, { steps: 2 });
-  await page.waitForFunction(
-    () => Number(document.querySelector<HTMLElement>("#map")?.dataset.bulldozeRoadTiles ?? 0) > 1,
-    undefined,
-    { timeout: TIMEOUT_MS },
-  );
-  const beforeClick = await outcomeCount();
-  await page.mouse.click(oneTile.x, oneTile.y);
-  await nextOutcome(beforeClick);
+  await nextOutcome(beforeOneTile);
   await page.waitForFunction(
     () => document.querySelector<HTMLElement>("#map")?.dataset.bulldozeRoadTiles === "0",
     undefined,
@@ -990,6 +981,8 @@ try {
   check(true, "止めた街で取り壊した直後に、見積もりが新しい街のものに変わる");
   await page.locator("#pause").click();
   await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
+  await page.keyboard.press("Escape");
+  await page.locator('button[data-tool="bulldoze"]').click();
   const beforeBulldoze = await outcomeCount();
   await page.mouse.move(cx - 100, cy - 20);
   await page.mouse.down();
