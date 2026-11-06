@@ -1211,7 +1211,8 @@ fn bulldoze(dir: &Path, [x0, y0, x1, y1]: [i64; 4]) {
     cli(&["agent", "act", dir.to_str().unwrap(), &file]);
 }
 
-/// 高速道路から道路を引き、住宅の区画、発電所、浄水場を置いて 2 日進めた街。(x, y) は道路の始点である。
+/// 高速道路から道路を引き、住宅と工業の区画、発電所、浄水場を置いて 2 日進めた街。(x, y) は道路の始点である。
+/// 職場がないと、職のない住民が増えて住宅の需要が止まり、町が育たない。
 fn supplied_town(name: &str) -> (PathBuf, i64, i64) {
     let dir = session(name);
     let d = dir.to_str().unwrap();
@@ -1223,6 +1224,7 @@ fn supplied_town(name: &str) -> (PathBuf, i64, i64) {
         &serde_json::json!([
             {"type":"BuildRoad","from":[x,y],"to":[x+40,y],"kind":"Medium"},
             {"type":"PaintZone","area":[[x+1,y+1],[x+40,y+6]],"zone":"Residential"},
+            {"type":"PaintZone","area":[[x+1,y-6],[x+20,y-1]],"zone":"Industrial"},
             {"type":"PlaceBuilding","kind":"PowerPlant","at":[x+30,y-1],"rotation":2},
             {"type":"PlaceBuilding","kind":"WaterPump","at":[x+36,y-1],"rotation":2},
         ])
