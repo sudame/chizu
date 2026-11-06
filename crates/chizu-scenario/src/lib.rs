@@ -342,7 +342,7 @@ mod tests {
     fn golden_hash() {
         assert_eq!(
             state_hash_of(&synthetic_population(42, 1_000)),
-            7_946_534_084_356_939_145
+            16_390_134_796_798_341_638
         );
     }
 }

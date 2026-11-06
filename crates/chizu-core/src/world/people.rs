@@ -189,12 +189,12 @@ impl World {
         s
     }
 
-    /// 家のある住民の幸福度の平均と、通勤・生活サービス・暮らし向きの点数の平均。端数は切り捨てる。
+    /// 家のある住民の幸福度の平均と、通勤・生活サービス・駐車場・暮らし向きの点数の平均。端数は切り捨てる。
     /// 幸福度は [`CityStats::happiness`] と同じく、住民ごとに [`happiness::total`] を出してから平均する。
     /// 家のある住民がいなければ中立の値である。画面に出すだけで、状態には混ぜない。
     pub fn happiness_summary(&self) -> (u8, HappinessParts) {
         let p = &self.population;
-        let (mut sum, mut total, mut housed) = ([0_u64; 3], 0_u64, 0_u64);
+        let (mut sum, mut total, mut housed) = ([0_u64; 4], 0_u64, 0_u64);
         for id in p.citizen_ids() {
             let row = p.citizen(id).expect("いる住民の行がない");
             let home = p.home(row.household).flatten();
@@ -202,7 +202,8 @@ impl World {
                 let h = row.happiness;
                 sum[0] += u64::from(h.commute);
                 sum[1] += u64::from(h.services);
-                sum[2] += u64::from(h.wealth);
+                sum[2] += u64::from(h.parking);
+                sum[3] += u64::from(h.wealth);
                 total += u64::from(happiness::total(h));
                 housed += 1;
             }
@@ -219,7 +220,8 @@ impl World {
             HappinessParts {
                 commute: avg(sum[0]),
                 services: avg(sum[1]),
-                wealth: avg(sum[2]),
+                parking: avg(sum[2]),
+                wealth: avg(sum[3]),
             },
         )
     }
@@ -273,6 +275,9 @@ impl World {
             population: p,
             buildings: &self.buildings,
             tax_permille: self.tax_permille,
+            car_places: &self.car_places,
+            facilities: &self.facilities,
+            parking_fee: self.parking_fee,
         };
         let leaving: Vec<HouseholdId> = p
             .household_ids()
@@ -718,9 +723,10 @@ pub(crate) mod tests {
             .find(|(b, x)| *b != old && x.zone.kind() == ZoneKind::Industrial)
             .map(|(b, _)| b)
             .expect("ほかの職場がない");
-        // update_jobs と同じく、職場を変えて予定を立て直す。
+        // update_jobs と同じく、職場を変えて予定を立て直す。新しい職場へ出る時刻が前の職場へ着くより先に来ると、
+        // その出発で前の移動がやめになり、着かずに終わる。歩いて向かう住民は着くのが遅いので、出発は翌日にずらす。
         w.set_workplace(id, Some(other));
-        let at = w.next_leave_home(id, other);
+        let at = Tick(w.next_leave_home(id, other).0 + TICKS_PER_DAY);
         w.population.set_schedule(
             id,
             ScheduleState {
@@ -1320,6 +1326,7 @@ pub(crate) mod tests {
             let zero = HappinessParts {
                 commute: 0,
                 services: 0,
+                parking: 0,
                 wealth: 0,
             };
             w.population_mut().apply_change(
@@ -1349,12 +1356,14 @@ pub(crate) mod tests {
                 HappinessParts {
                     commute: hi,
                     services: lo,
+                    parking: hi,
                     wealth: hi,
                 }
             } else {
                 HappinessParts {
                     commute: lo,
                     services: hi,
+                    parking: lo,
                     wealth: lo,
                 }
             };

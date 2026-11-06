@@ -576,17 +576,27 @@ mod tests {
     use chizu_core::{Command, CommandLog, TICKS_PER_DAY, replay};
 
     /// 詰まりが起きる街（`chizu-core/tests/gridlock/city.rec`）の、車が混み合う朝を再生した世界。
+    /// 詰まる道ができる tick は、育ち方の小さな違いで前後するので、67 日目の朝のうち、詰まった道が
+    /// できた最初の tick まで進める。
     fn jammed_city() -> World {
-        city_at(66 * TICKS_PER_DAY + 2_000)
+        let log = city_log(Zone::Residential);
+        let mut world = World::new(0);
+        replay(&mut world, &log, 66 * TICKS_PER_DAY + 1_500);
+        for _ in 0..150 {
+            if world
+                .road_congestion()
+                .values()
+                .any(|c| *c == Congestion::Jammed)
+            {
+                break;
+            }
+            replay(&mut world, &log, 10);
+        }
+        world
     }
 
-    /// 人が遊んだ街（種 0）を、`ticks` まで再生した街。
-    fn city_at(ticks: u64) -> World {
-        city_with_homes(ticks, Zone::Residential)
-    }
-
-    /// [`city_at`] の記録の高密度の住宅の塗りを、`home` の塗りに書き換えて再生した街。
-    fn city_with_homes(ticks: u64, home: Zone) -> World {
+    /// 人が遊んだ街（種 0）の記録の高密度の住宅の塗りを、`home` の塗りに書き換えた記録。
+    fn city_log(home: Zone) -> CommandLog {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../chizu-core/tests/gridlock/city.rec");
         let src = CommandLog::decode(&std::fs::read(path).unwrap()).unwrap();
@@ -600,8 +610,13 @@ mod tests {
             }
             log.push(e).unwrap();
         }
+        log
+    }
+
+    /// [`city_log`] を `ticks` まで再生した街。
+    fn city_with_homes(ticks: u64, home: Zone) -> World {
         let mut world = World::new(0);
-        replay(&mut world, &log, ticks);
+        replay(&mut world, &city_log(home), ticks);
         world
     }
 

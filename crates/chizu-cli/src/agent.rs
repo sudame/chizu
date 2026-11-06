@@ -185,9 +185,10 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  借りた枠は、車がいないあいだも空かない（月極）。家と借りた枠のあいだは歩く。借りる世帯を決め直すのは、
                  世帯が越してきたときと、自宅の枠を配り直すときと、ゲーム内の 1 日に 1 回である。
                  fee 共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額、街で 1 つ）。SetParkingFee で決める。始めは 10。
-                 世帯の払える上限は 10 ×（100 ＋ 蓄えの割合）÷ 100 で、蓄えに応じて 10〜20 である。料金が上限を超える世帯は
+                 世帯の払える上限は 10 ＋ 40 × 蓄えの割合 ÷ 100 で、蓄えに応じて 10〜49 である。料金が上限を超える世帯は
                  借りず、借りている世帯も 1 日 1 回の決め直しで枠を返す。料金を変えてもすぐには返さない。
                  料金の収入は financesPerDay.parkingFees（借りられた枠のうち、払える上限以下の世帯の分の数 × 料金）で、街の所持金に入る。
+                 料金を 10 より上げると、借りている世帯の幸福度の駐車場の点も下がる（population.happinessParts）。
                  共同の駐車場を取り壊すと、借りていた世帯は枠をなくし、停まっていた車も消える。
                  carlessAreas 車を持てない世帯の多い所の上位 10 件。家の正面のマスを 8×8 マスの区切りで数え、世帯の多い順
                  （同じなら区切りの座標の x、y の順）に並べる。at 区切りの最小の座標、center 真ん中のマス、households 世帯の数、
@@ -222,9 +223,13 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  vacantHomes が 0 なのに wantingHouseholds があるときは、住宅が足りないか、外の世界とつながっていない。
 
 observe の population.happinessParts（幸福度の内訳）:
-  家のある住民の、幸福度の 3 つの要素の点数（0〜100）の平均。commute 通勤（commute.time の時間から決まる）、
-  services 電気と水道、wealth 職、世帯の蓄え、住宅の税率。happiness は 1:1:3 の重みで足した値の平均で、
-  電気と水道が欠けると上限で抑えられる。
+  家のある住民の、幸福度の 4 つの要素の点数（0〜100）の平均。commute 通勤（commute.time の時間から決まる）、
+  services 電気と水道、parking 駐車場、wealth 職、世帯の蓄え、住宅の税率。happiness は
+  commute:services:parking:wealth を 1:1:1:4 の重みで足した値の平均で、電気と水道が欠けると上限で抑えられる。
+  parking は世帯の全員が同じ点で、自宅の枠があれば 100、車を持てない（parking.households.none）なら 30、
+  共同の駐車場を借りていれば 100 から遠さと高さを引く。遠さは家の正面のマスから駐車場の正面のマスまでの直線が
+  8 マスまでは 0 で、32 マスで 40 になるまで一様に増える。高さは料金が 10 以下なら 0 で、世帯の払える上限で 30 になるまで
+  一様に増える。上げるには、車を持てない世帯の多い所（parking.carlessAreas）の近くに共同の駐車場を置くか、料金を下げる。
 
 observe の demandFactors（demand の内訳）:
   区画の種類ごとに、demand を足し引きしている要因を [{factor, value}] で並べる。value を足し合わせると demand になる。値が 0 の要因も省かない。
@@ -351,7 +356,7 @@ observe の removedCrosswalks:
       税率を千分率で決める。住宅の税率は低密度と高密度で 1 つで、Residential で決める（ResidentialLow は断る）。
   {"type":"SetParkingFee","fee":0..50}
       共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額）を、街で 1 つ決める。始めは 10。範囲の外は Invalid。
-      料金が世帯の払える上限（蓄えに応じて 10〜20）を超えると、その世帯は借りない。借りている世帯は、
+      料金が世帯の払える上限（蓄えに応じて 10〜49）を超えると、その世帯は借りない。借りている世帯は、
       ゲーム内の 1 日に 1 回の決め直しで枠を返す。いまの料金は observe の parking.fee にある。
   {"type":"SetSimSpeed","speed":1..288}
       画面での速さの倍率。1 倍は実時間の 1 秒に 5 tick で、288 倍は 1 日を 5 秒で回す。advance の進み方は変わらない。
@@ -1257,11 +1262,13 @@ fn happiness_parts(h: HappinessParts) -> Value {
     let HappinessParts {
         commute,
         services,
+        parking,
         wealth,
     } = h;
     json!({
         "commute": commute,
         "services": services,
+        "parking": parking,
         "wealth": wealth,
     })
 }
@@ -1857,6 +1864,7 @@ const WATCHED: &[&str] = &[
     "/population/employed",
     "/population/happiness",
     "/population/happinessParts/commute",
+    "/population/happinessParts/parking",
     "/commute/time/medianMinutes",
     "/citizenPlaces/homeless",
     "/traffic/cars/total",

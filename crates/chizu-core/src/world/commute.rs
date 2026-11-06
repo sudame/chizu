@@ -751,6 +751,9 @@ mod commute_time_tests {
             population: &w.population,
             buildings: &w.buildings,
             tax_permille: w.tax_permille,
+            car_places: &w.car_places,
+            facilities: &w.facilities,
+            parking_fee: w.parking_fee,
         };
         let p = &w.population;
         let mut measured = 0;

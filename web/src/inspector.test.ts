@@ -19,7 +19,9 @@ describe("parseInspect", () => {
   });
 
   it("住宅を読む", () => {
-    expect(parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 5, 2])).toEqual({
+    expect(
+      parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 44, 5, 2]),
+    ).toEqual({
       kind: "building",
       target: [1, 5, 2],
       zone: "Residential",
@@ -33,6 +35,7 @@ describe("parseInspect", () => {
         happiness: 62,
         commute: 80,
         services: 50,
+        parking: 44,
         wealth: 55,
         commuteSeconds: 3960,
       },
@@ -44,7 +47,7 @@ describe("parseInspect", () => {
     const empty = parseInspect(pad([1, 1, 1, 1, 1, 2, 0, 0]));
     expect(empty).toMatchObject({ kind: "building", residents: null });
     const jobless = parseInspect([
-      1, 1, 1, 1, 1, 2, 1, 2, 40, 100, 100, 0, -1, -1, -1, -1, -1, 6, 1,
+      1, 1, 1, 1, 1, 2, 1, 2, 40, 100, 100, 0, -1, -1, -1, -1, -1, 100, 6, 1,
     ]);
     expect(jobless).toMatchObject({ residents: { commuteSeconds: null } });
   });
@@ -75,7 +78,7 @@ describe("parseInspect", () => {
 
 describe("describeInspect", () => {
   it("住宅の世帯、住民、幸福度とその要素、電気と水道、通勤を出す", () => {
-    const view = parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 5, 2]);
+    const view = parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 44, 5, 2]);
     expect(view).not.toBeNull();
     const text = describeInspect(view as NonNullable<typeof view>);
     expect(text.title).toBe("住宅（高密度、段階 2）");
@@ -85,6 +88,7 @@ describe("describeInspect", () => {
       { label: "幸福度", value: "62 / 100" },
       { label: "　通勤", value: "80" },
       { label: "　生活サービス", value: "50" },
+      { label: "　駐車場", value: "44" },
       { label: "　暮らし向き", value: "55" },
       { label: "電気", value: "届いている" },
       { label: "水道", value: "届いていない" },
@@ -122,7 +126,9 @@ describe("describeInspect", () => {
   });
 
   it("低密度の住宅（区画の番号 5）は高密度と分けて読み、住宅の欄を出す", () => {
-    const view = parseInspect([1, 5, 2, 1, 1, 3, 1, 3, 62, 80, 50, 55, 3960, 3, 1, 0, 0, 5, 2]);
+    const view = parseInspect([
+      1, 5, 2, 1, 1, 3, 1, 3, 62, 80, 50, 55, 3960, 3, 1, 0, 0, 100, 5, 2,
+    ]);
     expect(view).toMatchObject({ kind: "building", zone: "ResidentialLow" });
     const text = describeInspect(view as NonNullable<typeof view>);
     expect(text.title).toBe("住宅（低密度、段階 2）");
@@ -174,7 +180,7 @@ describe("formatDuration", () => {
 
 describe("applyInspectReply", () => {
   const tile: InspectQuery = { kind: "tile", x: 3, y: 4 };
-  const facility = [2, 1, 1200, 1200, ...Array(13).fill(-1), 8, 9];
+  const facility = [2, 1, 1200, 1200, ...Array(14).fill(-1), 8, 9];
 
   it("マスで押した最初の答えが届いたら、以後は識別子で引く", () => {
     const result = applyInspectReply(tile, tile, facility);
@@ -274,7 +280,7 @@ describe("setupInspector", () => {
     (globalThis as { document?: unknown }).document = { createElement: make };
     const inspector = setupInspector(panel() as unknown as HTMLElement, () => {});
     const at = (n: number) =>
-      parseInspect([1, 3, 1, 1, 1, 10, n, ...Array(10).fill(-1), 1, 1]) as NonNullable<
+      parseInspect([1, 3, 1, 1, 1, 10, n, ...Array(11).fill(-1), 1, 1]) as NonNullable<
         ReturnType<typeof parseInspect>
       >;
     inspector.show(at(1));

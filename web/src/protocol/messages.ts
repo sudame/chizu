@@ -24,7 +24,7 @@ export const FINANCE_LENGTH = 16;
 export const CARLESS_FIXED = 6;
 
 /** chizu-wasm の overview の数の個数。 */
-export const OVERVIEW_LENGTH = 21;
+export const OVERVIEW_LENGTH = 22;
 /** 区画の種類。Residential は高密度の住宅、Clear は区画を消す。 */
 export type ZoneName =
   | "Residential"

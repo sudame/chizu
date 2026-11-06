@@ -23,15 +23,20 @@ use crate::units::Money;
 /// 自宅の枠のない世帯が共同の駐車場を探す範囲。家の出入口のマスから、駐車場の正面のマスまでの直線の距離（マス）である。
 pub const SHARED_LOT_RADIUS: u64 = 32;
 
-/// 払える上限の基準にする料金（1 日）。
+/// 払える上限の基準にする料金（1 日）。蓄えのない世帯もこの料金までは払い、幸福度の高さの点も下げない。
 pub const BASE_SHARED_LOT_FEE: i64 = 10;
 
+/// 蓄えが `SAVINGS_FOR_FULL_BONUS` に届いた世帯が払える料金（1 日）。料金の範囲の上限（[`crate::command::MAX_PARKING_FEE`]）と同じにして、
+/// 料金を上げるほど借りる世帯が少しずつ減るようにする。越してくる世帯の蓄えはこれより少ないので、範囲の上限では誰も借りない。
+pub const TOP_SHARED_LOT_FEE: i64 = 50;
+
 /// 蓄え `savings` の世帯が払える、借りた枠 1 つの 1 日の料金の上限。
-/// 基準の料金 ×（100 ＋ 蓄えの割合）÷ 100 で、蓄えの割合は蓄えを `SAVINGS_FOR_FULL_BONUS` で割った百分率（0〜100）である。
+/// 基準の料金から、蓄えの割合に比例して [`TOP_SHARED_LOT_FEE`] まで上げる。蓄えの割合は、蓄えを
+/// `SAVINGS_FOR_FULL_BONUS` で割った百分率（0〜100）である。
 pub fn fee_cap(savings: Money) -> i64 {
     let full = crate::happiness::SAVINGS_FOR_FULL_BONUS.0;
     let percent = savings.0.clamp(0, full) * 100 / full;
-    BASE_SHARED_LOT_FEE * (100 + percent) / 100
+    BASE_SHARED_LOT_FEE + (TOP_SHARED_LOT_FEE - BASE_SHARED_LOT_FEE) * percent / 100
 }
 
 /// テストが自宅の枠の足りない街を作るための口。このクレートのテストと、`test-util` を付けた他のクレートのテストだけで使える。
@@ -295,9 +300,15 @@ mod tests {
     fn the_fee_cap_rises_with_savings() {
         let full = crate::happiness::SAVINGS_FOR_FULL_BONUS;
         assert_eq!(fee_cap(Money(0)), BASE_SHARED_LOT_FEE);
-        assert_eq!(fee_cap(Money(full.0 / 2)), 15);
-        assert_eq!(fee_cap(full), 20);
-        assert_eq!(fee_cap(Money(full.0 * 3)), 20);
+        assert_eq!(fee_cap(Money(full.0 / 4)), 20);
+        assert_eq!(fee_cap(Money(full.0 / 2)), 30);
+        assert_eq!(fee_cap(Money(full.0 - 1)), 49);
+        assert_eq!(fee_cap(full), TOP_SHARED_LOT_FEE);
+        assert_eq!(fee_cap(Money(full.0 * 3)), TOP_SHARED_LOT_FEE);
+        assert_eq!(
+            TOP_SHARED_LOT_FEE,
+            i64::from(crate::command::MAX_PARKING_FEE)
+        );
         // 始めたときの料金なら、蓄えのない世帯も払える。
         assert!(i64::from(crate::world::INITIAL_PARKING_FEE) <= fee_cap(Money(0)));
     }

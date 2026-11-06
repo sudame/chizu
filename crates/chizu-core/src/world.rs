@@ -851,6 +851,8 @@ impl World {
         self.sync_router();
         let (seed, tick, tax_permille) = (self.seed, self.tick, self.tax_permille);
         let buildings = &self.buildings;
+        let (car_places, facilities, parking_fee) =
+            (&self.car_places, &self.facilities[..], self.parking_fee);
         self.population
             .update_bucket(bucket_at(tick), |population, id, row| {
                 let ctx = CitizenContext {
@@ -859,6 +861,9 @@ impl World {
                     population,
                     buildings,
                     tax_permille,
+                    car_places,
+                    facilities,
+                    parking_fee,
                 };
                 update(&ctx, id, row)
             });
