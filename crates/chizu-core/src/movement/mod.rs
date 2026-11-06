@@ -24,6 +24,9 @@ mod parking;
 #[cfg(test)]
 mod parking_tests;
 mod pos;
+mod rail_crossing;
+#[cfg(test)]
+mod rail_crossing_tests;
 pub mod signal;
 #[cfg(test)]
 mod signal_tests;
@@ -54,6 +57,7 @@ pub use parking::{
     lot_spot, lot_tiles, shared_facility,
 };
 pub use pos::SidewalkPos;
+pub use rail_crossing::RailCrossings;
 
 use crate::command::NodeId;
 use crate::id::{Slots, TripId};
@@ -492,7 +496,12 @@ impl Trip {
     ///
     /// 交差点を通るときは、リンクの終わりを越えた距離を、渡る腕の横断歩道を順に並べた道のりの上の位置とみなす。
     /// 渡り始めるところで `gate` が許さなければ、その手前（歩道の端）で待つ。
-    fn advance(&mut self, net: &Network, gate: &crossing::Gate) -> (bool, Option<crossing::Occ>) {
+    fn advance(
+        &mut self,
+        net: &Network,
+        gate: &crossing::Gate,
+        rail: &RailCrossings,
+    ) -> (bool, Option<crossing::Occ>) {
         let speed = u32::try_from(WALK_SPEED.0).expect("歩く速さが負");
         let waited = core::mem::take(&mut self.waited);
         if let Some(done) = self.walk.jay {
@@ -531,6 +540,14 @@ impl Trip {
         }
         let mut p0 = self.offset.0;
         let mut p1 = p0.saturating_add(speed);
+        // 閉じた踏切の手前で待つ。
+        if let Some(stop) = rail
+            .walk_limit(self.link(), self.link_len.0, p0)
+            .filter(|s| *s < p1)
+        {
+            self.offset = LaneOffset(stop);
+            return (false, None);
+        }
         loop {
             if self.last_leg() {
                 self.offset = LaneOffset(p1);
@@ -1055,8 +1072,19 @@ impl Trips {
     /// その場で次の区切りの経路を探して進む。経路が見つからなかった主体も消して返す。
     /// `router` は `net` に合わせてあること。`now` は信号の段階を決めるのに使う。
     pub fn step(&mut self, net: &Network, router: &mut AstarRouter, now: Tick) -> Vec<TripId> {
+        self.step_with_rail(net, router, now, &RailCrossings::default())
+    }
+
+    /// [`Trips::step`] と同じく進める。`rail` の閉じた踏切の手前では、車と歩く人が止まる。
+    pub fn step_with_rail(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        now: Tick,
+        rail: &RailCrossings,
+    ) -> Vec<TripId> {
         self.finished.clear();
-        let done = self.advance(net, router.connectors(), now);
+        let done = self.advance(net, router.connectors(), now, rail);
         let mut ended = self.next_legs(net, router, done);
         let give_up: Vec<usize> = (0..self.rows.len())
             .filter(|i| self.rows[*i].as_ref().is_some_and(car::given_up))
@@ -1086,7 +1114,13 @@ impl Trips {
     }
 
     /// 歩く人と車を 1 tick 進め、区切りの終わりに着いた行を番号の順に返す。
-    fn advance(&mut self, net: &Network, connectors: &[Connector], now: Tick) -> Vec<usize> {
+    fn advance(
+        &mut self,
+        net: &Network,
+        connectors: &[Connector],
+        now: Tick,
+        rail: &RailCrossings,
+    ) -> Vec<usize> {
         // 信号の灯火と、歩く人が渡り始めてよいかは、前の tick の車と歩く人の様子だけから決める。
         let gate = car::gate(
             &self.rows,
@@ -1097,7 +1131,7 @@ impl Trips {
         );
         let advance = |(i, t): (usize, &mut Option<Trip>)| {
             let t = t.as_mut().filter(|t| t.mode == LaneMode::Sidewalk)?;
-            let (arrived, occ) = t.advance(net, &gate);
+            let (arrived, occ) = t.advance(net, &gate, rail);
             (arrived || occ.is_some()).then_some((i, arrived, occ))
         };
         #[cfg(feature = "parallel")]
@@ -1119,6 +1153,7 @@ impl Trips {
         let mut occupied = crossing::Occupied::of(net, walked.iter().filter_map(|w| w.2));
         // 長く待った人のいる横断歩道でも、止まりきれる車を止めて、人が渡り始められるようにする。
         occupied.crosswalks.extend(gate.claimed.iter().copied());
+        rail.add_closed_zones(net, &mut occupied);
         arrived.extend(car::step(
             &mut self.rows,
             net,
@@ -1127,6 +1162,7 @@ impl Trips {
             now,
             &occupied,
             &gate.signals,
+            rail,
         ));
         self.lights = signal::Lights {
             now,

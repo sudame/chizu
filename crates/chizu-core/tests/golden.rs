@@ -155,6 +155,13 @@ fn scenarios() -> Vec<Scenario> {
             money: None,
         },
         Scenario {
+            name: "rail_crossing",
+            seed: 0,
+            ticks: RAIL_CROSSING_TICKS,
+            log: rail_crossing(),
+            money: None,
+        },
+        Scenario {
             name: "land_slots",
             seed: 42,
             ticks: 2 * TICKS_PER_DAY + 600,
@@ -232,6 +239,68 @@ fn rail_lines() -> CommandLog {
         },
     );
     rec(3_000, Command::SetLineTrains { line, trains: 2 });
+    log
+}
+
+const RAIL_CROSSING_TICKS: u64 = 3_000;
+
+/// 駅 2 つを結ぶ線路を、道路が横切る踏切と、線路が道路を横切る踏切を作り、列車を走らせる記録。
+/// 隣に踏切を作る道路は断り、途中で踏切の道路を取り壊す。
+fn rail_crossing() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let at = TilePos::new;
+    let road = |from: (i64, i64), to: (i64, i64)| Command::BuildRoad {
+        from: at(from.0, from.1),
+        to: at(to.0, to.1),
+        kind: RoadKind::Small,
+    };
+    let station = |x| Command::PlaceBuilding {
+        kind: ServiceKind::Station,
+        at: at(x, 9),
+        rotation: 2,
+    };
+    let id = |index| StationId {
+        index,
+        generation: 0,
+    };
+    let line = LineId {
+        index: 0,
+        generation: 0,
+    };
+    // 駅の線路は y = 8 の x 3〜12 と x 55〜64 である。駅の前の道路は、線路の途中から離しておく。
+    rec(1, road((0, 10), (12, 10)));
+    rec(1, road((50, 10), (66, 10)));
+    rec(2, station(12));
+    rec(2, station(64));
+    // 先に引いた道路を、線路が横切る。
+    rec(2, road((40, 0), (40, 20)));
+    rec(
+        3,
+        Command::BuildRail {
+            from: at(12, 8),
+            to: at(55, 8),
+        },
+    );
+    // 線路を、あとから道路が横切る。隣のマスの道路は断る。
+    rec(4, road((30, 0), (30, 20)));
+    rec(4, road((31, 0), (31, 20)));
+    rec(
+        5,
+        Command::CreateLine {
+            from: id(0),
+            to: id(1),
+        },
+    );
+    rec(6, Command::SetLineTrains { line, trains: 2 });
+    rec(
+        2_000,
+        Command::Bulldoze {
+            area: TileRect::from_corners(at(30, 15), at(30, 15)),
+        },
+    );
     log
 }
 
@@ -1211,6 +1280,29 @@ fn rail_lines_cover_the_trains() {
     replay(&mut world, &s.log, s.ticks - 2_100);
     assert_eq!(world.rail().train_count(), 2);
     assert_eq!(world.rail().tally().deadlock, 0);
+}
+
+/// 踏切の記録が、どちらの順でも踏切を作り、列車が通るあいだだけ閉じることを確かめる。
+#[test]
+fn rail_crossing_covers_the_crossings() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "rail_crossing")
+        .unwrap();
+    let mut world = s.start();
+    let stats = replay(&mut world, &s.log, 1_900);
+    assert_eq!((stats.applied, stats.denied), (9, 1), "{stats:?}");
+    assert_denied_by(&stats, &[(DenyReason::CrossingTooClose, 1)]);
+    assert_eq!(world.rail().crossing_count(), 2);
+    let tally = world.rail().crossing_tally();
+    assert!(
+        tally.closures > 0 && tally.longest_closed <= 60,
+        "{tally:?}"
+    );
+    assert_eq!(tally.overrun, 0);
+    replay(&mut world, &s.log, s.ticks - 1_900);
+    assert_eq!(world.rail().crossing_count(), 1);
+    assert_eq!(world.rail().train_count(), 2);
 }
 
 /// 買い進める記録の結果が、水辺の配置と購入の規則を通っていることを確かめる。

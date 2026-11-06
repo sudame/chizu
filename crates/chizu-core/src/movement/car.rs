@@ -24,6 +24,7 @@ use smallvec::SmallVec;
 use super::Trip;
 use super::crossing::{self, JayCar};
 use super::junction::{self, Approach, Inside};
+use super::rail_crossing::{self, RailCrossings};
 use super::signal;
 use super::stop_line::{box_reach, clear_line, has_interior, stop_line};
 use crate::command::NodeId;
@@ -47,7 +48,7 @@ pub const CAR_DECEL: i32 = 4_500;
 pub const PARK_ENTRY_SPEED: i32 = 2_000;
 
 /// 前の車の後ろの端から、自分の前の端までに空ける距離に、車の長さを足したもの。
-const SPACING: u32 = CAR_LENGTH + MIN_GAP;
+pub(super) const SPACING: u32 = CAR_LENGTH + MIN_GAP;
 
 /// 交差点 `node` の停止線を越えて出ていくリンク `next` へ向かう車が、行き先の車線の最後尾までに要る距離
 /// （`next` の始まりから数える）。入った車は、前の車が止まっていても、交差点を抜けきる所（[`clear_line`]）まで
@@ -604,6 +605,32 @@ fn left_to_dest(net: &Network, t: &Trip, kind: crate::network::SegmentKind) -> O
         };
     }
     (left <= reach).then_some(left)
+}
+
+/// 車 `t` が、踏切の先に抜けきる空きがないために手前で止まる衝突区間（いまのリンクの始まりから測る）。
+/// 空きは、前の車 `leader` が減速の上限で止まった所から車間を空けた所か、前の車がなければリンクの終わりの
+/// 停止線までで測る。`next` なら、ノードの先の次のリンクの踏切も見る。
+fn crossing_holds(
+    net: &Network,
+    rail: &RailCrossings,
+    t: &Trip,
+    leader: Option<(LaneOffset, MmPerTick)>,
+    next: bool,
+) -> SmallVec<[u32; 2]> {
+    let link = t.link();
+    let len = t.link_len.0;
+    let front = i64::from(t.offset.0) + i64::from(CAR_LENGTH / 2);
+    let lead = leader.map(rail_crossing::bound_behind);
+    let bound = lead.unwrap_or_else(|| i64::from(stop_line(net, link).0));
+    let after = next
+        .then(|| t.route.links.get(t.leg as usize + 1).copied())
+        .flatten()
+        .and_then(|n| {
+            let n_len = super::pos::link_geometry(net, n)?.2.0;
+            let b = lead.unwrap_or_else(|| i64::from(len) + i64::from(stop_line(net, n).0));
+            Some((n, n_len, b))
+        });
+    rail.no_room_zones((link, len, bound), after, front)
 }
 
 /// 区間の途中の衝突区間の手前で止まる車が、衝突区間とのあいだに空ける距離（mm）。
@@ -1176,7 +1203,8 @@ fn check_lane(rows: &[Option<Trip>], lane: LaneId) {
     }
 }
 
-/// 車を tick `now` から 1 tick 進め、着いた主体の行の番号を返す。
+/// 車を tick `now` から 1 tick 進め、着いた主体の行の番号を返す。`rail` の踏切の先に抜けきる空きがなければ、手前で止まる。
+#[allow(clippy::too_many_arguments)]
 pub(super) fn step(
     rows: &mut [Option<Trip>],
     net: &Network,
@@ -1185,6 +1213,7 @@ pub(super) fn step(
     now: Tick,
     occupied: &crossing::Occupied,
     signals: &signal::Demand,
+    rail: &RailCrossings,
 ) -> Vec<usize> {
     // 出発を待っている車を、主体の番号の順に置き直す。
     let waiting: Vec<usize> = (0..rows.len())
@@ -1282,6 +1311,21 @@ pub(super) fn step(
                     .collect();
                 &both
             }
+        };
+        // 踏切の先に抜けきる空きがなければ、踏切の手前で止まる。
+        let holds = if rail.is_empty() {
+            SmallVec::new()
+        } else {
+            crossing_holds(net, rail, t, leader, next_lane.is_some())
+        };
+        let merged: Vec<u32>;
+        let jay = if holds.is_empty() {
+            jay
+        } else {
+            let mut v: Vec<u32> = jay.iter().copied().chain(holds).collect();
+            v.sort_unstable();
+            merged = v;
+            &merged
         };
         let (v, at) = drive(net, t, leader, held[k] || looks[k].no_room, jay);
         (i, t.speed, t.offset, v, at, next_lane, held[k])

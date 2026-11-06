@@ -14,7 +14,7 @@ fn line(fx: i64, fy: i64, tx: i64, ty: i64) -> Line {
 }
 
 fn build(r: &mut Rail, fx: i64, fy: i64, tx: i64, ty: i64) -> Result<(), DenyReason> {
-    r.build_rail(&line(fx, fy, tx, ty))
+    r.build_rail(&line(fx, fy, tx, ty), &BTreeSet::new())
 }
 
 fn degree(r: &Rail, x: i64, y: i64) -> usize {
@@ -353,24 +353,28 @@ fn building_a_rail_charges_and_marks_the_tiles() {
 }
 
 #[test]
-fn rails_and_roads_do_not_cross_yet() {
+fn rails_and_roads_share_a_tile_only_at_a_crossing() {
     let mut w = street();
     let before = w.clone();
-    // 道路のマスを通る線路は、踏切がまだないので断る。
+    // 道路に沿う線路と、道路の端（ノード）で始まる線路は、踏切にならないので断る。
     assert_eq!(
-        rail(&mut w, (20, 5), (20, 15)),
+        rail(&mut w, (5, 10), (15, 10)),
         ApplyOutcome::Denied(DenyReason::Occupied)
     );
     assert_eq!(
-        rail(&mut w, (40, 10), (50, 10)),
-        ApplyOutcome::Denied(DenyReason::Occupied)
+        rail(&mut w, (40, 5), (40, 15)),
+        ApplyOutcome::Denied(DenyReason::NodeOnCrossing)
     );
     assert_eq!(w, before);
+    // 道路の区間の途中を横切る線路は、踏切になる。
+    assert_eq!(rail(&mut w, (20, 5), (20, 15)), ApplyOutcome::Applied);
+    assert_eq!(tile_use(&w, 20, 10), TileUse::Crossing);
     assert_eq!(rail(&mut w, (0, 0), (40, 0)), ApplyOutcome::Applied);
     let before = w.clone();
+    // 線路のマスで終わる道路は、そこに道路のノードを置くので断る。
     assert_eq!(
-        road(&mut w, (20, -5), (20, 5)),
-        ApplyOutcome::Denied(DenyReason::Occupied)
+        road(&mut w, (30, -5), (30, 0)),
+        ApplyOutcome::Denied(DenyReason::NodeOnCrossing)
     );
     assert_eq!(w, before);
     // 斜めどうしがマスの角で交わる置き方も、どちらの順でも断る。
@@ -650,9 +654,9 @@ fn check_build_rail_agrees_with_applying() {
     let hash = w.state_hash();
     let free = line(0, 3, 40, 3);
     assert_eq!(w.check_build_rail(&free), Ok(rail_cost(&free)));
-    // 道路のマスを通る線路と、お金が足りない街の線路は、適用と同じ理由で断る
-    let across = line(5, 5, 5, 15);
-    assert_eq!(w.check_build_rail(&across), Err(DenyReason::Occupied));
+    // 道路に沿う線路と、お金が足りない街の線路は、適用と同じ理由で断る
+    let along = line(5, 10, 15, 10);
+    assert_eq!(w.check_build_rail(&along), Err(DenyReason::Occupied));
     let broke = World::new_with_money(0, Money(1_000));
     assert_eq!(
         broke.check_build_rail(&free),
@@ -660,7 +664,7 @@ fn check_build_rail_agrees_with_applying() {
     );
     assert_eq!(w.state_hash(), hash);
     assert_eq!(
-        rail(&mut w, (5, 5), (5, 15)),
+        rail(&mut w, (5, 10), (15, 10)),
         ApplyOutcome::Denied(DenyReason::Occupied)
     );
     assert_eq!(rail(&mut w, (0, 3), (40, 3)), ApplyOutcome::Applied);
