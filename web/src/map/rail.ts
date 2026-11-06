@@ -40,6 +40,8 @@ const RAIL_MIN_PX = 0.5;
 /** 枕木の、世界の間隔（マス）と、枕木の長さの半分（マス）。間隔は 0.6m で、負にして世界の距離で破線にする。 */
 const SLEEPER_PERIOD = 0.075;
 const SLEEPER_HALF = 0.14;
+/** 枕木 1 本の、線路に沿った厚み（マス）。破線の周期の半分である。 */
+const SLEEPER_THICK = SLEEPER_PERIOD / 2;
 /** 駅舎を、駅の間口の両端からこれだけ（マス）内側に置く。 */
 const BUILDING_MARGIN = 1;
 /** 駅舎の、道路の側の列のうち、道路に近い側の厚み（マス）と、道路の側の縁からの余白（マス）。 */
@@ -151,6 +153,177 @@ function stationOutline(
   );
 }
 
+type End = "a" | "b";
+
+/**
+ * 線路のつなぎ目。ノードに線路がちょうど 2 本あって向きが変わるところ（曲がり角）では、前後の線を
+ * 曲がりの二等分線でそろえて切り、道床もレールも 1 本の帯につなぐ（マイター継ぎ）。
+ * 曲がり角でないノードは、端の形だけを決める。
+ */
+class Joints {
+  readonly #tracks: readonly RailTrack[];
+  readonly #nodes = new Map<string, { track: number; end: End }[]>();
+
+  constructor(tracks: readonly RailTrack[]) {
+    this.#tracks = tracks;
+    tracks.forEach((t, track) => {
+      for (const end of ["a", "b"] as const) {
+        const key = Joints.key(t[end]);
+        const list = this.#nodes.get(key) ?? [];
+        list.push({ track, end });
+        this.#nodes.set(key, list);
+      }
+    });
+  }
+
+  static key(t: Tile): string {
+    return `${t.x},${t.y}`;
+  }
+
+  /** 線路 i の、ノードから遠ざかる向きの単位ベクトル。 */
+  #outward(track: number, end: End): [number, number] {
+    const t = this.#tracks[track];
+    if (t === undefined) {
+      return [0, 0];
+    }
+    const [from, to] = end === "a" ? [t.a, t.b] : [t.b, t.a];
+    const len = Math.hypot(to.x - from.x, to.y - from.y);
+    return len === 0 ? [0, 0] : [(to.x - from.x) / len, (to.y - from.y) / len];
+  }
+
+  /** 曲がり角なら、通る向きの内積と外積、通る向きで先に来る端を返す。 */
+  #bend(
+    track: number,
+    end: End,
+  ): { c: number; cross: number; incoming: boolean; len: number } | null {
+    const t = this.#tracks[track];
+    if (t === undefined) {
+      return null;
+    }
+    const ends = this.#nodes.get(Joints.key(t[end]));
+    if (ends?.length !== 2) {
+      return null;
+    }
+    const [e0, e1] = ends;
+    if (e0 === undefined || e1 === undefined || e0.track === e1.track) {
+      return null;
+    }
+    const u0 = this.#outward(e0.track, e0.end);
+    const u1 = this.#outward(e1.track, e1.end);
+    // 端 0 から入って端 1 へ出る向き
+    const d1 = [-u0[0], -u0[1]] as const;
+    const c = d1[0] * u1[0] + d1[1] * u1[1];
+    if (c > 1 - 1e-9 || c < -1 + 1e-9) {
+      return null;
+    }
+    const cross = d1[0] * u1[1] - d1[1] * u1[0];
+    const self = e0.track === track && e0.end === end;
+    const len = Math.hypot(t.b.x - t.a.x, t.b.y - t.a.y);
+    return { c, cross, incoming: self, len };
+  }
+
+  /**
+   * 線路 i の `end` の端を、中心線から横に `offset`（`strip` と同じ向きが正）ずれた線のために縮める長さ（マス）。
+   * 負なら伸ばす。曲がり角でなければ null。
+   */
+  trim(track: number, end: End, offset: number): number | null {
+    const bend = this.#bend(track, end);
+    if (bend === null) {
+      return null;
+    }
+    // 通る向きと線路の向きが同じなら、横のずれの正負も同じ
+    const same = (end === "b") === bend.incoming;
+    const k = ((same ? 1 : -1) * offset * bend.cross) / (1 + bend.c);
+    const limit = bend.len / 2;
+    return Math.max(-limit, Math.min(limit, k));
+  }
+
+  /** 曲がり角か。 */
+  isBend(track: number, end: End): boolean {
+    return this.#bend(track, end) !== null;
+  }
+
+  /**
+   * 曲がり角の二等分線の上に、レーン `lane`（線路 i の中心線からのずれ）の枕木を 1 本置く。前後の枕木はこの枕木の
+   * 両側から始まるので、角の隙間が 1 本ぶんに収まる。通る向きで先に来る端の線路だけが置く。
+   */
+  bisectorSleeper(g: Geometry, track: number, end: End, lane: number): void {
+    const t = this.#tracks[track];
+    const bend = this.#bend(track, end);
+    if (t === undefined || bend === null || !bend.incoming) {
+      return;
+    }
+    const ends = this.#nodes.get(Joints.key(t[end])) ?? [];
+    const other = ends.find((e) => !(e.track === track && e.end === end));
+    if (other === undefined) {
+      return;
+    }
+    // 通る向き（この端から入って、もう一方の端へ出る）の法線の和が、二等分線の向きになる
+    const u0 = this.#outward(track, end);
+    const u1 = this.#outward(other.track, other.end);
+    const n1 = [u0[1], -u0[0]] as const;
+    const n2 = [-u1[1], u1[0]] as const;
+    const same = end === "b";
+    const o = same ? lane : -lane;
+    const point = (offset: number): [number, number] => [
+      node.x + 0.5 + (offset * (n1[0] + n2[0])) / (1 + bend.c),
+      node.y + 0.5 + (offset * (n1[1] + n2[1])) / (1 + bend.c),
+    ];
+    const node = t[end];
+    const p = point(o - SLEEPER_HALF);
+    const q = point(o + SLEEPER_HALF);
+    g.line(p[0], p[1], q[0], q[1], SLEEPER_THICK / 2, RAIL_SLEEPER_COLOR, 0);
+  }
+
+  /** 道床の面。曲がり角は二等分線で斜めに切り、行き止まりは半マス伸ばし、分岐は丸か四角で埋める。 */
+  bed(g: Geometry, track: number): void {
+    const t = this.#tracks[track];
+    if (t === undefined) {
+      return;
+    }
+    const dx = t.b.x - t.a.x;
+    const dy = t.b.y - t.a.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) {
+      return;
+    }
+    const [ux, uy] = [dx / len, dy / len];
+    const [nx, ny] = [-uy, ux];
+    const corner = (end: End, side: number): [number, number] => {
+      const base = end === "a" ? t.a : t.b;
+      const sign = end === "a" ? 1 : -1;
+      const o = side * BED_HALF;
+      const k = this.trim(track, end, o);
+      const along = k ?? this.#capTrim(track, end);
+      return [base.x + 0.5 + nx * o + sign * ux * along, base.y + 0.5 + ny * o + sign * uy * along];
+    };
+    g.polygon([corner("a", 1), corner("a", -1), corner("b", -1), corner("b", 1)], RAIL_BED_COLOR);
+    for (const end of ["a", "b"] as const) {
+      const node = t[end];
+      const ends = this.#nodes.get(Joints.key(node)) ?? [];
+      if (ends.length < 3 && ends.length !== 0) {
+        continue;
+      }
+      // 3 本以上が集まるノードは、向きが集まる所を埋める
+      const allAxis = ends.every((e) =>
+        this.#outward(e.track, e.end).some((v) => Math.abs(v) < 1e-9),
+      );
+      if (allAxis) {
+        g.square(node, BED_HALF, RAIL_BED_COLOR, 0);
+      } else {
+        g.disc(node.x + 0.5, node.y + 0.5, BED_HALF, RAIL_BED_COLOR, 0);
+      }
+    }
+  }
+
+  /** 曲がり角でない端の、中心線に沿った伸ばし方（マスの、負なら縮める）。行き止まりは半マス伸ばす。 */
+  #capTrim(track: number, end: End): number {
+    const t = this.#tracks[track];
+    const ends = t === undefined ? undefined : this.#nodes.get(Joints.key(t[end]));
+    return ends?.length === 1 ? -BED_HALF : 0;
+  }
+}
+
 /** 線路と駅の頂点。線路も駅もなければ、どれも空である。 */
 export function railMeshes(
   tracks: readonly RailTrack[],
@@ -180,40 +353,72 @@ export function railMeshes(
   for (const { a, b } of tracks) {
     meshes.mid.strip(a, b, 0, DASH_HALF, RAIL_DASH_COLOR, DASH_MIN_PX, 0, 0, 0, DASH_PERIOD_PX);
   }
-  for (const { a, b, station } of tracks) {
-    meshes.bed.strip(a, b, 0, BED_HALF, RAIL_BED_COLOR, 0);
-    meshes.bed.square(a, BED_HALF, RAIL_BED_COLOR, 0);
-    meshes.bed.square(b, BED_HALF, RAIL_BED_COLOR, 0);
-    // 駅の線路は、両端が駅の敷地の端のマスの真ん中なので、敷地の端まで半マス伸ばす
-    const trim = station ? -0.5 : 0;
+  const joints = new Joints(tracks);
+  tracks.forEach((track, i) => {
+    const { a, b, station } = track;
+    joints.bed(meshes.bed, i);
     for (const side of [-1, 1]) {
       const lane = side * TRACK_OFFSET;
-      meshes.sleepers.strip(
-        a,
-        b,
-        lane,
-        SLEEPER_HALF,
-        RAIL_SLEEPER_COLOR,
-        0,
-        trim,
-        trim,
-        0,
-        -SLEEPER_PERIOD,
-      );
+      // 駅の線路は、両端が駅の敷地の端のマスの真ん中なので、敷地の端まで半マス伸ばす（曲がり角を除く）
+      const ext = station ? -0.5 : 0;
+      // 曲がり角では、枕木を中心線の符号つきのマイターで切り、二等分線の上の枕木から前後へ並べる
+      const inset = (end: End) => {
+        const k = joints.trim(i, end, lane);
+        return k === null ? null : k + SLEEPER_THICK / 2;
+      };
+      const trimA = inset("a");
+      const trimB = inset("b");
+      joints.bisectorSleeper(meshes.sleepers, i, "a", lane);
+      joints.bisectorSleeper(meshes.sleepers, i, "b", lane);
+      if (trimA === null && trimB === null) {
+        meshes.sleepers.strip(
+          a,
+          b,
+          lane,
+          SLEEPER_HALF,
+          RAIL_SLEEPER_COLOR,
+          0,
+          ext,
+          ext,
+          0,
+          -SLEEPER_PERIOD,
+        );
+      } else {
+        const ta = trimA ?? ext;
+        const tb = trimB ?? ext;
+        // 両端の隙間が同じ（半周期）になるよう、周期を少しだけ伸ばし縮みさせて、間に枕木をちょうど並べる
+        const length = Math.hypot(b.x - a.x, b.y - a.y) - ta - tb;
+        const n = Math.max(1, Math.round(length / SLEEPER_PERIOD - 0.5));
+        const period = length / (n + 0.5);
+        meshes.sleepers.strip(
+          a,
+          b,
+          lane,
+          SLEEPER_HALF,
+          RAIL_SLEEPER_COLOR,
+          0,
+          ta,
+          tb,
+          0,
+          -period,
+          period / 2,
+        );
+      }
       for (const rail of [-1, 1]) {
+        const o = lane + rail * RAIL_OFFSET;
         meshes.rails.strip(
           a,
           b,
-          lane + rail * RAIL_OFFSET,
+          o,
           0,
           RAIL_RAIL_COLOR,
           RAIL_MIN_PX,
-          trim,
-          trim,
+          joints.trim(i, "a", o) ?? ext,
+          joints.trim(i, "b", o) ?? ext,
         );
       }
     }
-  }
+  });
   for (const st of stations) {
     const { frontage } = stationFrame(st);
     const half = frontage / 2;
