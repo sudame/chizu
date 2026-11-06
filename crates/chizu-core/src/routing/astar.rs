@@ -376,6 +376,63 @@ pub(crate) fn extract(
     }
 }
 
+/// 根の並び `roots`（リンクと、そのリンクの頂点に置く始めの距離）から `toward` の向きに広げ、入口までの距離が
+/// `limit` 以下の頂点をすべて、リンクの ID の順に距離を添えて返す。根はいつも入る。グラフにない根は飛ばす。
+///
+/// 距離は [`search`] と同じく、頂点のリンクを端から端まで通る費用を含む。`Forward` なら根の距離に続けて
+/// 辺の費用と行き先のリンクの費用を足し、`Backward` なら辺を逆にたどって元のリンクの費用を足す。入口までの
+/// 距離は、そこから頂点のリンクの費用を引いたもの（`Forward` ならリンクの始まり、`Backward` ならリンクの終わり
+/// までの距離）である。長いリンクの途中の点まで測れるよう、入口が上限の中なら、リンクの先が上限を超えても入れる。
+/// 広げるのは、距離が `limit` 以下の頂点からだけである。最短の距離は広げる順によらず決まるので、結果は根の並びの
+/// 順にもよらない。
+pub fn reach_within(
+    g: &Graph,
+    roots: &[(LinkId, u64)],
+    toward: Toward,
+    limit: u64,
+    s: &mut Scratch,
+) -> Vec<(LinkId, u64)> {
+    s.reset(g.vertex_count());
+    let mut root_of: Vec<u32> = Vec::new();
+    for (link, d0) in roots {
+        let Some(v) = g.vertex(*link) else {
+            continue;
+        };
+        root_of.push(v);
+        if s.dist(v).is_some_and(|old| old <= *d0) {
+            continue;
+        }
+        s.set(v, *d0);
+        s.heap.push(Reverse((*d0, 0, v)));
+    }
+    let mut out = Vec::new();
+    // 上限を超えた頂点からは広げないので、待ち行列には広げた頂点の隣までしか入らない。最後まで取り出す。
+    while let Some(Reverse((dv, _, v))) = s.heap.pop() {
+        if s.is_closed(v) {
+            continue;
+        }
+        s.closed[v as usize] = true;
+        let entry = dv.saturating_sub(g.cost(v));
+        if entry <= limit || root_of.contains(&v) {
+            out.push((v, dv));
+        }
+        if dv > limit {
+            continue;
+        }
+        for e in adjacent(g, v, toward) {
+            let d = add(add(dv, e.cost), g.cost(e.to));
+            if s.dist(e.to).is_some_and(|old| old <= d) {
+                continue;
+            }
+            s.set(e.to, d);
+            s.heap.push(Reverse((d, 0, e.to)));
+        }
+    }
+    // 頂点の番号はリンクの ID の順に振ってあるので、番号で並べればリンクの ID の順になる。
+    out.sort_unstable();
+    out.into_iter().map(|(v, d)| (g.link(v), d)).collect()
+}
+
 /// 根 `root` を共有する依頼をまとめて解き、`others` の順に結果を返す。費用の同じ経路があれば、頂点の番号を順に比べていちばん小さいものを返す。
 ///
 /// `Forward` なら `root` は出発のリンクで `others` は着くリンク、`Backward` なら `root` は着くリンクで

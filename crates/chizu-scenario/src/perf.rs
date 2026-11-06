@@ -11,10 +11,12 @@ use chizu_core::{
     ScheduleState, TICKS_PER_DAY, Tick, Trips, bucket_at, rng,
 };
 
-use chizu_core::rail::choice::{RailPlanner, RideChoice};
+use chizu_core::network::LaneMode;
+use chizu_core::rail::choice::{RailPlanner, RideChoice, WalkEnd};
+use chizu_core::routing::Graph;
 
 use crate::{
-    RAIL_BENCH_LINES, city_grid_100k, commute_requests, commute_tiles, rail_choice_inputs,
+    RAIL_BENCH_LINES, city_grid_100k, commute_doors, commute_requests, rail_choice_inputs,
     rail_trains_running, synthetic_population, walk_ends, zoned_grid_city,
 };
 
@@ -176,20 +178,25 @@ impl ChoiceStats {
 }
 
 /// 人口 10 万の規模の格子に、駅 200 と路線 64 本を置き、`requests` 件の移動を鉄道の候補の見積もりに通す。
-/// 設計 3.10 の 7 の `rail_choice_100k` である。1 件は、駅の空間索引を 2 回引き、9 つの駅の組の表を引く。
+/// 設計 3.10 の 7 の `rail_choice_100k` である。1 件は、出発と行き先の出入口を両方の向きの歩道に直し、駅の
+/// 空間索引を 2 回引き（徒歩圏の駅ごとに駅まで歩く表を引く）、9 つの駅の組の表を引く。出入口は、住民の移動と
+/// 同じく建物の入口のリンクから直す。
 pub fn rail_choice(requests: u32, now: &dyn Fn() -> u64) -> ChoiceStats {
     let net = city_grid_100k();
+    let walk = Graph::build(&net, LaneMode::Sidewalk);
     let inputs = rail_choice_inputs(SEED);
-    let planner = RailPlanner::from_shapes(inputs.doors, &inputs.lines);
+    let planner = RailPlanner::from_shapes(inputs.doors, &inputs.lines).with_walks(&net, &walk);
     let choice = RideChoice::from_parts(&planner, inputs.live, Default::default(), 5);
-    let ends = commute_tiles(SEED, &net, requests);
+    let ends = commute_doors(SEED, &net, requests);
     let mut offered = 0;
     let mut worst = 0;
     let start = now();
     for chunk in ends.chunks(1_000) {
         let t = now();
-        for (a, b) in chunk {
-            offered += usize::from(black_box(choice.offer(*a, *b)).is_some());
+        for [(ta, la, oa), (tb, lb, ob)] in chunk {
+            let a = WalkEnd::on_link(&net, *ta, *la, *oa);
+            let b = WalkEnd::on_link(&net, *tb, *lb, *ob);
+            offered += usize::from(black_box(choice.offer(&a, &b)).is_some());
         }
         worst = u64::max(worst, now() - t);
     }
@@ -206,8 +213,14 @@ pub fn rail_choice(requests: u32, now: &dyn Fn() -> u64) -> ChoiceStats {
 #[derive(Clone, Copy, Debug)]
 pub struct RebuildStats {
     pub runs: u32,
+    /// 駅の空間索引と駅の組の表の時間。路線か本数だけが変わったときは、これだけを作り直す。
     pub mean_ns: u64,
     pub worst_ns: u64,
+    /// 駅まで歩く表の時間。道路の網か駅の出入口が変わったときは、これも作り直す。
+    pub walks_mean_ns: u64,
+    pub walks_worst_ns: u64,
+    /// 駅まで歩く表に入ったリンクの数の、駅ごとの平均（行きと帰りの和）。
+    pub walk_links: usize,
     /// 組の数と、そのうち乗り換え 1 回の進路を持つ組の数。
     pub pairs: usize,
     pub transfer_pairs: usize,
@@ -216,35 +229,60 @@ pub struct RebuildStats {
 impl RebuildStats {
     pub fn to_json(&self) -> String {
         format!(
-            r#"{{"runs":{},"mean_ns":{},"worst_ns":{},"pairs":{},"transfer_pairs":{}}}"#,
-            self.runs, self.mean_ns, self.worst_ns, self.pairs, self.transfer_pairs
+            r#"{{"runs":{},"mean_ns":{},"worst_ns":{},"walks_mean_ns":{},"walks_worst_ns":{},"walk_links":{},"pairs":{},"transfer_pairs":{}}}"#,
+            self.runs,
+            self.mean_ns,
+            self.worst_ns,
+            self.walks_mean_ns,
+            self.walks_worst_ns,
+            self.walk_links,
+            self.pairs,
+            self.transfer_pairs
         )
     }
 }
 
-/// 駅 200 と路線 64 本で、駅の空間索引と駅の組の表（乗り換え 1 回を含む）を `runs` 回作り直す時間（ns）の
-/// 平均と最悪と、組の数。設計 3.10 の 7 の `rail_table_rebuild` である。
+/// 駅 200 と路線 64 本で、駅の空間索引と駅の組の表（乗り換え 1 回を含む）と、駅まで歩く表を `runs` 回
+/// 作り直す時間（ns）の平均と最悪と、組の数。設計 3.10 の 7 の `rail_table_rebuild` である。網は
+/// [`city_grid_100k`] で、歩道のグラフは経路探索が持つものを使うので、時間に入れない。
 pub fn rail_table_rebuild(runs: u32, now: &dyn Fn() -> u64) -> RebuildStats {
+    let net = city_grid_100k();
+    let walk = Graph::build(&net, LaneMode::Sidewalk);
     let inputs = rail_choice_inputs(SEED);
-    let mut total = 0;
-    let mut worst = 0;
+    let (mut total, mut worst) = (0, 0);
+    let (mut walks_total, mut walks_worst) = (0, 0);
     let mut pairs = 0;
     let mut transfer_pairs = 0;
+    let mut walk_links = 0;
     for _ in 0..runs {
         let doors = inputs.doors.clone();
         let t = now();
         let planner = RailPlanner::from_shapes(doors, &inputs.lines);
-        let took = now() - t;
-        total += took;
-        worst = worst.max(took);
+        let w = now();
+        let planner = planner.with_walks(&net, &walk);
+        let end = now();
+        total += w - t;
+        worst = worst.max(w - t);
+        walks_total += end - w;
+        walks_worst = walks_worst.max(end - w);
         let planner = black_box(planner);
         pairs = planner.pairs();
         transfer_pairs = planner.transfer_pairs();
+        let sizes: Vec<usize> = inputs
+            .doors
+            .iter()
+            .filter_map(|(id, _, _)| planner.door_walks(*id).map(|w| w.len()))
+            .collect();
+        walk_links = sizes.iter().sum::<usize>() / sizes.len().max(1);
     }
+    let n = u64::from(runs.max(1));
     RebuildStats {
         runs,
-        mean_ns: total / u64::from(runs.max(1)),
+        mean_ns: total / n,
         worst_ns: worst,
+        walks_mean_ns: walks_total / n,
+        walks_worst_ns: walks_worst,
+        walk_links,
         pairs,
         transfer_pairs,
     }

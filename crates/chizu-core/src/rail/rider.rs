@@ -66,6 +66,9 @@ pub struct RidePlan {
     pub transfer: Option<Transfer>,
     /// 最後に歩いて向かう行き先の出入口。
     pub to: SidewalkPos,
+    /// 乗る駅まで歩く時間の見積もり（移動の秒）。駅に着いたときに、実際に歩いた時間と比べて数えるだけで
+    /// （[`StationWalks`]）、状態ハッシュには入れない。
+    pub walk_estimate: u32,
 }
 
 /// 駅で待っているか、列車に乗っている人。
@@ -142,6 +145,32 @@ pub struct Exit {
     pub rode: bool,
 }
 
+/// 駅まで歩いた人の数と、実際に歩いた時間と見積もりの和。始まりからの積み上げである。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StationWalks {
+    /// 駅に歩いて着き、待ち行列に入った人の数。乗り換える人は数えない。
+    pub walks: u64,
+    /// 出発から駅の出入口に着くまでの tick の和。
+    pub walked_ticks: u64,
+    /// 手段を選んだときの、駅まで歩く時間の見積もり（移動の秒）の和。
+    pub estimated_ticks: u64,
+}
+
+impl StationWalks {
+    /// 実際に歩いた時間の平均（tick）。歩いて着いた人がいなければ `None`。
+    pub fn average_walked(&self) -> Option<u64> {
+        self.walked_ticks.checked_div(self.walks)
+    }
+
+    /// 実際に歩いた時間の平均から、見積もりの平均を引いた値（tick）。正なら見積もりより長く歩いた。
+    pub fn average_gap(&self) -> Option<i64> {
+        let n = i128::from(self.walks);
+        let gap =
+            (i128::from(self.walked_ticks) - i128::from(self.estimated_ticks)).checked_div(n)?;
+        Some(i64::try_from(gap).expect("ずれがあふれた"))
+    }
+}
+
 /// 乗る人の読み取り用の数。始まりからの積み上げで、状態ハッシュには入れない。
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RideTally {
@@ -169,6 +198,8 @@ pub struct RideTally {
     pub station_transfers: BTreeMap<StationId, u64>,
     /// 路線ごとの、乗り換えてその路線の待ち行列に入った回数。
     pub line_transfers: BTreeMap<LineId, u64>,
+    /// 駅ごとの、歩いて着いた人と、実際に歩いた時間と見積もり。
+    pub station_walks: BTreeMap<StationId, StationWalks>,
 }
 
 impl RideTally {
@@ -399,6 +430,10 @@ impl Rail {
             since: now,
             train: None,
         };
+        let w = self.ride_tally.station_walks.entry(plan.board).or_default();
+        w.walks += 1;
+        w.walked_ticks += now.saturating_sub(started.0);
+        w.estimated_ticks += u64::from(plan.walk_estimate);
         let id = self.riders.insert(rider);
         self.by_trip.insert(trip, id);
         let ok = self.can_ride(plan.board, plan.line, plan.dir, plan.alight)

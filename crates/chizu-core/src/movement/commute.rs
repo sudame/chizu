@@ -31,7 +31,9 @@ use crate::citizens::Activity;
 use crate::id::{BuildingId, CitizenId, HouseholdId, TripId};
 use crate::network::{Network, TILE_MM};
 use crate::rail::RidePlan;
-use crate::rail::choice::{RideChoice, RideOffer, car_seconds, tile_distance_mm, walk_seconds};
+use crate::rail::choice::{
+    RideChoice, RideOffer, WalkEnd, car_seconds, tile_distance_mm, walk_seconds,
+};
 use crate::routing::AstarRouter;
 use crate::service::Facility;
 use crate::state_hash::{StateHash, StateHasher};
@@ -247,7 +249,18 @@ impl Trips {
                     if d < OWNER_DRIVE_MIN_MM.unsigned_abs() {
                         return None;
                     }
-                    c.offer(a, b).filter(|o| o.cost < base(d))
+                    // 駅まで歩く時間は、建物の出入口から歩道を歩く時間で見積もる。歩く移動の出発と行き先と同じ位置である。
+                    // 出入口が建物の入口なら、入口のリンクから直接求め、マスから歩道を探し直さない。
+                    let end = |id: BuildingId, tile: TilePos| -> Option<WalkEnd> {
+                        let b = buildings.get(id)?;
+                        Some(if b.lane_plan().is_some() {
+                            WalkEnd::new(net, tile, building_spot(net, b)?)
+                        } else {
+                            WalkEnd::on_link(net, tile, b.entrance, b.entrance_at)
+                        })
+                    };
+                    c.offer(&end(r.from, a)?, &end(r.to, b)?)
+                        .filter(|o| o.cost < base(d))
                 };
                 let walk = || ride(walk_seconds).map_or(Pick::Walk, Pick::Ride);
                 // 家に帰る住民は、自分が家でない所に停めた車が近くにあれば、近くても車で帰る。歩いて帰ると、
@@ -378,6 +391,7 @@ impl Trips {
                         alight: o.alight,
                         transfer: o.transfer,
                         to,
+                        walk_estimate: u32::try_from(o.walk_to_board).unwrap_or(u32::MAX),
                     });
                     out[*i] = Some(id);
                 }

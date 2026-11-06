@@ -811,6 +811,56 @@ fn flip(net: &Network, (link, offset): Spot) -> Option<Spot> {
     Some((back, LaneOffset(len.0.checked_sub(offset.0)?)))
 }
 
+/// 歩道の上の位置 `spot` を、歩き出せる両方の向きの歩道のリンクの上で表したもの。値は（リンク、リンクの始まりから
+/// その位置まで歩く時間、その位置からリンクの終わりまで歩く時間）で、時間は歩道のグラフのリンクの費用と同じ
+/// 求め方の ms である（[`crate::routing::walk_ms`]）。歩く移動は、どちらの向きからでも歩き出せる（[`plan`]）。
+/// 歩道がなければ空である。
+pub fn walk_spots(net: &Network, spot: SidewalkPos) -> SmallVec<[(LinkId, u64, u64); 2]> {
+    match spot.resolve_on(net, LaneMode::Sidewalk) {
+        Some((link, offset)) => walk_spots_on_link(net, link, offset),
+        None => SmallVec::new(),
+    }
+}
+
+/// [`walk_spots`] と同じだが、位置を歩道か車のリンク `link` の始まりからの距離 `offset` で渡す。車のリンクなら、
+/// 同じ区間の同じ向きの歩道の位置にする（[`SidewalkPos::on_any_link`] と同じ）。マスから位置を探し直さないので、
+/// リンクが分かっているときは速い。
+pub fn walk_spots_on_link(
+    net: &Network,
+    link: LinkId,
+    offset: LaneOffset,
+) -> SmallVec<[(LinkId, u64, u64); 2]> {
+    let mut out = SmallVec::new();
+    let link = LinkId {
+        mode: LaneMode::Sidewalk,
+        ..link
+    };
+    let Some((_, _, len)) = pos::link_geometry(net, link) else {
+        return out;
+    };
+    if offset > len || net.link_lanes(link).next().is_none() {
+        return out;
+    }
+    // 逆向きのリンクは同じ区間の上にあり、長さも同じである（[`flip`]）。
+    let (before, after) = (
+        u64::from(offset.0),
+        u64::from(len.0.saturating_sub(offset.0)),
+    );
+    let ms = crate::routing::walk_ms;
+    out.push((link, ms(before), ms(after)));
+    let back = LinkId {
+        dir: match link.dir {
+            Dir::Forward => Dir::Backward,
+            Dir::Backward => Dir::Forward,
+        },
+        ..link
+    };
+    if net.link_lanes(back).next().is_some() {
+        out.push((back, ms(after), ms(before)));
+    }
+    out
+}
+
 /// 経路 `route` で `from` から `to` まで歩く距離。
 fn walked_mm(net: &Network, route: &Route, (from, to): Ends) -> Option<u64> {
     let len = |l: &LinkId| pos::link_geometry(net, *l).map(|g| u64::from(g.2.0));

@@ -93,6 +93,10 @@ pub struct StationInfo {
     pub left_behind: bool,
     /// 駅に止まる路線の添え字。
     pub lines: Vec<u32>,
+    /// 始まりからこの駅まで歩いて着いた人と、その人たちが駅まで歩いた時間の平均と、見積もりの平均とのずれ
+    /// （実際 − 見積もり）。時間は時計の秒である。歩いて着いた人がいなければ時間は `None`。
+    pub walked_in: u64,
+    pub walk: Option<(u64, i64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,6 +162,22 @@ fn station_info(world: &World, id: StationId) -> Option<Found> {
         .station_door(id)
         .and_then(|door| world.catchments(&[door]).pop())
         .map(|c| (c.households, c.carless));
+    let walks = rail
+        .ride_tally()
+        .station_walks
+        .get(&id)
+        .copied()
+        .unwrap_or_default();
+    let clock = u64::from(GAME_SECONDS_PER_TICK);
+    let walk = walks
+        .average_walked()
+        .zip(walks.average_gap())
+        .map(|(w, g)| {
+            let g = g
+                .checked_mul(i64::from(GAME_SECONDS_PER_TICK))
+                .expect("ずれがあふれた");
+            (w * clock, g)
+        });
     Some(Found {
         target: Target::Station(id),
         info: Inspected::Station(StationInfo {
@@ -171,6 +191,8 @@ fn station_info(world: &World, id: StationId) -> Option<Found> {
                 .filter(|(_, l)| l.stations.contains(&id))
                 .map(|(lid, _)| lid.index)
                 .collect(),
+            walked_in: walks.walks,
+            walk,
         }),
     })
 }
@@ -304,10 +326,13 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
 }
 
 /// 画面に渡す数の個数。
-pub const INSPECT_LENGTH: usize = 20;
+pub const INSPECT_LENGTH: usize = 23;
 
 /// 駅の欄に並べる、止まる路線の数の上限。
 pub const STATION_LINES: usize = 10;
+
+/// 駅の欄の、歩いて着いた人の数の位置。止まる路線の並びのあとに、駅まで歩いた時間の平均と、見積もりとのずれが続く。
+const STATION_WALK_AT: usize = 8 + STATION_LINES;
 
 /// 数に直す。要素がないものは -1 にする。なければ空の配列。
 ///
@@ -318,7 +343,9 @@ pub const STATION_LINES: usize = 10;
 /// 施設：`[2, 施設の種類, 供給量, 1 日の維持費, 台数, 貸した枠, 停まっている台数, 外来の車, -1, ...]`。
 /// 台数からあとの 4 つは共同の駐車場だけで、ほかの施設は -1 である。
 /// 駅：`[3, 待っている人, 乗った人（積み上げ）, 降りた人（積み上げ）, 徒歩圏の世帯（出入口がなければ -1）, そのうち車を持てない世帯,
-/// 乗りきれず人が残ったか（0 か 1）, 止まる路線の数 n（最大 [`STATION_LINES`]）, 路線の添え字 × n, -1, ...]`。
+/// 乗りきれず人が残ったか（0 か 1）, 止まる路線の数 n（最大 [`STATION_LINES`]）, 路線の添え字 × n, -1, ...,
+/// 歩いて着いた人（18 番目）, 駅まで歩いた時間の平均（時計の秒。着いた人がいなければ -1）, 見積もりとのずれ（時計の秒。
+/// 実際 − 見積もりで、負にもなる。着いた人がいなければ 0）]`。
 /// どれも最後の 2 つは識別子の a と b で、建物なら ID の添え字と世代、施設なら min のマスの x と y、駅なら ID の添え字と世代である。
 /// 先頭の値が識別子の種類を兼ねる。
 pub fn encode(found: Option<Found>) -> Vec<f64> {
@@ -346,9 +373,13 @@ pub fn encode(found: Option<Found>) -> Vec<f64> {
             out[6] = f64::from(u8::from(st.left_behind));
             let lines = &st.lines[..st.lines.len().min(STATION_LINES)];
             out[7] = lines.len() as f64;
-            for (slot, index) in out[8..].iter_mut().zip(lines) {
+            for (slot, index) in out[8..8 + STATION_LINES].iter_mut().zip(lines) {
                 *slot = f64::from(*index);
             }
+            out[STATION_WALK_AT] = st.walked_in as f64;
+            let (walked, gap) = st.walk.map_or((-1.0, 0.0), |(w, g)| (w as f64, g as f64));
+            out[STATION_WALK_AT + 1] = walked;
+            out[STATION_WALK_AT + 2] = gap;
         }
         Inspected::Facility(f) => {
             out[0] = 2.0;
@@ -819,8 +850,10 @@ mod tests {
         assert_eq!(found[7], 1.0);
         assert_eq!(found[8], f64::from(line.index));
         assert_eq!(found[9], -1.0);
+        // 歩いて着いた人はまだいないので、歩いた時間は -1、ずれは 0
+        assert_eq!(found[18..21], [0.0, -1.0, 0.0]);
         // 識別子（最後の 2 つ）で引き直すと同じ答えになる
-        let again = sim.inspect_target(found[0], found[18], found[19]);
+        let again = sim.inspect_target(found[0], found[21], found[22]);
         assert_eq!(again, found);
         // 駅のない所は空
         assert!(sim.inspect(TilePos::new(40, 30)).is_empty());

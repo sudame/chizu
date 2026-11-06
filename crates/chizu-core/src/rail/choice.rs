@@ -1,10 +1,13 @@
 //! 鉄道の候補の見積もり（設計 3.10 の 4 と 7）。
 //!
-//! 移動の出発と行き先の建物の正面のマスから [`STATION_WALK_RADIUS`] マス以内の駅を、それぞれ近い順に
+//! 移動の出発と行き先の建物の正面のマスから [`STATION_WALK_RADIUS`] マス以内の駅を、それぞれ歩く時間の短い順に
 //! [`NEAR_STATIONS`] つ選び、9 つの組のうちいちばん費用の小さいものを鉄道の候補にする。費用は移動の秒で、
 //! 駅まで歩く時間、待ち、乗る時間、駅から歩く時間に、運賃を [`FARE_SECONDS`] 倍して足す。
 //!
 //! - 駅の空間索引（[`RailPlanner`]）は、駅の出入口のマスを [`STATION_WALK_RADIUS`] マス四方の区切りごとに並べた表である。
+//! - 駅まで歩く時間と駅から歩く時間は、駅ごとに出入口から歩道のグラフを [`STATION_WALK_LIMIT_MM`] の道のりまで
+//!   広げた表（[`DoorWalks`]）から引く。歩く移動が経路を探すのと同じグラフなので、建物から駅への道が遠回りなら、
+//!   見積もりも同じだけ長くなる。この道のりの中に建物の歩道がない駅は、候補にしない。
 //! - 駅の組の表は、（乗る駅、降りる駅）の組ごとに、乗り換えなしで結ぶ路線と向きと、乗る所と降りる所
 //!   （止まる要素の順の番号）を、路線の ID の順に並べて持つ。乗り換え 1 回の進路も、組ごとに 1 つまで持つ
 //!   （[`TransferRoute`]）。路線の形と走らせる本数だけから作るので、路線か線路か道路か本数が変わったときだけ
@@ -18,13 +21,17 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use smallvec::SmallVec;
 
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
+
 use super::line::{RailLine, StepKind};
 use super::rider::{FARE_SECONDS, QueueKey, Transfer, estimate_segments};
 use super::{LineId, Rail, StationId};
-use crate::movement::{SidewalkPos, facility_spot};
-use crate::network::{Network, TILE_MM};
-use crate::routing::WALK_SPEED;
+use crate::movement::{SidewalkPos, facility_spot, walk_spots, walk_spots_on_link};
+use crate::network::{LinkId, Network, SegmentId, TILE_MM};
+use crate::routing::{Graph, Scratch, Toward, WALK_SPEED, reach_within, walk_ms};
 use crate::tile::TilePos;
+use crate::units::LaneOffset;
 
 /// 駅まで歩く範囲（マス）。乗る駅と降りる駅の候補を探す範囲である。
 pub const STATION_WALK_RADIUS: i64 = 64;
@@ -39,6 +46,11 @@ pub fn in_walk_range(at: TilePos, door: TilePos) -> bool {
 /// 出発の側と行き先の側で、それぞれ候補にする駅の数。
 pub const NEAR_STATIONS: usize = 3;
 
+/// 駅の出入口から歩道のグラフを広げる道のりの上限（mm）。徒歩圏（直線で [`STATION_WALK_RADIUS`] マス）の 1.5 倍で
+/// ある。直線では徒歩圏に入っても、これより長く回らないと駅に着かない建物からは、その駅を候補にしない。
+pub const STATION_WALK_LIMIT_MM: u64 =
+    STATION_WALK_RADIUS.unsigned_abs() * TILE_MM.unsigned_abs() * 3 / 2;
+
 /// 乗り換えの手間（移動の秒）。乗り換える駅での待ちとは別に、乗り換え 1 回ごとに費用へ足す。同じ駅の中で
 /// ホームを移る手間と、待ちの見積もりが外れる備えである（設計 3.10 の「作る順の 7 で決めた細部」）。
 pub const TRANSFER_SECONDS: u64 = 60;
@@ -50,7 +62,8 @@ pub const WALK_DETOUR: (u64, u64) = (13, 10);
 /// 中央値で決めた（設計 3.10 の「作る順の 6 で決めた細部」）。
 pub const CAR_STRAIGHT_LINE_MM_PER_SECOND: u64 = 2_800;
 
-/// 直線の距離 `mm` を歩く時間の見積もり（移動の秒）。
+/// 直線の距離 `mm` を歩く時間の見積もり（移動の秒）。歩きの手段の費用と、歩く表を持たない [`RailPlanner`]
+/// （ベンチマークとテストで、駅の出入口と路線の形だけから作ったもの）の駅まで歩く時間に使う。
 pub fn walk_seconds(mm: u64) -> u64 {
     mm * WALK_DETOUR.0 / WALK_DETOUR.1 / u64::from(WALK_SPEED.0.unsigned_abs())
 }
@@ -171,7 +184,152 @@ impl LineShape {
     }
 }
 
-/// 駅の空間索引と、駅の組の表。路線の形と駅の出入口から作り直せるので、状態には入れない。
+/// 歩道の上の建物の出入口。駅を探す正面のマスと、歩き出せる向きごとの位置（[`walk_spots`]）を持つ。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WalkEnd {
+    /// 建物の正面のマス。徒歩圏（[`in_walk_range`]）と、歩く表のない索引の直線の距離に使う。
+    pub tile: TilePos,
+    /// 出入口のある歩道の区間（[`segment_key`]）。歩道の上になければ `None`。
+    segment: Option<u64>,
+    /// 区間の向き（[`crate::network::Dir`] の番号）ごとの、（リンクの始まりからここまで歩く時間、ここからリンクの終わりまで
+    /// 歩く時間）。時間は ms である。その向きに歩けなければ `None`。
+    dirs: [Option<(u32, u32)>; 2],
+}
+
+/// 区間の ID を、[`SegmentId`] の順と同じ順に並ぶ 1 つの整数にしたもの。
+fn segment_key(s: SegmentId) -> u64 {
+    (u64::from(s.index) << 16) | u64::from(s.generation)
+}
+
+fn narrow(ms: u64) -> u32 {
+    u32::try_from(ms).expect("歩く時間があふれた")
+}
+
+impl WalkEnd {
+    /// 正面のマスが `tile` で、出入口が歩道の上の `spot` にある建物。
+    pub fn new(net: &Network, tile: TilePos, spot: SidewalkPos) -> WalkEnd {
+        WalkEnd::from_spots(tile, walk_spots(net, spot))
+    }
+
+    /// 正面のマスが `tile` で、出入口がリンク `link` の始まりから `offset` の所にある建物（[`walk_spots_on_link`]）。
+    pub fn on_link(net: &Network, tile: TilePos, link: LinkId, offset: LaneOffset) -> WalkEnd {
+        WalkEnd::from_spots(tile, walk_spots_on_link(net, link, offset))
+    }
+
+    fn from_spots(tile: TilePos, spots: SmallVec<[(LinkId, u64, u64); 2]>) -> WalkEnd {
+        let mut end = WalkEnd::at(tile);
+        for (link, before, after) in spots {
+            end.segment = Some(segment_key(link.segment));
+            end.dirs[link.dir as usize] = Some((narrow(before), narrow(after)));
+        }
+        end
+    }
+
+    /// 歩道の上の位置を持たない、正面のマスだけの出入口。歩く表を持たない索引で使う。
+    pub fn at(tile: TilePos) -> WalkEnd {
+        WalkEnd {
+            tile,
+            segment: None,
+            dirs: [None; 2],
+        }
+    }
+}
+
+/// 表の値がないことを表す時間。
+const NO_WALK: u32 = u32::MAX;
+
+/// 1 つの駅の出入口から、歩道のグラフを [`STATION_WALK_LIMIT_MM`] の道のりまで広げた表。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DoorWalks {
+    /// 区間（[`segment_key`]）の順に、区間の向きごとの（リンクの始まりから出入口まで歩く時間、出入口から
+    /// リンクの終わりまで歩く時間）を並べる。並びは [前向き、後向き、前向き、後向き] で、時間は ms である。
+    /// 道のりの中になければ [`NO_WALK`]。出入口へ歩く時間は、辺を逆にたどって広げる。
+    rows: Vec<(u64, [u32; 4])>,
+}
+
+impl DoorWalks {
+    /// 出入口 `door` から作る。出入口が歩道の上になければ空で、どの建物からも歩いて着かない。
+    pub fn build(net: &Network, walk: &Graph, door: SidewalkPos, s: &mut Scratch) -> DoorWalks {
+        let spots = walk_spots(net, door);
+        let limit = walk_ms(STATION_WALK_LIMIT_MM);
+        let to: Vec<(LinkId, u64)> = spots.iter().map(|(l, before, _)| (*l, *before)).collect();
+        let from: Vec<(LinkId, u64)> = spots.iter().map(|(l, _, after)| (*l, *after)).collect();
+        let mut cells: Vec<(u64, usize, u32)> = Vec::new();
+        for (base, roots, toward) in [(0, to, Toward::Backward), (2, from, Toward::Forward)] {
+            for (l, d) in reach_within(walk, &roots, toward, limit, s) {
+                cells.push((segment_key(l.segment), base + l.dir as usize, narrow(d)));
+            }
+        }
+        cells.sort_unstable();
+        let mut rows: Vec<(u64, [u32; 4])> = Vec::new();
+        for (key, slot, d) in cells {
+            if rows.last().is_none_or(|(k, _)| *k != key) {
+                rows.push((key, [NO_WALK; 4]));
+            }
+            if let Some((_, row)) = rows.last_mut() {
+                row[slot] = d;
+            }
+        }
+        DoorWalks { rows }
+    }
+
+    fn row(&self, at: &WalkEnd) -> Option<&[u32; 4]> {
+        let key = at.segment?;
+        let i = self.rows.binary_search_by_key(&key, |(k, _)| *k).ok()?;
+        Some(&self.rows[i].1)
+    }
+
+    /// 建物の出入口 `at` から、この出入口まで歩く時間（ms）。歩き出せる向きのうち短いほうである。
+    /// 表の道のりの中に `at` の歩道がなければ `None`。
+    pub fn to_door(&self, at: &WalkEnd) -> Option<u64> {
+        let row = self.row(at)?;
+        (0..2)
+            .filter(|d| row[*d] != NO_WALK)
+            .filter_map(|d| row[d].checked_sub(at.dirs[d]?.0))
+            .min()
+            .map(u64::from)
+    }
+
+    /// この出入口から、建物の出入口 `at` まで歩く時間（ms）。
+    pub fn from_door(&self, at: &WalkEnd) -> Option<u64> {
+        let row = self.row(at)?;
+        (0..2)
+            .filter(|d| row[2 + d] != NO_WALK)
+            .filter_map(|d| row[2 + d].checked_sub(at.dirs[d]?.1))
+            .min()
+            .map(u64::from)
+    }
+
+    /// 表に入っている区間の数。
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
+/// 駅ごとの、出入口から歩く表（[`DoorWalks`]）。道路の網と駅の出入口だけから決まるので、網の版と出入口が同じなら、
+/// 路線を変えて駅の組の表を作り直すときに使い回せる（[`RailPlanner::reuse_walks`]）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WalkTables {
+    /// 表を作ったときの道路の網の版。
+    net_version: u64,
+    /// 駅の ID の順の、出入口。
+    doors: Vec<(StationId, SidewalkPos)>,
+    /// `doors` の順の、出入口から歩く表。
+    walks: Vec<DoorWalks>,
+}
+
+impl WalkTables {
+    /// 表を作ったときの道路の網の版。
+    pub fn net_version(&self) -> u64 {
+        self.net_version
+    }
+}
+
+/// 駅の空間索引と、駅の組の表。路線の形と駅の出入口と道路の網から作り直せるので、状態には入れない。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RailPlanner {
     /// 出入口のある駅。ID の順に並べ、出入口のマスと位置を添える。
@@ -180,6 +338,17 @@ pub struct RailPlanner {
     cells: BTreeMap<(i64, i64), Vec<u32>>,
     /// （乗る駅、降りる駅）の順に並べた、駅の組の表。
     table: Vec<((StationId, StationId), PairRoutes)>,
+    /// 出入口から歩く表。`None` なら、駅まで歩く時間を直線の距離から見積もる。
+    walks: Option<WalkTables>,
+}
+
+/// 駅を探す側。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    /// 建物から駅へ歩く（乗る駅）。
+    Board,
+    /// 駅から建物へ歩く（降りる駅）。
+    Alight,
 }
 
 fn cell_of(t: TilePos) -> (i64, i64) {
@@ -190,12 +359,14 @@ fn cell_of(t: TilePos) -> (i64, i64) {
 }
 
 impl RailPlanner {
-    /// いまの鉄道と道路の網から作る。出入口のない駅（道路に面していない駅）は候補にしない。
-    pub fn build(rail: &Rail, net: &Network) -> RailPlanner {
-        RailPlanner::build_with(rail, net, true)
+    /// いまの鉄道と道路の網から作る。`walk` は網の歩道のグラフである。出入口のない駅（道路に面していない駅）は
+    /// 候補にしない。
+    pub fn build(rail: &Rail, net: &Network, walk: &Graph) -> RailPlanner {
+        RailPlanner::build_with(rail, net, true).with_walks(net, walk)
     }
 
-    /// [`RailPlanner::build`] と同じだが、`transfers` が偽なら乗り換えの進路を表に入れない。
+    /// 駅の空間索引と駅の組の表だけを作る。駅まで歩く表は、[`RailPlanner::with_walks`] か
+    /// [`RailPlanner::reuse_walks`] で足す。`transfers` が偽なら乗り換えの進路を表に入れない。
     pub fn build_with(rail: &Rail, net: &Network, transfers: bool) -> RailPlanner {
         let doors: Vec<(StationId, TilePos, SidewalkPos)> = rail
             .stations()
@@ -218,6 +389,62 @@ impl RailPlanner {
             })
             .collect();
         RailPlanner::from_shapes(doors, &lines)
+    }
+
+    /// 駅ごとに、出入口から歩く表（[`DoorWalks`]）を作って持つ。`walk` は `net` の歩道のグラフである。駅ごとに
+    /// 別々に広げるので、スレッドに分けても同じ表になる。
+    pub fn with_walks(mut self, net: &Network, walk: &Graph) -> RailPlanner {
+        let one = |s: &mut Scratch, door: &SidewalkPos| DoorWalks::build(net, walk, *door, s);
+        #[cfg(feature = "parallel")]
+        let walks = self
+            .doors
+            .par_iter()
+            .map_init(Scratch::default, |s, (_, _, d)| one(s, d))
+            .collect();
+        #[cfg(not(feature = "parallel"))]
+        let walks = {
+            let mut s = Scratch::default();
+            self.doors.iter().map(|(_, _, d)| one(&mut s, d)).collect()
+        };
+        self.walks = Some(WalkTables {
+            net_version: net.version(),
+            doors: self.doors.iter().map(|(id, _, d)| (*id, *d)).collect(),
+            walks,
+        });
+        self
+    }
+
+    /// 前に作った歩く表 `tables` を、道路の網の版が `net_version` のままで、駅の出入口も同じなら持って `Ok` を返す。
+    /// 使えなければ、表を `Err` で返す。
+    pub fn reuse_walks(&mut self, tables: WalkTables, net_version: u64) -> Result<(), WalkTables> {
+        let same = tables.net_version == net_version
+            && tables.doors.len() == self.doors.len()
+            && tables
+                .doors
+                .iter()
+                .zip(&self.doors)
+                .all(|((a, da), (b, _, db))| a == b && da == db);
+        if !same {
+            return Err(tables);
+        }
+        self.walks = Some(tables);
+        Ok(())
+    }
+
+    /// 歩く表を外して返す。駅の組の表を捨てるときに、使い回せるよう取っておく。
+    pub fn into_walks(self) -> Option<WalkTables> {
+        self.walks
+    }
+
+    /// 歩く表を作ったときの道路の網の版。歩く表を持たなければ `None`。
+    pub fn net_version(&self) -> Option<u64> {
+        self.walks.as_ref().map(|w| w.net_version)
+    }
+
+    /// 駅 `id` の出入口から歩く表。
+    pub fn door_walks(&self, id: StationId) -> Option<&DoorWalks> {
+        let i = self.doors.binary_search_by_key(&id, |(s, _, _)| *s).ok()?;
+        self.walks.as_ref()?.walks.get(i)
     }
 
     /// 駅の出入口と、路線ごとの止まる所から作る。`doors` は駅の ID の順に並べる。乗り換えの進路は、
@@ -247,6 +474,7 @@ impl RailPlanner {
             doors,
             cells,
             table: build_table(lines),
+            walks: None,
         }
     }
 
@@ -272,11 +500,14 @@ impl RailPlanner {
         Some(&self.table[i].1)
     }
 
-    /// マス `at` から [`STATION_WALK_RADIUS`] マス以内の出入口の駅を、近い順（同じなら ID の順）に
-    /// [`NEAR_STATIONS`] つまで返す。値は `doors` の添え字と直線の距離（mm）である。
-    fn near(&self, at: TilePos) -> SmallVec<[(u32, u64); NEAR_STATIONS]> {
-        let (cx, cy) = cell_of(at);
-        let mut found: SmallVec<[(i64, StationId, u32); 8]> = SmallVec::new();
+    /// 建物の出入口 `at` の正面のマスから [`STATION_WALK_RADIUS`] マス以内の出入口の駅を、歩く時間の短い順
+    /// （同じなら ID の順）に [`NEAR_STATIONS`] つまで返す。値は `doors` の添え字と、歩く時間（移動の秒）である。
+    /// 歩く表を持てば、`side` の向きに歩道を歩く時間で、歩いて着けないか、[`STATION_WALK_LIMIT_MM`] を歩く時間より
+    /// 長くかかる駅は除く。表を持たなければ、直線の距離からの見積もり（[`walk_seconds`]）である。
+    fn near(&self, at: &WalkEnd, side: Side) -> SmallVec<[(u32, u64); NEAR_STATIONS]> {
+        let (cx, cy) = cell_of(at.tile);
+        let limit = walk_ms(STATION_WALK_LIMIT_MM);
+        let mut found: SmallVec<[(u64, StationId, u32); 8]> = SmallVec::new();
         for x in cx - 1..=cx + 1 {
             for y in cy - 1..=cy + 1 {
                 let Some(list) = self.cells.get(&(x, y)) else {
@@ -284,10 +515,24 @@ impl RailPlanner {
                 };
                 for i in list {
                     let (id, t, _) = self.doors[*i as usize];
-                    if in_walk_range(at, t) {
-                        let (dx, dy) = (t.x - at.x, t.y - at.y);
-                        found.push((dx * dx + dy * dy, id, *i));
+                    if !in_walk_range(at.tile, t) {
+                        continue;
                     }
+                    let seconds = match &self.walks {
+                        None => walk_seconds(tile_distance_mm(at.tile, t)),
+                        Some(w) => {
+                            let w = &w.walks[*i as usize];
+                            let ms = match side {
+                                Side::Board => w.to_door(at),
+                                Side::Alight => w.from_door(at),
+                            };
+                            let Some(ms) = ms.filter(|ms| *ms <= limit) else {
+                                continue;
+                            };
+                            ms / 1_000
+                        }
+                    };
+                    found.push((seconds, id, *i));
                 }
             }
         }
@@ -295,10 +540,7 @@ impl RailPlanner {
         found
             .into_iter()
             .take(NEAR_STATIONS)
-            .map(|(_, _, i)| {
-                let (_, t, _) = self.doors[i as usize];
-                (i, tile_distance_mm(at, t))
-            })
+            .map(|(seconds, _, i)| (i, seconds))
             .collect()
     }
 }
@@ -771,6 +1013,8 @@ pub struct RideOffer {
     pub door: SidewalkPos,
     /// 乗り換え。`alight` は乗り換える駅になる。
     pub transfer: Option<Transfer>,
+    /// 乗る駅まで歩く時間の見積もり（移動の秒）。
+    pub walk_to_board: u64,
 }
 
 /// 費用の同じ候補を選ぶ順。（費用、乗る駅、降りる駅、乗り換えるか、路線、乗り換える駅、乗り換え先の路線）。
@@ -845,18 +1089,18 @@ impl<'a> RideChoice<'a> {
         Some(wait + ride)
     }
 
-    /// 正面のマスが `from` の建物から、正面のマスが `to` の建物へ向かう鉄道の候補。乗り換え 1 回の進路も比べる。
+    /// 出入口が `from` の建物から、出入口が `to` の建物へ向かう鉄道の候補。乗り換え 1 回の進路も比べる。
     /// 費用の同じ組は、乗る駅、降りる駅の ID の小さい順に選び、同じ組なら乗り換えない進路を先にして、
     /// そのあとは（路線、乗り換える駅、乗り換え先の路線）の ID の小さい順に選ぶ。
-    pub fn offer(&self, from: TilePos, to: TilePos) -> Option<RideOffer> {
+    pub fn offer(&self, from: &WalkEnd, to: &WalkEnd) -> Option<RideOffer> {
         if self.is_empty() {
             return None;
         }
-        let starts = self.planner.near(from);
+        let starts = self.planner.near(from, Side::Board);
         if starts.is_empty() {
             return None;
         }
-        let goals = self.planner.near(to);
+        let goals = self.planner.near(to, Side::Alight);
         let mut best: Option<(OfferKey, RideOffer)> = None;
         let mut consider = |key: OfferKey, offer: RideOffer| {
             if best.as_ref().is_none_or(|(k, _)| key < *k) {
@@ -870,7 +1114,7 @@ impl<'a> RideChoice<'a> {
                 let Some(routes) = self.planner.routes(sa, sb) else {
                     continue;
                 };
-                let walk = walk_seconds(*wa) + walk_seconds(*wb) + self.fare_seconds;
+                let walk = wa + wb + self.fare_seconds;
                 for d in &routes.direct {
                     let Some(leg) = self.leg_cost(sa, d) else {
                         continue;
@@ -886,6 +1130,7 @@ impl<'a> RideChoice<'a> {
                             alight: sb,
                             door,
                             transfer: None,
+                            walk_to_board: *wa,
                         },
                     );
                 }
@@ -920,6 +1165,7 @@ impl<'a> RideChoice<'a> {
                             dir: t.second.dir,
                             alight: sb,
                         }),
+                        walk_to_board: *wa,
                     },
                 );
             }
@@ -985,7 +1231,10 @@ mod tests {
         let lines = [shape(0, &[0, 1], 100), shape(1, &[1, 3], 100)];
         let planner = RailPlanner::from_shapes(far_doors(), &lines);
         let o = choice(&planner, &lines)
-            .offer(TilePos::new(0, 0), TilePos::new(1_000, 0))
+            .offer(
+                &WalkEnd::at(TilePos::new(0, 0)),
+                &WalkEnd::at(TilePos::new(1_000, 0)),
+            )
             .expect("乗り換えの候補がない");
         assert_eq!(
             (o.board, o.line, o.alight),
@@ -1017,7 +1266,10 @@ mod tests {
             ];
             let planner = RailPlanner::from_shapes(far_doors(), &lines);
             let o = choice(&planner, &lines)
-                .offer(TilePos::new(0, 0), TilePos::new(1_000, 0))
+                .offer(
+                    &WalkEnd::at(TilePos::new(0, 0)),
+                    &WalkEnd::at(TilePos::new(1_000, 0)),
+                )
                 .unwrap();
             assert_eq!(o.transfer.is_some(), transfer, "直接の区間 {slow} tick");
             let direct = slow * 2 + 5 * FARE_SECONDS as u32;
@@ -1040,7 +1292,10 @@ mod tests {
         let lines = [first, shape(1, &[2, 3], 100), shape(2, &[1, 3], 100)];
         let planner = RailPlanner::from_shapes(far_doors(), &lines);
         let o = choice(&planner, &lines)
-            .offer(TilePos::new(0, 0), TilePos::new(1_000, 0))
+            .offer(
+                &WalkEnd::at(TilePos::new(0, 0)),
+                &WalkEnd::at(TilePos::new(1_000, 0)),
+            )
             .unwrap();
         assert_eq!((o.line, o.alight), (line(0), station(1)));
         assert_eq!(o.transfer.map(|t| t.line), Some(line(2)));
@@ -1052,7 +1307,10 @@ mod tests {
         ];
         let planner = RailPlanner::from_shapes(far_doors(), &lines);
         let o = choice(&planner, &lines)
-            .offer(TilePos::new(0, 0), TilePos::new(1_000, 0))
+            .offer(
+                &WalkEnd::at(TilePos::new(0, 0)),
+                &WalkEnd::at(TilePos::new(1_000, 0)),
+            )
             .unwrap();
         assert_eq!(o.line, line(0));
         // 乗り換えない進路と同じ費用なら、乗り換えない。直接の路線の区間を、乗り換えの費用と同じにする。
@@ -1064,7 +1322,10 @@ mod tests {
         ];
         let planner = RailPlanner::from_shapes(far_doors(), &lines);
         let o = choice(&planner, &lines)
-            .offer(TilePos::new(0, 0), TilePos::new(1_000, 0))
+            .offer(
+                &WalkEnd::at(TilePos::new(0, 0)),
+                &WalkEnd::at(TilePos::new(1_000, 0)),
+            )
             .unwrap();
         assert_eq!(o.cost, via + 5 * FARE_SECONDS);
         assert_eq!(o.transfer, None);
@@ -1076,7 +1337,10 @@ mod tests {
         ];
         let planner = RailPlanner::from_shapes(far_doors(), &lines);
         let o = choice(&planner, &lines)
-            .offer(TilePos::new(0, 0), TilePos::new(1_000, 0))
+            .offer(
+                &WalkEnd::at(TilePos::new(0, 0)),
+                &WalkEnd::at(TilePos::new(1_000, 0)),
+            )
             .unwrap();
         assert_eq!(o.cost, via + 5 * FARE_SECONDS);
         assert_eq!((o.line, o.transfer), (line(2), None));
