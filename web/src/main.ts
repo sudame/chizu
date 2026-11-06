@@ -55,6 +55,7 @@ import {
   clickStation,
   EMPTY_DRAFT,
   extendTarget,
+  insertTarget,
   type LineDraft,
   type LineRef,
   lineKey,
@@ -857,7 +858,7 @@ function updatePreview(): void {
   } else if (tool.kind === "line") {
     const g = new Geometry(railStations[0]?.min ?? { x: 0, y: 0 });
     geometry = g;
-    const target = extendTarget(lineDraft, railLines);
+    const target = extendTarget(lineDraft, railLines) ?? insertTarget(lineDraft, railLines);
     // 延ばしている路線の駅は、路線の色で縁取る。最初に押した駅は濃く、指している駅は薄く塗る
     const box = (st: RailStation, fill: Color, edge: Color) => {
       g.rect(st.min, st.max, fill);
@@ -1184,18 +1185,28 @@ function showLines(): void {
     railLines,
     railLines.flatMap((l) => l.stations.map(stationLabel)),
     lineDraft.extend,
+    lineDraft.insert?.line,
   ]);
   if (key === lineListShown) {
     return;
   }
   lineListShown = key;
-  renderLines(lineList, railLines, stationLabel, lineDraft.extend, {
+  renderLines(lineList, railLines, stationLabel, lineDraft.extend, lineDraft.insert?.line ?? null, {
     send: sendCommand,
     extend: (line: LineRef) => {
       const button = toolButtons.find((b) => b.dataset.tool === "line");
       if (button !== undefined) {
         selectTool({ kind: "line" }, button);
         lineDraft = { ...EMPTY_DRAFT, extend: line };
+        showLines();
+        updatePreview();
+      }
+    },
+    insert: (line: LineRef) => {
+      const button = toolButtons.find((b) => b.dataset.tool === "line");
+      if (button !== undefined) {
+        selectTool({ kind: "line" }, button);
+        lineDraft = { ...EMPTY_DRAFT, insert: { line, after: null } };
         showLines();
         updatePreview();
       }
@@ -1276,7 +1287,11 @@ function clickTile(at: Tile): void {
       return;
     }
     const known = new Set(railLines.map(lineKey));
-    const step = clickStation(lineDraft, station.min);
+    const step = clickStation(
+      lineDraft,
+      station.min,
+      insertTarget(lineDraft, railLines)?.stations ?? [],
+    );
     lineDraft = step.draft;
     if (step.command?.kind === "CreateLine") {
       knownLines = known;
@@ -1315,6 +1330,7 @@ function escapeOnce(): void {
       roadStart !== null ||
       lineDraft.first !== null ||
       lineDraft.extend !== null ||
+      lineDraft.insert !== null ||
       pointer?.mode === "area" ||
       devWalks.pending(),
     popoverOpen: popovers.anyOpen(),
@@ -1521,6 +1537,7 @@ const DONE: Record<CommandMessage["kind"], string> = {
   BuildRail: "線路を引いた",
   CreateLine: "路線を引いた",
   ExtendLine: "路線に駅を足した",
+  InsertLineStation: "路線に駅を挿した",
   RemoveLine: "路線を消した",
   SetLineTrains: "本数を変えた",
   UpgradeRoad: "道路の種類を変えた",
@@ -1632,6 +1649,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
           toolMessage.textContent = LOOPED_NOTICE;
         }
       }
+    }
+    // 駅を挿していた路線が消えたら、挿すのをやめる
+    if (lineDraft.insert !== null && insertTarget(lineDraft, railLines) === null) {
+      lineDraft = EMPTY_DRAFT;
     }
     showLines();
     // test:wasm が読む

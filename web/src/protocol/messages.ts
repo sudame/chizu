@@ -78,6 +78,15 @@ export type CommandMessage =
   | { kind: "CreateLine"; fromX: number; fromY: number; toX: number; toY: number }
   /** 路線の終点の先に駅 (atX, atY) を足す。最初の駅を指せば環状にする。路線は rail_lines が添える添え字と世代で指す。 */
   | { kind: "ExtendLine"; lineIndex: number; lineGeneration: number; atX: number; atY: number }
+  /** 路線の afterIndex 番目（0 始まり）の駅の次に駅 (atX, atY) を挿す。環状の路線にも挿せる。 */
+  | {
+      kind: "InsertLineStation";
+      lineIndex: number;
+      lineGeneration: number;
+      afterIndex: number;
+      atX: number;
+      atY: number;
+    }
   | { kind: "RemoveLine"; lineIndex: number; lineGeneration: number }
   /** 路線を走らせる列車の本数（0〜16）。行き詰まりを防ぐ上限を超える分は、中核が上限に抑える。 */
   | { kind: "SetLineTrains"; lineIndex: number; lineGeneration: number; trains: number }

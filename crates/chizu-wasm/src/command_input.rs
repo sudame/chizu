@@ -193,6 +193,15 @@ pub fn parse(
             line: line_id(&field)?,
             station: station_at(tile(&field, "atX", "atY")?).ok_or(InputError::NoStation)?,
         }),
+        "InsertLineStation" => {
+            let after_index = integer(&field, "afterIndex")
+                .and_then(|v| u8::try_from(v).map_err(|_| InputError::BadInteger("afterIndex")))?;
+            Ok(Command::InsertLineStation {
+                line: line_id(&field)?,
+                after_index,
+                station: station_at(tile(&field, "atX", "atY")?).ok_or(InputError::NoStation)?,
+            })
+        }
         "RemoveLine" => Ok(Command::RemoveLine {
             line: line_id(&field)?,
         }),
@@ -429,6 +438,32 @@ mod tests {
                 line: id,
                 station: station_at(TilePos::new(30, 30)).unwrap(),
             })
+        );
+        assert_eq!(
+            line(
+                "InsertLineStation",
+                &[
+                    ("afterIndex", num(1.0)),
+                    ("atX", num(30.0)),
+                    ("atY", num(30.0))
+                ]
+            ),
+            Ok(Command::InsertLineStation {
+                line: id,
+                after_index: 1,
+                station: station_at(TilePos::new(30, 30)).unwrap(),
+            })
+        );
+        assert_eq!(
+            line(
+                "InsertLineStation",
+                &[
+                    ("afterIndex", num(300.0)),
+                    ("atX", num(30.0)),
+                    ("atY", num(30.0))
+                ]
+            ),
+            Err(InputError::BadInteger("afterIndex"))
         );
         assert_eq!(
             line("ExtendLine", &[("atX", num(2.0)), ("atY", num(30.0))]),
