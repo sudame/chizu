@@ -301,10 +301,14 @@ observe の rail（線路と駅）:
   trains 遊ぶ人が決めた本数（SetLineTrains の値。cap が下がって列車が消えても変わらない）、cap 行き詰まりを防ぐ本数の上限
     （共有の区画を通る路線は、区画の枠のうち自分の分で運べる本数までにする。それより多く走らせても、区画の手前で待つだけである。
     区画の枠は本数 1 以上の路線で分ける。本数 0 の路線の cap は、本数を 1 以上にしたら配られる分から決めた値である）、
-  turnCap 終点の駅で折り返せる本数。終点の駅では、折り返す列車が両方のホームを押さえ、1 本ずつしか入れないので、
-    1 周の見込みの時間のうちに通せる本数には限りがある。同じ駅を終点にする路線どうしは、これを本数 1 以上の路線で分ける。
+  turnCap 終点の駅で折り返せる本数。終点の駅では、列車は着いたホームで折り返して同じホームから出るので、
+    1 周の見込みの時間のうちに通せる本数には限りがある。駅の線路をほかの路線が通らない終点は、ホーム 2 つに列車が
+    入れるので 2 倍通せる。同じホームに着いて折り返す路線どうしは、これを本数 1 以上の路線で分ける。
     これより多く走らせても、終点の手前に並んで 1 周が延びるだけなので、走らせる本数はこれまでに抑える。
     環状の路線は 16。乗り換えの駅を終点にせず、通して走る路線にすると増える。
+  turnLimit turnCap が cap より小さいとき、turnCap を決めている終点（そうでなければ null）。station 終点の駅の id、
+    platforms 列車が折り返せるホームの数（駅の線路をほかの路線も通る終点は 1、通らない終点は 2）、
+    sharedWith 同じホームに着いて折り返す、本数 1 以上のほかの路線の id（このホームの時間を分け合っている）。
   capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
     sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有の区画の枠を、これらの路線と分けている）。
     shortSpans 進路にある、待てる所になれない短い線路（from と to が線路の両端のノードのマス、lengthMm が長さ）。
@@ -519,7 +523,8 @@ observe の removedCrosswalks:
   {"type":"SetLineTrains","line":{"index":n,"generation":g},"trains":0..16}
       路線を走らせる列車の本数を決める。列車 1 本の維持費は 1 日 300。走るのは、行き詰まりを防ぐ上限（observe の
       rail.lines の cap）までである。待てる所は、ノードとノードのあいだの線路の向きごとで、72m 以上あり、終点の
-      折り返す前のホームでないもの（終点の両方のホームは 1 つに数える）である。ほかの路線と使う待てる所は共有の
+      折り返す前のホームでないもの（終点の駅は 1 つに数え、駅の線路をほかの路線が通らない終点はホーム 2 つに
+      列車が入れるので 2 つに数える）である。ほかの路線と使う待てる所は共有の
       待てる所で、続けて押さえて移る向きをたどって互いに行き来できる（輪でつながる）ものどうしが 1 つの共有の区画になる。ほかの路線と待てる所を共有しない路線の
       cap は、待てる所の数 − 1。共有する路線は、自分だけの待てる所の続き（区間）が 1 つならその数、2 つ以上なら数の
       和 − 1。自分だけの待てる所がない路線（区間運転、同じ駅を並べた路線など）は、区画の枠（区画の中だけを通る
@@ -577,6 +582,11 @@ act の結果:
     haltedLines と loweredLines に出るのは、コマンドの前に本数（trains）が 1 以上だった路線だけである。本数 0 の路線の
     cap は走らせたときの見込みなので比べない。本数を 0 にした路線も出さない。
     BuildRoad と UpgradeRoad の結果にも付く。できた踏切は crossings に出る。
+  走らせる本数を、終点の駅で折り返せる本数（turnCap）で抑えている路線があれば turnCappedLines が付く。コマンドで
+    本数（trains）か turnCap か走らせる本数が変わった路線だけを出す（本数を決めた路線のほか、同じホームで折り返す
+    路線を走らせて、ほかの路線の turnCap が下がったときなど）。cap の変化は loweredLines に出る。
+    路線ごとの line（id）、trains、cap、allowed（走らせる本数）、turnCap と turnCapBefore（コマンドの前の turnCap。
+    コマンドで作った路線は null）、turnLimit（observe の rail.lines と同じ）。
   コマンドで路線そのものが消えたら（駅の取り壊しなど。RemoveLine も含む）、removedLines にその id の並びが付く。
   コマンドで列車が消えたら removedTrains にその数が付く（上限が下がった、路線が止まった、進路が変わって先を押さえ直せないなど）。
     removedTrainsByLine は路線ごとの内訳（line と removed の並び）。
@@ -2368,6 +2378,7 @@ fn lines(world: &World) -> Value {
                 "trains": l.trains,
                 "cap": l.cap(),
                 "turnCap": l.turn_cap(),
+                "turnLimit": turn_limit(rail, id),
                 "capReason": cap_reason(rail, id),
                 "running": running,
                 "toStart": usize::from(l.allowed()).saturating_sub(running),
@@ -2384,6 +2395,23 @@ fn lines(world: &World) -> Value {
         })
         .collect();
     json!(out)
+}
+
+/// 終点の駅で折り返せる本数（turnCap）が上限（cap）より小さいとき、その本数を決めている終点。そうでなければ null である。
+fn turn_limit(rail: &chizu_core::Rail, id: chizu_core::LineId) -> Value {
+    let Some(t) = rail.line_capacity(id).and_then(|c| c.turn_limit) else {
+        return Value::Null;
+    };
+    let shared: Vec<Value> = t
+        .shared_with
+        .iter()
+        .map(|l| id_json(l.index, l.generation))
+        .collect();
+    json!({
+        "station": id_json(t.station.index, t.station.generation),
+        "platforms": t.platforms,
+        "sharedWith": shared,
+    })
 }
 
 /// 上限が 0 の理由。上限が 0 でなければ null である。
@@ -2500,6 +2528,10 @@ struct LineState {
     set: u8,
     stopped: bool,
     cap: u8,
+    /// 終点の駅で折り返せる本数。
+    turn_cap: u8,
+    /// 走らせる本数。
+    allowed: u8,
     /// 走っている列車の数。
     running: usize,
 }
@@ -2523,6 +2555,8 @@ fn line_states(world: &World) -> LineStates {
                 set: l.trains,
                 stopped: l.stopped,
                 cap: l.cap(),
+                turn_cap: l.turn_cap(),
+                allowed: l.allowed(),
                 running,
             };
             (id, s)
@@ -2571,6 +2605,29 @@ fn compare_lines(out: &mut Value, world: &World, before: &LineStates, after: &Li
             })
         })
         .collect();
+    // 走らせる本数を、終点の駅で折り返せる本数で抑えている路線。コマンドで本数か抑えが変わったものだけを出す。
+    let turn_capped: Vec<Value> = after
+        .iter()
+        .filter(|(id, a)| {
+            let b = before.get(*id);
+            a.runs()
+                && a.allowed < a.set.min(a.cap)
+                && b.is_none_or(|b| {
+                    b.set != a.set || b.turn_cap != a.turn_cap || b.allowed != a.allowed
+                })
+        })
+        .map(|(id, a)| {
+            json!({
+                "line": id_json(id.index, id.generation),
+                "trains": a.set,
+                "cap": a.cap,
+                "allowed": a.allowed,
+                "turnCap": a.turn_cap,
+                "turnCapBefore": before.get(id).map(|b| b.turn_cap),
+                "turnLimit": turn_limit(rail, *id),
+            })
+        })
+        .collect();
     let by_line: Vec<(chizu_core::LineId, usize)> = before
         .iter()
         .map(|(id, b)| {
@@ -2593,6 +2650,9 @@ fn compare_lines(out: &mut Value, world: &World, before: &LineStates, after: &Li
     }
     if !lowered.is_empty() {
         out["loweredLines"] = json!(lowered);
+    }
+    if !turn_capped.is_empty() {
+        out["turnCappedLines"] = json!(turn_capped);
     }
     if !gone.is_empty() {
         out["removedLines"] = json!(gone);
@@ -3477,6 +3537,8 @@ mod tests {
             set: 1,
             stopped: false,
             cap: 3,
+            turn_cap: 3,
+            allowed: 1,
             running: 0,
         };
         let mut before = line_states(&w);

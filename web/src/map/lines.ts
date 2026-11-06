@@ -28,7 +28,7 @@ export const LINE_COLOR_NAMES: readonly string[] = [
 ];
 
 /** chizu-wasm の rail_lines の、路線ごとの見出しの数の個数。 */
-export const LINE_HEADER = 14;
+export const LINE_HEADER = 18;
 /** 本数の上限。chizu-core の MAX_LINE_TRAINS と同じ。 */
 export const MAX_LINE_TRAINS = 16;
 
@@ -62,6 +62,8 @@ export type RailLineInfo = {
   allowed: number;
   /** 終点の駅で折り返せる本数。これより多く決めても、走らせる本数は増えない。 */
   turnCap: number;
+  /** 終点で折り返せる本数が上限より少ないとき、その本数を決めている終点。そうでなければ null。 */
+  turnLimit: TurnLimit | null;
   /** 線路が変わって進路を選べなくなった。 */
   stopped: boolean;
   /** 運転間隔（tick）。列車がなければ 0。 */
@@ -79,6 +81,16 @@ export type RailLineInfo = {
 };
 
 type LineRef = { index: number; generation: number };
+
+/** 終点で折り返せる本数を決めている終点。 */
+export type TurnLimit = {
+  /** 終点の駅。敷地の min のマスで指す。 */
+  station: Tile;
+  /** 列車が折り返せるホームの数（1 か 2）。駅の線路をほかの路線も通る終点は 1 である。 */
+  platforms: number;
+  /** 同じホームに着いて折り返す、ほかの路線の数。このホームの時間を分け合っている。 */
+  sharedLines: number;
+};
 
 /** 決めても走らせられる本数の上限。行き詰まりを防ぐ上限と、終点で折り返せる本数の小さいほう。 */
 export function lineLimit(line: RailLineInfo): number {
@@ -127,6 +139,10 @@ export function parseLines(data: ArrayLike<number>): RailLineInfo[] {
       cap: at(4),
       allowed: at(5),
       turnCap: at(13),
+      turnLimit:
+        at(14) > 0
+          ? { platforms: at(14), station: { x: at(15), y: at(16) }, sharedLines: at(17) }
+          : null,
       stopped: at(6) === 1,
       headway: at(7),
       roundTrip: at(8),

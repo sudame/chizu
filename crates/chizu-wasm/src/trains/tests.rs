@@ -88,14 +88,32 @@ fn trains_keep_to_the_left_of_their_direction_on_the_track() {
     // 列車が走り出すまで進め、先頭の車両を見る
     let mut seen_east = false;
     let mut seen_west = false;
-    for _ in 0..400 {
-        sim.advance(10);
+    let mut seen_turned = false;
+    for _ in 0..4_000 {
+        sim.advance(1);
         let mut cars = Vec::new();
         let base = collect_cars(sim.world(), &mut cars);
         let Some(head) = cars.first() else { continue };
         let y = f64::from(head.y) + f64::from(base.cy) * CHUNK_SIDE as f64;
-        // 線路の中心線は y = 8 のマスの真ん中（8.5）で、東へ進むなら北（8.3）、西へ進むなら南（8.7）を通る
         let heading = f64::from(head.heading) / 65536.0;
+        // 終点の駅では、列車は着いたホームでその場で折り返すので、折り返して出るのを待つあいだは、進む向きの
+        // 右（着いたときの左）に描く。
+        let rail = sim.world().rail();
+        let (_, t) = rail.trains().next().unwrap();
+        let line = rail.line(t.line).unwrap();
+        if line.pocket(t.pos).is_some() {
+            if line.path[t.pos as usize].depart && (heading - 0.0).abs() < 0.01 {
+                assert!((y - 8.7).abs() < 1e-3, "折り返した東向きの y が {y}");
+                seen_turned = true;
+            }
+            continue;
+        }
+        // 駅を出たばかりで、先頭の車両がまだ駅の線路にかかっている列車も見ない。
+        let n = line.path.len() as u32;
+        if line.pocket((t.pos + n - 1) % n).is_some() && t.offset < 20_000 {
+            continue;
+        }
+        // 線路の中心線は y = 8 のマスの真ん中（8.5）で、東へ進むなら北（8.3）、西へ進むなら南（8.7）を通る
         if (heading - 0.0).abs() < 0.01 {
             assert!((y - 8.3).abs() < 1e-3, "東向きの y が {y}");
             seen_east = true;
@@ -105,6 +123,7 @@ fn trains_keep_to_the_left_of_their_direction_on_the_track() {
         }
     }
     assert!(seen_east && seen_west, "往復の両方向を見ていない");
+    assert!(seen_turned, "西の終点で折り返した列車を見ていない");
 }
 
 /// y = 10 の道路の西と東の切れ端に面した駅 2 つを、y = 8 の線路で結び、x = 30 の縦の道路で踏切を作った街。

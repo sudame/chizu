@@ -42,6 +42,27 @@ export function capZeroReason(line: RailLineInfo): string {
   return `${shared}共有する所に止まれる列車の枠が回ってこないので走れない（同じ所を使う路線を減らすと走れる）`;
 }
 
+/**
+ * 終点の駅で折り返せる本数で走らせる本数を抑えている理由の文。どの終点で、ホームがいくつあり、ほかの路線と
+ * 分け合っているかを言う。
+ */
+export function turnLimitReason(line: RailLineInfo, nameOf: (station: Tile) => string): string {
+  const t = line.turnLimit;
+  if (t === null) {
+    return `終点の駅で折り返せるのは ${line.turnCap} 本まで`;
+  }
+  const head = `終点の${nameOf(t.station)}で折り返せるのは ${line.turnCap} 本まで`;
+  const shared =
+    t.sharedLines > 0
+      ? `。同じホームで折り返すほかの路線（${t.sharedLines} 本）と分け合っている`
+      : "";
+  const platforms =
+    t.platforms >= 2
+      ? "（ホーム 2 つを交互に使っても足りない。増やしても終点の手前に並ぶだけ）"
+      : "（駅の線路をほかにも通る列車があるので、着いたホーム 1 つで折り返す。ほかに通る列車がなければ 2 つ使える）";
+  return `${head}${platforms}${shared}`;
+}
+
 /** 路線 1 本の一覧の行に出す文。 */
 export function lineRow(line: RailLineInfo, nameOf: (station: Tile) => string): LineRow {
   let warning = "";
@@ -50,7 +71,7 @@ export function lineRow(line: RailLineInfo, nameOf: (station: Tile) => string): 
   } else if (line.cap === 0) {
     warning = `列車を走らせられない（本数の上限が 0）。${capZeroReason(line)}`;
   } else if (line.trains > line.allowed) {
-    const why = line.turnCap < line.cap ? "（終点の駅で折り返せる本数まで）" : "";
+    const why = line.turnCap < line.cap ? `。${turnLimitReason(line, nameOf)}` : "";
     warning = `決めた本数 ${line.trains} のうち、走らせるのは ${line.allowed} 本${why}`;
   }
   return {

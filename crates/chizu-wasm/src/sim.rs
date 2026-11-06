@@ -680,7 +680,9 @@ impl Sim {
 
     /// 路線を、1 路線につき
     /// `[添え字, 世代, 環状か, 決めた本数, 本数の上限, 走らせる本数, 止まっているか, 運転間隔(tick。なければ 0), 1 周の見込み(tick),
-    /// 駅の数, 線路の数, 待てる所の数, 理由に挙げる路線の数, 終点で折り返せる本数]` の 14 個の数に、駅ごとの `[敷地の min の x, y]` と、
+    /// 駅の数, 線路の数, 待てる所の数, 理由に挙げる路線の数, 終点で折り返せる本数,
+    /// 終点で折り返せる本数を決めている終点のホームの数（決めている終点がなければ 0）, その駅の敷地の min の x, y,
+    /// そのホームで折り返すほかの路線の数]` の 18 個の数に、駅ごとの `[敷地の min の x, y]` と、
     /// 線路ごとの `[a の x, y, b の x, y]` と、理由に挙げる路線ごとの `[添え字, 世代]` を続けて返す。
     /// 理由に挙げる路線は、上限が 0 の路線が進路を共有するほかの路線である。上限が 0 でなければ 0 本にする。
     /// 線路は進路に出てくるものを、重ならないよう最初に出てきた順に並べる。駅は路線の順である。
@@ -706,6 +708,10 @@ impl Sim {
                 .map(|st| [st.area.min.x, st.area.min.y])
                 .collect();
             let capacity = rail.line_capacity(id).expect("路線がある");
+            let limit = capacity.turn_limit.as_ref();
+            let limit_at = limit
+                .and_then(|t| rail.station(t.station))
+                .map_or([0, 0], |st| [st.area.min.x, st.area.min.y]);
             let shared: &[chizu_core::LineId] = if capacity.cap == 0 {
                 &capacity.shared_with
             } else {
@@ -726,6 +732,10 @@ impl Sim {
                 capacity.wait_places as f64,
                 shared.len() as f64,
                 f64::from(line.turn_cap()),
+                limit.map_or(0.0, |t| f64::from(t.platforms)),
+                limit_at[0] as f64,
+                limit_at[1] as f64,
+                limit.map_or(0.0, |t| t.shared_with.len() as f64),
             ]);
             out.extend(stations.iter().flatten().map(|v| *v as f64));
             out.extend(tracks.iter().flatten().map(|v| *v as f64));
@@ -1918,8 +1928,10 @@ mod tests {
         assert_eq!(data[11], c.wait_places as f64);
         assert_eq!(data[12], 0.0);
         assert_eq!(data[13], f64::from(c.turn_cap));
-        // 見出し 14 個、駅 2 つ、線路 n 本のあとに理由の路線が続かない
-        assert_eq!(data.len(), 14 + 4 + data[10] as usize * 4);
+        // 両端の駅でホーム 2 つに列車が入れるので、折り返せる本数は上限より小さくなく、決めている終点はない
+        assert_eq!(&data[14..18], &[0.0; 4]);
+        // 見出し 18 個、駅 2 つ、線路 n 本のあとに理由の路線が続かない
+        assert_eq!(data.len(), 18 + 4 + data[10] as usize * 4);
     }
 
     #[test]

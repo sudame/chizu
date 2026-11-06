@@ -792,34 +792,34 @@ fn act_creates_a_line_and_observe_shows_the_trains() {
     let lines = rail["lines"].as_array().unwrap();
     assert_eq!(lines.len(), 1, "{rail}");
     assert_eq!(lines[0]["trains"], 4, "{rail}");
-    assert_eq!(lines[0]["cap"], 3, "{rail}");
-    // 短い往復なので、終点の駅で折り返せる 2 本までしか走らせない。
-    assert_eq!(lines[0]["turnCap"], 2, "{rail}");
-    assert_eq!(lines[0]["running"], 2, "{rail}");
+    // 両端の駅はホーム 2 つに列車が入れるので、上限も終点で折り返せる本数も 5 本で、決めた 4 本が走る。
+    assert_eq!(lines[0]["cap"], 5, "{rail}");
+    assert_eq!(lines[0]["turnCap"], 5, "{rail}");
+    assert_eq!(lines[0]["running"], 4, "{rail}");
     assert_eq!(lines[0]["stopped"], false, "{rail}");
     assert_eq!(
         lines[0]["stations"],
         serde_json::json!([{"index":0,"generation":0},{"index":1,"generation":0}])
     );
     let trains = rail["trains"].as_array().unwrap();
-    assert_eq!(trains.len(), 2, "{rail}");
+    assert_eq!(trains.len(), 4, "{rail}");
     for t in trains {
         let y = t["at"][1].as_i64().unwrap();
         assert_eq!(y, 8, "{t}");
         assert!(["E", "W"].contains(&t["heading"].as_str().unwrap()), "{t}");
         assert!(t["nextStation"].is_object(), "{t}");
     }
-    assert_eq!(rail["trainCount"], 2);
+    assert_eq!(rail["trainCount"], 4);
     assert_eq!(rail["deadlock"], 0);
-    // 列車 2 本の 1 日の維持費 600 が足される。
+    // 列車 4 本の 1 日の維持費 1,200 が足される。
     assert_eq!(
         o["financesPerDay"]["railUpkeep"].as_i64().unwrap()
             - before["financesPerDay"]["railUpkeep"].as_i64().unwrap(),
-        600
+        1_200
     );
     assert_eq!(
         o["sinceLastObserve"]["changes"]["rail.trainCount"]["delta"],
-        2
+        4
     );
 }
 
@@ -985,11 +985,41 @@ fn act_and_observe_show_lowered_caps_and_trains_to_start() {
         ),
     );
     let acted = json(&cli(&["agent", "act", d, &cmds]));
-    for r in acted["results"].as_array().unwrap() {
+    let results = acted["results"].as_array().unwrap();
+    for r in results {
         assert_eq!(r["outcome"], "Applied", "{acted}");
     }
+    // 本数を 3 にした路線は、終点の駅で折り返せる 2 本に抑えられ、そのことと終点が turnCappedLines に出る。
+    // a–m を決めているのは、m の駅の線路を m–e も通るので着いたホーム 1 つで折り返す m である。
+    let set: Vec<&serde_json::Value> = results
+        .iter()
+        .filter(|r| r["type"] == "SetLineTrains")
+        .collect();
+    assert_eq!(set.len(), 3, "{acted}");
+    for (k, r) in set.iter().enumerate() {
+        let capped = r["turnCappedLines"].as_array().unwrap();
+        assert_eq!(capped.len(), 1, "{r}");
+        let c = &capped[0];
+        assert_eq!(
+            c["line"],
+            serde_json::json!({"index": k, "generation": 0}),
+            "{r}"
+        );
+        assert_eq!(c["trains"], 3, "{r}");
+        assert_eq!(c["allowed"], 2, "{r}");
+        assert_eq!(c["turnCap"], 2, "{r}");
+        assert_eq!(c["turnCapBefore"], 2, "{r}");
+        assert_eq!(c["turnLimit"]["platforms"], 1, "{r}");
+        assert_eq!(c["turnLimit"]["sharedWith"], serde_json::json!([]), "{r}");
+    }
+    assert_eq!(
+        set[0]["turnCappedLines"][0]["turnLimit"]["station"],
+        serde_json::json!({"index": 1, "generation": 0})
+    );
+    // 抑えが変わらないコマンドの結果には出ない。
+    assert!(results[0].get("turnCappedLines").is_none(), "{acted}");
     cli(&["agent", "advance", d, "600"]);
-    // a–f は 4 本で区画の枠を分けて自分の分け前が 0 になり、ほかの 3 本の cap を 3 から 1 に下げるので断る。
+    // a–f は 4 本で区画の枠を分けて自分の分け前が 0 になり、ほかの 3 本の cap を 1 に下げるので断る。
     let cmds = write(
         &dir.join("af.json"),
         &format!(
@@ -1004,50 +1034,52 @@ fn act_and_observe_show_lowered_caps_and_trains_to_start() {
     assert_eq!(r["reason"], "LineStarvesSelf", "{acted}");
     let lowered = r["loweredLines"].as_array().unwrap();
     assert_eq!(lowered.len(), 3, "{acted}");
+    let caps: Vec<_> = lowered.iter().map(|l| l["cap"].clone()).collect();
+    assert_eq!(caps, [4, 5, 4], "{acted}");
     for l in lowered {
-        assert_eq!(l["cap"], 3, "{acted}");
         assert_eq!(l["capAfter"], 1, "{acted}");
     }
-    // 短い往復の 3 本は、m と e を終点として分け合うので、終点の駅で折り返せる本数（turnCap）で 1 本ずつになる。
-    // m–e を本数 0 にすると、a–m と e–f は m と e を 1 本で使えるので 2 本まで走る。足りない分が toStart に出る。
+    // 短い往復の 3 本は、終点の駅で折り返せる本数（turnCap）で 2 本ずつになる。列車は着いたホームで折り返すので、
+    // m と e を終点にする隣どうしの路線は、別々のホームを使い、折り返せる本数を分け合わない。
     let o = json(&cli(&["agent", "observe", d]));
-    for l in o["rail"]["lines"].as_array().unwrap() {
-        assert_eq!(l["cap"], 3, "{o}");
-        assert_eq!(l["turnCap"], 1, "{o}");
-        assert_eq!(l["running"], 1, "{o}");
-    }
-    let cmds = write(
-        &dir.join("me.json"),
-        &format!(
-            r#"[{{"type":"SetLineTrains","line":{l1},"trains":0}}]"#,
-            l1 = st(1)
-        ),
-    );
-    let acted = json(&cli(&["agent", "act", d, &cmds]));
-    assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
-    let ends = |o: &serde_json::Value| -> Vec<serde_json::Value> {
-        o["rail"]["lines"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|l| l["id"] != serde_json::json!({"index":1,"generation":0}))
-            .cloned()
-            .collect()
-    };
-    let o = json(&cli(&["agent", "observe", d]));
-    let lines = ends(&o);
-    assert_eq!(lines.len(), 2, "{o}");
-    for l in &lines {
+    let lines = o["rail"]["lines"].as_array().unwrap();
+    let caps: Vec<_> = lines.iter().map(|l| l["cap"].clone()).collect();
+    assert_eq!(caps, [4, 5, 4], "{o}");
+    for l in lines {
         assert_eq!(l["turnCap"], 2, "{o}");
-        assert_eq!(l["toStart"], 1, "{o}");
-        assert_eq!(l["running"], 1, "{o}");
+        assert_eq!(l["running"], 2, "{o}");
+        assert_eq!(l["turnLimit"]["platforms"], 1, "{o}");
     }
+    // m–e を本数 0 にしても、ほかの路線の turnCap は変わらない。m–e の列車が終点で消えたあとに本数を戻すと、
+    // 走らせる本数に足りない分が toStart に出て、最初の駅から 1 本ずつ出直す。
+    let set = |name: &str, trains: u8| {
+        let cmds = write(
+            &dir.join(name),
+            &format!(
+                r#"[{{"type":"SetLineTrains","line":{l1},"trains":{trains}}}]"#,
+                l1 = st(1)
+            ),
+        );
+        let acted = json(&cli(&["agent", "act", d, &cmds]));
+        assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
+    };
+    set("me0.json", 0);
     cli(&["agent", "advance", d, "600"]);
     let o = json(&cli(&["agent", "observe", d]));
-    for l in ends(&o) {
-        assert_eq!(l["running"], 2, "{o}");
-        assert_eq!(l["toStart"], 0, "{o}");
-    }
+    let lines = o["rail"]["lines"].as_array().unwrap();
+    let turns: Vec<_> = lines.iter().map(|l| l["turnCap"].clone()).collect();
+    assert_eq!(turns, [2, 2, 2], "{o}");
+    assert_eq!(lines[1]["running"], 0, "{o}");
+    set("me3.json", 3);
+    let o = json(&cli(&["agent", "observe", d]));
+    let me = &o["rail"]["lines"][1];
+    assert_eq!(me["toStart"], 2, "{o}");
+    assert_eq!(me["running"], 0, "{o}");
+    cli(&["agent", "advance", d, "600"]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let me = &o["rail"]["lines"][1];
+    assert_eq!(me["running"], 2, "{o}");
+    assert_eq!(me["toStart"], 0, "{o}");
 }
 
 /// 大きすぎる縮尺は、あふれずに断る。
@@ -2612,7 +2644,7 @@ fn act_reports_a_lowered_cap_and_observe_shows_recent_riders() {
         // loweredLines に出るのは、本数 1 以上の路線だけである。
         r#"{"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":1}"#.to_string(),
     ];
-    // 踏切をいくつか作っても、cap はまだ下がらない。46 の道路で 3 から 1 に下がる。
+    // 踏切をいくつか作っても、cap はまだ下がらない。46 の道路で 5 から 3 に下がる。
     for x in (16..=46).step_by(3) {
         cmds.push(format!(
             r#"{{"type":"BuildRoad","from":[{x},0],"to":[{x},20],"kind":"Small"}}"#
@@ -2629,8 +2661,8 @@ fn act_reports_a_lowered_cap_and_observe_shows_recent_riders() {
     assert_eq!(lowered.len(), 1, "{acted}");
     assert_eq!(lowered[0]["crossings"], serde_json::json!([[46, 8]]));
     let line = &lowered[0]["loweredLines"][0];
-    assert_eq!(line["cap"], 3, "{line}");
-    assert_eq!(line["capAfter"], 1, "{line}");
+    assert_eq!(line["cap"], 5, "{line}");
+    assert_eq!(line["capAfter"], 3, "{line}");
     assert!(line["shortSpanCount"].as_u64().unwrap() > 0, "{line}");
     assert!(lowered[0].get("haltedLines").is_none());
 
