@@ -229,6 +229,9 @@ pub struct World {
     /// 始まりからの転入と転出の世帯と住民の数。読み取り用で、状態ハッシュには入れない。
     migration_totals: people::MigrationTotals,
     router: RouterSlot,
+    /// 駅の組の表。路線か線路か道路が変わったら捨て、次に使うときに作り直す。状態に入れない。
+    #[serde(skip)]
+    planner: ride::PlannerSlot,
 }
 
 mod bulldoze;
@@ -239,6 +242,7 @@ pub mod economy;
 mod errand;
 pub mod growth;
 pub mod people;
+mod ride;
 mod traffic;
 
 pub use bulldoze::BulldozePreview;
@@ -361,6 +365,7 @@ impl World {
             traffic: Default::default(),
             migration_totals: Default::default(),
             router,
+            planner: Default::default(),
         };
         let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
         for coord in coords {
@@ -954,6 +959,28 @@ impl World {
         }
         let outcome = self.apply_valid(command);
         self.trips.forget_lots(&self.buildings);
+        // 路線か線路か道路が変わったら、駅の組の表を作り直す。
+        match command {
+            Command::SetSimSpeed { .. }
+            | Command::SetTaxRate { .. }
+            | Command::SetParkingFee { .. }
+            | Command::SetFare { .. }
+            | Command::SetLineTrains { .. }
+            | Command::PaintZone { .. }
+            | Command::SetSignal { .. }
+            | Command::SetCrosswalk { .. } => {}
+            Command::BuyChunk { .. }
+            | Command::BuildRoad { .. }
+            | Command::UpgradeRoad { .. }
+            | Command::BuildRail { .. }
+            | Command::CreateLine { .. }
+            | Command::ExtendLine { .. }
+            | Command::RemoveLine { .. }
+            | Command::Bulldoze { .. }
+            | Command::PlaceBuilding { .. } => self.planner.forget(),
+        }
+        // 路線や駅がなくなって乗れなくなった人を、歩く移動に戻す。
+        self.release_rail_exits();
         outcome
     }
 
@@ -970,6 +997,10 @@ impl World {
             // 上限を超えた世帯が枠を返すのは、1 日 1 回の見直しのときである。
             Command::SetParkingFee { fee } => {
                 self.parking_fee = fee;
+                ApplyOutcome::Applied
+            }
+            Command::SetFare { fare } => {
+                self.rail.set_fare(fare);
                 ApplyOutcome::Applied
             }
             Command::BuyChunk { coord } => self.buy_chunk(coord),
@@ -1040,7 +1071,9 @@ impl World {
             Some((_, rail)) => self.trips.step_with_rail(net, router, tick, rail),
         };
         self.end_commutes(ended);
+        self.board_riders();
         self.step_trains(tick, crossings);
+        self.release_rail_exits();
         self.grow_buildings();
         self.update_economy();
         self.tick = tick.next();
@@ -1080,8 +1113,8 @@ fn outcome(r: Result<(), DenyReason>) -> ApplyOutcome {
 impl StateHash for World {
     fn write_state(&self, h: &mut StateHasher) {
         self.write_state_without_rail(h);
-        // 線路も駅も置いたことのない街は、鉄道を入れる前と同じハッシュになるよう、鉄道の欄を書かない。
-        if !self.rail.is_unused() {
+        // 線路も駅も置いたことがなく、運賃も変えていない街は、鉄道を入れる前と同じハッシュになるよう、鉄道の欄を書かない。
+        if !self.rail.is_blank() {
             h.write(&1_u8);
             h.write(&self.rail);
         }

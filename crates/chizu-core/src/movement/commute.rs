@@ -30,6 +30,8 @@ use crate::car_place::CarPlace;
 use crate::citizens::Activity;
 use crate::id::{BuildingId, CitizenId, HouseholdId, TripId};
 use crate::network::{Network, TILE_MM};
+use crate::rail::RidePlan;
+use crate::rail::choice::{RideChoice, RideOffer, car_seconds, tile_distance_mm, walk_seconds};
 use crate::routing::AstarRouter;
 use crate::service::Facility;
 use crate::state_hash::{StateHash, StateHasher};
@@ -183,6 +185,26 @@ fn far_enough(buildings: &Buildings, a: BuildingId, b: BuildingId, owns_car: boo
     dist >= min.checked_mul(min).expect("距離があふれた")
 }
 
+/// 建物 `a` と `b` の正面のマスの直線の距離（mm）。
+fn front_distance(
+    buildings: &Buildings,
+    a: BuildingId,
+    b: BuildingId,
+) -> Option<(TilePos, TilePos, u64)> {
+    let (a, b) = (buildings.get(a)?.front, buildings.get(b)?.front);
+    Some((a, b, tile_distance_mm(a, b)))
+}
+
+/// 依頼ごとに選んだ手段。
+enum Pick {
+    /// 車で走り始めた。
+    Drive(TripId),
+    /// 歩く。
+    Walk,
+    /// 駅まで歩いて鉄道に乗る。
+    Ride(RideOffer),
+}
+
 impl Trips {
     /// 通勤の移動をまとめて作り、依頼の順に ID を返す。車で向かう依頼から 1 件ずつ作り、
     /// 車で行けなかった依頼と近い依頼は、歩く移動としてまとめて作る。どちらでも行けなければ `None`。
@@ -191,13 +213,42 @@ impl Trips {
         &mut self,
         net: &Network,
         router: &mut AstarRouter,
-        (buildings, facilities): (&Buildings, &[Facility]),
+        sites: (&Buildings, &[Facility]),
         requests: &[CommuteRequest],
         now: Tick,
     ) -> Vec<Option<TripId>> {
-        let mut out: Vec<Option<TripId>> = requests
+        self.start_commutes_with_rides(net, router, sites, requests, now, None)
+    }
+
+    /// [`Trips::start_commutes`] と同じだが、`rides` があれば鉄道の候補と費用で比べる（設計 3.10 の 4）。
+    ///
+    /// 歩きと車は今の距離の決まりで選び、そのうえで鉄道の費用が小さければ鉄道にする。車を選んだ移動は車の費用と、
+    /// 歩きを選んだ移動は歩きの費用と比べる。費用が同じなら今の手段を残す。車を持つ世帯の
+    /// [`OWNER_DRIVE_MIN_MM`] より近い移動と、停めた車を取りに帰る移動は、鉄道と比べない。
+    /// 鉄道を選んだ移動は、乗る駅の出入口まで歩く移動として作り、着いたら駅の待ち行列に入る。
+    pub fn start_commutes_with_rides(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        (buildings, facilities): (&Buildings, &[Facility]),
+        requests: &[CommuteRequest],
+        now: Tick,
+        rides: Option<&RideChoice>,
+    ) -> Vec<Option<TripId>> {
+        let rides = rides.filter(|c| !c.is_empty());
+        let picks: Vec<Pick> = requests
             .iter()
             .map(|r| {
+                // 鉄道の候補。費用 `base` より小さいときだけ返す。
+                let ride = |base: fn(u64) -> u64| -> Option<RideOffer> {
+                    let c = rides?;
+                    let (a, b, d) = front_distance(buildings, r.from, r.to)?;
+                    if d < OWNER_DRIVE_MIN_MM.unsigned_abs() {
+                        return None;
+                    }
+                    c.offer(a, b).filter(|o| o.cost < base(d))
+                };
+                let walk = || ride(walk_seconds).map_or(Pick::Walk, Pick::Ride);
                 // 家に帰る住民は、自分が家でない所に停めた車が近くにあれば、近くても車で帰る。歩いて帰ると、
                 // 車がその駐車場に残り、翌朝からも使えないためである。
                 let fetch = r.who.to == Activity::Home
@@ -210,14 +261,14 @@ impl Trips {
                                 && lot_near(*lot, r.from, buildings, facilities)
                     );
                 if !fetch && !far_enough(buildings, r.from, r.to, r.owns_car) {
-                    return None;
+                    return walk();
                 }
                 if r.place.is_none() {
                     let tally = &mut self.parking_tally;
                     tally.no_place = tally.no_place.saturating_add(1);
                     // 枠をなくす前に乗っていて、そのあと停めた車が残っていれば外す。
                     self.forget_car(r.who.household);
-                    return None;
+                    return walk();
                 }
                 // 車が停めてあれば、その駐車場から出す。まだどこにもなければ、車は出発の建物から現れる。
                 let take = match self.commuters.cars.get(&r.who.household).copied() {
@@ -252,10 +303,14 @@ impl Trips {
                             HouseholdCar::Parked { .. } => &mut tally.no_car_parked_away,
                         };
                         *reason = reason.saturating_add(1);
-                        return None;
+                        return walk();
                     }
                 };
-                let id = self.spawn_drive_taking(
+                // 停めた車を取りに帰る移動は、車を残さないよう鉄道と比べない。
+                if !fetch && let Some(o) = ride(car_seconds) {
+                    return Pick::Ride(o);
+                }
+                let Some(id) = self.spawn_drive_taking(
                     net,
                     router,
                     (buildings, facilities),
@@ -263,24 +318,74 @@ impl Trips {
                     take,
                     (r.own_lot(), r.home),
                     now,
-                )?;
+                ) else {
+                    return walk();
+                };
                 self.commuters
                     .cars
                     .insert(r.who.household, HouseholdCar::InUse(id));
-                Some(id)
+                Pick::Drive(id)
+            })
+            .collect();
+        let mut out: Vec<Option<TripId>> = picks
+            .iter()
+            .map(|p| match p {
+                Pick::Drive(id) => Some(*id),
+                Pick::Walk | Pick::Ride(_) => None,
             })
             .collect();
         let spot = |b: BuildingId| building_spot(net, buildings.get(b)?);
-        let walks: Vec<(usize, _)> = out
+        // 歩く移動と、駅まで歩く移動を、依頼の順にまとめて作る。
+        let walks: Vec<(usize, _)> = picks
             .iter()
             .zip(requests)
             .enumerate()
-            .filter(|(_, (t, _))| t.is_none())
-            .filter_map(|(i, (_, r))| Some((i, (spot(r.from)?, spot(r.to)?))))
+            .filter_map(|(i, (p, r))| {
+                let to = match p {
+                    Pick::Drive(_) => return None,
+                    Pick::Walk => spot(r.to)?,
+                    Pick::Ride(o) => {
+                        spot(r.to)?;
+                        o.door
+                    }
+                };
+                Some((i, (spot(r.from)?, to)))
+            })
             .collect();
         let ends: Vec<_> = walks.iter().map(|(_, e)| *e).collect();
+        let mut retry = Vec::new();
         for ((i, _), id) in walks.iter().zip(self.spawn_many(net, router, &ends, now)) {
-            out[*i] = id;
+            let r = &requests[*i];
+            match (&picks[*i], id) {
+                (Pick::Ride(o), Some(id)) => {
+                    let to = spot(r.to).expect("行き先の出入口がない");
+                    self.rows[id.slot()]
+                        .as_mut()
+                        .expect("作った主体がない")
+                        .then = super::parking::Then::Ride(RidePlan {
+                        board: o.board,
+                        line: o.line,
+                        dir: o.dir,
+                        alight: o.alight,
+                        transfer: None,
+                        to,
+                    });
+                    out[*i] = Some(id);
+                }
+                // 駅まで歩けなければ、行き先へ歩く。
+                (Pick::Ride(_), None) => retry.push(*i),
+                (_, id) => out[*i] = id,
+            }
+        }
+        if !retry.is_empty() {
+            let ends: Vec<_> = retry
+                .iter()
+                .filter_map(|i| Some((*i, (spot(requests[*i].from)?, spot(requests[*i].to)?))))
+                .collect();
+            let pairs: Vec<_> = ends.iter().map(|(_, e)| *e).collect();
+            for ((i, _), id) in ends.iter().zip(self.spawn_many(net, router, &pairs, now)) {
+                out[*i] = id;
+            }
         }
         for (id, r) in out.iter().zip(requests) {
             if let Some(id) = id {

@@ -29,7 +29,7 @@ impl World {
                 continue;
             };
             if let Some(old) = row.trip {
-                self.trips.cancel(old);
+                self.cancel_trip(old);
                 self.population.set_trip(id, None);
             }
             let home = self.population.home(row.household).flatten();
@@ -57,11 +57,12 @@ impl World {
                 None => stuck.push(id),
             }
         }
-        let (net, router) = (&self.network, &mut self.router.router);
-        let sites = (&self.buildings, self.facilities.as_slice());
-        let trips = self
-            .trips
-            .start_commutes(net, router, sites, &requests, self.tick);
+        let trips = self.with_rides(|w, rides| {
+            let (net, router) = (&w.network, &mut w.router.router);
+            let sites = (&w.buildings, w.facilities.as_slice());
+            w.trips
+                .start_commutes_with_rides(net, router, sites, &requests, w.tick, rides)
+        });
         let mut no_route = 0;
         for (r, trip) in requests.iter().zip(trips) {
             match trip {
@@ -95,7 +96,7 @@ impl World {
         for id in members {
             self.errands.forget(id);
             if let Some(t) = self.population.citizen(id).and_then(|r| r.trip) {
-                self.trips.cancel(t);
+                self.cancel_trip(t);
             }
         }
         self.trips.forget_car(h);

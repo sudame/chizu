@@ -4,6 +4,7 @@
 //!   道路、施設、鉄道の維持費を引く。
 //!   1 日あたりの見込みを [`World::finances`] で出し、ゲーム内の 1 時間ごとにその 1/24 を所持金に足す。
 //!   24 で割り切れない端数は持ち越すので、何時間たっても 1 日あたりの見込みとずれない。
+//!   鉄道の運賃は、乗った tick に所持金へ入れる。見込みの運賃の行は前の日の収入で、1 時間ごとの足し引きには入れない。
 //!   所持金は負になってもよい。
 //! - マイルストーン：家のある住民の数が段階に届くと、買えるチャンクの枠が増える。一度届いた段階は人口が減っても戻らない。
 
@@ -99,6 +100,9 @@ pub struct Finances {
     pub taxes: [Money; 4],
     /// 共同の駐車場の料金の収入。借りられた枠の数 × 料金である。
     pub parking_fees: Money,
+    /// 鉄道の運賃の収入。前の日に乗った人が払った額である。運賃は乗ったときに所持金に入るので、
+    /// 1 時間ごとの足し引きには入れない。
+    pub fares: Money,
     /// 道路の維持費。外部接続の高速道路は含めない。
     pub road_upkeep: Money,
     /// 発電所と浄水場の維持費。添え字は [`ServiceKind::utility_slot`]。
@@ -111,7 +115,9 @@ pub struct Finances {
 
 impl Finances {
     pub fn income(&self) -> Money {
-        self.taxes.iter().fold(self.parking_fees, |a, b| a + *b)
+        self.taxes
+            .iter()
+            .fold(self.parking_fees + self.fares, |a, b| a + *b)
     }
 
     pub fn expenses(&self) -> Money {
@@ -194,6 +200,8 @@ impl World {
             ),
             mul(trains, TRAIN_UPKEEP_PER_DAY.0),
         ));
+        let day = self.tick.0 / TICKS_PER_DAY;
+        f.fares = Money(self.rail.ride_tally().fares_yesterday(day));
         for facility in &self.facilities {
             let upkeep = facility.kind.upkeep_per_day();
             match facility.kind.utility_slot() {
@@ -207,7 +215,9 @@ impl World {
     /// 1 日あたりの見込みの 1/24 を所持金に足す。端数は次の時間に持ち越す。
     fn settle_hour(&mut self) {
         let hours = i64::try_from(HOURS_PER_DAY).expect("時間の数があふれた");
-        let total = add(self.finances().net().0, self.ledger_carry);
+        // 運賃は乗ったときに所持金に入れてあるので、見込みからは除く。
+        let f = self.finances();
+        let total = add(add(f.net().0, -f.fares.0), self.ledger_carry);
         let this_hour = round::div_floor(total, hours);
         self.ledger_carry = total - this_hour * hours;
         self.money = self.money + Money(this_hour);

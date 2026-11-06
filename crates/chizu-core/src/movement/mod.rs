@@ -129,12 +129,35 @@ pub struct Trip {
     /// 横断歩道を外したり戻したりしても、いまの位置が別の腕の上へ移らないようにするためである。
     across: Option<(bool, crossing::Arms)>,
     departed: Tick,
+    /// 移動の手段。車で走り始めた移動は車、鉄道に乗った移動は鉄道で、着いた移動を手段ごとに数えるのに使う。
+    /// 読み取り用で、状態ハッシュには入れない。
+    via: Via,
     /// 車線や歩道が変わった直後の、描くずれの移り変わり。描画のためだけの値で、状態ハッシュには入れない。
     blend: Option<lane_shift::Blend>,
     /// 経路の最初のリンクのどこから歩き出したか。描画のためだけの値で、状態ハッシュにも保存データにも
     /// 入れず、比べるときも無視する。
     #[serde(skip)]
     origin: Origin,
+}
+
+/// 移動の手段。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Via {
+    #[default]
+    Walk,
+    Car,
+    Rail,
+}
+
+/// 駅の出入口に着いて、休ませた移動。`World` が駅の待ち行列に入れる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Boarding {
+    pub trip: TripId,
+    pub plan: crate::rail::RidePlan,
+    /// 最初の区切りの出発の tick。
+    pub started: Tick,
+    /// 着いた駅の出入口。
+    pub door: SidewalkPos,
 }
 
 /// [`Trip::origin`]。比べると常に等しい。
@@ -211,7 +234,7 @@ impl Trip {
         home: Option<crate::id::BuildingId>,
     ) -> bool {
         let Some((lot, to)) = (match self.then {
-            parking::Then::Arrive => None,
+            parking::Then::Arrive | parking::Then::Ride(_) => None,
             parking::Then::Drive { lot, to, .. } | parking::Then::Walk { lot, to } => {
                 lot.map(|lot| (lot, to))
             }
@@ -249,6 +272,19 @@ impl Trip {
 
     pub fn departed(&self) -> Tick {
         self.departed
+    }
+
+    /// 移動の手段。
+    pub fn via(&self) -> Via {
+        self.via
+    }
+
+    /// 駅へ歩いている移動の、鉄道の計画。
+    pub fn ride_plan(&self) -> Option<crate::rail::RidePlan> {
+        match self.then {
+            parking::Then::Ride(plan) => Some(plan),
+            _ => None,
+        }
     }
 
     /// いまの位置。歩く人が交差点で車道を渡っているあいだは、リンクの終わりにいるものとする。
@@ -658,6 +694,9 @@ pub struct Trips {
     finished: BTreeMap<TripId, Finished>,
     /// 直前の `step` の信号を決めた様子。画面に灯火を出すために控える。状態ハッシュには入れない。
     lights: signal::Lights,
+    /// 駅の出入口に着いて休ませた移動。`World` が同じ tick のうちに取り出すので、書き出さない。
+    #[serde(skip)]
+    boarding: Vec<Boarding>,
 }
 
 /// 網を変える前に控えた、主体ごとのリンクの中の車線の番号と描いていたずれ。[`Trips::note_before_change`] で作る。
@@ -670,6 +709,8 @@ pub struct Finished {
     /// 行き先に着いたか。次の区切りの経路が見つからず消えた移動と、通れなくなって消えた移動は `false`。
     pub reached: bool,
     pub departed: Tick,
+    /// 移動の手段。
+    pub via: Via,
 }
 
 /// 画面に描く移動体。
@@ -965,6 +1006,74 @@ impl Trips {
         self.finished.get(&id).copied()
     }
 
+    /// 駅の出入口に着いて休ませた移動を取り出す。休ませた順に並ぶ。
+    pub fn take_boarding(&mut self) -> Vec<Boarding> {
+        std::mem::take(&mut self.boarding)
+    }
+
+    /// 移動 `id` が、駅で休ませている移動か。
+    pub fn is_suspended(&self, id: TripId) -> bool {
+        self.slots.contains(id.index, id.generation) && self.rows[id.slot()].is_none()
+    }
+
+    /// 休ませている移動を、`from` から `to` へ歩く移動として作り直す。出発の tick は `started` にする。
+    /// まとめて経路を探し、作り直せたかを依頼の順に返す。休ませていない移動と、経路のない移動は作り直さない。
+    pub fn resume_walks(
+        &mut self,
+        net: &Network,
+        router: &mut AstarRouter,
+        walks: &[(TripId, SidewalkPos, SidewalkPos, Tick, Via)],
+    ) -> Vec<bool> {
+        router.sync(net);
+        let resolved: Vec<Option<Ends>> = walks
+            .iter()
+            .map(|(id, a, b, _, _)| {
+                if !self.is_suspended(*id) {
+                    return None;
+                }
+                Some((
+                    a.resolve_on(net, LaneMode::Sidewalk)?,
+                    b.resolve_on(net, LaneMode::Sidewalk)?,
+                ))
+            })
+            .collect();
+        let ends: Vec<Ends> = resolved.iter().flatten().copied().collect();
+        let mut routes = plan(router, net, LaneMode::Sidewalk, &ends, false).into_iter();
+        resolved
+            .iter()
+            .zip(walks)
+            .map(|(e, (id, _, to, started, via))| {
+                if e.is_none() {
+                    return false;
+                }
+                let Some((route, e, jay)) = routes.next().expect("探した経路の数が合わない")
+                else {
+                    return false;
+                };
+                let mut t = make_trip(net, route, e, *to, *started, jay);
+                t.via = *via;
+                self.rows[id.slot()] = Some(t);
+                true
+            })
+            .collect()
+    }
+
+    /// 休ませている移動を終える。結果は `reached`（行き先に着いたか）で残す。
+    pub fn finish_suspended(&mut self, id: TripId, reached: bool, started: Tick, via: Via) {
+        if !self.is_suspended(id) {
+            return;
+        }
+        self.finished.insert(
+            id,
+            Finished {
+                reached,
+                departed: started,
+                via,
+            },
+        );
+        self.remove(id);
+    }
+
     pub fn get(&self, id: TripId) -> Option<&Trip> {
         self.slots
             .contains(id.index, id.generation)
@@ -1114,6 +1223,7 @@ impl Trips {
                     Finished {
                         reached,
                         departed: t.departed,
+                        via: t.via,
                     },
                 );
                 self.remove(id);
@@ -1254,6 +1364,7 @@ impl Trips {
                     old.stalled,
                     old.then,
                 );
+                let via = old.via;
                 // 探し直す前の、リンクの中の車線の番号。網が変わると車線の ID も変わるので番号で覚える。
                 // 探し直す前に描いていたずれ。車線や経路が変わっても、そこから少しずつ移す。
                 // いまのリンクの区間が消えていると、どちらも網からは求められないので、控えた値を使う。
@@ -1280,6 +1391,7 @@ impl Trips {
                     t.stalled,
                     t.then,
                 ) = (speed, waiting, rejoining, waited, yielded, stalled, then);
+                t.via = via;
                 // いまの位置は、いまのリンクと同じ向きのリンクで表してあるので、そのリンクから
                 // 向きを変えたなら、側も入れ替わる。
                 t.walk.far ^= old_far;
@@ -1304,12 +1416,13 @@ impl Trips {
         lost.sort();
         for id in &lost {
             if let Some(t) = self.get(*id) {
-                let departed = t.departed;
+                let (departed, via) = (t.departed, t.via);
                 self.finished.insert(
                     *id,
                     Finished {
                         reached: false,
                         departed,
+                        via,
                     },
                 );
             }
@@ -1376,6 +1489,7 @@ fn make_trip(
         walk,
         across: None,
         departed: now,
+        via: Via::Walk,
         blend: None,
         origin: Origin::Door(from),
     };

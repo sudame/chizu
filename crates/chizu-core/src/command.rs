@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use crate::clock::TICKS_PER_SECOND_AT_NORMAL_SPEED;
 use crate::network::{Line, MAX_ROAD_TILES};
 use crate::rail::line::MAX_LINE_TRAINS;
-use crate::rail::{LineId, StationId};
+use crate::rail::{LineId, MAX_FARE, StationId};
 use crate::tile::{ChunkCoord, TilePos, TileRect, WORLD_LIMIT};
 use crate::zone::{MAX_ZONE_SIDE, rect_size};
 
@@ -362,6 +362,10 @@ pub enum Command {
         line: LineId,
         trains: u8,
     },
+    /// 鉄道の運賃（1 回の乗車の額）を、街で 1 つ決める。`0..=MAX_FARE` の外は受け付けない。
+    SetFare {
+        fare: u16,
+    },
 }
 
 /// コマンドの値が受け付ける範囲の外にある。
@@ -387,6 +391,8 @@ pub enum InvalidCommand {
     RoadTooLong { from: TilePos, to: TilePos },
     /// 路線の列車の本数が `MAX_LINE_TRAINS` を超えている。
     TooManyTrains(u8),
+    /// 運賃が `MAX_FARE` を超えている。
+    FareTooHigh(u16),
 }
 
 impl fmt::Display for InvalidCommand {
@@ -431,6 +437,9 @@ impl fmt::Display for InvalidCommand {
             InvalidCommand::TooManyTrains(n) => {
                 write!(f, "列車の本数 {n} は上限の {MAX_LINE_TRAINS} を超えている")
             }
+            InvalidCommand::FareTooHigh(fare) => {
+                write!(f, "運賃 {fare} は上限の {MAX_FARE} を超えている")
+            }
         }
     }
 }
@@ -455,7 +464,8 @@ impl Command {
             | Command::CreateLine { .. }
             | Command::ExtendLine { .. }
             | Command::RemoveLine { .. }
-            | Command::SetLineTrains { .. } => true,
+            | Command::SetLineTrains { .. }
+            | Command::SetFare { .. } => true,
         }
     }
 
@@ -510,6 +520,13 @@ impl Command {
                     Ok(())
                 } else {
                     Err(InvalidCommand::TooManyTrains(trains))
+                }
+            }
+            Command::SetFare { fare } => {
+                if fare <= MAX_FARE {
+                    Ok(())
+                } else {
+                    Err(InvalidCommand::FareTooHigh(fare))
                 }
             }
             // 種類の enum と `SimSpeed` は、型そのものが範囲の外の値を持てない。ID はどの値も指せる（ないものは断る）。

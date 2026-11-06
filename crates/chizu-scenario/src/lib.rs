@@ -1,13 +1,15 @@
 //! テストとベンチマークに使う、種から決定論的に作る街。
 
 use chizu_core::citizens::draw_household;
+use chizu_core::rail::choice::{LineLive, StopInfo, line_stops_of};
 use chizu_core::routing::{ROUTE_VARIANTS, RouteRequest};
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network,
     Population, Rail, RngPurpose, RoadKind, ServiceKind, Tick, TilePos, TileRect, World, ZoneKind,
     rng,
 };
-use chizu_core::{LaneOffset, SidewalkPos};
+use chizu_core::{LaneOffset, LineId, SidewalkPos, StationId};
+use std::collections::BTreeMap;
 
 pub mod perf;
 
@@ -168,6 +170,102 @@ pub fn rail_trains_running(seed: u64, lines: usize) -> Rail {
 /// 列車が出そろってから、測り始めるまでに回す tick。出そろった直後は、駅で間を空けて待つ列車が
 /// 同じ tick に出るので、ふだんより重い。
 pub const RAIL_BENCH_WARMUP: u64 = 3_000;
+
+/// [`rail_choice_inputs`] の駅の数。
+pub const RAIL_CHOICE_STATIONS: u32 = 200;
+
+/// 手段の選び方のベンチマークに使う、[`city_grid_100k`] の上の駅と路線。
+pub struct RailChoiceInputs {
+    /// 駅の ID の順の、出入口のマスと位置。
+    pub doors: Vec<(StationId, TilePos, SidewalkPos)>,
+    /// 路線ごとの止まる所。
+    pub lines: Vec<(LineId, Vec<StopInfo>)>,
+    /// 路線ごとの、走っている本数と区間の時間。
+    pub live: BTreeMap<LineId, LineLive>,
+}
+
+/// [`city_grid_100k`]（約 4.6km 四方）に、駅 [`RAIL_CHOICE_STATIONS`] 個と路線 [`RAIL_BENCH_LINES`] 本を置いた形。
+///
+/// 駅は 15 × 14 の格子（約 330m おき）から 200 個を選んで置く。路線は、ある駅から格子の隣の駅へ種で選んで
+/// 進み、まだ通っていない駅を 12〜32 個つないだもので、4 本に 1 本は環状にする。線路は引かず、路線の形
+/// （止まる所の並び）と、走っている本数（4〜8 本）と、区間の時間（40〜120 tick）だけを作る。
+pub fn rail_choice_inputs(seed: u64) -> RailChoiceInputs {
+    const COLS: i64 = 15;
+    const ROWS: i64 = 14;
+    const STEP: i64 = 41;
+    let station = |i: u32| StationId {
+        index: i,
+        generation: 0,
+    };
+    let pos = |i: u32| {
+        let i = i64::from(i);
+        TilePos::new(6 + (i % COLS) * STEP, 6 + (i / COLS) * STEP)
+    };
+    let doors = (0..RAIL_CHOICE_STATIONS)
+        .map(|i| {
+            let t = pos(i);
+            let door = SidewalkPos {
+                tile: t,
+                step: (1, 0),
+                along: LaneOffset(0),
+            };
+            (station(i), t, door)
+        })
+        .collect();
+    let n = i64::from(RAIL_CHOICE_STATIONS);
+    let mut lines = Vec::new();
+    let mut live = BTreeMap::new();
+    for k in 0..u32::try_from(RAIL_BENCH_LINES).expect("路線が多すぎる") {
+        let mut r = rng(seed, RngPurpose::JobAssignment, u64::from(k), Tick(7));
+        let want = 12 + r.below(21) as usize;
+        let mut at = i64::from(r.below(RAIL_CHOICE_STATIONS));
+        let mut seq = vec![at];
+        while seq.len() < want {
+            let (c, row) = (at % COLS, at / COLS);
+            let next: Vec<i64> = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                .into_iter()
+                .map(|(dc, dr)| (c + dc, row + dr))
+                .filter(|(c, row)| (0..COLS).contains(c) && (0..ROWS).contains(row))
+                .map(|(c, row)| row * COLS + c)
+                .filter(|j| *j < n && !seq.contains(j))
+                .collect();
+            if next.is_empty() {
+                break;
+            }
+            let len = u32::try_from(next.len()).expect("隣が多すぎる");
+            at = next[r.below(len) as usize];
+            seq.push(at);
+        }
+        if seq.len() < 2 {
+            continue;
+        }
+        let stations: Vec<StationId> = seq
+            .iter()
+            .map(|i| station(u32::try_from(*i).expect("駅の番号")))
+            .collect();
+        let id = LineId {
+            index: k,
+            generation: 0,
+        };
+        let stops = line_stops_of(&stations, k % 4 == 3);
+        let segments: Vec<u32> = stops.iter().map(|_| 40 + r.below(81)).collect();
+        live.insert(id, LineLive::new(4 + r.below(5), &segments));
+        lines.push((id, stops));
+    }
+    RailChoiceInputs { doors, lines, live }
+}
+
+/// `count` 件の、家から職場への移動の出発と行き先の建物の正面のマス。[`commute_requests`] のリンクの真ん中のマスである。
+pub fn commute_tiles(seed: u64, net: &Network, count: u32) -> Vec<(TilePos, TilePos)> {
+    let mid = |l: LinkId| {
+        let line = net.segment_line(l.segment).expect("リンクがない");
+        line.tile(line.len / 2)
+    };
+    commute_requests(seed, net, count, 8)
+        .into_iter()
+        .map(|r| (mid(r.from), mid(r.to)))
+        .collect()
+}
 
 pub use chizu_core::citizens::MAX_HOUSEHOLD_SIZE;
 

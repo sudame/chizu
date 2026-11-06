@@ -241,6 +241,7 @@ fn a_redirected_drive_keeps_its_departure_tick() {
         Some(Finished {
             reached: true,
             departed: Tick(77),
+            via: crate::movement::Via::Car,
         })
     );
 }
@@ -1788,4 +1789,89 @@ fn a_stranded_car_is_returned_only_when_out_of_reach() {
     );
     assert_eq!(s.trips.household_car(Household::ID), None);
     assert_eq!(lot(&s, shop), (0, 0));
+}
+
+/// 2km の移動で、鉄道の費用が車より大きい所では、車を持つ世帯は車に乗り、車を持たない世帯も仮の扱いの車に乗る。
+/// 鉄道の費用が小さい所では、どちらも駅へ歩いて鉄道に乗る（設計 3.10 の 4）。
+#[test]
+fn at_2km_the_cheaper_of_car_and_rail_wins() {
+    use crate::rail::choice::{LineLive, RailPlanner, RideChoice, line_stops_of};
+    use crate::rail::{LineId, StationId};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // 家（x = 0）と職場（x = 250、2km 先）と、駅の出入口に使う建物（x = 10 と x = 240）。
+    let (mut s, ids) = Street::with_roads(&[0, 250, 10, 240], &[(0, 260)]);
+    let (home, work) = (ids[0], ids[1]);
+    let door = |b: BuildingId| building_spot(&s.net, s.buildings.get(b).unwrap()).unwrap();
+    let station = |index| StationId {
+        index,
+        generation: 0,
+    };
+    let line = LineId {
+        index: 0,
+        generation: 0,
+    };
+    let doors = vec![
+        (station(0), door(ids[2]).tile, door(ids[2])),
+        (station(1), door(ids[3]).tile, door(ids[3])),
+    ];
+    let planner = RailPlanner::from_parts(
+        doors,
+        &[(line, line_stops_of(&[station(0), station(1)], false))],
+    );
+    for (seg, rail_wins) in [(100, true), (3_000, false)] {
+        for owns_car in [true, false] {
+            let live = BTreeMap::from([(line, LineLive::new(2, &[seg, seg]))]);
+            let choice = RideChoice::from_parts(&planner, live, BTreeSet::new(), 5);
+            let offer = choice
+                .offer(
+                    s.buildings.get(home).unwrap().front,
+                    s.buildings.get(work).unwrap().front,
+                )
+                .expect("鉄道の候補がない");
+            assert_eq!(offer.board, station(0));
+            assert_eq!(offer.alight, station(1));
+            let request = CommuteRequest {
+                who: Commuter {
+                    citizen: CitizenId {
+                        index: 0,
+                        generation: 0,
+                    },
+                    household: HouseholdId {
+                        index: u32::from(owns_car),
+                        generation: 0,
+                    },
+                    to: crate::citizens::Activity::Work,
+                },
+                from: home,
+                to: work,
+                home: Some(home),
+                place: Some(CarPlace::Home),
+                owns_car,
+            };
+            let (net, router) = (&s.net, &mut s.router);
+            let id = s.trips.start_commutes_with_rides(
+                net,
+                router,
+                (&s.buildings, &[]),
+                &[request],
+                Tick::ZERO,
+                Some(&choice),
+            )[0]
+            .expect("移動を作れない");
+            let t = s.trips.get(id).unwrap();
+            let rides = t.ride_plan().is_some();
+            let drives = matches!(t.then, parking::Then::Drive { .. });
+            assert_eq!(
+                (rides, drives),
+                (rail_wins, !rail_wins),
+                "区間 {seg} tick、車を持つ {owns_car}、鉄道の費用 {}",
+                offer.cost
+            );
+            if rides {
+                assert_eq!(t.via(), Via::Walk);
+            }
+            s.trips.cancel(id);
+        }
+    }
 }

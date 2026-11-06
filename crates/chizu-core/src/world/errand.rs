@@ -321,7 +321,7 @@ impl World {
             if heading == Some(Activity::Shop)
                 && let Some(t) = row.trip
             {
-                self.trips.cancel(t);
+                self.cancel_trip(t);
                 self.population.set_trip(id, None);
             }
             let next = row.schedule.next;
