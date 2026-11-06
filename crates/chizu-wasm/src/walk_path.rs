@@ -1017,7 +1017,6 @@ mod tests {
             assert_eq!(out, chizu_core::ApplyOutcome::Applied);
         }
         spawn(&mut w, (west, 16_000), (east, 40_000));
-        let mut held = 0;
         for _ in 0..2_000 {
             w.step();
             let found = w.movers_in(rect30()).iter().any(|m| {
@@ -1029,9 +1028,9 @@ mod tests {
                     }
                 })
             });
-            // 待つ人は、何 tick か待ってから返す。
-            held += usize::from(found);
-            if found && (!waiting || held > 5) {
+            // 待つ人は、角で待っている tick に返す。車の来ない信号では、人は角に着いた tick だけ待ち、
+            // 次の tick には人のために青が移って渡り始める。
+            if found {
                 return w;
             }
         }

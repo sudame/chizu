@@ -415,11 +415,19 @@ fn the_green_goes_where_the_cars_are() {
     let committed = signal::AxisDemand {
         cars: true,
         committed: true,
-        walkers: false,
+        ..none
+    };
+    let walkers = signal::AxisDemand {
+        walkers: true,
+        ..none
     };
     let cars_and_walkers = signal::AxisDemand {
         walkers: true,
         ..cars
+    };
+    let cars_and_patient = signal::AxisDemand {
+        patient: true,
+        ..cars_and_walkers
     };
     // y の向きの段階の、青の始めと黄の始め。
     let g = green_start(&n, node, 2);
@@ -432,8 +440,14 @@ fn the_green_goes_where_the_cars_are() {
     assert_eq!(lit(&n, node, g, cars, none), [Green, Red]);
     // 青の向きにも車がいれば、渡さない。
     assert_eq!(lit(&n, node, g, cars, cars), [Red, Green]);
-    // x の向きの腕を渡ろうと待つ人がいれば、y の向きの青のあいだに渡れるよう、渡さない。
-    assert_eq!(lit(&n, node, g, cars_and_walkers, none), [Red, Green]);
+    // x の向きの腕を渡ろうと待つ人は、信号のない交差点と同じく、来た車を先に通す。
+    assert_eq!(lit(&n, node, g, cars_and_walkers, none), [Green, Red]);
+    // 長く待った人がいれば、y の向きの青のあいだに渡れるよう、渡さない。
+    assert_eq!(lit(&n, node, g, cars_and_patient, none), [Red, Green]);
+    // どの向きにも車がなく、青の向き（y）の腕を渡ろうと待つ人だけがいれば、x の向きを青にして渡らせる。
+    assert_eq!(lit(&n, node, g, none, walkers), [Green, Red]);
+    // x の向きの腕を渡ろうと待つ人もいれば、その人が渡れる y の向きの青のままにする。
+    assert_eq!(lit(&n, node, g, walkers, walkers), [Red, Green]);
     // 青を戻すときに、渡していた向きに止まりきれない車がいれば、その tick は黄にする。
     assert_eq!(lit(&n, node, g, committed, cars), [Yellow, Red]);
     // 段階の向きにも止まりきれない車がいれば、どちらも黄にする。どちらの車も赤では入らない。
@@ -443,6 +457,35 @@ fn the_green_goes_where_the_cars_are() {
     assert_eq!(lit(&n, node, yellow, cars, cars), [Green, Red]);
     assert_eq!(lit(&n, node, yellow + YELLOW, cars, none), [Green, Red]);
     assert_eq!(lit(&n, node, yellow + YELLOW, none, none), [Red, Red]);
+    // ほかの向きに車が来ていなければ、黄と赤の段階でも、段階の向きの車と、ほかの向きの腕を渡る人のために
+    // 青のままにする。
+    assert_eq!(lit(&n, node, yellow, none, cars), [Red, Green]);
+    assert_eq!(lit(&n, node, yellow + YELLOW, none, cars), [Red, Green]);
+    assert_eq!(lit(&n, node, yellow + YELLOW, walkers, none), [Red, Green]);
+}
+
+#[test]
+fn walkers_may_start_late_in_the_green_when_their_arm_has_no_cars() {
+    let (n, node) = crossroads(true);
+    // y の向きの段階の、青の終わり際。x の向きの腕を渡る人は、骨組みの青の終わる WALK_CLEAR tick 前からは
+    // 渡り始めない。ただし、x の向きに車が来ていなければ渡り始める。
+    let late = green_start(&n, node, 2) + GREEN - 1;
+    let walk = |x_cars: bool| {
+        let mut d = Demand::default();
+        d.note(node, 0, |a| {
+            a.cars = x_cars;
+            a.walkers = true;
+        });
+        d.note(node, 2, |a| a.cars = true);
+        signal::state(&n, node, Tick(late), &d).unwrap()
+    };
+    let st = walk(true);
+    assert_eq!(st.light_for(0), Light::Red);
+    assert_eq!(st.light_for(2), Light::Green);
+    assert!(!st.walk(0), "車の来る腕を青の終わり際に渡り始めた");
+    let st = walk(false);
+    assert_eq!(st.light_for(2), Light::Green);
+    assert!(st.walk(0), "車の来ない腕を渡り始めない");
 }
 
 #[test]

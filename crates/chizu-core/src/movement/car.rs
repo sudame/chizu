@@ -1115,7 +1115,8 @@ pub(super) fn signal_demand(rows: &[Option<Trip>], net: &Network) -> signal::Dem
             continue;
         }
         if t.mode == LaneMode::Sidewalk {
-            // 渡り始めるのを待つ人は、渡る所の始まりにいる（`gate` の長く待った人と同じ）。
+            // 渡り始めるのを待つ人は、渡る所の始まりにいる（`gate` の長く待った人と同じ）。渡っている人は、
+            // 渡る所の途中にいる。
             if t.walk.jay.is_some() || t.offset < t.link_len {
                 continue;
             }
@@ -1125,13 +1126,21 @@ pub(super) fn signal_demand(rows: &[Option<Trip>], net: &Network) -> signal::Dem
             }
             let mut at = t.link_len.0;
             for s in t.departure(net).1 {
-                if t.offset.0 == at {
+                let end = at.saturating_add(crossing::width(net, s));
+                let waiting = t.offset.0 == at;
+                let crossing = at < t.offset.0 && t.offset.0 < end;
+                if waiting || crossing {
                     if let Some(l) = net.segment_line(s) {
-                        d.note(node, signal::axis(l.step), |a| a.walkers = true);
+                        let patient = waiting && t.waited >= crossing::PED_WAIT;
+                        d.note(node, signal::axis(l.step), |a| {
+                            a.walkers |= waiting;
+                            a.crossing |= crossing;
+                            a.patient |= patient;
+                        });
                     }
                     break;
                 }
-                at = at.saturating_add(crossing::width(net, s));
+                at = end;
             }
         } else if on_road(t) && t.bound.is_none() && near_end(net, t) {
             // 停止線を越えた車は、もう交差点の中にいて灯火に従わないので数えない。交わる向きの車は、
