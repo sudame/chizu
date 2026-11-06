@@ -294,13 +294,18 @@ observe の rail（線路と駅）:
   deadEnds 線路が 1 本だけつながるノード（線路の端。外へつないでいない駅の線路の端も入る）のマス、branches 分岐（3 本がつながる）のノードのマス、
   stations 駅ごとの id、at（置いたときの at）、area 敷地の角、ends 駅の線路の両端のマス（ここから外へ線路を引く）、
   facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅と列車の 1 日の維持費である。
-  lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、trains 決めた本数、cap 行き詰まりを防ぐ本数の上限、
+  lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、
+  trains 遊ぶ人が決めた本数（SetLineTrains の値。cap が下がって列車が消えても変わらない）、cap 行き詰まりを防ぐ本数の上限
+    （共有の区画を通る路線は、区画の枠のうち自分の分で運べる本数までにする。それより多く走らせても、区画の手前で待つだけである）、
   capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
     sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有の区画の枠を、これらの路線と分けている）。
     shortSpans 進路にある、待てる所になれない短い線路（from と to が線路の両端のノードのマス、lengthMm が長さ）。
     列車の押さえる長さ minWaitLengthMm（72m）より短い線路は待てる所にならない。線路を分岐で割ると、割れた短い線路がここに出る
     （先頭の 16 本まで。shortSpanCount が全部の数）。
-  running 走っている本数、roundTripTicks 1 周の見込みの時間（tick）、headwayTicks 運転間隔の見込み（tick、列車がなければ null）、
+  running いま走っている列車の本数。走らせるのは trains と cap の小さいほうまでである。
+  toStart 走らせる本数（trains と cap の小さいほう）に running が足りない分。本数を増やしたときや、路線を消すなどで
+    cap が戻ったときに出る。足りない分は、最初の駅のホームが空きしだい、1 tick に 1 本ずつ現れる（ふつうは数十〜百数十 tick で戻る）。
+  roundTripTicks 1 周の見込みの時間（tick）、headwayTicks 運転間隔の見込み（tick、列車がなければ null）、
   stopped 線路が変わって進路を選べず止まっているか（止まった路線の列車は消え、新しい列車も現れない）。
   trains 列車ごとの id、line 路線の id、at 先頭のマス、heading 進む向き（E、SE、S、SW、W、NW、N、NE）、
   state（Running 走っているか先の閉塞を待っている、Dwell 駅に止まっている、Turnback 終点で折り返している、
@@ -474,17 +479,21 @@ observe の removedCrosswalks:
       そうしないと届かなければ Denied（RailNoRoute）。路線は往復し、両端の駅で折り返す。途中の駅は通り過ぎてよい。
       駅がなければ Denied（NoSuchStation）、同じ駅なら Denied（StationInLine）、路線が 64 本あれば Denied（LineLimit）。
       作るとほかの路線の cap が 0 になる（共有の区画の枠を分けきれず、走れなくなる）なら Denied（LineStarvesOther）。
+      作る路線そのものの cap が 0 で（区画の枠が回ってこず、走れない）、ほかの路線の cap を下げるなら
+      Denied（LineStarvesSelf）。走らない路線のために、ほかの路線の列車が消えるだけだからである。
+      作る路線の cap が 0 でも、ほかの路線の cap が変わらないなら受け付ける。
       cap が下がるが 0 にはならないなら受け付け、超えた分と、先を押さえ直せない列車はすぐに消える（act の結果の removedTrains）。
       作った路線の id は observe の rail.lines にある（作った順に、空いた番号から使う）。
   {"type":"ExtendLine","line":{"index":n,"generation":g},"station":{"index":n,"generation":g}}
       路線の終点の先に駅を足す。最初の駅を指すと環状の路線になり、列車は折り返さずに回る。終点から向きを変えずに
       届かなければ Denied（RailNoRoute）。駅がもう路線にあれば Denied（StationInLine）、路線の駅が 32 あるか
       環状にした路線なら Denied（LineLimit）、路線がなければ Denied（NoSuchLine）。ほかの路線の cap を 0 にするなら
-      Denied（LineStarvesOther）。
+      Denied（LineStarvesOther）、延ばした路線の cap が 0 で、ほかの路線の cap を下げるなら Denied（LineStarvesSelf）。
   {"type":"InsertLineStation","line":{"index":n,"generation":g},"after_index":i,"station":{"index":n,"generation":g}}
       路線の途中に駅を挿す。路線の駅の並び（observe の rail.lines の stations）の i 番目（0 始まり）の次に station を入れる。
       取り壊した駅を建て直したあとに、元の位置へ戻すのに使う。環状の路線にも挿せる。
-      断る理由は ExtendLine と同じ（RailNoRoute、StationInLine、LineLimit、NoSuchLine、NoSuchStation、LineStarvesOther）。
+      断る理由は ExtendLine と同じ（RailNoRoute、StationInLine、LineLimit、NoSuchLine、NoSuchStation、LineStarvesOther、
+      LineStarvesSelf）。
       i が駅の並びの外（駅の数以上）なら Denied（NoSuchStation）。
   {"type":"RemoveLine","line":{"index":n,"generation":g}}
       路線をなくす。走っている列車も消える。
@@ -492,7 +501,7 @@ observe の removedCrosswalks:
       路線を走らせる列車の本数を決める。列車 1 本の維持費は 1 日 600。走るのは、行き詰まりを防ぐ上限（observe の
       rail.lines の cap）までである。待てる所は、ノードとノードのあいだの線路の向きごとで、72m 以上あり、終点の
       折り返す前のホームでないもの（終点の両方のホームは 1 つに数える）である。ほかの路線と使う待てる所は共有の
-      待てる所で、続けて押さえて移れるものどうしが 1 つの共有の区画になる。ほかの路線と待てる所を共有しない路線の
+      待てる所で、続けて押さえて移る向きをたどって互いに行き来できる（輪でつながる）ものどうしが 1 つの共有の区画になる。ほかの路線と待てる所を共有しない路線の
       cap は、待てる所の数 − 1。共有する路線は、自分だけの待てる所の続き（区間）が 1 つならその数、2 つ以上なら数の
       和 − 1。自分だけの待てる所がない路線（区間運転、同じ駅を並べた路線など）は、区画の枠（区画の中だけを通る
       待てる所の輪のうち短いものの長さ − 1）を区画を使う路線で分けた数である。列車は待てる所から次の待てる所までを
@@ -550,6 +559,8 @@ act の結果:
     近いほかの踏切のマス（nearKind が crossing）。BuildRoad で既にある踏切の近くに交差点を作る場合の crossing は、既にある踏切のマスである。
   reason が LineStarvesOther のときは starvedLine も付き、上限が 0 になって走れなくなる路線の id を示す
     （複数あれば id のいちばん小さいもの）。
+  reason が LineStarvesSelf のときは loweredLines も付き、受け付けたら cap が下がるはずだったほかの路線ごとに
+    line（id）、cap（いまの cap）、capAfter（下がったあとの cap）を示す。
   reason が NotOwned のときは notOwned も付き、買っていない土地のマスを示す。
     count 買っていないマスの数、tiles そのマス（先頭の 16 個まで）、
     chunks そのマスを含むチャンクのうち、いま BuyChunk で買えるもの（買った土地と辺で接する。先頭の 16 個まで）、
@@ -939,6 +950,21 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                         && let Some(line) = world.rail().starved_by_command(&command)
                     {
                         out["starvedLine"] = id_json(line.index, line.generation);
+                    }
+                    if reason == DenyReason::LineStarvesSelf {
+                        let lowered: Vec<Value> = world
+                            .rail()
+                            .lowered_by_command(&command)
+                            .into_iter()
+                            .map(|(line, cap, after)| {
+                                json!({
+                                    "line": id_json(line.index, line.generation),
+                                    "cap": cap,
+                                    "capAfter": after,
+                                })
+                            })
+                            .collect();
+                        out["loweredLines"] = json!(lowered);
                     }
                     if matches!(
                         reason,
@@ -2310,6 +2336,7 @@ fn lines(world: &World) -> Value {
                 "cap": l.cap(),
                 "capReason": cap_reason(rail, id),
                 "running": running,
+                "toStart": usize::from(l.allowed()).saturating_sub(running),
                 "roundTripTicks": l.round_trip_ticks(),
                 "headwayTicks": l.headway_ticks(),
                 "measuredRoundTripTicks": l.measured_round_trip_ticks(),
