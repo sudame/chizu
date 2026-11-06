@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::clock::TICKS_PER_SECOND_AT_NORMAL_SPEED;
 use crate::network::{Line, MAX_ROAD_TILES};
+use crate::rail::line::MAX_LINE_TRAINS;
+use crate::rail::{LineId, StationId};
 use crate::tile::{ChunkCoord, TilePos, TileRect, WORLD_LIMIT};
 use crate::zone::{MAX_ZONE_SIDE, rect_size};
 
@@ -341,6 +343,25 @@ pub enum Command {
         from: TilePos,
         to: TilePos,
     },
+    /// 駅 `from` から駅 `to` への路線を作る。列車の本数は 0 で始める。
+    CreateLine {
+        from: StationId,
+        to: StationId,
+    },
+    /// 路線 `line` の終点の先に駅 `station` を足す。最初の駅を指せば環状の路線にする。
+    ExtendLine {
+        line: LineId,
+        station: StationId,
+    },
+    /// 路線をなくす。走っている列車も消える。
+    RemoveLine {
+        line: LineId,
+    },
+    /// 路線を走らせる列車の本数を決める。`0..=MAX_LINE_TRAINS` の外は受け付けない。
+    SetLineTrains {
+        line: LineId,
+        trains: u8,
+    },
 }
 
 /// コマンドの値が受け付ける範囲の外にある。
@@ -364,6 +385,8 @@ pub enum InvalidCommand {
     RoadNotStraight { from: TilePos, to: TilePos },
     /// 道路が `MAX_ROAD_TILES` マスより長い。
     RoadTooLong { from: TilePos, to: TilePos },
+    /// 路線の列車の本数が `MAX_LINE_TRAINS` を超えている。
+    TooManyTrains(u8),
 }
 
 impl fmt::Display for InvalidCommand {
@@ -405,6 +428,9 @@ impl fmt::Display for InvalidCommand {
                 "道路 ({}, {}) → ({}, {}) が上限の {MAX_ROAD_TILES} マスより長い",
                 from.x, from.y, to.x, to.y
             ),
+            InvalidCommand::TooManyTrains(n) => {
+                write!(f, "列車の本数 {n} は上限の {MAX_LINE_TRAINS} を超えている")
+            }
         }
     }
 }
@@ -425,7 +451,11 @@ impl Command {
             | Command::SetCrosswalk { .. }
             | Command::SetTaxRate { .. }
             | Command::SetParkingFee { .. }
-            | Command::SetSimSpeed { .. } => true,
+            | Command::SetSimSpeed { .. }
+            | Command::CreateLine { .. }
+            | Command::ExtendLine { .. }
+            | Command::RemoveLine { .. }
+            | Command::SetLineTrains { .. } => true,
         }
     }
 
@@ -475,11 +505,21 @@ impl Command {
                     Err(InvalidCommand::BadRotation(rotation))
                 }
             }
-            // 種類の enum と `SimSpeed` は、型そのものが範囲の外の値を持てない。
+            Command::SetLineTrains { trains, .. } => {
+                if trains <= MAX_LINE_TRAINS {
+                    Ok(())
+                } else {
+                    Err(InvalidCommand::TooManyTrains(trains))
+                }
+            }
+            // 種類の enum と `SimSpeed` は、型そのものが範囲の外の値を持てない。ID はどの値も指せる（ないものは断る）。
             Command::SetSignal { .. }
             | Command::SetCrosswalk { .. }
             | Command::BuyChunk { .. }
-            | Command::SetSimSpeed { .. } => Ok(()),
+            | Command::SetSimSpeed { .. }
+            | Command::CreateLine { .. }
+            | Command::ExtendLine { .. }
+            | Command::RemoveLine { .. } => Ok(()),
         }
     }
 }

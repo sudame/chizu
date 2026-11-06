@@ -15,9 +15,9 @@ use chizu_core::movement::signal;
 
 use chizu_core::{
     Activity, BuildingId, ChunkCoord, Command, CommandLog, DenyReason, Heading, HouseholdCar,
-    LaneMode, LaneOffset, Money, RecordedCommand, ReplayStats, RngPurpose, RoadKind, ServiceKind,
-    SidewalkPos, SimSpeed, StateHasher, TICKS_PER_DAY, Tick, TilePos, TileRect, World, Zone,
-    ZoneKind, replay, rng,
+    LaneMode, LaneOffset, LineId, Money, RecordedCommand, ReplayStats, RngPurpose, RoadKind,
+    ServiceKind, SidewalkPos, SimSpeed, StateHasher, StationId, TICKS_PER_DAY, Tick, TilePos,
+    TileRect, World, Zone, ZoneKind, replay, rng,
 };
 
 /// 却下した件数の内訳。挙げなかった理由は 0 件とみなす。
@@ -148,6 +148,13 @@ fn scenarios() -> Vec<Scenario> {
             money: None,
         },
         Scenario {
+            name: "rail_lines",
+            seed: 0,
+            ticks: RAIL_LINES_TICKS,
+            log: rail_lines(),
+            money: None,
+        },
+        Scenario {
             name: "land_slots",
             seed: 42,
             ticks: 2 * TICKS_PER_DAY + 600,
@@ -155,6 +162,77 @@ fn scenarios() -> Vec<Scenario> {
             money: Some(Money(10_000_000)),
         },
     ]
+}
+
+const RAIL_LINES_TICKS: u64 = 4_000;
+
+/// 駅 2 つを線路で結んで路線を作り、列車を走らせる記録。本数を増やし、減らし、走っているあいだに
+/// 線路を分けて分岐を引き、分岐を取り壊す。
+fn rail_lines() -> CommandLog {
+    let mut log = CommandLog::new();
+    let mut rec = |tick: u64, c: Command| {
+        log.record(Tick(tick), c).unwrap();
+    };
+    let at = TilePos::new;
+    let station = |x| Command::PlaceBuilding {
+        kind: ServiceKind::Station,
+        at: at(x, 9),
+        rotation: 2,
+    };
+    let first = StationId {
+        index: 0,
+        generation: 0,
+    };
+    let second = StationId {
+        index: 1,
+        generation: 0,
+    };
+    let line = LineId {
+        index: 0,
+        generation: 0,
+    };
+    rec(
+        1,
+        Command::BuildRoad {
+            from: at(0, 10),
+            to: at(70, 10),
+            kind: RoadKind::Small,
+        },
+    );
+    // 駅の線路は y = 8 の x 3〜12 と x 53〜62 である。
+    rec(2, station(12));
+    rec(2, station(62));
+    rec(
+        3,
+        Command::BuildRail {
+            from: at(12, 8),
+            to: at(53, 8),
+        },
+    );
+    rec(
+        5,
+        Command::CreateLine {
+            from: first,
+            to: second,
+        },
+    );
+    rec(6, Command::SetLineTrains { line, trains: 4 });
+    rec(1_500, Command::SetLineTrains { line, trains: 1 });
+    rec(
+        2_000,
+        Command::BuildRail {
+            from: at(30, 8),
+            to: at(40, -2),
+        },
+    );
+    rec(
+        2_500,
+        Command::Bulldoze {
+            area: TileRect::from_corners(at(40, -2), at(40, -2)),
+        },
+    );
+    rec(3_000, Command::SetLineTrains { line, trains: 2 });
+    log
 }
 
 /// 道路を引き、交差させ、高速道路につなぎ、消して、また引く記録。重なり、角での交わり、
@@ -1102,6 +1180,27 @@ fn checkpoints_from(mut world: World, log: &CommandLog, ticks: u64) -> (String, 
         }
     }
     (out, world)
+}
+
+/// 鉄道の記録が、路線を作り、列車を走らせ、本数を変え、線路を変えても走り続けることを確かめる。
+#[test]
+fn rail_lines_cover_the_trains() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "rail_lines")
+        .unwrap();
+    let mut world = s.start();
+    let stats = replay(&mut world, &s.log, 1_400);
+    assert_eq!((stats.applied, stats.denied), (6, 0), "{stats:?}");
+    // 駅 2 つの往復は 3 本までに抑える。
+    assert_eq!(world.rail().train_count(), 3);
+    replay(&mut world, &s.log, 700);
+    assert_eq!(world.rail().train_count(), 1);
+    // 分岐を引いて線路が分かれても、列車は消えない。駅の線路 2 つと、分けた 2 本と分岐の 1 本である。
+    assert_eq!(world.rail().tracks().count(), 5);
+    replay(&mut world, &s.log, s.ticks - 2_100);
+    assert_eq!(world.rail().train_count(), 2);
+    assert_eq!(world.rail().tally().deadlock, 0);
 }
 
 /// 買い進める記録の結果が、水辺の配置と購入の規則を通っていることを確かめる。

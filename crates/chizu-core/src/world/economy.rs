@@ -12,6 +12,7 @@ use crate::car_place::{CarPlace, fee_cap};
 use crate::clock::TICKS_PER_DAY;
 use crate::command::{ServiceKind, ZoneKind};
 use crate::network::{SegmentKind, TILE_MM, road_cost_per_tile};
+use crate::rail::train::TRAIN_UPKEEP_PER_DAY;
 use crate::round;
 use crate::units::Money;
 
@@ -104,7 +105,7 @@ pub struct Finances {
     pub facility_upkeep: [Money; 2],
     /// 共同の駐車場の維持費。
     pub parking_upkeep: Money,
-    /// 鉄道の維持費。駅の外の線路（建設費の [`ROAD_UPKEEP_PERMILLE_PER_DAY`]）と駅の分である。
+    /// 鉄道の維持費。駅の外の線路（建設費の [`ROAD_UPKEEP_PERMILLE_PER_DAY`]）と、駅と、走っている列車の分である。
     pub rail_upkeep: Money,
 }
 
@@ -182,12 +183,16 @@ impl World {
             mul(TILE_MM, 1_000),
         ));
         let stations = i64::try_from(self.rail.stations().count()).expect("駅の数があふれた");
+        let trains = i64::try_from(self.rail.train_count()).expect("列車の数があふれた");
         f.rail_upkeep = Money(add(
-            round::div_ceil(
-                mul(self.rail.track_cost_mm(), ROAD_UPKEEP_PERMILLE_PER_DAY),
-                mul(TILE_MM, 1_000),
+            add(
+                round::div_ceil(
+                    mul(self.rail.track_cost_mm(), ROAD_UPKEEP_PERMILLE_PER_DAY),
+                    mul(TILE_MM, 1_000),
+                ),
+                mul(stations, ServiceKind::Station.upkeep_per_day().0),
             ),
-            mul(stations, ServiceKind::Station.upkeep_per_day().0),
+            mul(trains, TRAIN_UPKEEP_PER_DAY.0),
         ));
         for facility in &self.facilities {
             let upkeep = facility.kind.upkeep_per_day();

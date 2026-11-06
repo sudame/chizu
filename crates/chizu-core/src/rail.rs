@@ -18,6 +18,8 @@
 //!
 //! 道路のマスと線路のマスは重ならない（踏切はまだない）。道路と線路を交わらせる置き方は、呼ぶ側の
 //! [`World`](crate::world::World) が断る。
+//!
+//! 路線と列車（設計 3.10 の 3）は [`line`] と [`train`] にある。線路を引くか取り壊すと、路線ごとに進路を選び直す。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -74,7 +76,27 @@ pub struct StationId {
     pub generation: u16,
 }
 
-impl_arena_id!(RailNodeId, TrackId, StationId);
+/// 路線の ID。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LineId {
+    pub index: u32,
+    pub generation: u16,
+}
+
+/// 列車の ID。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct TrainId {
+    pub index: u32,
+    pub generation: u16,
+}
+
+impl_arena_id!(RailNodeId, TrackId, StationId, LineId, TrainId);
+
+pub mod line;
+pub mod train;
+
+pub use line::{RailLine, Step, StepKind};
+pub use train::{Block, RailTally, Train, TrainState};
 
 /// 線路の網のノード。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,8 +177,12 @@ pub struct Rail {
     nodes: Arena<RailNodeId, RailNode>,
     tracks: Arena<TrackId, Track>,
     stations: Arena<StationId, Station>,
+    lines: Arena<LineId, RailLine>,
+    trains: Arena<TrainId, Train>,
     /// マスごとの、そのマスを通る線路。ID の順に並べる。線路から作り直せるので、状態ハッシュには入れない。
     tiles: BTreeMap<TilePos, SmallVec<[TrackId; 2]>>,
+    /// 読み取り用の数。状態ハッシュには入れない。
+    tally: RailTally,
 }
 
 impl Default for Rail {
@@ -227,7 +253,10 @@ impl Rail {
             nodes: Arena::new(),
             tracks: Arena::new(),
             stations: Arena::new(),
+            lines: Arena::new(),
+            trains: Arena::new(),
             tiles: BTreeMap::new(),
+            tally: RailTally::default(),
         }
     }
 
@@ -426,6 +455,7 @@ impl Rail {
             }
             self.add_track(prev, n1);
         }
+        self.refresh_lines(&BTreeSet::new());
         Ok(())
     }
 
@@ -493,7 +523,7 @@ impl Rail {
             let s = self.stations.remove(id).expect("消す駅がない");
             removal.stations.push(s.area);
         }
-        for id in tracks {
+        for id in tracks.iter().copied() {
             removal
                 .tracks
                 .push(self.track_line(id).expect("消す線路がない"));
@@ -503,6 +533,9 @@ impl Rail {
                     self.nodes.remove(n);
                 }
             }
+        }
+        if !removal.is_empty() {
+            self.refresh_lines(&tracks);
         }
         removal
     }
@@ -572,12 +605,19 @@ impl Rail {
     }
 
     /// 線路をマス `t` で 2 つに分け、そこに置いたノードを返す。
+    /// 線路の上の列車は、同じ位置の分けた線路へ移す。
     fn split_track(&mut self, id: TrackId, t: TilePos) -> RailNodeId {
+        let first_len = Line::straight(self.nodes[self.tracks[id].a].tile, t)
+            .expect("分けるマスが線路の上にない")
+            .length()
+            .0;
+        let total = self.track_line(id).expect("分ける線路がない").length().0;
         let tr = self.remove_track(id);
         assert!(tr.station.is_none(), "駅の線路は分けない");
         let n = self.add_node(t);
-        self.add_track(tr.a, n);
-        self.add_track(n, tr.b);
+        let first = self.add_track(tr.a, n);
+        let second = self.add_track(n, tr.b);
+        self.move_trains_off(id, (first, first_len), (second, total - first_len));
         n
     }
 }
@@ -647,8 +687,13 @@ impl StateHash for Rail {
         h.write(&self.nodes);
         h.write(&self.tracks);
         h.write(&self.stations);
+        h.write(&self.lines);
+        h.write(&self.trains);
     }
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod train_tests;

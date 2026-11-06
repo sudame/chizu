@@ -36,6 +36,10 @@ name = "car_tick"
 harness = false
 
 [[bench]]
+name = "rail_trains"
+harness = false
+
+[[bench]]
 name = "perf"
 harness = false
 

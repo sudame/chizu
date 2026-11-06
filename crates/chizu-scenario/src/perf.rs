@@ -11,7 +11,10 @@ use chizu_core::{
     ScheduleState, TICKS_PER_DAY, Tick, Trips, bucket_at, rng,
 };
 
-use crate::{city_grid_100k, commute_requests, synthetic_population, walk_ends, zoned_grid_city};
+use crate::{
+    RAIL_BENCH_LINES, city_grid_100k, commute_requests, rail_trains_running, synthetic_population,
+    walk_ends, zoned_grid_city,
+};
 
 /// 測定に使う種。
 pub const SEED: u64 = 1;
@@ -124,6 +127,31 @@ pub fn movers(each: u32, ticks: u64, now: &dyn Fn() -> u64) -> TickStats {
     }
 }
 
+/// 列車 512 本（分岐と共有する区間のある [`RAIL_BENCH_LINES`] 本の路線に [`crate::RAIL_BENCH_TRAINS`] 本ずつ）を
+/// `ticks` tick 動かす。1 tick は、列車の動き、閉塞の出入り、駅の止まりと折り返し、共有する区間をまとめて押さえる決まり、
+/// 行き詰まりの輪の検査である。列車が出そろってふだんの走り方になるまでは測らない。
+/// `left` は回し終えたときの列車の数である。
+pub fn rail_trains(ticks: u64, now: &dyn Fn() -> u64) -> TickStats {
+    let mut rail = rail_trains_running(SEED, RAIL_BENCH_LINES);
+    let count = u32::try_from(rail.train_count()).expect("列車が多すぎる");
+    let mut tick = Tick(1_000_000);
+    let mut worst = 0;
+    let start = now();
+    for _ in 0..ticks {
+        let t = now();
+        rail.step(tick);
+        worst = u64::max(worst, now() - t);
+        tick = tick.next();
+    }
+    TickStats {
+        count,
+        ticks,
+        total_ns: now() - start,
+        worst_ns: worst,
+        left: rail.train_count(),
+    }
+}
+
 /// 経路の一括探索の時間。
 #[derive(Clone, Copy, Debug)]
 pub struct BatchStats {
@@ -174,6 +202,7 @@ pub fn warm_up(now: &dyn Fn() -> u64) {
     black_box(day(10_000, 2 * u64::from(BUCKET_COUNT), now));
     black_box(movers(500, 20, now));
     black_box(route_batch(1_000, 1, now));
+    black_box(rail_trains(20, now));
 }
 
 /// 測る項目をすべて回し、JSON の 1 つのオブジェクトにする。
@@ -193,13 +222,15 @@ pub fn run_all(now: &dyn Fn() -> u64, memory: &dyn Fn() -> Option<u64>) -> Strin
     let movers_20k = movers(10_000, 300, now);
     let batch_1k = route_batch(1_000, 20, now);
     let batch_100k = route_batch(100_000, 3, now);
+    let trains_512 = rail_trains(1_000, now);
     format!(
-        r#"{{"day_100k":{},"day_1m":{},"movers_20k":{},"route_batch_1k":{},"route_batch_100k":{},"memory_bytes":{{"start":{},"after_100k":{},"after_1m":{}}}}}"#,
+        r#"{{"day_100k":{},"day_1m":{},"movers_20k":{},"route_batch_1k":{},"route_batch_100k":{},"rail_trains":{},"memory_bytes":{{"start":{},"after_100k":{},"after_1m":{}}}}}"#,
         day_100k.to_json(),
         day_1m.to_json(),
         movers_20k.to_json(),
         batch_1k.to_json(),
         batch_100k.to_json(),
+        trains_512.to_json(),
         json_mem(base),
         json_mem(mem_100k),
         json_mem(mem_1m),

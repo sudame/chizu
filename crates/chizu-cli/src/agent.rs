@@ -289,7 +289,14 @@ observe の rail（線路と駅）:
   tiles 駅の外の線路のマスの数、tracks 駅の外の線路の区間（ノードからノードまで）の数、
   deadEnds 線路が 1 本だけつながるノード（線路の端。外へつないでいない駅の線路の端も入る）のマス、branches 分岐（3 本がつながる）のノードのマス、
   stations 駅ごとの id、at（置いたときの at）、area 敷地の角、ends 駅の線路の両端のマス（ここから外へ線路を引く）、
-  facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅の 1 日の維持費である。
+  facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅と列車の 1 日の維持費である。
+  lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、trains 決めた本数、cap 行き詰まりを防ぐ本数の上限、
+  running 走っている本数、roundTripTicks 1 周の見込みの時間（tick）、headwayTicks 運転間隔の見込み（tick、列車がなければ null）、
+  stopped 線路が変わって進路を選べず止まっているか（止まった路線の列車は消え、新しい列車も現れない）。
+  trains 列車ごとの id、line 路線の id、at 先頭のマス、heading 進む向き（E、SE、S、SW、W、NW、N、NE）、
+  state（Running 走っているか先の閉塞を待っている、Dwell 駅に止まっている、Turnback 終点で折り返している、
+  Ready 駅を出るのを待っている）、speed 速さ（mm/tick、25000 が時速 90km）、nextStation 次に止まる駅の id。
+  trainCount 列車の数、deadlock 列車が互いを待って止まる輪を見つけ、輪の中の列車を 1 本消した回数（ふつうは 0）。
 
 observe の removedCrosswalks:
   横断歩道を外した腕のある交差点ごとに、at マス、node ノードの ID、arms 外した腕の向き（SetCrosswalk の arm と同じ名前）。
@@ -368,7 +375,7 @@ observe の removedCrosswalks:
       Station は鉄道の駅で、間口 10 × 奥行き 3、40000（維持費 1 日 800）。道路の側から、駅舎とホーム、複線の線路、
       ホームの 3 列で、真ん中の列に駅の線路が道路と平行に通る。駅の線路の両端のマス（observe の rail.stations の ends）
       から BuildRail で外へ線路を引いてつなぐ。線路の上には置けない（Occupied）ので、駅を先に置いてから線路をつなぐ。
-      駅は facilities には入らず、observe の rail.stations に出る。まだ列車は走らない。
+      駅は facilities には入らず、observe の rail.stations に出る。列車は路線（CreateLine）を作ると走る。
   {"type":"SetSignal","at":[x,y],"on":true|false}
       マス at の交差点（3 本以上の道路が集まるノード）に信号を置くか、外す。費用はかからない。
       at の代わりに "node":{"index":n,"generation":g} でノードを指してもよい（記録に入るのはこの形）。
@@ -397,6 +404,28 @@ observe の removedCrosswalks:
       まだ踏切がないので、道路のマスは通れない（Denied（Occupied））。施設と駅のマスも通れない。ただし駅の線路の
       両端のマスでは、線路を始めても終えてもよい。建物のマスを通ると、その建物は取り壊される。
       ノードのあいだが 50 マス（斜めは 35 マス）を超える線路には、中核が等しい間隔で区切りのノードを置く。
+  {"type":"CreateLine","from":{"index":n,"generation":g},"to":{"index":n,"generation":g}}
+      駅 from から駅 to への路線を作る。駅は observe の rail.stations の id で指す。列車の本数は 0 で始まる。
+      進路は線路の上の最短の道のりで選び、ノードで 45 度より大きく曲がる所と、途中で向きを変える所は通らない。
+      そうしないと届かなければ Denied（RailNoRoute）。路線は往復し、両端の駅で折り返す。途中の駅は通り過ぎてよい。
+      駅がなければ Denied（NoSuchStation）、同じ駅なら Denied（StationInLine）、路線が 64 本あれば Denied（LineLimit）。
+      作った路線の id は observe の rail.lines にある（作った順に、空いた番号から使う）。
+  {"type":"ExtendLine","line":{"index":n,"generation":g},"station":{"index":n,"generation":g}}
+      路線の終点の先に駅を足す。最初の駅を指すと環状の路線になり、列車は折り返さずに回る。終点から向きを変えずに
+      届かなければ Denied（RailNoRoute）。駅がもう路線にあれば Denied（StationInLine）、路線の駅が 32 あるか
+      環状にした路線なら Denied（LineLimit）、路線がなければ Denied（NoSuchLine）。
+  {"type":"RemoveLine","line":{"index":n,"generation":g}}
+      路線をなくす。走っている列車も消える。
+  {"type":"SetLineTrains","line":{"index":n,"generation":g},"trains":0..16}
+      路線を走らせる列車の本数を決める。列車 1 本の維持費は 1 日 600。走るのは、行き詰まりを防ぐ上限（observe の
+      rail.lines の cap）までである。上限は、待てる所（ノードとノードのあいだの線路の向きごとで、72m 以上あり、ほかの路線が
+      使わないもの。終点の両方のホームは 1 つに数える）の数 − 1 である。列車は待てる所から次の待てる所までをまとめて
+      押さえて進むので、ほかの路線と共有する駅と線路では待たない。待てる所が 1 つ以下の路線（ほかの路線とすべて共有する
+      路線など）は cap が 0 で、列車は走らない。
+      列車は 4 両 80m、時速 90km で、最初の駅に 1 本ずつ現れる。駅に 20 tick 止まり、終点では 30 tick かけて折り返す。
+      同じ駅から前の列車が出てから、運転間隔（1 周の見込みの時間 ÷ 本数）の半分を空けて出る。先の閉塞を押さえてから
+      入るので、2 本が同じ閉塞に入ることはない。本数を減らすと、終点で折り返す列車から消える。まだ乗る人はいない。
+      線路を取り壊して進路を選べなくなった路線は止まり（stopped）、その路線の列車は消える。
   {"type":"BuyChunk","chunk":[cx,cy]}
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
   {"type":"SetTaxRate","zone":"Residential"|"Commercial"|"Industrial"|"Office","permille":0..300}
@@ -2007,7 +2036,98 @@ fn rail(world: &World) -> Value {
         "deadEnds": dead_ends,
         "branches": branches,
         "stations": stations,
+        "lines": lines(world),
+        "trains": trains(world),
+        "trainCount": rail.train_count(),
+        "deadlock": rail.tally().deadlock,
     })
+}
+
+fn id_json(index: u32, generation: u16) -> Value {
+    json!({"index": index, "generation": generation})
+}
+
+/// 路線。
+fn lines(world: &World) -> Value {
+    let rail = world.rail();
+    let out: Vec<Value> = rail
+        .lines()
+        .map(|(id, l)| {
+            let running = rail.trains().filter(|(_, t)| t.line == id).count();
+            let stations: Vec<Value> = l
+                .stations
+                .iter()
+                .map(|s| id_json(s.index, s.generation))
+                .collect();
+            json!({
+                "id": id_json(id.index, id.generation),
+                "stations": stations,
+                "looped": l.looped,
+                "trains": l.trains,
+                "cap": l.cap(),
+                "running": running,
+                "roundTripTicks": l.round_trip_ticks(),
+                "headwayTicks": l.headway_ticks(),
+                "stopped": l.stopped,
+            })
+        })
+        .collect();
+    json!(out)
+}
+
+/// 列車。
+fn trains(world: &World) -> Value {
+    let rail = world.rail();
+    let out: Vec<Value> = rail
+        .trains()
+        .map(|(id, t)| {
+            let line = rail.line(t.line).expect("列車の路線がない");
+            let track = rail.track_line(t.track).expect("列車の線路がない");
+            let step_mm = if track.is_diagonal() {
+                chizu_core::network::DIAGONAL_TILE_MM
+            } else {
+                chizu_core::TILE_MM
+            };
+            let total = track.length().0;
+            let (from_start, step) = match t.dir {
+                chizu_core::Dir::Forward => (t.offset, track.step),
+                chizu_core::Dir::Backward => (total - t.offset, (-track.step.0, -track.step.1)),
+            };
+            let k = u64::try_from(from_start / step_mm)
+                .unwrap_or(0)
+                .min(track.len);
+            let head = track.tile(k);
+            let heading = Heading::of_step(step).map(|h| format!("{h:?}"));
+            let state = match t.state {
+                chizu_core::TrainState::Running => "Running",
+                chizu_core::TrainState::Dwell { .. } => "Dwell",
+                chizu_core::TrainState::Turnback { .. } => "Turnback",
+                chizu_core::TrainState::Ready => "Ready",
+            };
+            // 走って駅に向かっている列車は、いまいる要素の駅も次の駅に入れる。駅に止まっている列車は入れない。
+            let pos = t.pos as usize;
+            let approaching =
+                t.state == chizu_core::TrainState::Running && t.offset < line.path[pos].len;
+            let next = line
+                .path
+                .iter()
+                .cycle()
+                .skip(if approaching { pos } else { pos + 1 })
+                .take(line.path.len())
+                .find(|s| s.kind != chizu_core::StepKind::Pass)
+                .and_then(|s| s.station);
+            json!({
+                "id": id_json(id.index, id.generation),
+                "line": id_json(t.line.index, t.line.generation),
+                "at": [head.x, head.y],
+                "heading": heading,
+                "state": state,
+                "speed": t.speed,
+                "nextStation": next.map(|s| id_json(s.index, s.generation)),
+            })
+        })
+        .collect();
+    json!(out)
 }
 
 /// 横断歩道を外した腕のある交差点と、外した腕の向き。
@@ -2121,6 +2241,8 @@ const WATCHED: &[&str] = &[
     "/land/milestone",
     "/financesPerDay/railUpkeep",
     "/rail/tiles",
+    "/rail/trainCount",
+    "/rail/deadlock",
 ];
 
 /// 前の observe と比べる数を、`/money` を `money`、`/demand/Office` を `demand.Office` と読み替えた名前で集める。
