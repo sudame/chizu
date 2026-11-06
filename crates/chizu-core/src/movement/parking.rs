@@ -1289,6 +1289,8 @@ impl Trips {
         ended: &mut Vec<usize>,
     ) {
         for i in rows {
+            let (index, generation) = self.slots.current(i).expect("待つ主体がない");
+            self.commuters.car_abandoned(TripId { index, generation });
             let t = self.rows[i].as_mut().expect("待つ主体がない");
             let Then::Walk { lot, to } = t.then else {
                 ended.push(i);
@@ -1327,13 +1329,13 @@ impl Trips {
     }
 
     /// 区切りの終わりに着いた行 `done` を、次の区切りへ進める。移動を終える行と、次の区切りの経路が
-    /// なくなっていた行を返す。
+    /// なくなっていた行を返す。`now` は車の区切りを始めた時刻と停めた時刻として、通勤の車の見込みに使う。
     pub(super) fn next_legs(
         &mut self,
         net: &Network,
         router: &mut AstarRouter,
         done: Vec<usize>,
-        rail: &RailCrossings,
+        (rail, now): (&RailCrossings, Tick),
     ) -> Vec<usize> {
         let mut ended = Vec::new();
         let mut legs: [Vec<(usize, SidewalkPos, SidewalkPos, Then)>; 2] = Default::default();
@@ -1360,6 +1362,7 @@ impl Trips {
                     let dest = t.dest;
                     let (index, generation) = self.slots.current(i).expect("着いた主体がない");
                     let trip = TripId { index, generation };
+                    self.commuters.car_stopped(trip, now);
                     match lot {
                         // 向かっていた駐車場が取り壊された。押さえた空きも一緒になくなっている。
                         None => {}
@@ -1411,6 +1414,11 @@ impl Trips {
                 t.then = then;
                 t.via = via;
                 self.rows[i] = Some(t);
+                if mode == LaneMode::Car {
+                    let (index, generation) = self.slots.current(i).expect("着いた主体がない");
+                    self.commuters
+                        .car_started(TripId { index, generation }, now);
+                }
                 // 出発と同じく、空いた車線に置き、前の車と重なるなら下げ、空きがなければ待たせる。
                 if let Some(ix) = ix.as_mut() {
                     car::place(&mut self.rows, net, ix, i, &zones, rail, &entering);

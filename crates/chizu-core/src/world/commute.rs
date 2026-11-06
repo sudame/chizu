@@ -311,7 +311,7 @@ impl World {
     pub(super) fn end_commutes(&mut self, ended: Vec<TripId>) {
         let mut arrived = Vec::new();
         for trip in ended {
-            let Some(c) = self.trips.take_commuter(trip) else {
+            let Some(c) = self.trips.end_commute(trip, self.tick) else {
                 continue;
             };
             let finished = self.trips.finished(trip);
