@@ -127,7 +127,7 @@ cargo run -p chizu-cli -- agent act <dir> <commands.json> [--verbose]  # いま�
 cargo run -p chizu-cli -- agent advance <dir> <ticks>     # 時間を進める
 cargo run -p chizu-cli -- agent observe <dir>             # 街の様子を JSON で出す
 cargo run -p chizu-cli -- agent export <dir>              # 再現の手順を、Issue に貼れる markdown で出す
-cargo run -p chizu-cli -- agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic]  # 範囲の地図を文字のマス目で出す（traffic は道路を混み具合で出す）
+cargo run -p chizu-cli -- agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic|parking|rail]  # 範囲の地図を文字のマス目で出す（traffic は道路を混み具合で、rail は線路を路線の色の番号で出す）
 ```
 
 map は observe と同じく何も書かず、フィードバックのディレクトリにも打てる。1 マスを 1 文字にして、先頭に凡例、上に x、行頭に y の目盛りを付ける。
@@ -148,6 +148,8 @@ act の結果は、コマンドごとの `outcome` と理由だけを返す。�
 
 observe は、前の observe からの増減を `sinceLastObserve` に出す。前の値は、`agent new` で作ったセッションの `last-observe.json` に残す。
 フィードバックのディレクトリには書かないので、そこでは `null` になる。observe が書くので、observe は排他のロックを取る。
+
+`--layer rail` は、線路を通る路線の色の番号の文字（A B J K M N Q U）にし、止まっている路線の線路を `x`、乗りきれず人が残った駅を `!`、駅の出入口から 64 マス以内の空きマスを `:` で出す。凡例の下に路線ごとの本数と乗車率が付く。observe の `rail.stations` には、徒歩圏の世帯（`households`、`carless`）と出入口（`door`）がある。
 
 map は、電気か水が届いていない建物を、区画の文字の代わりに `*`（電気）、`^`（水）、`%`（両方）で示す。
 

@@ -563,7 +563,7 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
     );
     assert!(!layer.contains("L 平面の共同の駐車場"), "{layer}");
     let err = cli_fails(&["agent", "map", d, "9", "-2", "18", "2", "--layer", "power"]);
-    assert!(err.contains("traffic か parking"), "{err}");
+    assert!(err.contains("traffic、parking、rail"), "{err}");
     assert_eq!(o["facilities"]["ParkingLot"], 1);
     assert_eq!(o["facilities"]["ParkingGarage"], 1);
     let upkeep = &o["financesPerDay"]["facilityUpkeep"];
@@ -640,10 +640,21 @@ fn act_builds_rail_and_a_station_and_observe_and_map_show_them() {
     assert_eq!(stations[0]["ends"], serde_json::json!([[3, 8], [12, 8]]));
     assert_eq!(stations[0]["area"], serde_json::json!([[3, 7], [12, 9]]));
     assert_eq!(stations[0]["facesRoad"], true);
+    // 駅の出入口は道路の上にある。家はないので、徒歩圏の世帯は 0
+    assert_eq!(stations[0]["door"][1], 10, "{rail}");
+    assert_eq!(stations[0]["households"], 0, "{rail}");
+    assert_eq!(stations[0]["carless"], 0, "{rail}");
     // 駅 800 と、4 マスの線路 6000 の 1%。
     assert_eq!(o["financesPerDay"]["railUpkeep"], 860);
     let map = cli(&["agent", "map", d, "2", "8", "17", "8"]);
     assert_eq!(grid_rows(&map, 1, 16), [".EEEEEEEEEETTTT."], "{map}");
+    // 鉄道の層では、駅まで歩く範囲の空きマスが : になる。線路はどの路線も通らないので T のまま
+    let map = cli(&["agent", "map", d, "2", "8", "17", "9", "--layer", "rail"]);
+    assert_eq!(
+        grid_rows(&map, 2, 16),
+        [":EEEEEEEEEETTTT:", ":EEEEEEEEEE:::::"],
+        "{map}"
+    );
     let gone = write(
         &dir.join("b.json"),
         r#"{"type":"Bulldoze","area":[[5,7],[5,7]]}"#,
