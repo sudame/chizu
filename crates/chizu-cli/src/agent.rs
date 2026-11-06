@@ -292,7 +292,7 @@ observe の rail（線路と駅）:
   facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅と列車の 1 日の維持費である。
   lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、trains 決めた本数、cap 行き詰まりを防ぐ本数の上限、
   running 走っている本数、roundTripTicks 1 周の見込みの時間（tick）、headwayTicks 運転間隔の見込み（tick、列車がなければ null）、
-  stopped 線路が変わって進路を選べず止まっているか（止まった路線の列車は駅を出ない）。
+  stopped 線路が変わって進路を選べず止まっているか（止まった路線の列車は消え、新しい列車も現れない）。
   trains 列車ごとの id、line 路線の id、at 先頭のマス、heading 進む向き（E、SE、S、SW、W、NW、N、NE）、
   state（Running 走っているか先の閉塞を待っている、Dwell 駅に止まっている、Turnback 終点で折り返している、
   Ready 駅を出るのを待っている）、speed 速さ（mm/tick、25000 が時速 90km）、nextStation 次に止まる駅の id。
@@ -418,12 +418,14 @@ observe の removedCrosswalks:
       路線をなくす。走っている列車も消える。
   {"type":"SetLineTrains","line":{"index":n,"generation":g},"trains":0..16}
       路線を走らせる列車の本数を決める。列車 1 本の維持費は 1 日 600。走るのは、行き詰まりを防ぐ上限（observe の
-      rail.lines の cap）までである。上限は、列車がまるごと入って待てる閉塞（ノードとノードのあいだの線路の向きごと。
-      72m より短いものと、ほかの路線と共有する区間の途中は数えない。終点の両方のホームは 1 つに数える）の数 − 1 である。
+      rail.lines の cap）までである。上限は、待てる所（ノードとノードのあいだの線路の向きごとで、72m 以上あり、ほかの路線が
+      使わないもの。終点の両方のホームは 1 つに数える）の数 − 1 である。列車は待てる所から次の待てる所までをまとめて
+      押さえて進むので、ほかの路線と共有する駅と線路では待たない。待てる所が 1 つ以下の路線（ほかの路線とすべて共有する
+      路線など）は cap が 0 で、列車は走らない。
       列車は 4 両 80m、時速 90km で、最初の駅に 1 本ずつ現れる。駅に 20 tick 止まり、終点では 30 tick かけて折り返す。
       同じ駅から前の列車が出てから、運転間隔（1 周の見込みの時間 ÷ 本数）の半分を空けて出る。先の閉塞を押さえてから
       入るので、2 本が同じ閉塞に入ることはない。本数を減らすと、終点で折り返す列車から消える。まだ乗る人はいない。
-      線路を取り壊して進路を選べなくなった路線は止まり（stopped）、線路の上にいた列車は消える。
+      線路を取り壊して進路を選べなくなった路線は止まり（stopped）、その路線の列車は消える。
   {"type":"BuyChunk","chunk":[cx,cy]}
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
   {"type":"SetTaxRate","zone":"Residential"|"Commercial"|"Industrial"|"Office","permille":0..300}

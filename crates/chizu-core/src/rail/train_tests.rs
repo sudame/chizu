@@ -84,7 +84,22 @@ fn check_blocks(w: &World) {
         let s = line.step(t.pos);
         assert_eq!((s.track, s.dir), (t.track, t.dir), "{id:?}");
         assert!(t.offset >= 0 && t.offset <= s.len, "{id:?} {t:?}");
+        // 駅で止まっている列車は、駅の線路の先の端にいる。
+        let at_end = t.offset == s.len;
+        match t.state {
+            TrainState::Running => {}
+            TrainState::Dwell { .. } | TrainState::Turnback { .. } => {
+                assert!(s.is_stop() && at_end, "{id:?} {t:?}");
+            }
+            TrainState::Ready => assert!(s.depart && at_end, "{id:?} {t:?}"),
+        }
         for b in line.held_blocks(t) {
+            if let Block::Track(track, _) = b {
+                assert!(
+                    rail.track(track).is_some(),
+                    "{id:?} が消えた線路を押さえている {t:?}"
+                );
+            }
             if let Some(other) = seen.insert(b, id) {
                 assert_eq!(other, id, "{b:?} を 2 本が押さえている");
             }
@@ -436,53 +451,52 @@ fn a_long_shuttle_with_sixteen_trains_turns_back_without_deadlock() {
     assert_eq!(most, 16);
 }
 
-/// 途中の駅を 2 つの路線が両方の向きに共有すると、路線ごとの上限を守っても、路線をまたぐ輪で
-/// 行き詰まることがある。そのときは備えが輪の中の列車を 1 本消し、列車はまた走り出す。
+/// 3 つの決まりでは起きないはずの輪を手で作ると、備えが輪の中の ID のいちばん大きい列車を 1 本消し、
+/// 列車はまた走り出す。駅 2 つの往復の 4 つの待てる所に 1 本ずつ置き、どの列車も次の待てる所を待つ形にする。
 #[test]
-fn the_backstop_untangles_lines_crossing_at_a_shared_middle_station() {
-    let mut w = rich_world();
-    ok(&mut w, road((0, 10), (90, 10)));
-    ok(&mut w, road((58, 0), (80, 0)));
-    let west = station(&mut w, (12, 8), 2);
-    let mid = station(&mut w, (32, 8), 2);
-    let east = station(&mut w, (79, 8), 2);
-    let north = station(&mut w, (71, -2), 2);
-    ok(&mut w, rail((12, 8), (23, 8)));
-    ok(&mut w, rail((32, 8), (70, 8)));
-    ok(&mut w, rail((45, 8), (55, -2)));
-    ok(&mut w, rail((55, -2), (62, -2)));
-    let one = create(&mut w, west, mid);
-    ok(
-        &mut w,
-        Command::ExtendLine {
-            line: one,
-            station: east,
-        },
-    );
-    let two = create(&mut w, north, mid);
-    ok(
-        &mut w,
-        Command::ExtendLine {
-            line: two,
-            station: west,
-        },
-    );
-    set_trains(&mut w, one, 16);
-    set_trains(&mut w, two, 16);
+fn the_backstop_untangles_a_cycle_of_waiting_trains() {
+    let (mut w, a, b) = shuttle_world();
+    let id = create(&mut w, a, b);
+    set_trains(&mut w, id, 3);
+    let mut rail = w.rail().clone();
+    let line = rail.line(id).unwrap().clone();
+    let waits: Vec<u32> = (0..line.len()).filter(|i| line.step(*i).wait).collect();
+    assert_eq!(waits, [0, 1, 3, 4]);
+    let mut ids = Vec::new();
+    for i in waits {
+        let s = line.step(i);
+        ids.push(rail.trains.insert(Train {
+            line: id,
+            pos: i,
+            track: s.track,
+            dir: s.dir,
+            offset: s.len,
+            speed: 0,
+            ahead: 0,
+            state: if s.depart {
+                TrainState::Ready
+            } else {
+                TrainState::Running
+            },
+            waited: 0,
+        }));
+    }
+    rail.step(Tick(1));
+    assert_eq!(rail.tally().deadlock, 1);
+    assert_eq!(rail.train_count(), 3);
+    assert!(rail.train(*ids.iter().max().unwrap()).is_none());
     let mut departures = 0;
-    for _ in 0..20_000 {
-        let before: Vec<TrainState> = w.rail().trains().map(|(_, t)| t.state).collect();
-        w.step();
-        check_blocks(&w);
-        departures += w
-            .rail()
+    for tick in 2..5_000 {
+        let before: Vec<TrainState> = rail.trains().map(|(_, t)| t.state).collect();
+        rail.step(Tick(tick));
+        departures += rail
             .trains()
             .zip(before)
             .filter(|((_, t), b)| *b != TrainState::Running && t.state == TrainState::Running)
             .count();
     }
-    assert!(w.rail().tally().deadlock > 0);
-    assert!(departures > 500, "{departures}");
+    assert_eq!(rail.tally().deadlock, 1);
+    assert!(departures > 50, "{departures}");
 }
 
 /// 2 つの路線が、分岐と幹の線路と終点の駅を共有し、幹の上を逆の向きにも走る。
@@ -531,21 +545,20 @@ fn lines_sharing_a_junction_and_a_terminal_run_without_deadlock() {
             2,
             "{id:?}"
         );
-        // 西の終点との行き来だけが、共有する区間である。
-        let shared: Vec<bool> = line
-            .path
-            .iter()
-            .filter(|s| s.depart)
-            .map(|s| s.shared)
-            .collect();
-        assert_eq!(shared.iter().filter(|s| **s).count(), 2, "{id:?}");
-        // 駅のホーム 6 つ（終点は 1 つに数えて 4 つ）と、共有しない区間の線路の 2 つの向き。
-        assert_eq!(line.cap(), 5, "{id:?}");
+        // 西の終点と、そこから分岐までの線路は共有するので待てる所にしない。待てる所は、分岐から先の
+        // 長い線路の 2 つの向き、途中の駅の 2 つのホーム、その先の線路の 2 つの向き、東か北の終点の折り返したあとの
+        // ホームの 7 つである。北の路線の (40, -2)–(45, -2) は 40m しかないので待てる所にしない。
+        assert!(
+            line.path
+                .iter()
+                .all(|s| !s.wait || s.len >= train::TRAIN_BLOCK_LEN_MM)
+        );
+        assert_eq!(line.cap(), 6, "{id:?}");
     }
     set_trains(&mut w, one, 16);
     set_trains(&mut w, two, 16);
-    let most = run(&mut w, 30_000, 1_500);
-    assert_eq!(most, 10);
+    let most = run(&mut w, 30_000, 2_000);
+    assert_eq!(most, 12);
 }
 
 /// 2 つの路線が、向かい合う終点として同じ駅を使う。両方のホームをまとめて押さえて入るので、
@@ -660,4 +673,212 @@ fn lines_replay_and_round_trip_through_the_snapshot() {
     }
     assert_eq!(back, whole);
     assert_eq!(back.state_hash(), whole.state_hash());
+}
+
+/// 駅 a、b、c を一列に並べ、a–b と b–c を線路で結んだ街。
+fn three_in_a_row() -> (World, StationId, StationId, StationId) {
+    let mut w = rich_world();
+    ok(&mut w, road((0, 10), (100, 10)));
+    let a = station(&mut w, (12, 8), 2);
+    let b = station(&mut w, (62, 8), 2);
+    let c = station(&mut w, (92, 8), 2);
+    ok(&mut w, rail((12, 8), (53, 8)));
+    ok(&mut w, rail((62, 8), (83, 8)));
+    (w, a, b, c)
+}
+
+/// a–b の往復を 1 本で走らせ、`pos` の要素で `Turnback { left }` になるまで回す。
+fn turn_back_at(w: &mut World, pos: u32, left: u16) {
+    for _ in 0..3_000 {
+        w.step();
+        let (_, t) = w.rail().trains().next().unwrap();
+        if t.pos == pos && t.state == (TrainState::Turnback { left }) {
+            return;
+        }
+    }
+    panic!("折り返さない");
+}
+
+/// 最初の駅で折り返し終える直前に路線を延ばしても、列車は折り返しをやり直して走り続ける。
+#[test]
+fn extending_a_line_while_turning_back_at_the_first_station_keeps_the_train() {
+    let (mut w, a, b, c) = three_in_a_row();
+    let id = create(&mut w, a, b);
+    set_trains(&mut w, id, 1);
+    turn_back_at(&mut w, 5, 1);
+    ok(
+        &mut w,
+        Command::ExtendLine {
+            line: id,
+            station: c,
+        },
+    );
+    run(&mut w, 3_000, 1_000);
+    assert_eq!(w.rail().train_count(), 1);
+}
+
+/// 終点で折り返しているあいだに路線を延ばすと、終点は途中の駅になる。列車は折り返さずに、
+/// 先の閉塞を押さえてから駅を出る。
+#[test]
+fn extending_a_line_while_turning_back_at_the_far_end_keeps_the_train_at_the_station() {
+    let (mut w, a, b, c) = three_in_a_row();
+    let id = create(&mut w, a, b);
+    set_trains(&mut w, id, 1);
+    turn_back_at(&mut w, 2, 15);
+    ok(
+        &mut w,
+        Command::ExtendLine {
+            line: id,
+            station: c,
+        },
+    );
+    let (_, t) = w.rail().trains().next().unwrap();
+    assert_eq!((t.pos, t.ahead), (2, 0));
+    run(&mut w, 3_000, 1_000);
+    assert_eq!(w.rail().train_count(), 1);
+}
+
+/// 先に押さえた線路を取り壊すと、その列車は消える。
+#[test]
+fn bulldozing_a_track_reserved_ahead_removes_the_train() {
+    let mut w = rich_world();
+    ok(&mut w, road((0, 10), (120, 10)));
+    let a = station(&mut w, (12, 8), 2);
+    let b = station(&mut w, (112, 8), 2);
+    // 途中にノードのない長い線路は 50 マスごとに区切るので、駅のあいだは 2 本になる。
+    ok(&mut w, rail((12, 8), (103, 8)));
+    let id = create(&mut w, a, b);
+    set_trains(&mut w, id, 1);
+    let mut found = false;
+    for _ in 0..3_000 {
+        w.step();
+        let (_, t) = w.rail().trains().next().unwrap();
+        if t.pos == 1 && t.ahead >= 1 && t.state == TrainState::Running {
+            found = true;
+            break;
+        }
+    }
+    assert!(found);
+    ok(
+        &mut w,
+        Command::Bulldoze {
+            area: TileRect::from_corners(at(80, 8), at(80, 8)),
+        },
+    );
+    assert_eq!(w.rail().train_count(), 0);
+    for _ in 0..200 {
+        w.step();
+        check_blocks(&w);
+    }
+}
+
+/// 駅 a、b を結ぶ線路の、b の端から `gap` マス手前に、使われない短い枝を付けた往復の路線を回し、
+/// 行き詰まりの輪を見つけた回数を返す。
+fn spur_near_terminal(gap: i64, trains: u8) -> u64 {
+    let mut w = rich_world();
+    ok(&mut w, road((0, 10), (70, 10)));
+    let a = station(&mut w, (12, 8), 2);
+    let b = station(&mut w, (62, 8), 2);
+    ok(&mut w, rail((12, 8), (53, 8)));
+    let j = 53 - gap;
+    ok(&mut w, rail((j, 8), (j - 5, 3)));
+    let id = create(&mut w, a, b);
+    set_trains(&mut w, id, trains);
+    for _ in 0..10_000 {
+        w.step();
+        check_blocks(&w);
+    }
+    w.rail().tally().deadlock
+}
+
+/// 分岐のすぐ先に列車が入りきらない短い線路があっても、列車はそこで待たないので行き詰まらない。
+#[test]
+fn a_short_track_right_after_a_junction_does_not_deadlock() {
+    for gap in [1, 3, 5, 8, 9, 20] {
+        for trains in [2, 3, 16] {
+            assert_eq!(
+                spur_near_terminal(gap, trains),
+                0,
+                "gap {gap} trains {trains}"
+            );
+        }
+    }
+}
+
+/// 駅 W、M、E を y = 8 に、駅 N を y = −2 に置き、W–M、M–E を結び、M と E のあいだの (45, 8) から
+/// N へ分かれる街。
+fn two_line_world() -> (World, [StationId; 4]) {
+    let mut w = rich_world();
+    ok(&mut w, road((0, 10), (90, 10)));
+    ok(&mut w, road((58, 0), (80, 0)));
+    let west = station(&mut w, (12, 8), 2);
+    let mid = station(&mut w, (32, 8), 2);
+    let east = station(&mut w, (79, 8), 2);
+    let north = station(&mut w, (71, -2), 2);
+    ok(&mut w, rail((12, 8), (23, 8)));
+    ok(&mut w, rail((32, 8), (70, 8)));
+    ok(&mut w, rail((45, 8), (55, -2)));
+    ok(&mut w, rail((55, -2), (62, -2)));
+    (w, [west, mid, east, north])
+}
+
+fn line_through(w: &mut World, stations: &[StationId]) -> LineId {
+    let id = create(w, stations[0], stations[1]);
+    for s in &stations[2..] {
+        ok(
+            w,
+            Command::ExtendLine {
+                line: id,
+                station: *s,
+            },
+        );
+    }
+    id
+}
+
+/// 途中の駅 M と端の駅 W を 2 つの路線が共有しても、共有する区間を抜けて自分の路線だけの待てる所まで
+/// まとめて押さえるので、路線をまたぐ輪ができない。形 A は W–M–E と N–M–W、形 B は W–M–E と W–M–N である。
+#[test]
+fn lines_sharing_a_middle_station_and_a_terminal_do_not_deadlock() {
+    for form_b in [false, true] {
+        let (mut w, [west, mid, east, north]) = two_line_world();
+        let one = line_through(&mut w, &[west, mid, east]);
+        let two = if form_b {
+            line_through(&mut w, &[west, mid, north])
+        } else {
+            line_through(&mut w, &[north, mid, west])
+        };
+        set_trains(&mut w, one, 6);
+        set_trains(&mut w, two, 6);
+        let most = run(&mut w, 20_000, 3_000);
+        let rail = w.rail();
+        let allowed = rail.line(one).unwrap().allowed() + rail.line(two).unwrap().allowed();
+        assert!(allowed >= 2, "form_b {form_b}");
+        assert_eq!(most, usize::from(allowed), "form_b {form_b}");
+    }
+}
+
+/// 路線が止まると、その路線の列車は消えて閉塞を返す。同じ駅を使うほかの路線は走り続ける。
+#[test]
+fn a_stopped_line_lets_go_of_a_shared_station() {
+    let (mut w, [west, mid, east, north]) = two_line_world();
+    let one = line_through(&mut w, &[west, mid, east]);
+    let two = line_through(&mut w, &[west, mid, north]);
+    set_trains(&mut w, one, 2);
+    set_trains(&mut w, two, 2);
+    run(&mut w, 2_000, 3_000);
+    assert!(w.rail().trains().any(|(_, t)| t.line == two));
+    // N へ向かう線路を取り壊すと、W–M–N の路線は進路を選べずに止まる。
+    ok(
+        &mut w,
+        Command::Bulldoze {
+            area: TileRect::from_corners(at(58, -2), at(58, -2)),
+        },
+    );
+    assert!(w.rail().line(two).unwrap().stopped);
+    assert!(!w.rail().line(one).unwrap().stopped);
+    assert!(w.rail().trains().all(|(_, t)| t.line == one));
+    let most = run(&mut w, 10_000, 3_000);
+    assert!(w.rail().trains().all(|(_, t)| t.line == one));
+    assert_eq!(most, usize::from(w.rail().line(one).unwrap().allowed()));
 }

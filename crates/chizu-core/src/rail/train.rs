@@ -16,11 +16,13 @@
 //! 5. 押さえられずに止まった列車が互いを待つ輪を見つけたら、輪の中で ID のいちばん大きい列車を消す。
 //!
 //! 行き詰まりは次の 3 つの決まりで防ぐ。
-//! 1. 本数の上限（[`RailLine::cap`]）。
+//! 1. 本数の上限（[`RailLine::cap`]）。待てる所（[`Step::wait`]）の数 − 1 までにする。
 //! 2. 終点の駅には、両方のホーム（着く側と、折り返して出る側）をまとめて押さえられるときだけ入る。
-//!    折り返したあとは着いた側のホームを返す。終点の両方のホームは、列車 1 本ぶんの閉塞として使われる。
-//! 3. ほかの路線と閉塞を共有する区間（[`Step::shared`]）では、次に止まる駅のホーム（終点なら両方のホーム）までを
-//!    まとめて押さえてから駅を出る。
+//!    終点は待てる所にしないので、3 の押さえ方で、折り返した先まで続けて押さえる。
+//! 3. 列車は、待てる所から次の待てる所までをまとめて押さえて進む。待てる所は、列車がまるごと入り、
+//!    ほかの路線が使わない要素である。分岐のすぐ先の短い線路や、ほかの路線と共有する駅と線路では待たずに、
+//!    抜けた先の自分の路線だけの待てる所まで押さえてから入る。途中の駅に止まるのと間を空けて待つのは
+//!    時間で終わるので、待てる所の外で押さえたまま待つ列車は、いずれ進んで閉塞を返す。
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -169,6 +171,21 @@ impl RailLine {
         d
     }
 
+    /// 先頭が `pos` の要素にいる列車が、`k` 個先の要素から押さえ始めるときに、まとめて押さえる終わりの
+    /// 要素が先頭から何個先か。`k` 個先から先で最初の待てる所までである（決まりの 3）。
+    /// 待てる所がないか 1 周しても届かなければ、1 周の手前までにする。上限が 0 の路線の列車は消すので、
+    /// ふだんは起きない。
+    pub(crate) fn run_ahead(&self, pos: u32, k: u32) -> u32 {
+        let last = self.len() - 1;
+        if k > last {
+            return last;
+        }
+        self.next_wait((pos + k) % self.len())
+            .map(|j| self.distance(pos, j))
+            .filter(|d| *d >= k)
+            .unwrap_or(last)
+    }
+
     /// 走っている列車が次に止まる要素。先頭が要素の先の端にいるなら、その要素は通り過ぎたものとする。
     fn upcoming_stop(&self, t: &Train) -> u32 {
         let from = if t.offset < self.step(t.pos).len {
@@ -204,6 +221,17 @@ impl Rail {
         let mut i = line.tail(t.pos, t.offset);
         let mut out = vec![i];
         while i != t.pos {
+            i = line.next(i);
+            out.push(i);
+        }
+        out
+    }
+
+    /// 列車が押さえている要素の番号。体がかかる要素と、先に押さえた要素である。
+    pub(crate) fn reserved_steps(&self, line: &RailLine, t: &Train) -> Vec<u32> {
+        let mut out = self.body_steps(line, t);
+        let mut i = t.pos;
+        for _ in 0..t.ahead {
             i = line.next(i);
             out.push(i);
         }
@@ -266,7 +294,9 @@ impl Rail {
     }
 
     /// 路線の進路が替わったか、線路が分かれたあとに、路線の列車を進路の上の同じ線路と向きの要素へ置き直す。
-    /// 置ける要素がなければ列車を消す。進路が替わったときは、先に押さえた要素を返す。
+    /// 置ける要素がなければ列車を消す。先に押さえた要素は、新しい進路では別の要素を指すので、どの列車も返す。
+    /// 新しい進路で続けられない状態は直す。駅でない所で止まっている列車は走る状態に戻し、折り返している
+    /// 列車は、折り返す先のホームを押さえ直してから折り返すよう、止まって待つ状態に戻す。
     pub(crate) fn relocate_trains(&mut self, line_id: LineId) {
         let Some(line) = self.lines.get(line_id) else {
             return;
@@ -284,10 +314,11 @@ impl Rail {
                 let s = line.step(i);
                 s.track == t.track && s.dir == t.dir
             };
-            if (t.pos as usize) < line.path.len() && at(t.pos) {
-                continue;
-            }
-            let Some(i) = (0..line.len()).find(|i| at(*i)) else {
+            let i = if (t.pos as usize) < line.path.len() && at(t.pos) {
+                t.pos
+            } else if let Some(i) = (0..line.len()).find(|i| at(*i)) {
+                i
+            } else {
                 gone.push(id);
                 continue;
             };
@@ -295,16 +326,19 @@ impl Rail {
             t.pos = i;
             t.ahead = 0;
             t.offset = t.offset.min(s.len);
-            let keeps = match t.state {
-                TrainState::Running => true,
-                TrainState::Dwell { .. } => s.is_stop() && t.offset == s.len,
-                TrainState::Turnback { .. } => s.kind == StepKind::Terminal && t.offset == s.len,
-                TrainState::Ready => s.depart && t.offset == s.len,
+            let end = t.offset == s.len;
+            t.state = match t.state {
+                TrainState::Dwell { left } if s.is_stop() && end => TrainState::Dwell { left },
+                TrainState::Turnback { .. } if s.kind == StepKind::Terminal && end => {
+                    TrainState::Dwell { left: 0 }
+                }
+                TrainState::Ready if s.depart && end => TrainState::Ready,
+                TrainState::Running => TrainState::Running,
+                _ => {
+                    t.speed = 0;
+                    TrainState::Running
+                }
             };
-            if !keeps {
-                t.state = TrainState::Running;
-                t.speed = 0;
-            }
         }
         for id in gone {
             self.trains.remove(id);
@@ -333,12 +367,19 @@ impl Rail {
         for (_, t) in self.trains.iter() {
             *counts.entry(t.line).or_default() += 1;
         }
-        let Rail { lines, trains, .. } = self;
+        let Rail {
+            lines,
+            trains,
+            tracks: self_tracks,
+            ..
+        } = self;
         for (id, line) in lines.iter() {
             if line.stopped || counts.get(&id).copied().unwrap_or(0) >= line.allowed() {
                 continue;
             }
             let first: &Step = line.step(0);
+            // 最初の駅が待てる所でなければ、次の待てる所までをまとめて押さえて現れる（決まりの 3）。
+            let ahead = if first.wait { 0 } else { line.run_ahead(0, 1) };
             let t = Train {
                 line: id,
                 pos: 0,
@@ -346,12 +387,13 @@ impl Rail {
                 dir: first.dir,
                 offset: first.len,
                 speed: 0,
-                ahead: 0,
+                ahead,
                 state: TrainState::Ready,
                 waited: 0,
             };
             let blocks = line.held_blocks(&t);
-            if blocks.iter().all(|b| !held.contains_key(b)) {
+            let tracks_ok = (0..=ahead).all(|k| self_tracks.get(line.step(k).track).is_some());
+            if tracks_ok && blocks.iter().all(|b| !held.contains_key(b)) {
                 let tid = trains.insert(t);
                 for b in blocks {
                     held.insert(b, tid);
@@ -460,18 +502,13 @@ impl Rail {
                     if line.stopped || !gap_ok {
                         None
                     } else {
-                        let s = line.next_stop(line.next(t.pos));
-                        let ds = line.distance(t.pos, s);
-                        let terminal = line.step(s).kind == StepKind::Terminal;
-                        let end = if line.step(t.pos).shared {
-                            // 決まりの 3：次に止まる駅のホームまで（終点なら両方のホーム）をまとめて押さえる。
-                            ds + u32::from(terminal)
-                        } else if ds == 1 && terminal {
-                            2
+                        // 決まりの 3：次の待てる所までをまとめて押さえて出る。待てる所でない駅には、
+                        // 先まで押さえて着いているので、押さえ足さない。
+                        let r = if t.ahead == 0 {
+                            grant(t, 1, line.run_ahead(t.pos, 1))
                         } else {
-                            1
+                            Reserve::Done
                         };
-                        let r = grant(t, t.ahead + 1, end);
                         if r == Reserve::Done {
                             t.state = TrainState::Running;
                             departed.push((t.line, t.pos));
@@ -482,7 +519,7 @@ impl Rail {
                 TrainState::Dwell { .. } | TrainState::Turnback { .. } => {
                     // 決まりの 2 の両方のホームを押さえ直す（線路が変わって先に押さえた要素を返したとき）。
                     if line.step(t.pos).kind == StepKind::Terminal && t.ahead < 1 {
-                        Some(grant(t, 1, 1))
+                        Some(grant(t, 1, line.run_ahead(t.pos, 1)))
                     } else {
                         None
                     }
@@ -490,14 +527,11 @@ impl Rail {
                 TrainState::Running => {
                     let s = line.upcoming_stop(t);
                     let ds = line.distance(t.pos, s);
-                    let terminal = line.step(s).kind == StepKind::Terminal;
                     let mut r = None;
                     loop {
+                        // 次に止まる駅より先は、駅を出るまで押さえない。待てる所でない駅や終点には、
+                        // その先の待てる所までまとめて押さえて入るので、ここで押さえ終えている。
                         if t.ahead >= ds {
-                            // 決まりの 2：終点に入るなら、両方のホームを押さえてある。
-                            if terminal && t.ahead < ds + 1 {
-                                r = Some(grant(t, t.ahead + 1, ds + 1));
-                            }
                             break;
                         }
                         let room = line.distance_to_end(t, t.ahead);
@@ -507,8 +541,7 @@ impl Rail {
                             break;
                         }
                         let next = t.ahead + 1;
-                        let end = if next == ds && terminal { ds + 1 } else { next };
-                        let got = grant(t, next, end);
+                        let got = grant(t, next, line.run_ahead(t.pos, next));
                         r = Some(got);
                         if got != Reserve::Done {
                             break;

@@ -127,8 +127,9 @@ pub fn movers(each: u32, ticks: u64, now: &dyn Fn() -> u64) -> TickStats {
     }
 }
 
-/// 列車 512 本（[`RAIL_BENCH_LINES`] 本の路線に [`crate::RAIL_BENCH_TRAINS`] 本ずつ）を `ticks` tick 動かす。1 tick は、
-/// 列車の動き、閉塞の出入り、駅の止まりと折り返し、行き詰まりの輪の検査である。列車が出そろうまでは測らない。
+/// 列車 512 本（分岐と共有する区間のある [`RAIL_BENCH_LINES`] 本の路線に [`crate::RAIL_BENCH_TRAINS`] 本ずつ）を
+/// `ticks` tick 動かす。1 tick は、列車の動き、閉塞の出入り、駅の止まりと折り返し、共有する区間をまとめて押さえる決まり、
+/// 行き詰まりの輪の検査である。列車が出そろってふだんの走り方になるまでは測らない。
 /// `left` は回し終えたときの列車の数である。
 pub fn rail_trains(ticks: u64, now: &dyn Fn() -> u64) -> TickStats {
     let mut rail = rail_trains_running(SEED, RAIL_BENCH_LINES);

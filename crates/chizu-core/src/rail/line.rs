@@ -70,10 +70,11 @@ pub struct Step {
     pub slow: bool,
     /// 列車が駅を出る要素か。途中の駅（`Stop`）と、折り返して入る要素である。
     pub depart: bool,
-    /// 出る要素から次に止まる駅のホームまでに、ほかの路線と共有する閉塞があるか。`depart` のときだけ意味がある。
-    /// 共有するなら、次の駅のホームまでをまとめて押さえてから出る（行き詰まりを防ぐ決まりの 3）。
+    /// 列車が先頭をこの要素の先の端に置いて待てるか（待てる所）。列車が押さえる長さ（[`TRAIN_BLOCK_LEN_MM`]）
+    /// 以上の長さがあり、この線路のこの向きをほかの路線が使わず、終点（折り返す前の要素）でない要素である。
+    /// 列車は、待てる所から次の待てる所までをまとめて押さえて進む（行き詰まりを防ぐ決まりの 3）。
     /// ほかの路線の進路が変わると変わるので、路線を作る、変える、なくすたびに、すべての路線で決め直す。
-    pub shared: bool,
+    pub wait: bool,
 }
 
 impl Step {
@@ -108,40 +109,20 @@ pub struct RailLine {
 }
 
 impl RailLine {
-    /// 行き詰まりを防ぐ本数の上限（決まりの 1）。16 と「輪の中の閉塞の数 − 1」の小さいほうである。
+    /// 行き詰まりを防ぐ本数の上限（決まりの 1）。16 と「待てる所（[`Step::wait`]）の数 − 1」の小さいほうである。
     ///
-    /// 輪の中の閉塞は、列車がまるごと入って待てる閉塞（同じものは 1 つに数える）である。終点の両方のホームは、
-    /// まとめて押さえて入る（決まりの 2）ので 1 つに数える。次のものは数えない。
-    /// - 列車が押さえる長さ（[`TRAIN_BLOCK_LEN_MM`]）より短い線路。列車がまるごと入れない。
-    /// - ほかの路線と共有する区間（[`Step::shared`]）の途中の閉塞。駅のホームまでをまとめて押さえて走り抜けるので、
-    ///   列車はそこで待たない（決まりの 3）。
-    /// - 分岐のノード。列車は止まれない。
+    /// 列車は待てる所でだけ止まって先を待ち、待てる所はほかの路線が使わないので、路線をまたいで待ち合う輪は
+    /// できない。路線の中では、待てる所が列車より 1 つ多ければ、空いた待てる所の手前の列車がいつも進める。
+    /// 同じ線路の同じ向きが進路に 2 度出るときは 1 つに数える。終点の両方のホームは、折り返したあとの要素
+    /// だけが待てる所なので 1 つに数える。
     pub fn cap(&self) -> u8 {
-        let mut through = vec![false; self.path.len()];
-        for i in 0..self.len() {
-            let s = self.step(i);
-            if s.depart && s.shared {
-                let stop = self.next_stop(self.next(i));
-                let mut j = self.next(i);
-                while j != stop {
-                    through[j as usize] = true;
-                    j = self.next(j);
-                }
-            }
-        }
         let places: BTreeSet<(TrackId, Dir)> = self
             .path
             .iter()
-            .zip(&through)
-            .filter(|(s, through)| !**through && s.len >= TRAIN_BLOCK_LEN_MM)
-            .map(|(s, _)| (s.track, s.dir))
+            .filter(|s| s.wait)
+            .map(|s| (s.track, s.dir))
             .collect();
-        let terminals = self
-            .path
-            .iter()
-            .filter(|s| s.kind == StepKind::Terminal)
-            .count();
-        let room = places.len().saturating_sub(terminals).saturating_sub(1);
+        let room = places.len().saturating_sub(1);
         u8::try_from(room.min(usize::from(MAX_LINE_TRAINS))).expect("上限は 16 以下")
     }
 
@@ -201,6 +182,18 @@ impl RailLine {
 
     pub(crate) fn step(&self, i: u32) -> &Step {
         &self.path[i as usize]
+    }
+
+    /// `from` から先で最初の待てる所の要素。待てる所がなければ `None`。
+    pub(crate) fn next_wait(&self, from: u32) -> Option<u32> {
+        let mut i = from;
+        for _ in 0..self.len() {
+            if self.step(i).wait {
+                return Some(i);
+            }
+            i = self.next(i);
+        }
+        None
     }
 
     /// `from` から先で最初に止まる要素。
@@ -411,52 +404,40 @@ impl Rail {
                         junction,
                         slow: junction.is_some() || bend,
                         depart,
-                        shared: false,
+                        wait: false,
                     }
                 })
                 .collect(),
         )
     }
 
-    /// 出る要素ごとに、次に止まる駅のホームまでの閉塞をほかの路線と共有するかを決め直す。
-    fn mark_shared(&mut self) {
-        let mut users = BTreeMap::<Block, BTreeSet<LineId>>::new();
+    /// すべての路線の待てる所（[`Step::wait`]）を決め直し、止まった路線と、待てる所が足りずに上限が 0 になった
+    /// 路線の列車を消す。消えた列車の押さえていた閉塞は、それで返る。
+    fn mark_waits(&mut self) {
+        let mut users = BTreeMap::<(TrackId, Dir), BTreeSet<LineId>>::new();
         for (id, l) in self.lines.iter() {
             for s in &l.path {
-                for b in s.blocks() {
-                    users.entry(b).or_default().insert(id);
-                }
+                users.entry((s.track, s.dir)).or_default().insert(id);
             }
         }
         let ids: Vec<LineId> = self.lines.iter().map(|(id, _)| id).collect();
         for id in ids {
-            let line = self.lines.get(id).expect("路線がない");
-            let flags: Vec<bool> = (0..line.len())
-                .map(|i| {
-                    if !line.step(i).depart {
-                        return false;
-                    }
-                    let stop = line.next_stop(line.next(i));
-                    let mut j = i;
-                    loop {
-                        j = line.next(j);
-                        if line
-                            .step(j)
-                            .blocks()
-                            .any(|b| users.get(&b).is_some_and(|u| u.len() > 1))
-                        {
-                            return true;
-                        }
-                        if j == stop {
-                            return false;
-                        }
-                    }
-                })
-                .collect();
             let line = self.lines.get_mut(id).expect("路線がない");
-            for (s, f) in line.path.iter_mut().zip(flags) {
-                s.shared = f;
+            for s in &mut line.path {
+                s.wait = s.kind != StepKind::Terminal
+                    && s.len >= TRAIN_BLOCK_LEN_MM
+                    && users.get(&(s.track, s.dir)).is_some_and(|u| u.len() == 1);
             }
+        }
+        let lines = &self.lines;
+        let gone: Vec<_> = self
+            .trains
+            .iter()
+            .filter(|(_, t)| lines.get(t.line).is_none_or(|l| l.stopped || l.cap() == 0))
+            .map(|(id, _)| id)
+            .collect();
+        for id in gone {
+            self.trains.remove(id);
         }
     }
 
@@ -485,7 +466,7 @@ impl Rail {
             stopped: false,
             departed: BTreeMap::new(),
         });
-        self.mark_shared();
+        self.mark_waits();
         Ok(id)
     }
 
@@ -513,7 +494,7 @@ impl Rail {
         line.stations = stations;
         line.looped = closes;
         self.replace_path(id, path);
-        self.mark_shared();
+        self.mark_waits();
         Ok(())
     }
 
@@ -521,7 +502,7 @@ impl Rail {
     pub(crate) fn remove_line(&mut self, id: LineId) -> Result<(), DenyReason> {
         self.lines.remove(id).ok_or(DenyReason::NoSuchLine)?;
         self.remove_trains_where(|t| t.line == id);
-        self.mark_shared();
+        self.mark_waits();
         Ok(())
     }
 
@@ -536,7 +517,14 @@ impl Rail {
     fn replace_path(&mut self, id: LineId, path: Vec<Step>) {
         let line = self.lines.get_mut(id).expect("路線がない");
         line.stopped = false;
-        if line.path == path {
+        // 待てる所の印は、進路を選び直したあとに決め直すので、比べない。
+        let same = line.path.len() == path.len()
+            && line
+                .path
+                .iter()
+                .zip(&path)
+                .all(|(a, b)| Step { wait: b.wait, ..*a } == *b);
+        if same {
             return;
         }
         line.path = path;
@@ -545,17 +533,18 @@ impl Rail {
     }
 
     /// 線路を引くか取り壊したあとに、路線の駅と進路を選び直す。消えた駅は路線から外し、駅が 2 つ未満に
-    /// なった路線はなくす。進路を選べない路線は止まり、それまでの進路を残す。取り壊した線路 `removed` の上に
-    /// いた列車は消す。線路を分けただけなら、列車は分けた線路へ移してあるので消さない。
+    /// なった路線はなくす。進路を選べない路線は止まり、それまでの進路を残して、列車を消す。取り壊した線路
+    /// `removed` に体がかかるか、先に押さえていた列車は消す。線路を分けただけなら、列車は分けた線路へ移してあるので消さない。
     pub(crate) fn refresh_lines(&mut self, removed: &BTreeSet<TrackId>) {
-        // 取り壊した線路の上にいる列車は、進路を選び直す前の進路で体の位置を求めて消す。
+        // 取り壊した線路に体がかかるか、取り壊した線路を先に押さえた列車は、進路を選び直す前の進路で
+        // 押さえた要素を求めて消す。
         let gone: Vec<_> = self
             .trains
             .iter()
             .filter(|(_, t)| {
                 removed.contains(&t.track)
                     || self.lines.get(t.line).is_none_or(|l| {
-                        self.body_steps(l, t)
+                        self.reserved_steps(l, t)
                             .into_iter()
                             .any(|i| removed.contains(&l.step(i).track))
                     })
@@ -587,13 +576,11 @@ impl Rail {
             line.looped = looped;
             match plan {
                 Some(path) => self.replace_path(id, path),
-                None => {
-                    line.stopped = true;
-                    self.relocate_trains(id);
-                }
+                // 止まった路線の列車は、mark_waits で消える。
+                None => line.stopped = true,
             }
         }
-        self.mark_shared();
+        self.mark_waits();
     }
 }
 
@@ -607,7 +594,7 @@ impl StateHash for Step {
         h.write(&self.junction);
         h.write(&self.slow);
         h.write(&self.depart);
-        h.write(&self.shared);
+        h.write(&self.wait);
     }
 }
 
