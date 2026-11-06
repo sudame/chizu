@@ -19,6 +19,9 @@ use crate::rail::choice::{RailPlanner, RideChoice};
 pub(super) struct PlannerSlot {
     #[serde(skip)]
     planner: Option<RailPlanner>,
+    /// 乗り換えの進路を表に入れない。乗り換えあり・なしを比べて測るときだけ使う。
+    #[serde(skip)]
+    no_transfers: bool,
 }
 
 impl PartialEq for PlannerSlot {
@@ -44,8 +47,19 @@ impl World {
             return;
         }
         if self.planner.planner.is_none() {
-            self.planner.planner = Some(RailPlanner::build(&self.rail, &self.network));
+            self.planner.planner = Some(RailPlanner::build_with(
+                &self.rail,
+                &self.network,
+                !self.planner.no_transfers,
+            ));
         }
+    }
+
+    /// 乗り換えの進路を駅の組の表に入れないようにする。乗り換えあり・なしを比べて測るときに使う。
+    #[cfg(test)]
+    pub(crate) fn disable_rail_transfers(&mut self) {
+        self.planner.no_transfers = true;
+        self.planner.forget();
     }
 
     /// 駅の組の表。路線がなければ `None`。
@@ -103,6 +117,7 @@ impl World {
                     .rail
                     .station(s)
                     .and_then(|st| facility_spot(&self.network, &st.site())),
+                ExitFrom::Site(site) => facility_spot(&self.network, &site),
                 ExitFrom::Nowhere => None,
             };
             match from {

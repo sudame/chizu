@@ -2443,6 +2443,8 @@ fn act_sets_the_fare() {
     assert_eq!(seen["rail"]["fare"], 5);
     assert_eq!(seen["rail"]["riders"]["waiting"], 0);
     assert_eq!(seen["rail"]["riders"]["boarded"], 0);
+    assert_eq!(seen["rail"]["riders"]["transfers"], 0);
+    assert_eq!(seen["rail"]["riders"]["transferWaiting"], 0);
     assert_eq!(seen["citizenPlaces"]["riding"], 0);
     assert_eq!(seen["financesPerDay"]["fares"], 0);
     let cmd = write(

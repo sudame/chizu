@@ -310,20 +310,26 @@ observe の rail（線路と駅）:
     鉄道は、駅まで歩く時間（直線 × 1.3 ÷ 秒速 1.389m）、待ち（運転間隔の半分。直前に乗りきれずに人が残った駅と向きでは
     運転間隔をもう 1 つ足す）、乗る時間、駅から歩く時間に、運賃 × 5 秒を足したもの。歩きは直線 × 1.3 ÷ 秒速 1.389m、
     車は直線 ÷ 秒速 2.8m。駅は出発と行き先の建物から 64 マス以内の、出入口のある駅を近い順に 3 つずつ試す。
-    走っている列車が 1 本以上あり、止まっていない路線だけを使う。乗り換えはまだしない。150m 未満の移動（車を
+    走っている列車が 1 本以上あり、止まっていない路線だけを使う。乗り換えは 1 回までで、乗り換える駅での待ち
+    （乗り換え先の路線の運転間隔の半分）と、乗り換えの手間 60 秒を足す。直接行ける路線より安いときだけ乗り換える。
+    乗り換える人は、最初の路線を降りた駅で乗り換え先の路線の列に並ぶ。乗り換え先の路線がなくなると、その駅から歩く。
+    150m 未満の移動（車を
     持つかによらない）と、家の枠でない駐車場に停めた車で出る移動（停めた車を取りに帰る移動を含む）は鉄道と比べない。列車の定員は 600 人で、駅に着いたときと駅を出るときに、
     待っている人を着いた順に乗せる。駅に止まる時間は、着いたときの乗り降りの人数 ÷ 20（切り上げ）tick と 20 tick の
     長いほうで、乗り降りが 400 人を超えると延びる。
     待ち行列の先頭で 600 tick より長く待った人は、歩いて行き先へ向かう。
-  stations の waiting 待っている人、boarded と alighted 始まりからの乗った数と降りた数。
+  stations の waiting 待っている人（乗り換えを待つ人も含む）、boarded と alighted 始まりからの乗った数と降りた数
+    （乗り換えも 1 回ずつ数える）、transfers 始まりからこの駅で乗り換えた数、transferWaiting この駅で乗り換えを待つ人。
   lines の measuredRoundTripTicks 測った時間を混ぜた 1 周の時間（tick）、boarded 始まりからの乗った数、waiting 待っている人、
+    transfersIn 始まりから乗り換えてこの路線の列に並んだ数、
     leftBehindStops 直前に出た列車に乗りきれず人が残った（駅、向き）の数、loadPermille いちばん混んだ列車の乗車率（‰）。
   trains の riders 乗っている人。
   fare 運賃（1 回の乗車の額。乗り換えても 1 回分。SetFare で決める。始めは 5）。運賃は乗ったときに所持金に入り、
     世帯の蓄えからは引かない。financesPerDay.fares は前の日の運賃の収入。
   riders 乗る人の数。waiting 駅で待っている人、aboard 列車に乗っている人、boarded と alighted 始まりからの乗った数と
     降りた数、gaveUp 待ちきれず歩いた人、evicted 路線、駅、列車がなくなって途中で歩きに戻った人、fares 始まりからの
-    運賃の収入、avgWaitTicks 乗った人が駅で待った平均の tick（乗った人がいなければ null）。
+    運賃の収入、avgWaitTicks 乗った人が駅で待った平均の tick（乗った人がいなければ null）、transfers 始まりからの
+    乗り換えた数、transferWaiting 乗り換える駅で待っている人。
   crossings 踏切。count 数、list 踏切ごとの at マス、closed いま閉じているか、closedTicks 閉じてからの tick
   （開いていれば null）。踏切は、走っている列車が押さえた範囲の中で踏切を抜けきれ、16 tick 以内に着く見込みのときと、
   列車の体がかかっているあいだだけ閉じる。駅に止まっている列車では閉じない。車は閉じた踏切の手前で止まり、開いていても
@@ -2142,6 +2148,13 @@ fn rail(world: &World) -> Value {
     for ((s, _, _), q) in rail.queues() {
         *waiting_at.entry(*s).or_default() += q.len();
     }
+    // 乗り換える駅で待っている人。
+    let mut transfer_waiting_at = std::collections::BTreeMap::<chizu_core::StationId, usize>::new();
+    for (_, r) in rail.riders() {
+        if r.leg > 0 && r.train.is_none() {
+            *transfer_waiting_at.entry(r.plan.alight).or_default() += 1;
+        }
+    }
     let stations: Vec<Value> = rail
         .stations()
         .map(|(id, s)| {
@@ -2159,6 +2172,8 @@ fn rail(world: &World) -> Value {
                 "waiting": waiting_at.get(&id).copied().unwrap_or(0),
                 "boarded": boarded,
                 "alighted": alighted,
+                "transfers": rides.station_transfers.get(&id).copied().unwrap_or(0),
+                "transferWaiting": transfer_waiting_at.get(&id).copied().unwrap_or(0),
             })
         })
         .collect();
@@ -2195,6 +2210,8 @@ fn rail(world: &World) -> Value {
             "fares": rides.fares,
             "avgWaitTicks": (rides.boarded > 0)
                 .then(|| (rides.wait_ticks as f64 / rides.boarded as f64 * 10.0).round() / 10.0),
+            "transfers": rides.transfers,
+            "transferWaiting": transfer_waiting_at.values().sum::<usize>(),
         },
     })
 }
@@ -2273,6 +2290,7 @@ fn lines(world: &World) -> Value {
                 "measuredRoundTripTicks": l.measured_round_trip_ticks(),
                 "stopped": l.stopped,
                 "boarded": rides.line_boarded.get(&id).copied().unwrap_or(0),
+                "transfersIn": rides.line_transfers.get(&id).copied().unwrap_or(0),
                 "waiting": waiting,
                 "leftBehindStops": left_behind,
                 "loadPermille": fullest * 1000 / chizu_core::rail::TRAIN_CAPACITY,
@@ -2556,6 +2574,7 @@ const WATCHED: &[&str] = &[
     "/rail/riders/gaveUp",
     "/rail/riders/evicted",
     "/rail/riders/fares",
+    "/rail/riders/transfers",
 ];
 
 /// 前の observe と比べる数を、`/money` を `money`、`/demand/Office` を `demand.Office` と読み替えた名前で集める。

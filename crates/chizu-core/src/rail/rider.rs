@@ -6,6 +6,8 @@
 //! - 待ち行列は（駅、路線、向き）ごとに、着いた順の並びで持つ。
 //! - 列車が駅に着いたら、降りる駅がここの人を降ろし、待ち行列の先頭から定員まで乗せる。駅を出るときも、
 //!   着いたあとに並んだ人を定員まで乗せる。
+//! - 乗り換える人は、最初の路線を降りた駅で、乗り換え先の路線の待ち行列に入る。乗り換えたときに乗り換え先の
+//!   路線で行けなくなっていれば、その駅から歩く。
 //! - 降りた人と、待ちきれない人と、路線や駅や列車がなくなって乗れなくなった人は、[`Exit`] として呼ぶ側
 //!   （[`World`](crate::world::World)）に渡し、駅の出入口から行き先へ歩く移動に戻してもらう。
 //!
@@ -21,6 +23,7 @@ use super::train::{DWELL_TICKS, Train};
 use super::{LineId, Rail, RiderId, StationId, TrainId};
 use crate::id::TripId;
 use crate::movement::SidewalkPos;
+use crate::service::Facility;
 use crate::state_hash::{StateHash, StateHasher};
 use crate::units::{Money, Tick};
 
@@ -43,7 +46,7 @@ pub const MAX_FARE: u16 = 20;
 /// 駅の近くどうしなら 500m 前後から鉄道が車に勝つ重さにした（設計 3.10 の「作る順の 6 で決めた細部」）。
 pub const FARE_SECONDS: u64 = 5;
 
-/// 乗り換え（作る順の 7 で使う）。
+/// 乗り換え。最初の路線を [`RidePlan::alight`] で降り、路線 `line` に向き `dir` で乗り換えて、駅 `alight` で降りる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Transfer {
     pub line: LineId,
@@ -52,13 +55,14 @@ pub struct Transfer {
 }
 
 /// 鉄道で向かう移動の計画。駅 `board` から路線 `line` に向き `dir` で乗り、駅 `alight` で降りて、`to` まで歩く。
+/// 乗り換えるときは、`alight` で `transfer` の路線に乗り換え、`transfer` の `alight` で降りて歩く。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RidePlan {
     pub board: StationId,
     pub line: LineId,
     pub dir: u8,
     pub alight: StationId,
-    /// 乗り換え。作る順の 6 ではいつも `None` である。
+    /// 乗り換え。乗り換えは 1 回までである。
     pub transfer: Option<Transfer>,
     /// 最後に歩いて向かう行き先の出入口。
     pub to: SidewalkPos,
@@ -74,12 +78,43 @@ pub struct Rider {
     pub plan: RidePlan,
     /// 何回目の乗車か（0 から数える）。
     pub leg: u8,
-    /// 待っている駅の出入口。乗れなくなったときは、ここから歩く。
+    /// 最初に待った駅の出入口。1 回目の乗車を待つあいだに乗れなくなったときは、ここから歩く。乗り換える駅で
+    /// 待つ人は、その駅の出入口から歩く（[`Rider::waiting_exit`]）。
     pub door: SidewalkPos,
     /// 待ち行列に入った tick。
     pub since: u64,
     /// 乗っている列車。待っているあいだは `None`。
     pub train: Option<TrainId>,
+}
+
+impl Rider {
+    /// いまの乗車の（乗る駅、路線、向き、降りる駅）。2 回目の乗車は、乗り換える駅から乗り換え先の路線に乗る。
+    pub fn leg_route(&self) -> (StationId, LineId, u8, StationId) {
+        match (self.leg, self.plan.transfer) {
+            (0, _) | (_, None) => (
+                self.plan.board,
+                self.plan.line,
+                self.plan.dir,
+                self.plan.alight,
+            ),
+            (_, Some(t)) => (self.plan.alight, t.line, t.dir, t.alight),
+        }
+    }
+
+    /// いま並ぶか並んでいる待ち行列。
+    pub fn queue_key(&self) -> QueueKey {
+        let (s, l, d, _) = self.leg_route();
+        (s, l, d)
+    }
+
+    /// 待っているあいだに乗れなくなったときに、どこから歩くか。乗り換える駅で待つ人は、その駅から歩く。
+    pub fn waiting_exit(&self) -> ExitFrom {
+        if self.leg == 0 {
+            ExitFrom::Door(self.door)
+        } else {
+            ExitFrom::Station(self.plan.alight)
+        }
+    }
 }
 
 /// 歩きに戻る人が、どこから歩くか。
@@ -89,6 +124,8 @@ pub enum ExitFrom {
     Door(SidewalkPos),
     /// この駅の出入口から歩く。
     Station(StationId),
+    /// この敷地の駅の出入口から歩く。取り壊した駅で乗り換えを待っていた人に使う。
+    Site(Facility),
     /// 歩き出せる駅がない。行き先に着いたことにする（3.6 の救済と同じ）。
     Nowhere,
 }
@@ -125,6 +162,12 @@ pub struct RideTally {
     pub wait_ticks: u64,
     /// 日ごとの運賃の収入。（日、その日、前の日）。
     pub fare_days: (u64, i64, i64),
+    /// 乗り換えた回数。最初の路線を降りて、乗り換え先の路線の待ち行列に入った数である。
+    pub transfers: u64,
+    /// 駅ごとの、その駅で乗り換えた回数。
+    pub station_transfers: BTreeMap<StationId, u64>,
+    /// 路線ごとの、乗り換えてその路線の待ち行列に入った回数。
+    pub line_transfers: BTreeMap<LineId, u64>,
 }
 
 impl RideTally {
@@ -295,8 +338,23 @@ impl Rail {
         Money(std::mem::take(&mut self.fare_due))
     }
 
+    /// 駅 `from` から路線 `line` に向き `dir` で乗り、駅 `to` で降りられるか。駅と路線があり、路線が止まっておらず、
+    /// 同じ向きで 2 つの駅を結ぶときである。
+    fn can_ride(&self, from: StationId, line: LineId, dir: u8, to: StationId) -> bool {
+        self.stations.get(from).is_some()
+            && self
+                .lines
+                .get(line)
+                .is_some_and(|l| !l.stopped && l.direct(from, to, dir).is_some())
+    }
+
+    /// 乗り換え `t` を、駅 `at` で乗り換えて使えるか。
+    fn can_transfer(&self, at: StationId, t: &Transfer) -> bool {
+        self.can_ride(at, t.line, t.dir, t.alight)
+    }
+
     /// 駅まで歩き終えた人を、駅の待ち行列に入れる。乗れない計画（駅、路線がない、止まった路線、向きの合わない駅）
-    /// なら、その場で歩きに戻す。
+    /// なら、その場で歩きに戻す。乗り換える計画は、乗り換え先の路線にも乗れなければ歩きに戻す。
     pub(crate) fn add_rider(
         &mut self,
         trip: TripId,
@@ -316,10 +374,10 @@ impl Rail {
         };
         let id = self.riders.insert(rider);
         self.by_trip.insert(trip, id);
-        let ok = self.stations.get(plan.board).is_some()
-            && self.lines.get(plan.line).is_some_and(|l| {
-                !l.stopped && l.direct(plan.board, plan.alight, plan.dir).is_some()
-            });
+        let ok = self.can_ride(plan.board, plan.line, plan.dir, plan.alight)
+            && plan
+                .transfer
+                .is_none_or(|t| self.can_transfer(plan.alight, &t));
         if ok {
             self.queues
                 .entry((plan.board, plan.line, plan.dir))
@@ -349,7 +407,7 @@ impl Rail {
                 }
             }
             None => {
-                let key = (r.plan.board, r.plan.line, r.plan.dir);
+                let key = r.queue_key();
                 if let Some(q) = self.queues.get_mut(&key) {
                     q.retain(|x| *x != id);
                     if q.is_empty() {
@@ -503,12 +561,16 @@ impl Rail {
         let aboard = self.aboard.remove(&id).unwrap_or_default();
         let (out, stay): (Vec<RiderId>, Vec<RiderId>) = aboard
             .into_iter()
-            .partition(|r| terminal || self.riders.get(*r).is_some_and(|x| x.plan.alight == s));
+            .partition(|r| terminal || self.riders.get(*r).is_some_and(|x| x.leg_route().3 == s));
         let alighted = out.len();
         for r in out {
             self.ride_tally.alighted += 1;
             self.ride_tally.station_counts.entry(s).or_default().1 += 1;
-            self.evict(r, ExitFrom::Station(s), true);
+            let x = *self.riders.get(r).expect("乗る人がいない");
+            match x.plan.transfer {
+                Some(t) if x.leg == 0 && x.plan.alight == s => self.transfer(r, s, &t, now),
+                _ => self.evict(r, ExitFrom::Station(s), true),
+            }
         }
         if !stay.is_empty() {
             self.aboard.insert(id, stay);
@@ -520,6 +582,47 @@ impl Rail {
         };
         let busy = (alighted + boarded).div_ceil(BOARDINGS_PER_TICK);
         DWELL_TICKS.max(u16::try_from(busy).unwrap_or(u16::MAX))
+    }
+
+    /// 乗る人 `id` を、駅 `at` で乗り換え `t` の路線の待ち行列に入れる。乗り換え先の路線で行けなくなっていれば、
+    /// その駅から歩く。
+    fn transfer(&mut self, id: RiderId, at: StationId, t: &Transfer, now: u64) {
+        if !self.can_transfer(at, t) {
+            self.ride_tally.evicted += 1;
+            self.evict(id, ExitFrom::Station(at), true);
+            return;
+        }
+        let r = self.riders.get_mut(id).expect("乗る人がいない");
+        r.leg = 1;
+        r.train = None;
+        r.since = now;
+        self.queues
+            .entry((at, t.line, t.dir))
+            .or_default()
+            .push_back(id);
+        let tally = &mut self.ride_tally;
+        tally.transfers += 1;
+        *tally.station_transfers.entry(at).or_default() += 1;
+        *tally.line_transfers.entry(t.line).or_default() += 1;
+    }
+
+    /// 取り壊す駅 `id`（敷地 `site`）で乗り換えを待っている人を、駅を消す前に、その敷地の出入口から歩かせる。
+    /// 駅を消したあとでは、乗り換える駅の出入口を求められないためである。
+    pub(crate) fn evict_transfer_waiters(&mut self, id: StationId, site: Facility) {
+        let keys: Vec<QueueKey> = self.queues.keys().filter(|k| k.0 == id).copied().collect();
+        for key in keys {
+            let q = self.queues.remove(&key).unwrap_or_default();
+            let (gone, keep): (VecDeque<RiderId>, VecDeque<RiderId>) = q
+                .into_iter()
+                .partition(|r| self.riders.get(*r).is_some_and(|x| x.leg > 0));
+            for r in gone {
+                self.ride_tally.evicted += 1;
+                self.evict(r, ExitFrom::Site(site), false);
+            }
+            if !keep.is_empty() {
+                self.queues.insert(key, keep);
+            }
+        }
     }
 
     /// 列車 `id` が駅を出るときに、着いたあとに並んだ人を定員まで乗せる。乗りきれずに人が残ったかを覚える。
@@ -552,17 +655,19 @@ impl Rail {
                     break;
                 }
                 q.pop_front();
-                let door = r.door;
+                let from = r.waiting_exit();
                 self.ride_tally.gave_up += 1;
-                self.evict(head, ExitFrom::Door(door), false);
+                self.evict(head, from, false);
             }
         }
     }
 
     /// 路線か線路が変わったあとに、乗れなくなった人を歩きに戻す。待っている人は、駅か路線がなくなったか、
     /// 路線が止まったか、乗る駅と降りる駅を同じ向きで結ばなくなったら、待っていた駅の出入口から歩く。
+    /// 乗り換える計画の人は、最初の路線を待つあいだに乗り換え先の路線で行けなくなっても歩く。
     /// 乗っている人は、乗っている列車が降りる駅に着かなくなったら（降りる駅が路線になくなったか、終点より先になった）、
-    /// 列車が止まっている駅か次に止まる駅で降りたことにする。
+    /// 列車が止まっている駅か次に止まる駅で降りたことにする。乗り換え先の路線で行けなくなった人も、乗り換える駅に
+    /// 着くなら乗り続け、乗り換える駅から歩く（[`Rail::transfer`]）。
     pub(crate) fn settle_riders(&mut self) {
         let keys: Vec<QueueKey> = self.queues.keys().copied().collect();
         for key in keys {
@@ -571,12 +676,12 @@ impl Rail {
             let mut keep = VecDeque::new();
             let mut gone = Vec::new();
             for r in q {
-                let alight = self.riders.get(r).expect("乗る人がいない").plan.alight;
-                let ok = self.stations.get(s).is_some()
-                    && self
-                        .lines
-                        .get(l)
-                        .is_some_and(|line| !line.stopped && line.direct(s, alight, d).is_some());
+                let x = self.riders.get(r).expect("乗る人がいない");
+                let ok = self.can_ride(s, l, d, x.leg_route().3)
+                    && (x.leg > 0
+                        || x.plan
+                            .transfer
+                            .is_none_or(|t| self.can_transfer(x.plan.alight, &t)));
                 if ok {
                     keep.push_back(r);
                 } else {
@@ -584,9 +689,9 @@ impl Rail {
                 }
             }
             for r in gone {
-                let door = self.riders.get(r).expect("乗る人がいない").door;
+                let from = self.riders.get(r).expect("乗る人がいない").waiting_exit();
                 self.ride_tally.evicted += 1;
-                self.evict(r, ExitFrom::Door(door), false);
+                self.evict(r, from, false);
             }
             if !keep.is_empty() {
                 self.queues.insert(key, keep);
@@ -602,7 +707,7 @@ impl Rail {
             };
             let list = self.aboard.remove(&id).unwrap_or_default();
             let (stay, out): (Vec<RiderId>, Vec<RiderId>) = list.into_iter().partition(|r| {
-                let alight = self.riders.get(*r).expect("乗る人がいない").plan.alight;
+                let alight = self.riders.get(*r).expect("乗る人がいない").leg_route().3;
                 reaches(line, &t, alight)
             });
             if !out.is_empty() {

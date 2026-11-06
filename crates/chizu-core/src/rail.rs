@@ -582,6 +582,8 @@ impl Rail {
         let mut removal = RailRemoval::default();
         let (gone, tracks) = self.bulldoze_targets(area);
         for id in gone {
+            let site = self.stations.get(id).expect("消す駅がない").site();
+            self.evict_transfer_waiters(id, site);
             let s = self.stations.remove(id).expect("消す駅がない");
             removal.stations.push(s.area);
         }

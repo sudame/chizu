@@ -959,13 +959,13 @@ impl World {
         }
         let outcome = self.apply_valid(command);
         self.trips.forget_lots(&self.buildings);
-        // 路線か線路か道路が変わったら、駅の組の表を作り直す。
+        // 路線か線路か道路か、路線の本数が変わったら、駅の組の表を作り直す。乗り換えの進路は、走らせる本数で
+        // 待ちを見込んで絞るためである。
         match command {
             Command::SetSimSpeed { .. }
             | Command::SetTaxRate { .. }
             | Command::SetParkingFee { .. }
             | Command::SetFare { .. }
-            | Command::SetLineTrains { .. }
             | Command::PaintZone { .. }
             | Command::SetSignal { .. }
             | Command::SetCrosswalk { .. } => {}
@@ -977,6 +977,7 @@ impl World {
             | Command::ExtendLine { .. }
             | Command::InsertLineStation { .. }
             | Command::RemoveLine { .. }
+            | Command::SetLineTrains { .. }
             | Command::Bulldoze { .. }
             | Command::PlaceBuilding { .. } => self.planner.forget(),
         }
