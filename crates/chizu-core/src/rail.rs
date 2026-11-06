@@ -110,7 +110,7 @@ pub use crossing::{CROSSING_WARN_TICKS, CrossingTally};
 pub use line::{LineCapacity, RailLine, ShortSpan, Step, StepKind};
 pub use rider::{
     Exit, ExitFrom, FARE_SECONDS, INITIAL_FARE, MAX_FARE, QueueKey, RAIL_GIVE_UP, RidePlan,
-    RideTally, Rider, TRAIN_CAPACITY, Transfer,
+    RideTally, Rider, StationWalks, TRAIN_CAPACITY, Transfer,
 };
 pub use train::{Block, RailTally, TRAIN_BLOCK_LEN_MM, Train, TrainState};
 

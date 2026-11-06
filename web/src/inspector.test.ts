@@ -20,7 +20,9 @@ describe("parseInspect", () => {
 
   it("住宅を読む", () => {
     expect(
-      parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 44, 5, 2]),
+      parseInspect([
+        1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 44, -1, -1, -1, 5, 2,
+      ]),
     ).toEqual({
       kind: "building",
       target: [1, 5, 2],
@@ -47,7 +49,7 @@ describe("parseInspect", () => {
     const empty = parseInspect(pad([1, 1, 1, 1, 1, 2, 0, 0]));
     expect(empty).toMatchObject({ kind: "building", residents: null });
     const jobless = parseInspect([
-      1, 1, 1, 1, 1, 2, 1, 2, 40, 100, 100, 0, -1, -1, -1, -1, -1, 100, 6, 1,
+      1, 1, 1, 1, 1, 2, 1, 2, 40, 100, 100, 0, -1, -1, -1, -1, -1, 100, -1, -1, -1, 6, 1,
     ]);
     expect(jobless).toMatchObject({ residents: { commuteSeconds: null } });
   });
@@ -78,7 +80,9 @@ describe("parseInspect", () => {
 
 describe("describeInspect", () => {
   it("住宅の世帯、住民、幸福度とその要素、電気と水道、通勤を出す", () => {
-    const view = parseInspect([1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 44, 5, 2]);
+    const view = parseInspect([
+      1, 1, 2, 1, 0, 8, 3, 9, 62, 80, 50, 55, 3960, 4, 1, 0, 2, 44, -1, -1, -1, 5, 2,
+    ]);
     expect(view).not.toBeNull();
     const text = describeInspect(view as NonNullable<typeof view>);
     expect(text.title).toBe("住宅（高密度、段階 2）");
@@ -127,7 +131,7 @@ describe("describeInspect", () => {
 
   it("低密度の住宅（区画の番号 5）は高密度と分けて読み、住宅の欄を出す", () => {
     const view = parseInspect([
-      1, 5, 2, 1, 1, 3, 1, 3, 62, 80, 50, 55, 3960, 3, 1, 0, 0, 100, 5, 2,
+      1, 5, 2, 1, 1, 3, 1, 3, 62, 80, 50, 55, 3960, 3, 1, 0, 0, 100, -1, -1, -1, 5, 2,
     ]);
     expect(view).toMatchObject({ kind: "building", zone: "ResidentialLow" });
     const text = describeInspect(view as NonNullable<typeof view>);
@@ -180,7 +184,7 @@ describe("formatDuration", () => {
 
 describe("applyInspectReply", () => {
   const tile: InspectQuery = { kind: "tile", x: 3, y: 4 };
-  const facility = [2, 1, 1200, 1200, ...Array(14).fill(-1), 8, 9];
+  const facility = [2, 1, 1200, 1200, ...Array(17).fill(-1), 8, 9];
 
   it("マスで押した最初の答えが届いたら、以後は識別子で引く", () => {
     const result = applyInspectReply(tile, tile, facility);
@@ -280,7 +284,7 @@ describe("setupInspector", () => {
     (globalThis as { document?: unknown }).document = { createElement: make };
     const inspector = setupInspector(panel() as unknown as HTMLElement, () => {});
     const at = (n: number) =>
-      parseInspect([1, 3, 1, 1, 1, 10, n, ...Array(11).fill(-1), 1, 1]) as NonNullable<
+      parseInspect([1, 3, 1, 1, 1, 10, n, ...Array(14).fill(-1), 1, 1]) as NonNullable<
         ReturnType<typeof parseInspect>
       >;
     inspector.show(at(1));
@@ -296,9 +300,12 @@ describe("setupInspector", () => {
 });
 
 describe("駅", () => {
-  // [3, 待っている人, 乗った, 降りた, 徒歩圏の世帯, 車を持てない世帯, 残ったか, 路線の数, 路線の添え字 × 10, a, b]
+  // [3, 待っている人, 乗った, 降りた, 徒歩圏の世帯, 車を持てない世帯, 残ったか, 路線の数, 路線の添え字 × 10,
+  //  歩いて着いた人, 駅まで歩いた時間の平均（時計の秒）, 見積もりとのずれ（時計の秒）, a, b]
   const info = (over: Record<number, number> = {}) => {
-    const base = [3, 12, 340, 310, 480, 60, 0, 2, 0, 1, -1, -1, -1, -1, -1, -1, -1, -1, 4, 0];
+    const base = [
+      3, 12, 340, 310, 480, 60, 0, 2, 0, 1, -1, -1, -1, -1, -1, -1, -1, -1, 120, 1440, 180, 4, 0,
+    ];
     return base.map((v, i) => over[i] ?? v);
   };
 
@@ -313,9 +320,18 @@ describe("駅", () => {
       carless: 60,
       leftBehind: false,
       lines: [0, 1],
+      walkedIn: 120,
+      walkSeconds: 1440,
+      walkGapSeconds: 180,
     });
     // 出入口がない駅は徒歩圏の世帯が -1 で届く
     expect(parseInspect(info({ 4: -1, 5: -1 }))).toMatchObject({ households: null, carless: 0 });
+    // 歩いて着いた人がいなければ、歩いた時間とずれは null
+    expect(parseInspect(info({ 18: 0, 19: -1, 20: 0 }))).toMatchObject({
+      walkedIn: 0,
+      walkSeconds: null,
+      walkGapSeconds: null,
+    });
   });
 
   it("待っている人、乗り降り、徒歩圏の世帯、止まる路線を出す", () => {
@@ -331,8 +347,22 @@ describe("駅", () => {
       { label: "今日乗った人", value: "40 人" },
       { label: "今日降りた人", value: "35 人" },
       { label: "徒歩圏の世帯", value: "480 世帯（車を持てない 60）" },
+      { label: "駅まで歩いた時間", value: "約 24 分（見積もりより約 3 分長い）" },
       { label: "止まる路線", value: "青線、緑線" },
     ]);
+  });
+
+  it("駅まで歩いた時間を、見積もりとのずれの向きとともに出す", () => {
+    const walk = (over: Record<number, number>) => {
+      const view = parseInspect(info(over));
+      if (view === null) {
+        throw new Error("駅を読めない");
+      }
+      return describeInspect(view).rows.find((r) => r.label === "駅まで歩いた時間")?.value;
+    };
+    expect(walk({ 20: -120 })).toBe("約 24 分（見積もりより約 2 分短い）");
+    expect(walk({ 20: 20 })).toBe("約 24 分（見積もりとほぼ同じ）");
+    expect(walk({ 18: 0, 19: -1, 20: 0 })).toBe("まだ歩いて来た人がいない");
   });
 
   it("日の変わり目を見ていないあいだは、開いてからの数だと書く", () => {

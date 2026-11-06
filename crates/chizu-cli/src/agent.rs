@@ -312,9 +312,11 @@ observe の rail（線路と駅）:
   Ready 駅を出るのを待っている）、speed 速さ（mm/tick、25000 が時速 90km）、nextStation 次に止まる駅の id。
   trainCount 列車の数、deadlock 列車が互いを待って止まる輪を見つけ、輪の中の列車を 1 本消した回数（ふつうは 0）。
   乗る人：住民は、歩きと車をこれまでの距離の決まりで選んだうえで、鉄道の費用が小さければ鉄道に乗る。費用は移動の秒で、
-    鉄道は、駅まで歩く時間（直線 × 1.3 ÷ 秒速 1.389m）、待ち（運転間隔の半分。直前に乗りきれずに人が残った駅と向きでは
-    運転間隔をもう 1 つ足す）、乗る時間、駅から歩く時間に、運賃 × 5 秒を足したもの。歩きは直線 × 1.3 ÷ 秒速 1.389m、
-    車は直線 ÷ 秒速 2.8m。駅は出発と行き先の建物から 64 マス以内の、出入口のある駅を近い順に 3 つずつ試す。
+    鉄道は、駅まで歩く時間（建物の出入口から駅の出入口まで、歩道を秒速 1.389m で歩く経路の時間）、待ち（運転間隔の
+    半分。直前に乗りきれずに人が残った駅と向きでは運転間隔をもう 1 つ足す）、乗る時間、駅から歩く時間（同じく歩道の
+    経路）に、運賃 × 5 秒を足したもの。歩きは直線 × 1.3 ÷ 秒速 1.389m、車は直線 ÷ 秒速 2.8m。駅は出発と行き先の
+    建物の正面のマスから 64 マス以内の、出入口のある駅を、歩く時間の短い順に 3 つずつ試す。歩道で着けない駅と、
+    歩く経路が 768m より長い駅は試さない。駅の出入口から歩道の網へ出る道が遠回りだと、徒歩圏の中でも鉄道は選ばれない。
     走っている列車が 1 本以上あり、止まっていない路線だけを使う。乗り換えは 1 回までで、乗り換える駅での待ち
     （乗り換え先の路線の運転間隔の半分）と、乗り換えの手間 60 秒を足す。直接行ける路線より安いときだけ乗り換える。
     乗り換える人は、最初の路線を降りた駅で乗り換え先の路線の列に並ぶ。乗り換え先の路線がなくなると、その駅から歩く。
@@ -326,7 +328,10 @@ observe の rail（線路と駅）:
   stations の waiting 待っている人（乗り換えを待つ人も含む）、boarded と alighted 始まりからの乗った数と降りた数
     （乗り換えも 1 回ずつ数える）、transfers 始まりからこの駅で乗り換えた数、transferWaiting この駅で乗り換えを待つ人、
     households と carless 駅の徒歩圏（出入口のマスから 64 マス以内に、家の正面のマスがある）の世帯の数と、そのうち
-    車を持てない世帯の数（出入口がない駅は null）、door 出入口のマス（道路に面していない駅は null）。
+    車を持てない世帯の数（出入口がない駅は null）、door 出入口のマス（道路に面していない駅は null）、
+    walkedIn 始まりからこの駅まで歩いて着き、列に並んだ人（乗り換えは数えない）、avgWalkTicks その人たちが出発から
+    駅に着くまでに歩いた平均の tick、walkGapTicks 歩いた平均から、手段を選んだときの駅まで歩く見積もりの平均を引いた
+    tick（正なら見積もりより長く歩いた。横断歩道や信号で待った分が入る。どちらも歩いて着いた人がいなければ null）。
   lines の measuredRoundTripTicks 測った時間を混ぜた 1 周の時間（tick）、boarded 始まりからの乗った数、waiting 待っている人、
     transfersIn 始まりから乗り換えてこの路線の列に並んだ数、
     leftBehindStops 直前に出た列車に乗りきれず人が残った（駅、向き）の数、loadPermille いちばん混んだ列車の乗車率（‰）。
@@ -2208,6 +2213,7 @@ fn rail(world: &World) -> Value {
                 json!([tile(a), tile(b)])
             });
             let (boarded, alighted) = rides.station_counts.get(&id).copied().unwrap_or((0, 0));
+            let walks = rides.station_walks.get(&id).copied().unwrap_or_default();
             json!({
                 "id": {"index": id.index, "generation": id.generation},
                 "at": tile(s.front),
@@ -2222,6 +2228,9 @@ fn rail(world: &World) -> Value {
                 "door": door.map(tile),
                 "households": near.map(|c| c.households),
                 "carless": near.map(|c| c.carless),
+                "walkedIn": walks.walks,
+                "avgWalkTicks": walks.average_walked(),
+                "walkGapTicks": walks.average_gap(),
             })
         })
         .collect();

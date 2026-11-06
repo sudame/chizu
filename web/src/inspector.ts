@@ -12,10 +12,13 @@ import {
 } from "./protocol/messages.ts";
 
 /** chizu-wasm の inspect が返す数の個数。 */
-export const INSPECT_LENGTH = 20;
+export const INSPECT_LENGTH = 23;
 
 /** 駅の欄に並べる、止まる路線の数の上限。chizu-wasm の inspect::STATION_LINES と同じ。 */
 export const STATION_LINES = 10;
+
+/** 駅の欄の、歩いて着いた人の数の位置。止まる路線の並びのあとに、駅まで歩いた時間の平均と、見積もりとのずれが続く。 */
+const WALK_AT = 8 + STATION_LINES;
 
 /** 幸福度とその要素の満点。chizu-core の HAPPINESS_MAX と同じ。 */
 export const HAPPINESS_MAX = 100;
@@ -102,6 +105,12 @@ export type StationView = {
   leftBehind: boolean;
   /** 駅に止まる路線の添え字。 */
   lines: number[];
+  /** 始まりからこの駅まで歩いて着いた人。 */
+  walkedIn: number;
+  /** その人たちが駅まで歩いた時間の平均（時計の秒）。歩いて着いた人がいなければ null。 */
+  walkSeconds: number | null;
+  /** 歩いた時間の平均から、手段を選んだときの見積もりの平均を引いた値（時計の秒）。正なら見積もりより長く歩いた。 */
+  walkGapSeconds: number | null;
 };
 
 export type InspectView = BuildingView | FacilityView | StationView;
@@ -142,6 +151,9 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
       carless: Math.max(at(5), 0),
       leftBehind: at(6) === 1,
       lines: Array.from({ length: count }, (_, i) => at(8 + i)),
+      walkedIn: Math.max(at(WALK_AT), 0),
+      walkSeconds: at(WALK_AT) > 0 ? at(WALK_AT + 1) : null,
+      walkGapSeconds: at(WALK_AT) > 0 ? at(WALK_AT + 2) : null,
     };
   }
   if (at(0) === 2) {
@@ -219,6 +231,25 @@ export type InspectText = { title: string; rows: InspectRow[] };
 
 const reach = (ok: boolean) => (ok ? "届いている" : "届いていない");
 
+/** 見積もりとのずれを「ほぼ同じ」とみなす幅（時計の秒）。 */
+const WALK_GAP_EVEN = 30;
+
+/**
+ * 駅まで歩いた時間の平均と、見積もりとのずれ。見積もりより大きく長いなら、駅の出入口から歩道の網へ出る道が
+ * 遠回りか、横断歩道や信号で待っている。
+ */
+function walkText(view: StationView): string {
+  if (view.walkSeconds === null || view.walkGapSeconds === null) {
+    return "まだ歩いて来た人がいない";
+  }
+  const gap = view.walkGapSeconds;
+  const note =
+    Math.abs(gap) < WALK_GAP_EVEN
+      ? "見積もりとほぼ同じ"
+      : `見積もりより${formatDuration(Math.abs(gap))}${gap > 0 ? "長い" : "短い"}`;
+  return `${formatDuration(view.walkSeconds)}（${note}）`;
+}
+
 /** パネルに出す題と行。駅には、その日の乗り降り（`rides`）を添えられる。 */
 export function describeInspect(view: InspectView, rides: StationRides | null = null): InspectText {
   if (view.kind === "station") {
@@ -244,6 +275,7 @@ export function describeInspect(view: InspectView, rides: StationRides | null = 
             ? "道路に面していないので、歩いて来られない"
             : `${n(view.households)} 世帯（車を持てない ${n(view.carless)}）`,
       },
+      { label: "駅まで歩いた時間", value: walkText(view) },
       {
         label: "止まる路線",
         value: view.lines.length === 0 ? "なし" : view.lines.map((l) => lineName(l)).join("、"),

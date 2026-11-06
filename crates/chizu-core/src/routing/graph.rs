@@ -31,6 +31,11 @@ fn travel_ms(mm: u64, speed: MmPerTick) -> Option<u64> {
     Some(mm.checked_mul(1_000)?.div_ceil(speed))
 }
 
+/// `mm` を歩く時間（ms）。歩道のグラフのリンクの費用と同じ求め方である。
+pub fn walk_ms(mm: u64) -> u64 {
+    travel_ms(mm, WALK_SPEED).expect("歩く時間があふれた")
+}
+
 /// 網の中身が食い違っていて、グラフを作れない理由。
 ///
 /// 道路を引く・消すコマンドで変えた網では起きない。読み戻した街の状態が、検査の値を通ったまま

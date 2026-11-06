@@ -644,6 +644,10 @@ fn act_builds_rail_and_a_station_and_observe_and_map_show_them() {
     assert_eq!(stations[0]["door"][1], 10, "{rail}");
     assert_eq!(stations[0]["households"], 0, "{rail}");
     assert_eq!(stations[0]["carless"], 0, "{rail}");
+    // 歩いて着いた人がまだいないので、歩いた時間と見積もりとのずれは null
+    assert_eq!(stations[0]["walkedIn"], 0, "{rail}");
+    assert!(stations[0]["avgWalkTicks"].is_null(), "{rail}");
+    assert!(stations[0]["walkGapTicks"].is_null(), "{rail}");
     // 駅 800 と、4 マスの線路 6000 の 1%。
     assert_eq!(o["financesPerDay"]["railUpkeep"], 860);
     let map = cli(&["agent", "map", d, "2", "8", "17", "8"]);
