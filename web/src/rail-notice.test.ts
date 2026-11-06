@@ -54,6 +54,7 @@ const stationStat = (over: Partial<StationStat> = {}): StationStat => ({
   boarded: 0,
   alighted: 0,
   leftBehind: false,
+  shared: 0,
   ...over,
 });
 const stats = (lines: LineStat[], stations: StationStat[] = []): RailStats => ({

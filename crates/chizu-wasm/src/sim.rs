@@ -741,7 +741,8 @@ impl Sim {
     /// 画面へは間引いて送る。先頭は [`RAIL_STATS_HEADER`] 個の `[駅の数, 路線の数, 待ちきれず歩いた人（積み上げ）,
     /// 途中で歩きに戻った人（積み上げ）]`、続いて駅ごとに [`RAIL_STATS_STATION`] 個の
     /// `[添え字, 世代, 敷地の min の x, y, 出入口のマスの x, y, 出入口があるか（0 か 1）, 徒歩圏の世帯, そのうち車を持てない世帯,
-    /// 待っている人, 乗った人（積み上げ）, 降りた人（積み上げ）, 直前に乗りきれず人が残ったか（0 か 1）]`、
+    /// 待っている人, 乗った人（積み上げ）, 降りた人（積み上げ）, 直前に乗りきれず人が残ったか（0 か 1）,
+    /// 徒歩圏の世帯のうち、ほかの駅の徒歩圏にも入る世帯]`、
     /// 路線ごとに [`RAIL_STATS_LINE`] 個の
     /// `[添え字, 世代, いちばん混んだ列車の乗車率（‰）, 乗った人（積み上げ）, 待っている人, 乗りきれず人が残った（駅、向き）の数,
     /// 列車に乗っている人, 走っている列車]` を並べる。状態は変えない。
@@ -782,6 +783,7 @@ impl Sim {
                 boarded as f64,
                 alighted as f64,
                 f64::from(u8::from(left)),
+                f64::from(near.shared),
             ]);
         }
         for (id, _) in rail.lines() {
@@ -847,6 +849,47 @@ impl Sim {
                 f64::from(near.carless),
             ])
         })
+    }
+
+    /// 道路のコマンド（`BuildRoad`、`UpgradeRoad`）を、街の写しに適用したときの踏切と路線への響きを返す。
+    /// 先頭は新しくできる踏切の数、続いて本数の上限が下がる路線ごとに `[添え字, 世代, 前の上限, 後の上限]`。
+    /// 線路がなければ踏切はできないので写しを作らない。道路のコマンド以外と、適用できないコマンドは空を返す。状態は変えない。
+    pub fn road_probe(&self, command: &Command) -> Vec<f64> {
+        if !matches!(
+            command,
+            Command::BuildRoad { .. } | Command::UpgradeRoad { .. }
+        ) || self.world.rail().tracks().next().is_none()
+        {
+            return Vec::new();
+        }
+        let caps = |w: &chizu_core::World| -> std::collections::BTreeMap<_, _> {
+            w.rail().lines().map(|(id, l)| (id, l.cap())).collect()
+        };
+        let before_caps = caps(&self.world);
+        let before: std::collections::BTreeSet<TilePos> = self.world.rail().crossings().collect();
+        let mut after_world = self.world.clone();
+        if after_world.apply(command) != chizu_core::ApplyOutcome::Applied {
+            return Vec::new();
+        }
+        let made = after_world
+            .rail()
+            .crossings()
+            .filter(|t| !before.contains(t))
+            .count();
+        let mut out = vec![made as f64];
+        for (id, line) in after_world.rail().lines() {
+            if let Some(&was) = before_caps.get(&id)
+                && line.cap() < was
+            {
+                out.extend([
+                    f64::from(id.index),
+                    f64::from(id.generation),
+                    f64::from(was),
+                    f64::from(line.cap()),
+                ]);
+            }
+        }
+        out
     }
 
     /// 線路を `from` から `to` に引けるかを、状態を変えずに調べる。引けないときは理由の文を、

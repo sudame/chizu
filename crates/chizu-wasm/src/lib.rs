@@ -294,6 +294,17 @@ impl Simulation {
         .collect())
     }
 
+    /// 道路のコマンドを適用したときの踏切と路線の上限への響きを返す。並びは `sim::Sim::road_probe` にある。
+    pub fn road_probe(&self, command: JsValue) -> Result<Vec<f64>, JsError> {
+        let world = self.0.world();
+        let command = command_from_js(
+            &command,
+            |t| world.network().node_at(t),
+            |t| world.rail().station_at(t),
+        )?;
+        Ok(self.0.road_probe(&command))
+    }
+
     /// 長方形 (x0, y0)-(x1, y1) を取り壊したときに消えるもの。並びは `sim::Sim::bulldoze_preview` にある。
     pub fn bulldoze_preview(
         &self,

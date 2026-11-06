@@ -22,9 +22,9 @@ import {
   WAITING_ALERT,
 } from "./transit.ts";
 
-// 駅 1 つ：添え字、世代、min の x、y、出入口の x、y、出入口があるか、世帯、車を持てない世帯、待つ人、乗った人、降りた人、残ったか
+// 駅 1 つ：添え字、世代、min の x、y、出入口の x、y、出入口があるか、世帯、車を持てない世帯、待つ人、乗った人、降りた人、残ったか、ほかの駅と重なる世帯
 const station = (over: Partial<Record<number, number>> = {}): number[] => {
-  const base = [3, 0, 10, 20, 12, 22, 1, 40, 6, 5, 100, 80, 0];
+  const base = [3, 0, 10, 20, 12, 22, 1, 40, 6, 5, 100, 80, 0, 30];
   return base.map((v, i) => over[i] ?? v);
 };
 const line = (over: Partial<Record<number, number>> = {}): number[] => {
@@ -58,6 +58,7 @@ describe("rail_stats を読む", () => {
       boarded: 100,
       alighted: 80,
       leftBehind: false,
+      shared: 30,
     });
     expect(stats.stations[1]?.waiting).toBe(150);
     expect(stats.lines).toEqual([

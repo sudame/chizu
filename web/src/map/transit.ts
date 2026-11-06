@@ -10,7 +10,7 @@ import { STATION_WALK_RADIUS } from "./tools.ts";
 
 /** chizu-wasm の rail_stats の見出しの数と、駅 1 つ、路線 1 本の数の個数。 */
 export const RAIL_STATS_HEADER = 4;
-export const RAIL_STATS_STATION = 13;
+export const RAIL_STATS_STATION = 14;
 export const RAIL_STATS_LINE = 8;
 
 export type StationStat = {
@@ -30,6 +30,8 @@ export type StationStat = {
   alighted: number;
   /** 直前に乗りきれず人が残ったか。 */
   leftBehind: boolean;
+  /** 徒歩圏の世帯のうち、ほかの駅の徒歩圏にも入る世帯の数。 */
+  shared: number;
 };
 
 export type LineStat = {
@@ -78,6 +80,7 @@ export function parseRailStats(tick: number, data: ArrayLike<number>): RailStats
       boarded: at(i + 10),
       alighted: at(i + 11),
       leftBehind: at(i + 12) === 1,
+      shared: at(i + 13),
     });
   }
   const lines: LineStat[] = [];

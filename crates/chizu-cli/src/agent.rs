@@ -323,7 +323,10 @@ observe の rail（線路と駅）:
   stations の waiting 待っている人（乗り換えを待つ人も含む）、boarded と alighted 始まりからの乗った数と降りた数
     （乗り換えも 1 回ずつ数える）、transfers 始まりからこの駅で乗り換えた数、transferWaiting この駅で乗り換えを待つ人、
     households と carless 駅の徒歩圏（出入口のマスから 64 マス以内に、家の正面のマスがある）の世帯の数と、そのうち
-    車を持てない世帯の数（出入口がない駅は null）、door 出入口のマス（道路に面していない駅は null）、
+    車を持てない世帯の数（出入口がない駅は null）、sharedHouseholds そのうち、ほかの駅の徒歩圏にも入る世帯の数、
+    overlapPermille その千分率（世帯がいなければ null。大きいと、遠いほうの駅は使われにくい）、
+    recentBoarded 直近 recentDays（3）日に乗った人の数（0 が続く駅は使われていない。街がまだ 3 日たっていないか、
+    その駅が 3 日前になかったときは null。observe のたびに 3 日前まで記録を再生して求める）、door 出入口のマス（道路に面していない駅は null）、
     walkedIn 始まりからこの駅まで歩いて着き、列に並んだ人（乗り換えは数えない）、avgWalkTicks その人たちが出発から
     駅に着くまでに歩いた平均の tick、walkGapTicks 歩いた平均から、手段を選んだときの駅まで歩く見積もりの平均を引いた
     tick（正なら見積もりより長く歩いた。横断歩道や信号で待った分が入る。どちらも歩いて着いた人がいなければ null）。
@@ -537,7 +540,10 @@ act の結果:
       beyondDepth 道路から 6 マスを超えた奥（道路のない所を含む）、notFronted 道路から 6 マス以内だが、間口から続かない空き
       （道路の端の外、間口との間に塗れないマスを挟んだ、別の種類の区画の奥など）。
   コマンドで走れなくなった（stopped になったか cap が 0 になった）路線があれば haltedLines が付く。
-    路線ごとの id、stopped、capReason（observe の rail.lines と同じ）。
+    路線ごとの id、stopped、capBefore と capAfter（コマンドの前と後の cap）、capReason（observe の rail.lines と同じ）。
+  走れるまま cap が下がった路線があれば loweredLines が付く（道路のコマンドで踏切ができ、線路が割れて待てる所が減ったときなど）。
+    路線ごとの id、capBefore、capAfter、waitPlaces（待てる所の数）、shortSpanCount（待てる所になれない短い線路の数）。
+    BuildRoad と UpgradeRoad の結果にも付く。できた踏切は crossings に出る。
   コマンドで路線そのものが消えたら（駅の取り壊しなど。RemoveLine も含む）、removedLines にその id の並びが付く。
   コマンドで列車が消えたら removedTrains にその数が付く（上限が下がった、路線が止まった、進路が変わって先を押さえ直せないなど）。
     removedTrainsByLine は路線ごとの内訳（line と removed の並び）。
@@ -2202,6 +2208,8 @@ fn rail(world: &World) -> Value {
                 "door": door.map(tile),
                 "households": near.map(|c| c.households),
                 "carless": near.map(|c| c.carless),
+                "sharedHouseholds": near.map(|c| c.shared),
+                "overlapPermille": near.and_then(|c| overlap_permille(c.shared, c.households)),
                 "walkedIn": walks.walks,
                 "avgWalkTicks": walks.average_walked(),
                 "walkGapTicks": walks.average_gap(),
@@ -2356,44 +2364,115 @@ fn cap_reason(rail: &chizu_core::Rail, id: chizu_core::LineId) -> Value {
     })
 }
 
+/// 徒歩圏の世帯のうち、ほかの駅の徒歩圏にも入る世帯の千分率。世帯がいなければ `None`。
+/// 画面の知らせ（web/src/rail-notice.ts の `OVERLAP_PERMILLE`）と同じ物差しである。
+fn overlap_permille(shared: u32, households: u32) -> Option<u64> {
+    (u64::from(shared) * 1000).checked_div(u64::from(households))
+}
+
+/// 駅の「直近の乗る人」を数える長さ（日）。画面の知らせ（web/src/rail-notice.ts の `UNUSED_DAYS`）と同じである。
+const RECENT_RIDE_DAYS: u64 = 3;
+
+/// observe の駅に `recentBoarded`（直近 [`RECENT_RIDE_DAYS`] 日に乗った人の数）と `recentDays` を足す。
+/// 中核が持つのは始まりからの積み上げだけなので、その日数前まで記録を再生した街との差を取る。
+/// 街がまだその日数たっていないか、その駅がまだなかったときは `recentBoarded` が null になる。駅がなければ再生しない。
+fn attach_recent_riders(seen: &mut Value, saved: &Saved) {
+    let window = RECENT_RIDE_DAYS * TICKS_PER_DAY;
+    let Some(stations) = seen
+        .pointer_mut("/rail/stations")
+        .and_then(Value::as_array_mut)
+        .filter(|a| !a.is_empty())
+    else {
+        return;
+    };
+    let past = saved.tick.checked_sub(window).map(|target| {
+        let mut world = World::new(saved.seed);
+        replay(&mut world, &saved.log, target);
+        world
+    });
+    for st in stations {
+        let index = st.pointer("/id/index").and_then(Value::as_u64);
+        let generation = st.pointer("/id/generation").and_then(Value::as_u64);
+        let boarded = st.get("boarded").and_then(Value::as_u64);
+        let recent = past.as_ref().and_then(|w| {
+            let id = chizu_core::StationId {
+                index: u32::try_from(index?).ok()?,
+                generation: u16::try_from(generation?).ok()?,
+            };
+            w.rail().station(id)?;
+            let was = w.rail().ride_tally().station_counts.get(&id).map_or(0, |c| c.0);
+            Some(boarded?.saturating_sub(was))
+        });
+        st["recentBoarded"] = json!(recent);
+        st["recentDays"] = json!(RECENT_RIDE_DAYS);
+    }
+}
+
 /// `capReason` の `shortSpans` に載せる線路の数の上限。
 const SHORT_SPAN_LIST: usize = 16;
 
 /// 走れる（止まっておらず、上限が 0 でない）路線と、路線ごとの列車の数。コマンドの前後で比べるのに使う。
-fn line_states(world: &World) -> std::collections::BTreeMap<chizu_core::LineId, (bool, usize)> {
+/// 値は、走れるか、列車の数、本数の上限。
+fn line_states(
+    world: &World,
+) -> std::collections::BTreeMap<chizu_core::LineId, (bool, usize, u8)> {
     let rail = world.rail();
     rail.lines()
         .map(|(id, l)| {
             let running = rail.trains().filter(|(_, t)| t.line == id).count();
-            (id, (!l.stopped && l.cap() > 0, running))
+            (id, (!l.stopped && l.cap() > 0, running, l.cap()))
         })
         .collect()
 }
 
-/// コマンドの前後の路線を比べ、走れなくなった路線（haltedLines）と、なくなった路線（removedLines）と、消えた列車の数（removedTrains）を `out` に足す。
+/// コマンドの前後の路線を比べ、走れなくなった路線（haltedLines）と、走れるまま本数の上限が下がった路線（loweredLines）と、なくなった路線（removedLines）と、消えた列車の数（removedTrains）を `out` に足す。
 /// どちらもなければ何も足さない。
 fn note_line_changes(
     out: &mut Value,
     world: &World,
-    before: &std::collections::BTreeMap<chizu_core::LineId, (bool, usize)>,
+    before: &std::collections::BTreeMap<chizu_core::LineId, (bool, usize, u8)>,
 ) {
     let after = line_states(world);
     let rail = world.rail();
     let halted: Vec<Value> = before
         .iter()
-        .filter(|(id, (ran, _))| *ran && after.get(*id).is_some_and(|(runs, _)| !runs))
-        .map(|(id, _)| {
+        .filter(|(id, (ran, _, _))| *ran && after.get(*id).is_some_and(|(runs, _, _)| !runs))
+        .map(|(id, (_, _, cap))| {
             let l = rail.line(*id).expect("路線がない");
             json!({
                 "id": id_json(id.index, id.generation),
                 "stopped": l.stopped,
+                "capBefore": cap,
+                "capAfter": l.cap(),
                 "capReason": cap_reason(rail, *id),
+            })
+        })
+        .collect();
+    // 走れるまま本数の上限が下がった路線。踏切で線路が割れたときなどに起きる。
+    let lowered: Vec<Value> = before
+        .iter()
+        .filter_map(|(id, (_, _, was))| {
+            let (runs, _, now) = after.get(id)?;
+            (*runs && now < was).then(|| {
+                let c = rail.line_capacity(*id);
+                json!({
+                    "id": id_json(id.index, id.generation),
+                    "capBefore": was,
+                    "capAfter": now,
+                    "waitPlaces": c.as_ref().map(|c| c.wait_places),
+                    "shortSpanCount": c.as_ref().map(|c| c.short_spans.len()),
+                })
             })
         })
         .collect();
     let by_line: Vec<(chizu_core::LineId, usize)> = before
         .iter()
-        .map(|(id, (_, n))| (*id, n.saturating_sub(after.get(id).map_or(0, |(_, m)| *m))))
+        .map(|(id, (_, n, _))| {
+            (
+                *id,
+                n.saturating_sub(after.get(id).map_or(0, |(_, m, _)| *m)),
+            )
+        })
         .filter(|(_, n)| *n > 0)
         .collect();
     let removed: usize = by_line.iter().map(|(_, n)| n).sum();
@@ -2404,6 +2483,9 @@ fn note_line_changes(
         .collect();
     if !halted.is_empty() {
         out["haltedLines"] = json!(halted);
+    }
+    if !lowered.is_empty() {
+        out["loweredLines"] = json!(lowered);
     }
     if !gone.is_empty() {
         out["removedLines"] = json!(gone);
@@ -3124,6 +3206,7 @@ pub fn run(args: &[String]) -> Result<String, String> {
         ["observe", dir] => {
             let (_lock, world, before, is_session) = open_for_read(Path::new(dir), true)?;
             let mut seen = observe(&world, &before);
+            attach_recent_riders(&mut seen, &read_saved(Path::new(dir))?);
             let last = read_last_observe(Path::new(dir), is_session);
             let history = attach_utility_trends(&mut seen, last.as_ref());
             seen["sinceLastObserve"] =
@@ -3265,7 +3348,7 @@ mod tests {
         let mut before = line_states(&w);
         let lines: Vec<_> = w.rail().lines().map(|(id, _)| id).collect();
         assert_eq!(lines.len(), 4);
-        before.insert(lines[3], (true, 0));
+        before.insert(lines[3], (true, 0, 3));
         let mut out = json!({});
         note_line_changes(&mut out, &w, &before);
         let halted = out["haltedLines"].as_array().unwrap();
@@ -3285,6 +3368,21 @@ mod tests {
             )
         );
         assert!(out.get("removedTrains").is_none() && out.get("removedLines").is_none());
+        assert_eq!(halted[0]["capBefore"], 3);
+        assert_eq!(halted[0]["capAfter"], 0);
+        assert!(out.get("loweredLines").is_none());
+        // 走れるまま上限が下がった路線は loweredLines に出る
+        let mut before = line_states(&w);
+        let cap = before[&lines[0]].2;
+        before.insert(lines[0], (true, 0, cap + 2));
+        let mut out = json!({});
+        note_line_changes(&mut out, &w, &before);
+        let lowered = out["loweredLines"].as_array().unwrap();
+        assert_eq!(lowered.len(), 1, "{out}");
+        assert_eq!(lowered[0]["id"], id_json(lines[0].index, lines[0].generation));
+        assert_eq!(lowered[0]["capBefore"], cap + 2);
+        assert_eq!(lowered[0]["capAfter"], cap);
+        assert!(out.get("haltedLines").is_none());
     }
 
     /// 1 日前（tick 0）の需要が 1,000 の控えで、いま tick 7200 の主の網を見る。
