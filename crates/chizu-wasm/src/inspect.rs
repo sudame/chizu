@@ -87,8 +87,8 @@ pub struct StationInfo {
     /// 始まりからの乗った人と降りた人。1 日の数は画面が日の変わり目の差で求める。
     pub boarded: u64,
     pub alighted: u64,
-    /// 出入口の徒歩圏の世帯の数と、そのうち車を持てない世帯の数。出入口がなければ `None`。
-    pub catchment: Option<(u32, u32)>,
+    /// 出入口の徒歩圏の世帯の数、そのうち車を持てない世帯の数、職場が徒歩圏にある住民の数。出入口がなければ `None`。
+    pub catchment: Option<(u32, u32, u32)>,
     /// 直前に乗りきれず人が残ったか。
     pub left_behind: bool,
     /// 駅に止まる路線の添え字。
@@ -161,7 +161,7 @@ fn station_info(world: &World, id: StationId) -> Option<Found> {
     let catchment = world
         .station_door(id)
         .and_then(|door| world.catchments(&[door]).pop())
-        .map(|c| (c.households, c.carless));
+        .map(|c| (c.households, c.carless, c.workers));
     let walks = rail
         .ride_tally()
         .station_walks
@@ -326,12 +326,12 @@ fn building_info(world: &World, id: BuildingId) -> Option<BuildingInfo> {
 }
 
 /// 画面に渡す数の個数。
-pub const INSPECT_LENGTH: usize = 23;
+pub const INSPECT_LENGTH: usize = 24;
 
 /// 駅の欄に並べる、止まる路線の数の上限。
 pub const STATION_LINES: usize = 10;
 
-/// 駅の欄の、歩いて着いた人の数の位置。止まる路線の並びのあとに、駅まで歩いた時間の平均と、見積もりとのずれが続く。
+/// 駅の欄の、歩いて着いた人の数の位置。止まる路線の並びのあとに、駅まで歩いた時間の平均と、見積もりとのずれ、徒歩圏に職場のある住民の数が続く。
 const STATION_WALK_AT: usize = 8 + STATION_LINES;
 
 /// 数に直す。要素がないものは -1 にする。なければ空の配列。
@@ -366,9 +366,10 @@ pub fn encode(found: Option<Found>) -> Vec<f64> {
             out[1] = st.waiting as f64;
             out[2] = st.boarded as f64;
             out[3] = st.alighted as f64;
-            if let Some((households, carless)) = st.catchment {
+            if let Some((households, carless, workers)) = st.catchment {
                 out[4] = f64::from(households);
                 out[5] = f64::from(carless);
+                out[STATION_WALK_AT + 3] = f64::from(workers);
             }
             out[6] = f64::from(u8::from(st.left_behind));
             let lines = &st.lines[..st.lines.len().min(STATION_LINES)];
@@ -851,9 +852,9 @@ mod tests {
         assert_eq!(found[8], f64::from(line.index));
         assert_eq!(found[9], -1.0);
         // 歩いて着いた人はまだいないので、歩いた時間は -1、ずれは 0
-        assert_eq!(found[18..21], [0.0, -1.0, 0.0]);
+        assert_eq!(found[18..22], [0.0, -1.0, 0.0, 0.0]);
         // 識別子（最後の 2 つ）で引き直すと同じ答えになる
-        let again = sim.inspect_target(found[0], found[21], found[22]);
+        let again = sim.inspect_target(found[0], found[22], found[23]);
         assert_eq!(again, found);
         // 駅のない所は空
         assert!(sim.inspect(TilePos::new(40, 30)).is_empty());

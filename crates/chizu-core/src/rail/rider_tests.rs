@@ -157,6 +157,23 @@ fn catchment_counts_households_by_the_door_tile() {
     }
     // 東は工場だけなので、徒歩圏に家はない
     assert_eq!(got[1].households, 0);
+    // 職場の住民は、職場の建物の正面のマスで数える
+    let mut workers = [0_u32; 2];
+    for c in p.citizen_ids() {
+        let Some(front) = p
+            .citizen(c)
+            .and_then(|r| r.workplace)
+            .and_then(|id| w.buildings().get(id))
+            .map(|b| b.front)
+        else {
+            continue;
+        };
+        for (i, d) in doors.iter().enumerate() {
+            workers[i] += u32::from(choice::in_walk_range(front, *d));
+        }
+    }
+    assert!(workers[1] > 0, "東の駅の徒歩圏に職場の住民がいない");
+    assert_eq!([got[0].workers, got[1].workers], workers);
     let all = w
         .carless_households()
         .iter()
