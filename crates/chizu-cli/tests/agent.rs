@@ -839,7 +839,8 @@ fn act_reports_lines_that_cannot_run() {
             {{"type":"CreateLine","from":{a},"to":{c}}}"#
         )
     };
-    // a–b の区間運転を 4 本作ると、a–b の進路の輪がつくる共有の区画の枠 3 を前の 3 本が使い、4 本目は上限が 0 になる。
+    // a–b の区間運転を 4 本作り、前の 3 本を走らせると、a–b の進路の輪がつくる共有の区画の枠 3 を前の 3 本が使い、
+    // 4 本目は上限が 0 になる。
     let dir = session("agent-rail-cap-zero-reason");
     let d = dir.to_str().unwrap();
     cli(&["agent", "new", d, "0"]);
@@ -848,11 +849,15 @@ fn act_reports_lines_that_cannot_run() {
         &format!(
             r#"[{},
             {{"type":"CreateLine","from":{a},"to":{b}}},
-            {{"type":"SetLineTrains","line":{l0},"trains":2}}]"#,
+            {{"type":"SetLineTrains","line":{l0},"trains":2}},
+            {{"type":"SetLineTrains","line":{l1},"trains":1}},
+            {{"type":"SetLineTrains","line":{l2},"trains":1}}]"#,
             town(&st(0), &st(1), &st(1)),
             a = st(0),
             b = st(1),
             l0 = st(0),
+            l1 = st(1),
+            l2 = st(2),
         ),
     );
     let acted = json(&cli(&["agent", "act", d, &cmds]));
@@ -885,8 +890,8 @@ fn act_reports_lines_that_cannot_run() {
     );
     assert!(lines[3]["capReason"]["shortSpans"].is_array(), "{o}");
     assert!(o["rail"]["trainCount"].as_u64().unwrap() > 0, "{o}");
-    // a–c の路線に列車を走らせ、a–b を 2 本置いたところへ 3 本目の a–b を足すと、区画の枠を 4 本で分けることになり、
-    // 前からある a–c の上限が 0 になるので断る。
+    // a–c と 2 本の a–b を走らせたところへ 3 本目の a–b を足す。本数 0 の路線は区画の枠を使わないので、作るのは
+    // 受け付ける。走らせようとすると、区画の枠を 4 本で分けることになり、前からある a–c の上限が 0 になるので断る。
     let dir = session("agent-rail-cap-zero");
     let d = dir.to_str().unwrap();
     cli(&["agent", "new", d, "0"]);
@@ -895,23 +900,31 @@ fn act_reports_lines_that_cannot_run() {
         &format!(
             r#"[{},
             {{"type":"SetLineTrains","line":{l2},"trains":2}},
-            {{"type":"CreateLine","from":{a},"to":{b}}}]"#,
+            {{"type":"SetLineTrains","line":{l0},"trains":1}},
+            {{"type":"SetLineTrains","line":{l1},"trains":1}},
+            {{"type":"CreateLine","from":{a},"to":{b}}},
+            {{"type":"SetLineTrains","line":{l3},"trains":1}}]"#,
             town(&st(0), &st(1), &st(2)),
             a = st(0),
             b = st(1),
+            l0 = st(0),
+            l1 = st(1),
             l2 = st(2),
+            l3 = st(3),
         ),
     );
     let acted = json(&cli(&["agent", "act", d, &cmds]));
-    assert_eq!(acted["results"][9]["outcome"], "Applied", "{acted}");
-    assert_eq!(acted["results"][10]["outcome"], "Denied", "{acted}");
+    for i in 9..=12 {
+        assert_eq!(acted["results"][i]["outcome"], "Applied", "{acted}");
+    }
+    assert_eq!(acted["results"][13]["outcome"], "Denied", "{acted}");
     assert_eq!(
-        acted["results"][10]["reason"], "LineStarvesOther",
+        acted["results"][13]["reason"], "LineStarvesOther",
         "{acted}"
     );
     // 上限が 0 になる路線の id が付く。
     assert_eq!(
-        acted["results"][10]["starvedLine"],
+        acted["results"][13]["starvedLine"],
         serde_json::json!({"index":2,"generation":0}),
         "{acted}"
     );
@@ -2587,6 +2600,8 @@ fn act_reports_a_lowered_cap_and_observe_shows_recent_riders() {
         r#"{"type":"BuildRail","from":[12,8],"to":[53,8]}"#.to_string(),
         r#"{"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":1,"generation":0}}"#
             .to_string(),
+        // loweredLines に出るのは、本数 1 以上の路線だけである。
+        r#"{"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":1}"#.to_string(),
     ];
     // 踏切をいくつか作っても、cap はまだ下がらない。46 の道路で 3 から 1 に下がる。
     for x in (16..=46).step_by(3) {

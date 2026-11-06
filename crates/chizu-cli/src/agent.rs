@@ -297,7 +297,8 @@ observe の rail（線路と駅）:
   facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅と列車の 1 日の維持費である。
   lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、
   trains 遊ぶ人が決めた本数（SetLineTrains の値。cap が下がって列車が消えても変わらない）、cap 行き詰まりを防ぐ本数の上限
-    （共有の区画を通る路線は、区画の枠のうち自分の分で運べる本数までにする。それより多く走らせても、区画の手前で待つだけである）、
+    （共有の区画を通る路線は、区画の枠のうち自分の分で運べる本数までにする。それより多く走らせても、区画の手前で待つだけである。
+    区画の枠は本数 1 以上の路線で分ける。本数 0 の路線の cap は、本数を 1 以上にしたら配られる分から決めた値である）、
   capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
     sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有の区画の枠を、これらの路線と分けている）。
     shortSpans 進路にある、待てる所になれない短い線路（from と to が線路の両端のノードのマス、lengthMm が長さ）。
@@ -486,7 +487,8 @@ observe の removedCrosswalks:
       進路は線路の上の最短の道のりで選び、ノードで 45 度より大きく曲がる所と、途中で向きを変える所は通らない。
       そうしないと届かなければ Denied（RailNoRoute）。路線は往復し、両端の駅で折り返す。途中の駅は通り過ぎてよい。
       駅がなければ Denied（NoSuchStation）、同じ駅なら Denied（StationInLine）、路線が 64 本あれば Denied（LineLimit）。
-      作るとほかの路線の cap が 0 になる（共有の区画の枠を分けきれず、走れなくなる）なら Denied（LineStarvesOther）。
+      作るとほかの路線（本数 1 以上の路線）の cap が 0 になる（共有の区画の枠を分けきれず、走れなくなる）なら Denied（LineStarvesOther）。
+      作った路線は本数 0 なので、共有の区画の枠を使わない。
       作る路線そのものの cap が 0 で（区画の枠が回ってこず、走れない）、ほかの路線の cap を下げるなら
       Denied（LineStarvesSelf）。走らない路線のために、ほかの路線の列車が消えるだけだからである。
       作る路線の cap が 0 でも、ほかの路線の cap が変わらないなら受け付ける。
@@ -515,6 +517,11 @@ observe の removedCrosswalks:
       待てる所の輪のうち短いものの長さ − 1）を区画を使う路線で分けた数である。列車は待てる所から次の待てる所までを
       まとめて押さえて進み、区画に入るのは自分の路線の分の枠が空いているときだけである。待てる所が 1 つ以下の路線と、
       区画の枠の分け前がない路線は cap が 0 で、列車は走らない。
+      区画の枠は、区画を使う路線のうち本数 1 以上の路線で等しく分ける（本数 0 の路線の分は 0）。そのため、本数を 0 から
+      1 以上にすると、区画を一緒に使うほかの路線の cap が下がることがある（act の結果の loweredLines）。0 にすると上がる。
+      1 以上どうしで変えても、ほかの路線は変わらない。ほかの路線（本数 1 以上）の cap を 0 にするなら Denied（LineStarvesOther、
+      starvedLine 付き）、この路線の cap が 0 なのにほかの路線の cap を下げるなら Denied（LineStarvesSelf）。
+      本数を変えて区画の分が変わったときは、超えた列車をすぐに消す（removedTrains）。
       列車は 4 両 80m、時速 90km で、最初の駅に 1 本ずつ現れる。駅に 20 tick 止まり、終点では 30 tick かけて折り返す。
       同じ駅から前の列車が出てから、運転間隔（1 周の見込みの時間 ÷ 本数）の半分を空けて出る。先の閉塞を押さえてから
       入るので、2 本が同じ閉塞に入ることはない。本数を減らすと、終点で折り返す列車から消える。消える列車に乗っていた人は、
@@ -558,6 +565,8 @@ act の結果:
   走れるまま cap が下がった路線があれば loweredLines が付く（道路のコマンドで踏切ができ、線路が割れて待てる所が減ったときなど）。
     路線ごとの line（id）、cap（前の cap）、capAfter（後の cap）、waitPlaces（待てる所の数）、shortSpanCount（待てる所になれない短い線路の数）。
     LineStarvesSelf で断ったときの loweredLines と同じ形である。
+    haltedLines と loweredLines に出るのは、コマンドの前に本数（trains）が 1 以上だった路線だけである。本数 0 の路線の
+    cap は走らせたときの見込みなので比べない。本数を 0 にした路線も出さない。
     BuildRoad と UpgradeRoad の結果にも付く。できた踏切は crossings に出る。
   コマンドで路線そのものが消えたら（駅の取り壊しなど。RemoveLine も含む）、removedLines にその id の並びが付く。
   コマンドで列車が消えたら removedTrains にその数が付く（上限が下がった、路線が止まった、進路が変わって先を押さえ直せないなど）。
@@ -2473,36 +2482,62 @@ fn world_at_past(saved: &Saved, dir: &Path, target: u64, keep: bool) -> World {
 /// `capReason` の `shortSpans` に載せる線路の数の上限。
 const SHORT_SPAN_LIST: usize = 16;
 
-/// 走れる（止まっておらず、上限が 0 でない）路線と、路線ごとの列車の数。コマンドの前後で比べるのに使う。
-/// 値は、走れるか、列車の数、本数の上限。
-fn line_states(world: &World) -> std::collections::BTreeMap<chizu_core::LineId, (bool, usize, u8)> {
+/// コマンドの前後で比べる、路線ごとの状態。
+#[derive(Clone, Copy, Debug)]
+struct LineState {
+    /// 遊ぶ人が決めた本数。
+    set: u8,
+    stopped: bool,
+    cap: u8,
+    /// 走っている列車の数。
+    running: usize,
+}
+
+impl LineState {
+    /// 走らせている路線か。止まっておらず、本数が 1 以上で、上限が 0 でない。中核がほかの路線のコマンドから守る
+    /// 路線（本数 0 の路線を除く）と同じに数える。本数 0 の路線は、上限が見込みの値なので比べない。
+    fn runs(&self) -> bool {
+        !self.stopped && self.set > 0 && self.cap > 0
+    }
+}
+
+type LineStates = std::collections::BTreeMap<chizu_core::LineId, LineState>;
+
+fn line_states(world: &World) -> LineStates {
     let rail = world.rail();
     rail.lines()
         .map(|(id, l)| {
             let running = rail.trains().filter(|(_, t)| t.line == id).count();
-            (id, (!l.stopped && l.cap() > 0, running, l.cap()))
+            let s = LineState {
+                set: l.trains,
+                stopped: l.stopped,
+                cap: l.cap(),
+                running,
+            };
+            (id, s)
         })
         .collect()
 }
 
 /// コマンドの前後の路線を比べ、走れなくなった路線（haltedLines）と、走れるまま本数の上限が下がった路線（loweredLines）と、なくなった路線（removedLines）と、消えた列車の数（removedTrains）を `out` に足す。
 /// どちらもなければ何も足さない。
-fn note_line_changes(
-    out: &mut Value,
-    world: &World,
-    before: &std::collections::BTreeMap<chizu_core::LineId, (bool, usize, u8)>,
-) {
-    let after = line_states(world);
+fn note_line_changes(out: &mut Value, world: &World, before: &LineStates) {
+    compare_lines(out, world, before, &line_states(world));
+}
+
+/// [`note_line_changes`] の比べ。走れなくなった路線は、前に走らせていて、あとも本数が 1 以上の路線である。
+/// 本数を 0 にした路線は、走らせるのをやめただけなので出さない。
+fn compare_lines(out: &mut Value, world: &World, before: &LineStates, after: &LineStates) {
     let rail = world.rail();
     let halted: Vec<Value> = before
         .iter()
-        .filter(|(id, (ran, _, _))| *ran && after.get(*id).is_some_and(|(runs, _, _)| !runs))
-        .map(|(id, (_, _, cap))| {
+        .filter(|(id, b)| b.runs() && after.get(*id).is_some_and(|a| a.set > 0 && !a.runs()))
+        .map(|(id, b)| {
             let l = rail.line(*id).expect("路線がない");
             json!({
                 "id": id_json(id.index, id.generation),
                 "stopped": l.stopped,
-                "cap": cap,
+                "cap": b.cap,
                 "capAfter": l.cap(),
                 "capReason": cap_reason(rail, *id),
             })
@@ -2511,14 +2546,14 @@ fn note_line_changes(
     // 走れるまま本数の上限が下がった路線。踏切で線路が割れたときなどに起きる。
     let lowered: Vec<Value> = before
         .iter()
-        .filter_map(|(id, (_, _, was))| {
-            let (runs, _, now) = after.get(id)?;
-            (*runs && now < was).then(|| {
+        .filter_map(|(id, b)| {
+            let a = after.get(id)?;
+            (b.runs() && a.runs() && a.cap < b.cap).then(|| {
                 let c = rail.line_capacity(*id);
                 json!({
                     "line": id_json(id.index, id.generation),
-                    "cap": was,
-                    "capAfter": now,
+                    "cap": b.cap,
+                    "capAfter": a.cap,
                     "waitPlaces": c.as_ref().map(|c| c.wait_places),
                     "shortSpanCount": c.as_ref().map(|c| c.short_spans.len()),
                 })
@@ -2527,10 +2562,11 @@ fn note_line_changes(
         .collect();
     let by_line: Vec<(chizu_core::LineId, usize)> = before
         .iter()
-        .map(|(id, (_, n, _))| {
+        .map(|(id, b)| {
             (
                 *id,
-                n.saturating_sub(after.get(id).map_or(0, |(_, m, _)| *m)),
+                b.running
+                    .saturating_sub(after.get(id).map_or(0, |a| a.running)),
             )
         })
         .filter(|(_, n)| *n > 0)
@@ -3371,11 +3407,8 @@ mod tests {
         );
     }
 
-    /// 上限が 0 になった路線は、止まっていなくても haltedLines に理由つきで出る。
-    /// 駅 a–b の区間運転を 4 本作ると、共有の区画の枠 3 を前の 3 本が使い、4 本目の上限が 0 になる。
-    /// コマンドの前に a–b が走っていたことにして、前後の比べを確かめる。
-    #[test]
-    fn halted_lines_show_a_line_whose_cap_became_zero() {
+    /// 駅 a–b の区間運転を 4 本作った街。共有の区画の枠は 3 で、本数 1 以上の路線で分ける。
+    fn four_short_turns() -> (World, Vec<chizu_core::LineId>) {
         use chizu_core::{Money, RoadKind, ServiceKind, StationId};
         let mut w = World::new_with_money(0, Money(100_000_000));
         let mut apply = |c: Command| assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
@@ -3410,12 +3443,37 @@ mod tests {
                 to: st(1),
             });
         }
-        let mut before = line_states(&w);
         let lines: Vec<_> = w.rail().lines().map(|(id, _)| id).collect();
         assert_eq!(lines.len(), 4);
-        before.insert(lines[3], (true, 0, 3));
+        (w, lines)
+    }
+
+    fn set_trains(w: &mut World, line: chizu_core::LineId, trains: u8) {
+        let c = Command::SetLineTrains { line, trains };
+        assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+    }
+
+    /// 上限が 0 になった路線は、止まっていなくても haltedLines に理由つきで出る。
+    /// 前の 3 本を走らせると、共有の区画の枠 3 を前の 3 本が使い、4 本目の上限が 0 になる。
+    /// コマンドの前後で 4 本目が本数 1 で走っていたことにして、比べを確かめる。
+    #[test]
+    fn halted_lines_show_a_line_whose_cap_became_zero() {
+        let (mut w, lines) = four_short_turns();
+        for line in &lines[..3] {
+            set_trains(&mut w, *line, 1);
+        }
+        let running = LineState {
+            set: 1,
+            stopped: false,
+            cap: 3,
+            running: 0,
+        };
+        let mut before = line_states(&w);
+        before.insert(lines[3], running);
+        let mut after = line_states(&w);
+        after.get_mut(&lines[3]).unwrap().set = 1;
         let mut out = json!({});
-        note_line_changes(&mut out, &w, &before);
+        compare_lines(&mut out, &w, &before, &after);
         let halted = out["haltedLines"].as_array().unwrap();
         assert_eq!(halted.len(), 1, "{out}");
         assert_eq!(
@@ -3438,8 +3496,8 @@ mod tests {
         assert!(out.get("loweredLines").is_none());
         // 走れるまま上限が下がった路線は loweredLines に出る
         let mut before = line_states(&w);
-        let cap = before[&lines[0]].2;
-        before.insert(lines[0], (true, 0, cap + 2));
+        let cap = before[&lines[0]].cap;
+        before.get_mut(&lines[0]).unwrap().cap = cap + 2;
         let mut out = json!({});
         note_line_changes(&mut out, &w, &before);
         let lowered = out["loweredLines"].as_array().unwrap();
@@ -3451,6 +3509,44 @@ mod tests {
         assert_eq!(lowered[0]["cap"], cap + 2);
         assert_eq!(lowered[0]["capAfter"], cap);
         assert!(out.get("haltedLines").is_none());
+    }
+
+    /// 本数 0 の路線は、見込みの上限が下がっても 0 になっても、haltedLines と loweredLines に出ない。
+    /// 中核が `SetLineTrains` を断るときと同じく、走らせている路線だけを比べる。
+    /// 2 本を走らせたところで 3 本目を走らせると、走っている 2 本の上限は下がり、本数 0 の 4 本目の見込みの上限は
+    /// 0 になる。
+    #[test]
+    fn lines_without_trains_are_not_reported_halted_or_lowered() {
+        let (mut w, lines) = four_short_turns();
+        for line in &lines[..2] {
+            set_trains(&mut w, *line, 1);
+        }
+        let before = line_states(&w);
+        assert!(before[&lines[3]].cap > 0);
+        set_trains(&mut w, lines[2], 1);
+        assert_eq!(w.rail().line(lines[3]).unwrap().cap(), 0);
+        let mut out = json!({});
+        note_line_changes(&mut out, &w, &before);
+        assert!(out.get("haltedLines").is_none(), "{out}");
+        let lowered: Vec<&Value> = out["loweredLines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| &l["line"])
+            .collect();
+        let expected: Vec<Value> = lines[..2]
+            .iter()
+            .filter(|l| before[*l].cap > w.rail().line(**l).unwrap().cap())
+            .map(|l| id_json(l.index, l.generation))
+            .collect();
+        assert!(!expected.is_empty());
+        assert_eq!(lowered, expected.iter().collect::<Vec<_>>(), "{out}");
+        // 走らせていた路線を 0 にしても、走らせるのをやめただけなので haltedLines に出ない。
+        let before = line_states(&w);
+        set_trains(&mut w, lines[0], 0);
+        let mut out = json!({});
+        note_line_changes(&mut out, &w, &before);
+        assert!(out.get("haltedLines").is_none(), "{out}");
     }
 
     /// 1 日前（tick 0）の需要が 1,000 の控えで、いま tick 7200 の主の網を見る。

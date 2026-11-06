@@ -913,23 +913,132 @@ fn run_inside(inner: &[usize], counts: &[(u8, u8)]) -> Vec<(u8, u8)> {
 const COUNTS: [(u8, u8); 7] = [(1, 1), (1, 6), (6, 1), (3, 3), (6, 6), (16, 16), (2, 16)];
 
 /// 区間運転（W–M–E があるときの W–M）が走る。W–M は自分だけの待てる所を持たず、W、W–M の線路、M の
-/// 待てる所の輪（4 つ）が共有の区画の中の輪になる。区画の枠は 3 で、W–M に 2、W–M–E に 1 を分ける。
-/// W–M–E の自分だけの区間には待てる所が 5 つあるが、W–M–E の列車は 1 周の 3 分の 1 以上を区画の中で過ごすので、
-/// 区画の分 1 で運べるのは 3 本の分である。上限は 3 になる（`flow_cap`）。5 本にしても、駅を出る数は変わらない。
+/// 待てる所の輪（4 つ）が共有の区画の中の輪になる。区画の枠は 3 で、本数が 1 以上の路線で分ける。
+/// W–M の本数が 0 のうちは、W–M–E が 3 つとも使い、上限は自分だけの区間の待てる所の数 5 である。W–M の上限は、
+/// 本数を 1 以上にしたら配られる分の 2 を見せる。
+/// W–M を走らせると、W–M に 2、W–M–E に 1 を分ける。W–M–E の列車は 1 周の 3 分の 1 以上を区画の中で過ごすので、
+/// 区画の分 1 で運べるのは 3 本の分である。上限は 3 になる。5 本にしても、駅を出る数は変わらない。
 #[test]
 fn a_short_turn_line_runs_inside_another() {
     let (mut w, st) = two_line_world();
     let outer = line_through(&mut w, &[st[0], st[1], st[2]]);
     let inner = line_through(&mut w, &[st[0], st[1]]);
+    set_trains(&mut w, outer, 5);
     let rail = w.rail();
     assert!(rail.line(inner).unwrap().plan.runs.is_empty());
     assert_eq!(rail.line(inner).unwrap().cap(), 2);
+    assert_eq!(rail.line(inner).unwrap().plan.quota[&0], 0);
     assert_eq!(rail.line(outer).unwrap().plan.runs, vec![5]);
+    assert_eq!(rail.line(outer).unwrap().plan.quota[&0], 3);
+    assert_eq!(rail.line(outer).unwrap().cap(), 5);
+    set_trains(&mut w, inner, 1);
+    let rail = w.rail();
+    assert_eq!(rail.line(inner).unwrap().plan.quota[&0], 2);
+    assert_eq!(rail.line(inner).unwrap().cap(), 2);
     assert_eq!(rail.line(outer).unwrap().plan.quota[&0], 1);
     assert_eq!(rail.line(outer).unwrap().cap(), 3);
     for (o, i) in run_inside(&[0, 1], &COUNTS) {
         assert!(i <= 2 && o <= 3, "{o}/{i}");
     }
+}
+
+/// 本数 0 の区間運転は、区画の枠を押さえない（#344）。W–M–E を 5 本走らせ、W–M を 0 本にしておくと、
+/// W–M–E は区画の枠 3 をすべて使って 5 本走る。W–M を走らせると W–M–E の上限は 3 に下がり、超えた列車は
+/// すぐに消える。W–M を 0 本に戻すと、W–M の列車はすぐに消え（減った枠を待って止まらないように）、
+/// W–M–E は 5 本まで出直す。
+#[test]
+fn a_short_turn_line_without_trains_leaves_the_zone_to_the_main_line() {
+    let (mut w, st) = two_line_world();
+    let outer = line_through(&mut w, &[st[0], st[1], st[2]]);
+    let inner = line_through(&mut w, &[st[0], st[1]]);
+    set_trains(&mut w, outer, 5);
+    let count = |w: &World, id: LineId| w.rail().trains().filter(|(_, t)| t.line == id).count();
+    let (_, per_line) = run_lines(&mut w, 3_000, 3_000);
+    assert_eq!(per_line[&outer], 5);
+    set_trains(&mut w, inner, 2);
+    assert_eq!(w.rail().line(outer).unwrap().cap(), 3);
+    assert!(count(&w, outer) <= 3);
+    let (_, per_line) = run_lines(&mut w, 3_000, 3_000);
+    assert_eq!(per_line[&inner], 2);
+    assert_eq!(count(&w, outer), 3);
+    set_trains(&mut w, inner, 0);
+    assert_eq!(count(&w, inner), 0);
+    assert_eq!(w.rail().line(outer).unwrap().cap(), 5);
+    run(&mut w, 3_000, 3_000);
+    assert_eq!(count(&w, outer), 5);
+}
+
+/// W–M–E を 1 本走らせ、E で折り返して M へ戻る途中（自分だけの区間）まで進めた街。
+fn outer_train_heading_back() -> (World, [StationId; 4], LineId) {
+    let (mut w, st) = two_line_world();
+    let outer = line_through(&mut w, &[st[0], st[1], st[2]]);
+    set_trains(&mut w, outer, 1);
+    let line = w.rail().line(outer).unwrap();
+    let east = line
+        .path
+        .iter()
+        .position(|s| s.kind == StepKind::Terminal && s.station == Some(st[2]))
+        .unwrap();
+    let east = u32::try_from(east).unwrap();
+    let len = line.len();
+    for _ in 0..20_000 {
+        w.step();
+        let found = w.rail().trains().any(|(_, t)| {
+            t.line == outer && t.state == TrainState::Running && t.pos > east && t.pos + 3 < len
+        });
+        if found {
+            return (w, st, outer);
+        }
+    }
+    panic!("M へ戻る途中の列車がない");
+}
+
+/// 本数 0 にした路線の列車は、区分けが変わらず終点まで残る。その途中で区画ができ、その路線の分が 0 になったら、
+/// 列車をすぐに消す。残すと、区画の手前で止まり続ける。
+#[test]
+fn a_zero_line_train_is_dropped_when_a_zone_shuts_it_out() {
+    let (mut w, st, outer) = outer_train_heading_back();
+    set_trains(&mut w, outer, 0);
+    assert_eq!(
+        w.rail().trains().filter(|(_, t)| t.line == outer).count(),
+        1
+    );
+    line_through(&mut w, &[st[0], st[1]]);
+    assert!(
+        w.rail()
+            .line(outer)
+            .unwrap()
+            .plan
+            .quota
+            .values()
+            .any(|q| *q == 0)
+    );
+    assert!(w.rail().trains().all(|(_, t)| t.line != outer));
+    run(&mut w, 3_000, 3_000);
+    assert!(w.rail().trains().all(|(_, t)| t.line != outer));
+}
+
+/// 前の規則で、本数 0 の路線が区画の分を持っていたときの保存データを読むと、読み直した区分けではその路線の分が
+/// 0 になる。そのとき残っている列車も、次の tick で消す。
+#[test]
+fn a_zero_line_train_from_an_old_save_is_dropped() {
+    let (mut w, st, outer) = outer_train_heading_back();
+    line_through(&mut w, &[st[0], st[1]]);
+    let mut rail = w.rail().clone();
+    // 本数だけを 0 にし、区分けを作り直す。読み込みの `restore_plans` と同じである。
+    rail.lines.get_mut(outer).unwrap().trains = 0;
+    rail.restore_plans();
+    assert!(
+        rail.line(outer)
+            .unwrap()
+            .plan
+            .quota
+            .values()
+            .any(|q| *q == 0)
+    );
+    assert_eq!(rail.trains().filter(|(_, t)| t.line == outer).count(), 1);
+    rail.step(w.tick());
+    assert!(rail.trains().all(|(_, t)| t.line != outer));
 }
 
 /// 同じ駅を並べた 2 つの路線（緩行と快速）と、途中の駅を通り過ぎる路線が走る。どちらの路線も進路のすべてを
@@ -954,8 +1063,10 @@ fn a_short_branch_line_runs() {
     run_inside(&[3, 1], &COUNTS);
 }
 
-/// 共有の区画の枠を、区画を使う路線で分けきれない路線を作ると、前からある路線の上限が 0 になるので断る。
+/// 共有の区画の枠を、区画を使う路線で分けきれない本数を決めると、前からある路線の上限が 0 になるので断る。
 /// 区間運転 W–M が作る区画（枠 3）を、W–M、W–M–E、W–M–N が 1 つずつ使っているところへ、M–W を足す。
+/// 本数 0 の M–W は枠を使わないので、作るのは受け付ける。M–W を走らせようとすると、余りを先に配る区間運転の
+/// M–W に 1 つ回り、W–M–N の分が 0 になるので断る。
 #[test]
 fn a_line_that_would_starve_another_is_denied() {
     let (mut w, [west, mid, east, north]) = two_line_world();
@@ -967,22 +1078,24 @@ fn a_line_that_would_starve_another_is_denied() {
         set_trains(&mut w, id, 3);
     }
     run(&mut w, 2_000, 3_000);
+    let back = create(&mut w, mid, west);
+    for id in [short, one, two] {
+        assert_eq!(w.rail().line(id).unwrap().plan.quota[&0], 1, "{id:?}");
+    }
+    assert_eq!(w.rail().line(back).unwrap().cap(), 1);
     let before = w.state_hash();
+    let command = Command::SetLineTrains {
+        line: back,
+        trains: 2,
+    };
     assert_eq!(
-        w.apply(&Command::CreateLine {
-            from: mid,
-            to: west
-        }),
+        w.apply(&command),
         ApplyOutcome::Denied(DenyReason::LineStarvesOther)
     );
     assert_eq!(w.state_hash(), before);
+    assert_eq!(w.rail().line(back).unwrap().trains, 0);
     // 断る原因の路線を、状態を変えずに読める。
-    let command = Command::CreateLine {
-        from: mid,
-        to: west,
-    };
-    let starved = w.rail().starved_by_command(&command).expect("原因がある");
-    assert!([short, one, two].contains(&starved));
+    assert_eq!(w.rail().starved_by_command(&command), Some(two));
     assert_eq!(
         w.rail()
             .starved_by_command(&Command::RemoveLine { line: short }),
@@ -1015,15 +1128,20 @@ fn row_world() -> (World, [StationId; 4], [LineId; 3]) {
 /// 区画の枠を分けるのは、辺をたどって互いに行き来できる共有の待てる所だけである（#356）。A–E を足すと、
 /// A–M、M–E、A–E の待てる所が輪のある区画（枠 3）になる。E–F が待つ E のホームは、区画から辺が入るだけで
 /// 区画へ戻る辺がないので区画に入らず、E–F は区画の枠を分けない。A–E は E–F を走れなくしないので断らない。
+/// 本数 0 の A–E は枠を使わず、A–M と M–E で 2 と 1 に分ける。A–E を走らせると 1 つずつになる。
 #[test]
 fn a_line_ending_where_another_starts_does_not_starve_it() {
     let (mut w, [a, _, e, _], [am, me, ef]) = row_world();
     let ae = create(&mut w, a, e);
-    let rail = w.rail();
-    assert_eq!(rail.line(ef).unwrap().cap(), 3);
-    for id in [am, me, ae] {
-        assert_eq!(rail.line(id).unwrap().cap(), 1, "{id:?}");
-    }
+    let caps = |w: &World| [am, me, ae, ef].map(|id| w.rail().line(id).unwrap().cap());
+    assert_eq!(caps(&w), [2, 1, 1, 3]);
+    let command = Command::SetLineTrains {
+        line: ae,
+        trains: 3,
+    };
+    assert_eq!(w.rail().lowered_by_command(&command), vec![(am, 2, 1)]);
+    ok(&mut w, command);
+    assert_eq!(caps(&w), [1, 1, 1, 3]);
     run(&mut w, 3_000, 3_000);
 }
 
@@ -1044,12 +1162,13 @@ fn a_line_that_cannot_run_and_lowers_others_is_denied() {
     }
 }
 
-/// 路線を作って上限が下がり列車が消えた路線も、その路線を消して上限が戻れば、決めた本数まで最初の駅から
+/// 路線を作って走らせ、上限が下がり列車が消えた路線も、その路線を消して上限が戻れば、決めた本数まで最初の駅から
 /// 出直す（#356）。
 #[test]
 fn trains_come_back_when_the_cap_comes_back() {
     let (mut w, [a, _, e, _], lines) = row_world();
     let ae = create(&mut w, a, e);
+    set_trains(&mut w, ae, 3);
     let count = |w: &World, id: LineId| w.rail().trains().filter(|(_, t)| t.line == id).count();
     assert_eq!(count(&w, lines[0]), 1);
     ok(&mut w, Command::RemoveLine { line: ae });
@@ -1063,11 +1182,18 @@ fn trains_come_back_when_the_cap_comes_back() {
 }
 
 /// 上限と、0 のときの理由を読める。共有の区画の枠を、区画を使う路線で分けきれないと、新しい路線の上限が 0 になる。
-/// W–M の区間運転を 4 本作ると、区画の枠 3 を前の 3 本が 1 つずつ使い、4 本目は 0 になる。
+/// W–M の区間運転を 4 本作り、前の 3 本を走らせると、区画の枠 3 を前の 3 本が 1 つずつ使い、4 本目は 0 になる。
+/// 走らせる前は、どの路線も、自分だけを走らせたら配られる 3 を上限に見せる。
 #[test]
 fn line_capacity_shows_why_the_cap_is_zero() {
     let (mut w, [west, mid, _, _]) = two_line_world();
     let ids: Vec<LineId> = (0..4).map(|_| line_through(&mut w, &[west, mid])).collect();
+    for id in &ids {
+        assert_eq!(w.rail().line(*id).unwrap().cap(), 3);
+    }
+    for id in &ids[..3] {
+        set_trains(&mut w, *id, 1);
+    }
     let rail = w.rail();
     let c = rail.line_capacity(ids[0]).unwrap();
     assert_eq!(c.cap, 1);
@@ -1378,6 +1504,9 @@ mod ring;
 fn removing_a_line_restores_the_cap_of_a_starved_line() {
     let (mut w, [west, mid, _, _]) = two_line_world();
     let ids: Vec<LineId> = (0..4).map(|_| line_through(&mut w, &[west, mid])).collect();
+    for id in &ids[..3] {
+        set_trains(&mut w, *id, 1);
+    }
     assert_eq!(w.rail().line(ids[3]).unwrap().cap(), 0);
     ok(&mut w, Command::RemoveLine { line: ids[0] });
     assert!(w.rail().line(ids[3]).unwrap().cap() > 0);

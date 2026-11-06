@@ -15,7 +15,7 @@ use crate::happiness::{CitizenContext, update_citizen};
 use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
-use crate::rail::{LineId, Rail, RailLine, rail_cost};
+use crate::rail::{LineId, Rail, rail_cost};
 use crate::rng::{RngPurpose, mix_words};
 use crate::routing::{AstarRouter, BAND_TICKS, Delays, GraphError};
 use crate::schedule::bucket_at;
@@ -962,11 +962,14 @@ impl World {
         if command.validate().is_err() {
             return ApplyOutcome::Rejected;
         }
-        // 本数を変えても、上限で抑えられて走らせる本数が変わらなければ、駅の組の表は同じになる。
-        let allowed = |w: &World, line: LineId| w.rail.line(line).map(RailLine::allowed);
+        // 本数を変えても、上限で抑えられて走らせる本数が変わらなければ、駅の組の表は同じになる。本数で共有の区画の
+        // 枠を分けるので、ほかの路線の走らせる本数も変わることがある。
+        let allowed = |w: &World| -> Vec<(LineId, u8)> {
+            w.rail.lines().map(|(id, l)| (id, l.allowed())).collect()
+        };
         let allowed_before = match command {
-            Command::SetLineTrains { line, .. } => allowed(self, *line),
-            _ => None,
+            Command::SetLineTrains { .. } => allowed(self),
+            _ => Vec::new(),
         };
         let outcome = self.apply_valid(command);
         self.trips.forget_lots(&self.buildings);
@@ -990,8 +993,8 @@ impl World {
             | Command::RemoveLine { .. }
             | Command::Bulldoze { .. }
             | Command::PlaceBuilding { .. } => self.planner.forget(),
-            Command::SetLineTrains { line, .. } => {
-                if allowed(self, *line) != allowed_before {
+            Command::SetLineTrains { .. } => {
+                if allowed(self) != allowed_before {
                     self.planner.forget();
                 }
             }
