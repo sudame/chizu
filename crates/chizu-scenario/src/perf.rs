@@ -180,7 +180,7 @@ impl ChoiceStats {
 pub fn rail_choice(requests: u32, now: &dyn Fn() -> u64) -> ChoiceStats {
     let net = city_grid_100k();
     let inputs = rail_choice_inputs(SEED);
-    let planner = RailPlanner::from_parts(inputs.doors, &inputs.lines);
+    let planner = RailPlanner::from_shapes(inputs.doors, &inputs.lines);
     let choice = RideChoice::from_parts(&planner, inputs.live, Default::default(), 5);
     let ends = commute_tiles(SEED, &net, requests);
     let mut offered = 0;
@@ -202,20 +202,52 @@ pub fn rail_choice(requests: u32, now: &dyn Fn() -> u64) -> ChoiceStats {
     }
 }
 
-/// 駅 200 と路線 64 本で、駅の空間索引と駅の組の表を `runs` 回作り直す時間（ns）の平均と、組の数。
-/// 設計 3.10 の 7 の `rail_table_rebuild`（乗り換えを入れる前）である。
-pub fn rail_table_rebuild(runs: u32, now: &dyn Fn() -> u64) -> (u64, usize) {
+/// 駅の組の表の作り直しの時間。
+#[derive(Clone, Copy, Debug)]
+pub struct RebuildStats {
+    pub runs: u32,
+    pub mean_ns: u64,
+    pub worst_ns: u64,
+    /// 組の数と、そのうち乗り換え 1 回の進路を持つ組の数。
+    pub pairs: usize,
+    pub transfer_pairs: usize,
+}
+
+impl RebuildStats {
+    pub fn to_json(&self) -> String {
+        format!(
+            r#"{{"runs":{},"mean_ns":{},"worst_ns":{},"pairs":{},"transfer_pairs":{}}}"#,
+            self.runs, self.mean_ns, self.worst_ns, self.pairs, self.transfer_pairs
+        )
+    }
+}
+
+/// 駅 200 と路線 64 本で、駅の空間索引と駅の組の表（乗り換え 1 回を含む）を `runs` 回作り直す時間（ns）の
+/// 平均と最悪と、組の数。設計 3.10 の 7 の `rail_table_rebuild` である。
+pub fn rail_table_rebuild(runs: u32, now: &dyn Fn() -> u64) -> RebuildStats {
     let inputs = rail_choice_inputs(SEED);
     let mut total = 0;
+    let mut worst = 0;
     let mut pairs = 0;
+    let mut transfer_pairs = 0;
     for _ in 0..runs {
         let doors = inputs.doors.clone();
         let t = now();
-        let planner = RailPlanner::from_parts(doors, &inputs.lines);
-        total += now() - t;
-        pairs = black_box(planner).pairs();
+        let planner = RailPlanner::from_shapes(doors, &inputs.lines);
+        let took = now() - t;
+        total += took;
+        worst = worst.max(took);
+        let planner = black_box(planner);
+        pairs = planner.pairs();
+        transfer_pairs = planner.transfer_pairs();
     }
-    (total / u64::from(runs.max(1)), pairs)
+    RebuildStats {
+        runs,
+        mean_ns: total / u64::from(runs.max(1)),
+        worst_ns: worst,
+        pairs,
+        transfer_pairs,
+    }
 }
 
 /// 経路の一括探索の時間。
@@ -292,9 +324,9 @@ pub fn run_all(now: &dyn Fn() -> u64, memory: &dyn Fn() -> Option<u64>) -> Strin
     let batch_100k = route_batch(100_000, 3, now);
     let trains_512 = rail_trains(1_000, now);
     let choice_100k = rail_choice(250_000, now);
-    let (rebuild_ns, pairs) = rail_table_rebuild(10, now);
+    let rebuild = rail_table_rebuild(10, now);
     format!(
-        r#"{{"day_100k":{},"day_1m":{},"movers_20k":{},"route_batch_1k":{},"route_batch_100k":{},"rail_trains":{},"rail_choice_100k":{},"rail_table_rebuild":{{"mean_ns":{rebuild_ns},"pairs":{pairs}}},"memory_bytes":{{"start":{},"after_100k":{},"after_1m":{}}}}}"#,
+        r#"{{"day_100k":{},"day_1m":{},"movers_20k":{},"route_batch_1k":{},"route_batch_100k":{},"rail_trains":{},"rail_choice_100k":{},"rail_table_rebuild":{},"memory_bytes":{{"start":{},"after_100k":{},"after_1m":{}}}}}"#,
         day_100k.to_json(),
         day_1m.to_json(),
         movers_20k.to_json(),
@@ -302,6 +334,7 @@ pub fn run_all(now: &dyn Fn() -> u64, memory: &dyn Fn() -> Option<u64>) -> Strin
         batch_100k.to_json(),
         trains_512.to_json(),
         choice_100k.to_json(),
+        rebuild.to_json(),
         json_mem(base),
         json_mem(mem_100k),
         json_mem(mem_1m),

@@ -1,7 +1,7 @@
 //! テストとベンチマークに使う、種から決定論的に作る街。
 
 use chizu_core::citizens::draw_household;
-use chizu_core::rail::choice::{LineLive, StopInfo, line_stops_of};
+use chizu_core::rail::choice::{LineLive, LineShape, line_stops_of};
 use chizu_core::routing::{ROUTE_VARIANTS, RouteRequest};
 use chizu_core::{
     ApplyOutcome, CHUNK_SIDE, ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network,
@@ -178,8 +178,8 @@ pub const RAIL_CHOICE_STATIONS: u32 = 200;
 pub struct RailChoiceInputs {
     /// 駅の ID の順の、出入口のマスと位置。
     pub doors: Vec<(StationId, TilePos, SidewalkPos)>,
-    /// 路線ごとの止まる所。
-    pub lines: Vec<(LineId, Vec<StopInfo>)>,
+    /// 路線ごとの止まる所と、区間の時間と本数。路線の ID の順に並べる。
+    pub lines: Vec<LineShape>,
     /// 路線ごとの、走っている本数と区間の時間。
     pub live: BTreeMap<LineId, LineLive>,
 }
@@ -249,8 +249,14 @@ pub fn rail_choice_inputs(seed: u64) -> RailChoiceInputs {
         };
         let stops = line_stops_of(&stations, k % 4 == 3);
         let segments: Vec<u32> = stops.iter().map(|_| 40 + r.below(81)).collect();
-        live.insert(id, LineLive::new(4 + r.below(5), &segments));
-        lines.push((id, stops));
+        let trains = 4 + r.below(5);
+        live.insert(id, LineLive::new(trains, &segments));
+        lines.push(LineShape {
+            line: id,
+            stops,
+            segments,
+            trains,
+        });
     }
     RailChoiceInputs { doors, lines, live }
 }

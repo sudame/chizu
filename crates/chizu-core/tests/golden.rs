@@ -169,6 +169,13 @@ fn scenarios() -> Vec<Scenario> {
             money: Some(Money(10_000_000)),
         },
         Scenario {
+            name: "rail_transfers",
+            seed: rail_riders_seed(),
+            ticks: RAIL_RIDERS_TICKS,
+            log: rail_transfers(rail_riders_seed()),
+            money: Some(Money(10_000_000)),
+        },
+        Scenario {
             name: "land_slots",
             seed: 42,
             ticks: 2 * TICKS_PER_DAY + 600,
@@ -261,6 +268,17 @@ fn rail_riders_seed() -> u64 {
 /// 西の住宅と東の工場を東西の通りで結び、通りの南の駅 2 つを線路でつないで列車を走らせる記録。
 /// 住民は、費用で比べて駅まで歩き、列車に乗り、降りて歩く。途中で運賃を変え、本数を変える。
 fn rail_riders(seed: u64) -> CommandLog {
+    rail_town_log(seed, false)
+}
+
+/// [`rail_riders`] の駅のあいだに駅をもう 1 つ置き、西と真ん中、真ん中と東を結ぶ 2 本の路線を走らせる記録。
+/// 住民は真ん中の駅で乗り換える。途中で本数を変え、終わりの近くで乗り換え先の路線をなくす。
+fn rail_transfers(seed: u64) -> CommandLog {
+    rail_town_log(seed, true)
+}
+
+/// [`rail_riders`] と [`rail_transfers`] の記録。`transfer` なら、真ん中の駅で乗り換える 2 本の路線にする。
+fn rail_town_log(seed: u64, transfer: bool) -> CommandLog {
     let mut log = CommandLog::new();
     let mut rec = |tick: u64, c: Command| {
         log.record(Tick(tick), c).unwrap();
@@ -274,24 +292,31 @@ fn rail_riders(seed: u64) -> CommandLog {
     rec(1, road(at(-64, 0), at(127, 0)));
     let inner = chizu_core::world::highway_line(seed).start;
     rec(1, road(inner, at(inner.x, 0)));
-    // 駅の線路は y = 2 の x -50〜-41 と x 100〜109 である。
-    for x in [-50, 100] {
+    // 駅の線路は y = 2 の x -50〜-41 と x 100〜109、乗り換えるときは真ん中が x 30〜39 である。
+    let (stations, rails): (&[i64], &[(i64, i64)]) = if transfer {
+        (&[-50, 30, 100], &[(-41, 30), (39, 100)])
+    } else {
+        (&[-50, 100], &[(-41, 100)])
+    };
+    for x in stations {
         rec(
             2,
             Command::PlaceBuilding {
                 kind: ServiceKind::Station,
-                at: at(x, 1),
+                at: at(*x, 1),
                 rotation: 0,
             },
         );
     }
-    rec(
-        3,
-        Command::BuildRail {
-            from: at(-41, 2),
-            to: at(100, 2),
-        },
-    );
+    for (a, b) in rails {
+        rec(
+            3,
+            Command::BuildRail {
+                from: at(*a, 2),
+                to: at(*b, 2),
+            },
+        );
+    }
     rec(
         4,
         Command::PaintZone {
@@ -324,28 +349,72 @@ fn rail_riders(seed: u64) -> CommandLog {
             },
         );
     }
-    let line = LineId {
-        index: 0,
+    let line = |index| LineId {
+        index,
         generation: 0,
     };
+    let station = |index| StationId {
+        index,
+        generation: 0,
+    };
+    if transfer {
+        rec(
+            6,
+            Command::CreateLine {
+                from: station(0),
+                to: station(1),
+            },
+        );
+        rec(
+            6,
+            Command::CreateLine {
+                from: station(1),
+                to: station(2),
+            },
+        );
+        for l in [0, 1] {
+            rec(
+                7,
+                Command::SetLineTrains {
+                    line: line(l),
+                    trains: 2,
+                },
+            );
+        }
+        rec(
+            TICKS_PER_DAY + 900,
+            Command::SetLineTrains {
+                line: line(0),
+                trains: 1,
+            },
+        );
+        rec(
+            2 * TICKS_PER_DAY - 900,
+            Command::RemoveLine { line: line(1) },
+        );
+        return log;
+    }
     rec(
         6,
         Command::CreateLine {
-            from: StationId {
-                index: 0,
-                generation: 0,
-            },
-            to: StationId {
-                index: 1,
-                generation: 0,
-            },
+            from: station(0),
+            to: station(1),
         },
     );
-    rec(7, Command::SetLineTrains { line, trains: 2 });
+    rec(
+        7,
+        Command::SetLineTrains {
+            line: line(0),
+            trains: 2,
+        },
+    );
     rec(TICKS_PER_DAY, Command::SetFare { fare: 10 });
     rec(
         TICKS_PER_DAY + 900,
-        Command::SetLineTrains { line, trains: 1 },
+        Command::SetLineTrains {
+            line: line(0),
+            trains: 1,
+        },
     );
     log
 }
@@ -1404,6 +1473,25 @@ fn rail_riders_cover_the_riders() {
     assert!(t.boarded > 20 && t.alighted > 0, "{t:?}");
     assert!(world.traffic().yesterday.unwrap().rode > 0);
     assert_eq!(world.rail().fare(), 10);
+}
+
+/// 乗り換えの記録で、住民が真ん中の駅で乗り換えて着き、乗り換え先の路線をなくすと、乗り換えを待つ人がいなくなる
+/// ことを確かめる。
+#[test]
+fn rail_transfers_cover_the_transfers() {
+    let s = scenarios()
+        .into_iter()
+        .find(|s| s.name == "rail_transfers")
+        .unwrap();
+    let mut world = s.start();
+    let stats = replay(&mut world, &s.log, s.ticks - 901);
+    assert_eq!(stats.denied, 0, "{stats:?}");
+    let t = world.rail().ride_tally().clone();
+    assert!(t.transfers > 10, "{t:?}");
+    assert!(world.traffic().yesterday.unwrap().rode > 0);
+    replay(&mut world, &s.log, 901);
+    assert_eq!(world.rail().lines().count(), 1);
+    assert!(world.rail().riders().all(|(_, r)| r.leg == 0));
 }
 
 /// 踏切の記録が、どちらの順でも踏切を作り、列車が通るあいだだけ閉じることを確かめる。

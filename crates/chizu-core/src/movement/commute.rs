@@ -376,7 +376,7 @@ impl Trips {
                         line: o.line,
                         dir: o.dir,
                         alight: o.alight,
-                        transfer: None,
+                        transfer: o.transfer,
                         to,
                     });
                     out[*i] = Some(id);

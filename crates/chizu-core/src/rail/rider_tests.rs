@@ -17,6 +17,20 @@ fn ok(outcome: ApplyOutcome) {
 /// 東西に約 2km 離れた住宅（西）と工場（東）を、y = 0 の通りで結んだ街。通りの南に駅を 2 つ置き、
 /// 駅のあいだを y = 2 の線路で結んで、本数 `trains` の路線を走らせる。
 pub(crate) fn rail_town(seed: u64, trains: u8) -> (World, LineId, StationId, StationId) {
+    let (mut w, stations) = street_town(seed, &[-140, 125], &[(-131, 125)]);
+    let (west, east) = (stations[0], stations[1]);
+    ok(w.apply(&Command::CreateLine {
+        from: west,
+        to: east,
+    }));
+    let line = w.rail().lines().next().unwrap().0;
+    ok(w.apply(&Command::SetLineTrains { line, trains }));
+    (w, line, west, east)
+}
+
+/// [`rail_town`] の通りと区画に、駅を `stations`（駅の線路の西の端の x）に置き、`rails`（x の組）の y = 2 の線路で
+/// 結んだ街。路線はまだない。駅は `stations` の順に返す。
+fn street_town(seed: u64, stations: &[i64], rails: &[(i64, i64)]) -> (World, Vec<StationId>) {
     // 高速道路が北から入る種を選ぶ。南から入ると、入口から通りまでの道路が線路を横切る。
     let seed = (seed..)
         .find(|s| crate::world::highway_line(*s).start.y < 0)
@@ -49,20 +63,24 @@ pub(crate) fn rail_town(seed: u64, trains: u8) -> (World, LineId, StationId, Sta
     if !(-160..=160).contains(&corner.x) {
         ok(w.apply(&road(corner, at(corner.x.clamp(-160, 160), 0))));
     }
-    // 駅の線路は、西が y = 2 の x -140〜-131、東が x 125〜134。
-    for x in [-140, 125] {
+    // 駅の線路は、y = 2 の x から x + 9 まで。
+    for x in stations {
         ok(w.apply(&Command::PlaceBuilding {
             kind: ServiceKind::Station,
-            at: at(x, 1),
+            at: at(*x, 1),
             rotation: 0,
         }));
     }
-    let west = w.rail().station_at(at(-140, 2)).expect("西の駅がない");
-    let east = w.rail().station_at(at(125, 2)).expect("東の駅がない");
-    ok(w.apply(&Command::BuildRail {
-        from: at(-131, 2),
-        to: at(125, 2),
-    }));
+    let ids: Vec<StationId> = stations
+        .iter()
+        .map(|x| w.rail().station_at(at(*x, 2)).expect("駅がない"))
+        .collect();
+    for (a, b) in rails {
+        ok(w.apply(&Command::BuildRail {
+            from: at(*a, 2),
+            to: at(*b, 2),
+        }));
+    }
     for (area, zone) in [
         (((-160, -6), (-110, -1)), Zone::Residential),
         (((110, -6), (160, -1)), Zone::Industrial),
@@ -92,13 +110,7 @@ pub(crate) fn rail_town(seed: u64, trains: u8) -> (World, LineId, StationId, Sta
             rotation: 2,
         }));
     }
-    ok(w.apply(&Command::CreateLine {
-        from: west,
-        to: east,
-    }));
-    let line = w.rail().lines().next().unwrap().0;
-    ok(w.apply(&Command::SetLineTrains { line, trains }));
-    (w, line, west, east)
+    (w, ids)
 }
 
 fn run(w: &mut World, ticks: u64) {
@@ -179,7 +191,7 @@ fn check(w: &World) {
         assert!(!q.is_empty());
         for id in q {
             let r = rail.rider(*id).expect("待ち行列にいない人がいる");
-            assert_eq!((r.plan.board, r.plan.line, r.plan.dir), (*s, *l, *d));
+            assert_eq!(r.queue_key(), (*s, *l, *d));
             assert_eq!(r.train, None);
             assert!(seen.insert(*id));
         }
@@ -639,4 +651,241 @@ fn riders_left_behind_add_a_headway_to_the_wait() {
     rail.queues.remove(&key);
     rail.serve_departure(train, now);
     assert!(!rail.left_behind().contains(&key));
+}
+
+/// [`rail_town`] の通りの南に、駅を西（x -140）、真ん中（x -5）、東（x 125）の 3 つ置き、西と真ん中を結ぶ路線と、
+/// 真ん中と東を結ぶ路線を、それぞれ本数 `trains` で走らせる街。西の住宅から東の工場へは、真ん中の駅で
+/// 乗り換えないと鉄道で行けない。路線は作った順に、駅は西から順に返す。
+pub(crate) fn transfer_town(trains: u8) -> (World, [LineId; 2], [StationId; 3]) {
+    let (mut w, s) = street_town(5, &[-140, -5, 125], &[(-131, -5), (4, 125)]);
+    let mut lines = Vec::new();
+    for (from, to) in [(s[0], s[1]), (s[1], s[2])] {
+        ok(w.apply(&Command::CreateLine { from, to }));
+        let line = w.rail().lines().last().unwrap().0;
+        ok(w.apply(&Command::SetLineTrains { line, trains }));
+        lines.push(line);
+    }
+    (w, [lines[0], lines[1]], [s[0], s[1], s[2]])
+}
+
+/// 本数を変えても、上限で抑えられて走らせる本数が変わらなければ、駅の組の表を捨てない。走らせる本数が変われば
+/// 捨てる。
+#[test]
+fn setting_trains_above_the_cap_keeps_the_table() {
+    let (mut w, [line, _], _) = transfer_town(3);
+    let cap = w.rail().line(line).unwrap().cap();
+    assert!(cap >= 2, "上限が小さすぎる: {cap}");
+    ok(w.apply(&Command::SetLineTrains { line, trains: cap }));
+    assert!(w.rail_planner().is_some());
+    ok(w.apply(&Command::SetLineTrains {
+        line,
+        trains: crate::rail::line::MAX_LINE_TRAINS,
+    }));
+    assert_eq!(w.rail().line(line).unwrap().allowed(), cap);
+    assert!(w.has_rail_planner(), "走らせる本数が同じなのに表を捨てた");
+    ok(w.apply(&Command::SetLineTrains {
+        line,
+        trains: cap - 1,
+    }));
+    assert!(
+        !w.has_rail_planner(),
+        "走らせる本数が変わったのに表を捨てなかった"
+    );
+}
+
+/// 乗り換える駅で待っている人（2 回目の乗車）と、乗り換える前の路線の列車に乗っていて、同じ路線へ乗り換える人。
+/// 移動の ID と、乗り換え先の路線である。
+fn transfer_pair(rail: &Rail) -> Option<(crate::id::TripId, crate::id::TripId, LineId)> {
+    rail.riders().find_map(|(_, waiting)| {
+        if waiting.leg != 1 || waiting.train.is_some() {
+            return None;
+        }
+        let line = waiting.leg_route().1;
+        let aboard = rail.riders().find(|(_, r)| {
+            r.leg == 0 && r.train.is_some() && r.plan.transfer.is_some_and(|t| t.line == line)
+        })?;
+        Some((waiting.trip, aboard.1.trip, line))
+    })
+}
+
+/// 乗り換えの組（[`transfer_pair`]）ができるまで回す。
+fn run_until_transfer_pair(w: &mut World) -> (crate::id::TripId, crate::id::TripId, LineId) {
+    for _ in 0..3 * crate::TICKS_PER_DAY {
+        w.step();
+        if let Some(p) = transfer_pair(w.rail()) {
+            return p;
+        }
+    }
+    panic!("乗り換える駅で待つ人と、乗り換える前の人が同時にいない");
+}
+
+/// 西の住宅から東の工場へ、真ん中の駅で乗り換えて着く。乗り換えは真ん中の駅でだけ起き、運賃は乗り換えても
+/// 1 回分である。
+#[test]
+fn commuters_transfer_at_the_shared_station_and_arrive() {
+    let (mut w, [first, second], [_, mid, _]) = transfer_town(3);
+    run(&mut w, 3 * crate::TICKS_PER_DAY);
+    let t = w.rail().ride_tally().clone();
+    assert!(t.transfers > 50, "乗り換えた人が少ない: {t:?}");
+    assert_eq!(t.station_transfers.get(&mid).copied(), Some(t.transfers));
+    assert_eq!(t.station_transfers.len(), 1);
+    let on = |l| t.line_transfers.get(&l).copied().unwrap_or(0);
+    assert_eq!(on(first) + on(second), t.transfers);
+    // 朝は 2 本目に、夕方は 1 本目に乗り換える。
+    assert!(on(first) > 0 && on(second) > 0, "{t:?}");
+    let fare = i64::from(INITIAL_FARE);
+    let boarded = i64::try_from(t.boarded).unwrap();
+    let transfers = i64::try_from(t.transfers).unwrap();
+    assert!(t.fares < boarded * fare, "乗り換えで運賃を払った: {t:?}");
+    assert!(t.fares >= (boarded - transfers) * fare, "{t:?}");
+    let y = w.traffic().yesterday.expect("前の日の集計がない");
+    assert!(y.rode > 20, "鉄道で着いた移動が少ない: {y:?}");
+}
+
+/// 乗り換え先の路線をなくすと、乗り換える駅で待っていた人はその駅から歩く。乗り換える前の路線に乗っていた人は、
+/// 乗り換える駅まで乗り、そこから歩く。
+#[test]
+fn riders_walk_from_the_transfer_station_when_the_next_line_is_removed() {
+    let (mut w, _, [_, mid, _]) = transfer_town(3);
+    let (waiting, aboard, line) = run_until_transfer_pair(&mut w);
+    let mut rail = w.rail().clone();
+    rail.remove_line(line).unwrap();
+    let mut exits = rail.take_exits();
+    let e = *exits
+        .iter()
+        .find(|e| e.trip == waiting)
+        .expect("待っていた人が歩いていない");
+    assert_eq!(e.from, ExitFrom::Station(mid));
+    // 1 本目には乗ったので、鉄道で移動したと数える。
+    assert!(e.rode);
+    assert!(rail.rider_of(aboard).is_some(), "乗り換える前の人が降りた");
+    let mut tick = w.tick();
+    for _ in 0..2_000 {
+        if exits.iter().any(|e| e.trip == aboard) {
+            break;
+        }
+        tick = tick.next();
+        rail.step(tick);
+        exits.extend(rail.take_exits());
+    }
+    let e = *exits
+        .iter()
+        .find(|e| e.trip == aboard)
+        .expect("乗り換える前の人が降りていない");
+    assert_eq!(e.from, ExitFrom::Station(mid));
+    assert!(e.rode);
+    assert_eq!(rail.rider_of(aboard), None);
+    // 街の中でも、乗り換えられなくなった人は歩きに戻り、乗る人の整合は崩れない。
+    ok(w.apply(&Command::RemoveLine { line }));
+    check(&w);
+    run(&mut w, 1_500);
+    assert!(
+        w.rail().riders().all(|(_, r)| r.leg_route().1 != line),
+        "なくした路線を待つ人が残った"
+    );
+}
+
+/// 乗り換える駅を取り壊すと、そこで乗り換えを待っていた人は、取り壊した駅の敷地の出入口から歩く。
+#[test]
+fn riders_waiting_at_a_bulldozed_transfer_station_walk_from_its_site() {
+    let (mut w, _, [_, mid, _]) = transfer_town(3);
+    let (waiting, _, _) = run_until_transfer_pair(&mut w);
+    let mut rail = w.rail().clone();
+    let site = rail.station(mid).unwrap().site();
+    rail.bulldoze(site.area);
+    let e = rail
+        .take_exits()
+        .into_iter()
+        .find(|e| e.trip == waiting)
+        .expect("待っていた人が歩いていない");
+    assert_eq!(e.from, ExitFrom::Site(site));
+    assert!(e.rode);
+    ok(w.apply(&Command::Bulldoze { area: site.area }));
+    check(&w);
+    run(&mut w, 600);
+}
+
+/// 乗り換える駅で待つ人がいるときに書き出して読み戻しても、同じ状態ハッシュから同じように進む。
+#[test]
+fn transfer_riders_round_trip_through_the_snapshot() {
+    let (mut w, _, _) = transfer_town(3);
+    run_until_transfer_pair(&mut w);
+    let mut back = World::from_snapshot(&w.to_snapshot()).unwrap();
+    assert_eq!(back.state_hash(), w.state_hash());
+    let waiting = |w: &World| {
+        w.rail()
+            .riders()
+            .filter(|(_, r)| r.leg == 1 && r.train.is_none())
+            .map(|(id, r)| (id, *r))
+            .collect::<Vec<_>>()
+    };
+    assert!(!waiting(&w).is_empty());
+    assert_eq!(waiting(&back), waiting(&w));
+    for _ in 0..500 {
+        w.step();
+        back.step();
+    }
+    assert_eq!(back.state_hash(), w.state_hash());
+    assert_eq!(
+        back.rail().ride_tally().transfers,
+        w.rail().ride_tally().transfers
+    );
+}
+
+/// 乗り換えの街（[`transfer_town`]）を、乗り換えを使わない版と使う版で回し、4 日目からの 3 日の手段ごとの移動、
+/// 乗り換えの数、通勤、幸福度、車、止まった車、救済を出す。乗り換えを使わない版は、直接行ける路線がないので、
+/// 鉄道のない街と同じ移動になる。
+/// `cargo test -p chizu-core --release measure_transfers -- --ignored --nocapture` で回す。
+#[test]
+#[ignore]
+fn measure_transfers() {
+    use crate::world::CarSample;
+    for transfers in [false, true] {
+        let (mut w, _, _) = transfer_town(3);
+        if !transfers {
+            w.disable_rail_transfers();
+        }
+        for _ in 0..3 * crate::TICKS_PER_DAY {
+            w.step();
+        }
+        for _ in 0..3 {
+            let r0 = w.trips().rescues();
+            let x0 = w.rail().ride_tally().transfers;
+            let (mut cars, mut stopped, mut samples, mut happy) = (0_u64, 0_u64, 0_u64, 0_u64);
+            let mut before = CarSample::default();
+            for k in 0..crate::TICKS_PER_DAY {
+                w.step();
+                if k % 100 == 0 {
+                    let s = w.car_sample();
+                    stopped += s.stopped_on_road_since(&before) as u64;
+                    cars += s.len() as u64;
+                    samples += 1;
+                    before = s;
+                }
+                if k % 600 == 0 {
+                    happy += u64::from(w.happiness_summary().0);
+                }
+            }
+            let y = w.traffic().yesterday.unwrap();
+            let ct = w.commute_times();
+            let r1 = w.trips().rescues();
+            println!(
+                "transfers {transfers} day {} pop {} walk {} car {} rail {} transferred {} commute_med {:?} p90 {:?} happy_x12 {} cars_x100 {} stopped_x100 {} teleported {} walked_instead {} gave_up {}",
+                w.tick().0 / crate::TICKS_PER_DAY,
+                w.population().citizen_count(),
+                y.walked,
+                y.drove,
+                y.rode,
+                w.rail().ride_tally().transfers - x0,
+                ct.median_seconds,
+                ct.p90_seconds,
+                happy,
+                cars * 100 / samples,
+                stopped * 100 / samples,
+                r1.teleported - r0.teleported,
+                r1.walked_instead - r0.walked_instead,
+                w.rail().ride_tally().gave_up,
+            );
+        }
+    }
 }

@@ -10,7 +10,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 fn rail_choice(c: &mut Criterion) {
     let net = city_grid_100k();
     let inputs = rail_choice_inputs(1);
-    let planner = RailPlanner::from_parts(inputs.doors.clone(), &inputs.lines);
+    let planner = RailPlanner::from_shapes(inputs.doors.clone(), &inputs.lines);
     let choice = RideChoice::from_parts(&planner, inputs.live.clone(), Default::default(), 5);
     let ends = commute_tiles(1, &net, 1_000);
     c.bench_function("rail_choice_1k", |b| {
@@ -21,7 +21,12 @@ fn rail_choice(c: &mut Criterion) {
         });
     });
     c.bench_function("rail_table_rebuild", |b| {
-        b.iter(|| black_box(RailPlanner::from_parts(inputs.doors.clone(), &inputs.lines)));
+        b.iter(|| {
+            black_box(RailPlanner::from_shapes(
+                inputs.doors.clone(),
+                &inputs.lines,
+            ))
+        });
     });
 }
 

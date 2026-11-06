@@ -15,7 +15,7 @@ use crate::happiness::{CitizenContext, update_citizen};
 use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
-use crate::rail::{Rail, rail_cost};
+use crate::rail::{LineId, Rail, RailLine, rail_cost};
 use crate::rng::{RngPurpose, mix_words};
 use crate::routing::{AstarRouter, BAND_TICKS, Delays, GraphError};
 use crate::schedule::bucket_at;
@@ -959,15 +959,21 @@ impl World {
         if command.validate().is_err() {
             return ApplyOutcome::Rejected;
         }
+        // 本数を変えても、上限で抑えられて走らせる本数が変わらなければ、駅の組の表は同じになる。
+        let allowed = |w: &World, line: LineId| w.rail.line(line).map(RailLine::allowed);
+        let allowed_before = match command {
+            Command::SetLineTrains { line, .. } => allowed(self, *line),
+            _ => None,
+        };
         let outcome = self.apply_valid(command);
         self.trips.forget_lots(&self.buildings);
-        // 路線か線路か道路が変わったら、駅の組の表を作り直す。
+        // 路線か線路か道路か、路線の走らせる本数が変わったら、駅の組の表を作り直す。乗り換えの進路は、走らせる
+        // 本数で待ちを見込んで絞るためである。
         match command {
             Command::SetSimSpeed { .. }
             | Command::SetTaxRate { .. }
             | Command::SetParkingFee { .. }
             | Command::SetFare { .. }
-            | Command::SetLineTrains { .. }
             | Command::PaintZone { .. }
             | Command::SetSignal { .. }
             | Command::SetCrosswalk { .. } => {}
@@ -981,6 +987,11 @@ impl World {
             | Command::RemoveLine { .. }
             | Command::Bulldoze { .. }
             | Command::PlaceBuilding { .. } => self.planner.forget(),
+            Command::SetLineTrains { line, .. } => {
+                if allowed(self, *line) != allowed_before {
+                    self.planner.forget();
+                }
+            }
         }
         // 路線や駅がなくなって乗れなくなった人を、歩く移動に戻す。
         self.release_rail_exits();
