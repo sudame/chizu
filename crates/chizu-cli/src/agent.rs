@@ -31,8 +31,9 @@ use chizu_core::{
     ApplyOutcome, BuildingId, CHUNK_SIDE, CarPlace, CarSample, Carless, CarlessReason, ChunkCoord,
     CitizenPlaces, Command, CommandLog, CommuteDistances, CommuteTimes, DailyLotMisses, DayTraffic,
     DenyReason, GameTime, HappinessParts, Heading, Layer, Line, LotMisses, MigrationOutlook,
-    NodeControl, NodeId, ParkingTally, Rescues, ServiceKind, SharedLot, TICKS_PER_DAY, TILE_MM,
-    TilePos, TileRect, TileUse, Traffic, World, Zone, ZoneKind, carless_areas, replay,
+    MigrationTotals, NodeControl, NodeId, ParkingTally, Rescues, ServiceKind, SharedLot,
+    TICKS_PER_DAY, TILE_MM, TilePos, TileRect, TileUse, Traffic, World, Zone, ZoneKind,
+    carless_areas, replay,
 };
 use serde_json::{Map, Value, json};
 
@@ -230,7 +231,12 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  medianMinutes 中央値、p90Minutes 長いほうから 1 割の境目（どちらも時計の分。通勤する住民がいなければ null）、
                  overHour 時計で 60 分を超え、通勤の点が下がっている住民の数。
                  通勤の点は時計で 60 分までは満点で、2 時間で 50 点、3 時間で 0 点になるまで一様に下がる。渋滞を直すと数日かけて上がる。
-  migration      転入。wantingHouseholds 移住の処理（60 tick ごと）1 回で外から来ようとする世帯の数、
+  migration      転入と転出。arrivedHouseholds と arrivedCitizens は始まりからの転入の積み上げ（外から越してきた世帯と住民の数）、
+                 leftHouseholds と leftCitizens は始まりからの転出の積み上げ（街を出た世帯と住民の数）で、そのうち
+                 leftUnhappy…は幸福度が低くて出た数、leftHomeless…は家のないまま 1 日たって出た数である。どれも drives と同じく
+                 始まりからの積み上げで、日ごとの数は 2 つの時点の差で求める。sinceLastObserve の changes にも
+                 arrivedHouseholds、leftHouseholds などの増減が出る。幸福度を下げたあとに何世帯が出ていったかは、leftUnhappyHouseholds の増減で追える。
+                 wantingHouseholds 移住の処理（60 tick ごと）1 回で外から来ようとする世帯の数、
                  vacantHomes 外の世界と道路でつながった住宅の空き戸数、homelessHouseholds と homelessCitizens 家がなく空き家を待つ世帯と住民、
                  blockedHouseholds 来ようとしても空き家が足りず入れない世帯の数。
                  newcomerHappiness 越してくる人の見込みの幸福度。職があり、電気と水道が届き、通勤が短い人として、
@@ -1402,7 +1408,7 @@ fn happiness_parts(h: HappinessParts) -> Value {
     })
 }
 
-fn migration(m: MigrationOutlook) -> Value {
+fn migration(m: MigrationOutlook, totals: MigrationTotals) -> Value {
     let MigrationOutlook {
         wanting_households,
         vacant_homes,
@@ -1412,7 +1418,24 @@ fn migration(m: MigrationOutlook) -> Value {
         newcomer_happiness,
         newcomer_parking,
     } = m;
+    // 中核に欄が足されたらここで止まり、observe に出すかを決められるよう、`..` なしで分解する。
+    let MigrationTotals {
+        arrived_households,
+        arrived_citizens,
+        left_unhappy_households,
+        left_unhappy_citizens,
+        left_homeless_households,
+        left_homeless_citizens,
+    } = totals;
     json!({
+        "arrivedHouseholds": arrived_households,
+        "arrivedCitizens": arrived_citizens,
+        "leftHouseholds": left_unhappy_households + left_homeless_households,
+        "leftCitizens": left_unhappy_citizens + left_homeless_citizens,
+        "leftUnhappyHouseholds": left_unhappy_households,
+        "leftUnhappyCitizens": left_unhappy_citizens,
+        "leftHomelessHouseholds": left_homeless_households,
+        "leftHomelessCitizens": left_homeless_citizens,
         "wantingHouseholds": wanting_households,
         "vacantHomes": vacant_homes,
         "homelessHouseholds": homeless_households,
@@ -1906,7 +1929,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
         "traffic": traffic(world, before),
         "parking": parking(world),
         "commute": commute(world.commute_distances(), world.commute_times()),
-        "migration": migration(world.migration_outlook()),
+        "migration": migration(world.migration_outlook(), world.migration_totals()),
         "demand": by_zone(|z| demand[z.index()]),
         "demandFactors": by_zone(|z| {
             factors.zone(z.index())
@@ -2178,6 +2201,12 @@ const WATCHED: &[&str] = &[
     "/parking/households/home",
     "/parking/households/shared",
     "/parking/households/none",
+    "/migration/arrivedHouseholds",
+    "/migration/arrivedCitizens",
+    "/migration/leftHouseholds",
+    "/migration/leftCitizens",
+    "/migration/leftUnhappyHouseholds",
+    "/migration/leftHomelessHouseholds",
     "/migration/wantingHouseholds",
     "/migration/vacantHomes",
     "/migration/homelessHouseholds",
