@@ -699,6 +699,18 @@ fn act_makes_a_crossing_and_observe_and_map_show_it() {
         acted["results"][2]["crossings"],
         serde_json::json!([[20, 10]])
     );
+    // 断った理由には、近い踏切と近い交差点（曲がり角）のマスが付く。
+    assert_eq!(
+        acted["results"][3]["crossingNear"],
+        serde_json::json!({"crossing": [21, 10], "near": [20, 10], "nearKind": "crossing"}),
+        "{acted}"
+    );
+    assert_eq!(
+        acted["results"][4]["crossingNear"],
+        serde_json::json!({"crossing": [38, 10], "near": [40, 10], "nearKind": "junction"}),
+        "{acted}"
+    );
+    assert!(acted["results"][5].get("crossingNear").is_none(), "{acted}");
     let o = json(&cli(&["agent", "observe", d]));
     let c = &o["rail"]["crossings"];
     assert_eq!(c["count"], 1, "{c}");
@@ -850,6 +862,13 @@ fn act_reports_lines_that_cannot_run() {
         "{o}"
     );
     assert_eq!(lines[3]["capReason"]["waitPlaces"], 4, "{o}");
+    // 短く割れた線路の欄は、割れていなければ空である。
+    assert_eq!(
+        lines[3]["capReason"]["minWaitLengthMm"],
+        chizu_core::TRAIN_BLOCK_LEN_MM,
+        "{o}"
+    );
+    assert!(lines[3]["capReason"]["shortSpans"].is_array(), "{o}");
     assert!(o["rail"]["trainCount"].as_u64().unwrap() > 0, "{o}");
     // a–c の路線に列車を走らせ、a–b を 2 本置いたところへ 3 本目の a–b を足すと、区画の枠を 4 本で分けることになり、
     // 前からある a–c の上限が 0 になるので断る。
@@ -873,6 +892,12 @@ fn act_reports_lines_that_cannot_run() {
     assert_eq!(acted["results"][10]["outcome"], "Denied", "{acted}");
     assert_eq!(
         acted["results"][10]["reason"], "LineStarvesOther",
+        "{acted}"
+    );
+    // 上限が 0 になる路線の id が付く。
+    assert_eq!(
+        acted["results"][10]["starvedLine"],
+        serde_json::json!({"index":2,"generation":0}),
         "{acted}"
     );
     cli(&["agent", "advance", d, "300"]);
@@ -2375,6 +2400,15 @@ fn act_reports_trains_removed_when_a_new_line_lowers_the_cap() {
     let r = &acted["results"][0];
     assert_eq!(r["outcome"], "Applied", "{acted}");
     assert!(r["removedTrains"].as_u64().unwrap() > 0, "{acted}");
+    // 消えた列車は路線ごとに数える。
+    let by_line = r["removedTrainsByLine"].as_array().unwrap();
+    assert_eq!(by_line.len(), 1, "{acted}");
+    assert_eq!(
+        by_line[0]["line"],
+        serde_json::json!({"index":0,"generation":0}),
+        "{acted}"
+    );
+    assert_eq!(by_line[0]["removed"], r["removedTrains"], "{acted}");
     assert!(r.get("haltedLines").is_none(), "{acted}");
 }
 

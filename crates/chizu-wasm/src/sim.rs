@@ -733,14 +733,24 @@ impl Sim {
 
     /// 線路を `from` から `to` に引けるかを、状態を変えずに調べる。引けないときは理由の文を、
     /// 引けるなら `None` を返し、どちらも建設費を添える。直線の形が正しくないときの建設費は 0 である。
-    pub fn rail_probe(&self, from: TilePos, to: TilePos) -> (Option<&'static str>, i64) {
+    pub fn rail_probe(&self, from: TilePos, to: TilePos) -> (Option<String>, i64) {
         let Ok(line) = Line::between(from, to) else {
-            return (Some("線路は縦横か 45 度の直線で、1,024 マスまで引ける"), 0);
+            return (
+                Some("線路は縦横か 45 度の直線で、1,024 マスまで引ける".to_string()),
+                0,
+            );
         };
         let cost = chizu_core::rail::rail_cost(&line).0;
         match self.world.check_build_rail(&line) {
             Ok(_) => (None, cost),
-            Err(reason) => (Some(deny_text(reason)), cost),
+            Err(reason) => {
+                let command = chizu_core::Command::BuildRail { from, to };
+                let detail = self
+                    .world
+                    .crossing_denial(&command)
+                    .filter(|d| d.reason == reason);
+                (Some(deny_text_at(reason, detail)), cost)
+            }
         }
     }
 
@@ -1080,6 +1090,26 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         }
         DenyReason::CrossingTooClose => "すぐ隣にほかの踏切がある",
     }
+}
+
+/// `deny_text` に、踏切の決まりで断った場所を添えた文。場所が分からなければ `deny_text` と同じである。
+pub fn deny_text_at(reason: DenyReason, detail: Option<chizu_core::CrossingDenial>) -> String {
+    let text = deny_text(reason);
+    let Some(d) = detail else {
+        return text.to_string();
+    };
+    let (Some(crossing), Some(near)) = (d.crossing, d.near) else {
+        return text.to_string();
+    };
+    let what = match reason {
+        DenyReason::CrossingNearJunction => "近い交差点か曲がり角",
+        DenyReason::CrossingTooClose => "近い踏切",
+        _ => return text.to_string(),
+    };
+    format!(
+        "{text}（踏切になるマス ({}, {})、{what} ({}, {})）",
+        crossing.x, crossing.y, near.x, near.y
+    )
 }
 
 fn rect_contains(r: TileRect, t: TilePos) -> bool {
@@ -1644,18 +1674,42 @@ mod tests {
         );
         // 道路に沿う線路は断る。道路の区間の途中を横切る線路は踏切になる
         let (reason, _) = sim.rail_probe(TilePos::new(5, 10), TilePos::new(15, 10));
-        assert_eq!(reason, Some(deny_text(DenyReason::Occupied)));
+        assert_eq!(reason.as_deref(), Some(deny_text(DenyReason::Occupied)));
         let (reason, _) = sim.rail_probe(TilePos::new(5, 6), TilePos::new(5, 14));
         assert_eq!(reason, None);
         // 道路の端（ノード）で始まる線路は、踏切のマスにノードを置くので断る
         let (reason, _) = sim.rail_probe(TilePos::new(0, 10), TilePos::new(0, 14));
-        assert_eq!(reason, Some(deny_text(DenyReason::NodeOnCrossing)));
+        assert_eq!(
+            reason.as_deref(),
+            Some(deny_text(DenyReason::NodeOnCrossing))
+        );
         // 直線でない指定は形の誤りとして断り、建設費は 0
         let (reason, cost) = sim.rail_probe(TilePos::new(0, 0), TilePos::new(5, 2));
         assert!(reason.is_some());
         assert_eq!(cost, 0);
         assert_eq!(sim.world().money(), money);
         assert_eq!(sim.world().rail().tracks().count(), 0);
+    }
+
+    #[test]
+    fn rail_probe_names_the_junction_that_is_too_close_to_a_crossing() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 10), (30, 10))).unwrap();
+        sim.submit(road((20, 0), (20, 20))).unwrap();
+        // 交差点 (20, 10) から 2 マスの踏切になる線路は、近い交差点のマスを文に添えて断る
+        let (reason, _) = sim.rail_probe(TilePos::new(10, 12), TilePos::new(30, 12));
+        let reason = reason.expect("断る");
+        assert!(
+            reason.starts_with(deny_text(DenyReason::CrossingNearJunction)),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("(20, 12)") && reason.contains("(20, 10)"),
+            "{reason}"
+        );
+        // 3 マス離せば引ける
+        let (reason, _) = sim.rail_probe(TilePos::new(10, 13), TilePos::new(30, 13));
+        assert_eq!(reason, None);
     }
 
     #[test]

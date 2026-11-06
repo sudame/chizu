@@ -22,6 +22,7 @@ use super::{LineId, Rail, RailNodeId, StationId, TrackId, heading_of, spread};
 use crate::network::Dir;
 use crate::round;
 use crate::state_hash::{StateHash, StateHasher};
+use crate::tile::TilePos;
 use crate::world::DenyReason;
 
 /// 街に置ける路線の数。
@@ -494,6 +495,18 @@ pub struct LineCapacity {
     pub wait_places: usize,
     /// 進路の線路を同じ向きに使う、ほかの路線（ID の順）。共有する待てる所は、区画の枠をこれらの路線と分ける。
     pub shared_with: Vec<LineId>,
+    /// 進路の中で、待てる所になれない短い線路（長さが [`TRAIN_BLOCK_LEN_MM`] 未満で、終点の要素でないもの）。
+    /// 線路を分岐で割ると、割れた短い線路がここに出る。進路に出てくる順で、同じ線路は 1 つにまとめる。
+    pub short_spans: Vec<ShortSpan>,
+}
+
+/// 待てる所になれない短い線路 1 本。端のマスは線路のノードのマスである。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShortSpan {
+    pub from: TilePos,
+    pub to: TilePos,
+    /// 線路の長さ（mm）。
+    pub len_mm: i64,
 }
 
 impl Rail {
@@ -522,7 +535,52 @@ impl Rail {
             cap: line.cap(),
             wait_places: wait_places(line.path.iter().filter(|s| s.wait)).len(),
             shared_with,
+            short_spans: self.short_spans(line),
         })
+    }
+
+    /// 路線の進路にある、待てる所になれない短い線路。
+    fn short_spans(&self, line: &RailLine) -> Vec<ShortSpan> {
+        let mut seen = BTreeSet::new();
+        line.path
+            .iter()
+            .filter(|s| s.kind != StepKind::Terminal && s.len < TRAIN_BLOCK_LEN_MM)
+            .filter(|s| seen.insert(s.track))
+            .filter_map(|s| {
+                let l = self.track_line(s.track)?;
+                Some(ShortSpan {
+                    from: l.start,
+                    to: l.end(),
+                    len_mm: s.len,
+                })
+            })
+            .collect()
+    }
+
+    /// コマンド `command`（`CreateLine` か `ExtendLine`）が `LineStarvesOther` で断られるなら、そのせいで上限が 0 に
+    /// なる路線のうち、ID のいちばん小さいもの。断られないコマンドと、路線のコマンドでないものは `None`。状態を変えない。
+    pub fn starved_by_command(&self, command: &crate::command::Command) -> Option<LineId> {
+        use crate::command::Command;
+        match command {
+            Command::CreateLine { from, to } => {
+                self.stations.get(*from)?;
+                self.stations.get(*to)?;
+                let path = self.plan(&[*from, *to], false)?;
+                self.starved_by(self.lines.next_id(), &path)
+            }
+            Command::ExtendLine { line, station } => {
+                let l = self.lines.get(*line)?;
+                self.stations.get(*station)?;
+                let closes = l.stations[0] == *station;
+                let mut stations = l.stations.clone();
+                if !closes {
+                    stations.push(*station);
+                }
+                let path = self.plan(&stations, closes)?;
+                self.starved_by(*line, &path)
+            }
+            _ => None,
+        }
     }
 
     /// 路線 `id`（新しく作る路線なら、作ったときに付く ID）の進路を `path` にしたとき、上限が 0 でなかったのに

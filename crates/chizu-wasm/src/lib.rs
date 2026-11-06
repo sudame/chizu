@@ -252,7 +252,7 @@ impl Simulation {
             TilePos::new(coord(x1)?, coord(y1)?),
         );
         Ok([
-            reason.map_or(JsValue::NULL, JsValue::from_str),
+            reason.map_or(JsValue::NULL, |r| JsValue::from_str(&r)),
             JsValue::from_f64(cost as f64),
         ]
         .into_iter()

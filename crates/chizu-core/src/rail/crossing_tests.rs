@@ -523,3 +523,64 @@ fn cars_leaving_lots_next_to_a_two_way_crossing_wait_for_trains() {
 
 /// 閉じる前に踏切に入った車と人が、踏切を抜けきるまでの tick の上限。止まっていた車でも 3 tick で抜ける。
 const LATE_TICKS: u64 = 8;
+
+/// 踏切の決まりで断られたとき、近い踏切と、近い交差点のマスを状態を変えずに読める。
+#[test]
+fn crossing_denial_names_the_tile_that_got_in_the_way() {
+    let (mut w, _, _) = crossing_world();
+    ok(road(&mut w, (30, 0), (30, 20)));
+    let denial = |w: &World, command: Command| {
+        let before = w.clone();
+        let d = w.crossing_denial(&command);
+        assert_eq!(*w, before);
+        d
+    };
+    let road_cmd = |from: (i64, i64), to: (i64, i64)| Command::BuildRoad {
+        from: at(from.0, from.1),
+        to: at(to.0, to.1),
+        kind: RoadKind::Small,
+    };
+    // 隣の踏切。
+    let d = denial(&w, road_cmd((31, 0), (31, 20))).expect("断る");
+    assert_eq!(d.reason, DenyReason::CrossingTooClose);
+    assert_eq!(d.crossing, Some(at(31, 8)));
+    assert_eq!(d.near, Some(at(30, 8)));
+    // 踏切から 2 マスの所に交差点を作る道路。
+    let d = denial(&w, road_cmd((25, 10), (30, 10))).expect("断る");
+    assert_eq!(d.reason, DenyReason::CrossingNearJunction);
+    assert_eq!(d.crossing, Some(at(30, 8)));
+    assert_eq!(d.near, Some(at(30, 10)));
+    // 線路を引いて、交差点の 2 マス以内に踏切を作る。
+    ok(road(&mut w, (25, 11), (30, 11)));
+    let rail_cmd = Command::BuildRail {
+        from: at(40, 13),
+        to: at(20, 13),
+    };
+    let d = denial(&w, rail_cmd).expect("断る");
+    assert_eq!(d.reason, DenyReason::CrossingNearJunction);
+    assert_eq!(d.crossing, Some(at(30, 13)));
+    assert_eq!(d.near, Some(at(30, 11)));
+    // 断らないコマンドには何も返さない。
+    assert_eq!(denial(&w, road_cmd((60, 0), (60, 5))), None);
+}
+
+/// 路線の進路にある線路を分岐で割ると、待てる所になれない短い線路が、位置と長さつきで読める。
+#[test]
+fn line_capacity_lists_the_short_tracks_a_branch_cuts_off() {
+    let (mut w, a, b) = crossing_world();
+    ok(w.apply(&Command::CreateLine { from: a, to: b }));
+    let id = w.rail().lines().next().expect("路線がある").0;
+    let before = w.rail().line_capacity(id).unwrap().short_spans;
+    assert!(before.iter().all(|s| s.len_mm < TRAIN_BLOCK_LEN_MM));
+    // x = 19 の分岐で、駅の端から 7 マスの線路が割れる。
+    ok(rail(&mut w, (19, 8), (14, 3)));
+    let after = w.rail().line_capacity(id).unwrap().short_spans;
+    assert!(after.len() > before.len(), "{before:?} {after:?}");
+    assert!(after.iter().all(|s| s.len_mm < TRAIN_BLOCK_LEN_MM));
+    assert!(
+        after
+            .iter()
+            .any(|s| s.from == at(19, 8) || s.to == at(19, 8)),
+        "{after:?}"
+    );
+}

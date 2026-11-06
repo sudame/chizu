@@ -98,8 +98,8 @@ pub mod line;
 pub mod train;
 
 pub use crossing::{CROSSING_WARN_TICKS, CrossingTally};
-pub use line::{LineCapacity, RailLine, Step, StepKind};
-pub use train::{Block, RailTally, Train, TrainState};
+pub use line::{LineCapacity, RailLine, ShortSpan, Step, StepKind};
+pub use train::{Block, RailTally, TRAIN_BLOCK_LEN_MM, Train, TrainState};
 
 /// 線路の網のノード。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

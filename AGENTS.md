@@ -142,6 +142,10 @@ observe は、人と車の動きも出す（`citizenPlaces`、`traffic`、`migra
 act の結果は、コマンドごとの `outcome` と理由だけを返す。記録に入った形のコマンドは `--verbose` を付けたときだけ添える。
 `NotOwned` で断ったときは、`notOwned` に買っていないマスと、そのマスを含むチャンク（いま買える `chunks` と、辺で接していない `chunksNotAdjacent`）を付ける（中核の `DenyReason` は変えず、chizu-cli が買った土地と照らして求める）。
 
+`CrossingNearJunction` と `CrossingTooClose` で断ったときは `crossingNear`（`crossing` 踏切になるはずだったマス、`near` 近い交差点か曲がり角か踏切のマス、`nearKind`）、
+`LineStarvesOther` で断ったときは `starvedLine`（上限が 0 になる路線の id）を付ける。どちらも中核の読み取り用の関数（`World::crossing_denial`、`Rail::starved_by_command`）で求める。
+消えた列車は `removedTrains` の数に加えて、路線ごとの内訳を `removedTrainsByLine` に付ける。上限が 0 の理由（`capReason`）には、待てる所になれない短い線路 `shortSpans` を付ける。
+
 observe は、前の observe からの増減を `sinceLastObserve` に出す。前の値は、`agent new` で作ったセッションの `last-observe.json` に残す。
 フィードバックのディレクトリには書かないので、そこでは `null` になる。observe が書くので、observe は排他のロックを取る。
 

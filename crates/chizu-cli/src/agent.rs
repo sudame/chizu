@@ -293,6 +293,9 @@ observe の rail（線路と駅）:
   lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、trains 決めた本数、cap 行き詰まりを防ぐ本数の上限、
   capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
     sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有の区画の枠を、これらの路線と分けている）。
+    shortSpans 進路にある、待てる所になれない短い線路（from と to が線路の両端のノードのマス、lengthMm が長さ）。
+    列車の押さえる長さ minWaitLengthMm（72m）より短い線路は待てる所にならない。線路を分岐で割ると、割れた短い線路がここに出る
+    （先頭の 16 本まで。shortSpanCount が全部の数）。
   running 走っている本数、roundTripTicks 1 周の見込みの時間（tick）、headwayTicks 運転間隔の見込み（tick、列車がなければ null）、
   stopped 線路が変わって進路を選べず止まっているか（止まった路線の列車は消え、新しい列車も現れない）。
   trains 列車ごとの id、line 路線の id、at 先頭のマス、heading 進む向き（E、SE、S、SW、W、NW、N、NE）、
@@ -485,10 +488,16 @@ act の結果:
     路線ごとの id、stopped、capReason（observe の rail.lines と同じ）。
   コマンドで路線そのものが消えたら（駅の取り壊しなど。RemoveLine も含む）、removedLines にその id の並びが付く。
   コマンドで列車が消えたら removedTrains にその数が付く（上限が下がった、路線が止まった、進路が変わって先を押さえ直せないなど）。
+    removedTrainsByLine は路線ごとの内訳（line と removed の並び）。
   Bulldoze の Applied には bulldozed が付く。
     roadTiles 消えた道路のマスの数、railTiles 消えた線路のマスの数（駅の中を含む）、facilities 消えた施設の数、
     stations 消えた駅の数、buildings 消えた建物の数、
     displacedHouseholds 住んでいた建物が消えて家をなくした世帯の数。
+  reason が CrossingNearJunction か CrossingTooClose のときは crossingNear も付く。
+    crossing 踏切になるはずだったマス、near 近い交差点か曲がり角のマス（nearKind が junction）か、
+    近いほかの踏切のマス（nearKind が crossing）。BuildRoad で既にある踏切の近くに交差点を作る場合の crossing は、既にある踏切のマスである。
+  reason が LineStarvesOther のときは starvedLine も付き、上限が 0 になって走れなくなる路線の id を示す
+    （複数あれば id のいちばん小さいもの）。
   reason が NotOwned のときは notOwned も付き、買っていない土地のマスを示す。
     count 買っていないマスの数、tiles そのマス（先頭の 16 個まで）、
     chunks そのマスを含むチャンクのうち、いま BuyChunk で買えるもの（買った土地と辺で接する。先頭の 16 個まで）、
@@ -871,6 +880,14 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
                     if reason == DenyReason::NotOwned {
                         out["notOwned"] = not_owned(world, &command);
                     }
+                    if let Some(near) = crossing_near(world, &command, reason) {
+                        out["crossingNear"] = near;
+                    }
+                    if reason == DenyReason::LineStarvesOther
+                        && let Some(line) = world.rail().starved_by_command(&command)
+                    {
+                        out["starvedLine"] = id_json(line.index, line.generation);
+                    }
                     if matches!(
                         reason,
                         DenyReason::NoZonableTile | DenyReason::Occupied | DenyReason::ZoneUnchanged
@@ -1071,6 +1088,25 @@ fn not_owned(world: &World, command: &Command) -> Value {
         "chunks": list(buyable),
         "chunksNotAdjacent": list(later),
     })
+}
+
+/// `CrossingNearJunction` と `CrossingTooClose` で断られたコマンドの、踏切になるはずだったマスと、近い交差点（曲がり角）か踏切のマス。
+/// 断られても街は変わらないので、断られたあとの街で調べてよい。中核の `DenyReason` は変えず、中核の読み取り用の関数で求める。
+fn crossing_near(world: &World, command: &Command, reason: DenyReason) -> Option<Value> {
+    let kind = match reason {
+        DenyReason::CrossingNearJunction => "junction",
+        DenyReason::CrossingTooClose => "crossing",
+        _ => return None,
+    };
+    let d = world
+        .crossing_denial(command)
+        .filter(|d| d.reason == reason)?;
+    let (crossing, near) = (d.crossing?, d.near?);
+    Some(json!({
+        "crossing": [crossing.x, crossing.y],
+        "near": [near.x, near.y],
+        "nearKind": kind,
+    }))
 }
 
 /// `PaintZone` で区画を塗ったあとの、長方形のマスの内訳。塗ったあとの街で調べる。
@@ -2169,8 +2205,29 @@ fn cap_reason(rail: &chizu_core::Rail, id: chizu_core::LineId) -> Value {
         .iter()
         .map(|l| id_json(l.index, l.generation))
         .collect();
-    json!({"waitPlaces": c.wait_places, "sharedWith": shared})
+    let short: Vec<Value> = c
+        .short_spans
+        .iter()
+        .take(SHORT_SPAN_LIST)
+        .map(|sp| {
+            json!({
+                "from": [sp.from.x, sp.from.y],
+                "to": [sp.to.x, sp.to.y],
+                "lengthMm": sp.len_mm,
+            })
+        })
+        .collect();
+    json!({
+        "waitPlaces": c.wait_places,
+        "sharedWith": shared,
+        "minWaitLengthMm": chizu_core::TRAIN_BLOCK_LEN_MM,
+        "shortSpans": short,
+        "shortSpanCount": c.short_spans.len(),
+    })
 }
+
+/// `capReason` の `shortSpans` に載せる線路の数の上限。
+const SHORT_SPAN_LIST: usize = 16;
 
 /// 走れる（止まっておらず、上限が 0 でない）路線と、路線ごとの列車の数。コマンドの前後で比べるのに使う。
 fn line_states(world: &World) -> std::collections::BTreeMap<chizu_core::LineId, (bool, usize)> {
@@ -2204,10 +2261,12 @@ fn note_line_changes(
             })
         })
         .collect();
-    let removed: usize = before
+    let by_line: Vec<(chizu_core::LineId, usize)> = before
         .iter()
-        .map(|(id, (_, n))| n.saturating_sub(after.get(id).map_or(0, |(_, m)| *m)))
-        .sum();
+        .map(|(id, (_, n))| (*id, n.saturating_sub(after.get(id).map_or(0, |(_, m)| *m))))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    let removed: usize = by_line.iter().map(|(_, n)| n).sum();
     let gone: Vec<Value> = before
         .keys()
         .filter(|id| !after.contains_key(*id))
@@ -2221,6 +2280,11 @@ fn note_line_changes(
     }
     if removed > 0 {
         out["removedTrains"] = json!(removed);
+        out["removedTrainsByLine"] = by_line
+            .iter()
+            .map(|(id, n)| json!({"line": id_json(id.index, id.generation), "removed": n}))
+            .collect::<Vec<_>>()
+            .into();
     }
 }
 
