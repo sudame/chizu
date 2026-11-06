@@ -2600,6 +2600,8 @@ fn act_reports_a_lowered_cap_and_observe_shows_recent_riders() {
         r#"{"type":"BuildRail","from":[12,8],"to":[53,8]}"#.to_string(),
         r#"{"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":1,"generation":0}}"#
             .to_string(),
+        // loweredLines に出るのは、本数 1 以上の路線だけである。
+        r#"{"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":1}"#.to_string(),
     ];
     // 踏切をいくつか作っても、cap はまだ下がらない。46 の道路で 3 から 1 に下がる。
     for x in (16..=46).step_by(3) {
