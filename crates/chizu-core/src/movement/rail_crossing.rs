@@ -29,6 +29,8 @@ pub struct Span {
     pub from: u32,
     pub to: u32,
     pub closed: bool,
+    /// 閉じているか、もうすぐ閉じると見込む踏切か（`Rail::closing_crossings`）。
+    pub closing: bool,
 }
 
 /// リンクから見た踏切。位置はリンクの始まりから測った手前の端と向こうの端である。
@@ -38,6 +40,7 @@ pub(super) struct OnLink {
     pub near: u32,
     pub far: u32,
     pub closed: bool,
+    pub closing: bool,
 }
 
 /// 道路の区間ごとの踏切。tick ごとに、線路の網の踏切の一覧と、閉じた踏切から作る。
@@ -83,12 +86,30 @@ impl RailCrossings {
                 from: mm(center - per / 2),
                 to: mm(center + per / 2),
                 closed: closed.contains(&t),
+                closing: closed.contains(&t),
             });
         }
         for v in spans.values_mut() {
             v.sort_unstable_by_key(|s| s.from);
         }
         RailCrossings { spans }
+    }
+
+    /// `closing` の踏切を、もうすぐ閉じる踏切とする。閉じた踏切は、もとからもうすぐ閉じる踏切である。
+    pub fn with_closing(mut self, closing: &BTreeSet<TilePos>) -> RailCrossings {
+        for s in self.spans.values_mut().flatten() {
+            s.closing |= closing.contains(&s.tile);
+        }
+        self
+    }
+
+    /// リンク `link`（長さ `len`）の始まりから入る車が、閉じたかもうすぐ閉じる踏切の手前で止まる所に、止まった車が
+    /// いるとみなす位置（車の真ん中、リンクの始まりから測る）。そういう踏切がなければ `None`。
+    pub(super) fn closing_wall(&self, link: LinkId, len: u32) -> Option<i64> {
+        self.on_link(link, len)
+            .iter()
+            .find(|c| c.closing)
+            .map(|c| i64::from(super::car::jay_line(zone_of(c.near))) + i64::from(SPACING))
     }
 
     pub fn is_empty(&self) -> bool {
@@ -108,12 +129,14 @@ impl RailCrossings {
                     near: s.from,
                     far: s.to,
                     closed: s.closed,
+                    closing: s.closing,
                 },
                 Dir::Backward => OnLink {
                     tile: s.tile,
                     near: len.saturating_sub(s.to),
                     far: len.saturating_sub(s.from),
                     closed: s.closed,
+                    closing: s.closing,
                 },
             })
             .collect();
@@ -232,6 +255,31 @@ impl RailCrossings {
         }
         (inside, waits)
     }
+
+    /// 体が踏切にかかったまま止まっている車のいる踏切と、開いた踏切の手前で車間ぶんの内に止まっている車の数。
+    /// 後者は、踏切の先に抜けきる空きがないか、前の車の列が踏切の手前まで延びて止まった車である。
+    #[cfg(test)]
+    pub(crate) fn stopped_cars(&self, trips: &Trips) -> (BTreeSet<TilePos>, u64) {
+        let mut inside = BTreeSet::new();
+        let mut held = 0_u64;
+        let half = i64::from(CAR_LENGTH / 2);
+        for (_, t) in trips.iter() {
+            if t.mode != LaneMode::Car || t.waiting || t.speed != MmPerTick::ZERO {
+                continue;
+            }
+            let at = i64::from(t.offset.0);
+            for c in self.on_link(t.link(), t.link_len.0) {
+                let (near, far) = (i64::from(c.near), i64::from(c.far));
+                if at - half < far && near < at + half {
+                    inside.insert(c.tile);
+                } else if !c.closed && at + half <= near && near - (at + half) < i64::from(SPACING)
+                {
+                    held += 1;
+                }
+            }
+        }
+        (inside, held)
+    }
 }
 
 /// 前の車（いまのリンクの始まりから数えた位置と速さ）が減速の上限で止まった所から、車間を空けた所。
@@ -239,4 +287,33 @@ impl RailCrossings {
 pub(super) fn bound_behind(leader: (LaneOffset, MmPerTick)) -> i64 {
     let (at, v) = leader;
     i64::from(at.0) + braking_distance(i64::from(v.0.max(0))) - i64::from(SPACING)
+}
+
+#[cfg(test)]
+impl RailCrossings {
+    /// 交差点 `node` の車道の四角（[`super::stop_line::box_reach`] の内）に、止まったままの車の数。
+    pub(crate) fn stopped_in_box(
+        net: &Network,
+        trips: &Trips,
+        node: crate::command::NodeId,
+    ) -> usize {
+        trips
+            .iter()
+            .filter(|(_, t)| t.mode == LaneMode::Car && !t.waiting && t.speed == MmPerTick::ZERO)
+            .filter(|(_, t)| {
+                let link = t.link();
+                let Some(s) = net.segment(link.segment) else {
+                    return false;
+                };
+                let (a, b) = match link.dir {
+                    Dir::Forward => (s.a, s.b),
+                    Dir::Backward => (s.b, s.a),
+                };
+                let p = i64::from(t.offset.0);
+                let len = i64::from(t.link_len.0);
+                let reach = super::stop_line::box_reach(net, node, link);
+                (a == node && p < reach) || (b == node && len - p < reach)
+            })
+            .count()
+    }
 }
