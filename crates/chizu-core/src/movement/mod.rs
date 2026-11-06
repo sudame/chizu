@@ -540,10 +540,11 @@ impl Trip {
         }
         let mut p0 = self.offset.0;
         let mut p1 = p0.saturating_add(speed);
-        // 閉じた踏切の手前で待つ。
+        // 閉じた踏切の手前で待つ。待つ所より手前で着く人は、そのまま着く。
+        let arrives_before = |s: u32| self.last_leg() && self.dest_offset.0 <= s;
         if let Some(stop) = rail
             .walk_limit(self.link(), self.link_len.0, p0)
-            .filter(|s| *s < p1)
+            .filter(|s| *s < p1 && !arrives_before(*s))
         {
             self.offset = LaneOffset(stop);
             return (false, None);
@@ -1061,7 +1062,15 @@ impl Trips {
                 let (route, e, jay) = routes.next().expect("探した経路の数が合わない")?;
                 let id = self.insert(make_trip(net, route, e, *to, now, jay));
                 if mode == LaneMode::Car {
-                    car::place(&mut self.rows, net, &mut ix, id.slot(), &zones, &entering);
+                    car::place(
+                        &mut self.rows,
+                        net,
+                        &mut ix,
+                        id.slot(),
+                        &zones,
+                        &RailCrossings::default(),
+                        &entering,
+                    );
                 }
                 Some(id)
             })
@@ -1085,7 +1094,7 @@ impl Trips {
     ) -> Vec<TripId> {
         self.finished.clear();
         let done = self.advance(net, router.connectors(), now, rail);
-        let mut ended = self.next_legs(net, router, done);
+        let mut ended = self.next_legs(net, router, done, rail);
         let give_up: Vec<usize> = (0..self.rows.len())
             .filter(|i| self.rows[*i].as_ref().is_some_and(car::given_up))
             .collect();

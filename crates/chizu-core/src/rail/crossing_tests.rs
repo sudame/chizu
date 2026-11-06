@@ -442,3 +442,84 @@ fn trains_starting_next_to_a_crossing_wait_for_the_warning() {
         assert_eq!(w.trips().rescues().teleported, 0, "列車 {trains} 本");
     }
 }
+
+/// [`crossing_world`] の駅から離れた踏切（x = 30）の両側に、住宅と工場の区画を塗った街。踏切の隣のマスに面した
+/// 建物があり、その駐車場から出る車と出入口から歩く人が、閉じた踏切のすぐ手前から動き出す。列車は 2 本で、
+/// 踏切を両方の向きから通る。
+fn two_way_crossing_town() -> World {
+    let seed = 6;
+    assert_eq!(crate::world::highway_line(seed).start, at(20, -64));
+    let (mut w, a, b) = crossing_world_with(
+        World::new_with_money(seed, Money(1_000_000_000)).with_unlimited_land(),
+    );
+    ok(road(&mut w, (20, -64), (20, -60)));
+    ok(road(&mut w, (20, -60), (-10, -60)));
+    ok(road(&mut w, (20, -60), (40, -60)));
+    ok(road(&mut w, (30, -60), (30, 60)));
+    assert_eq!(w.rail().crossings().collect::<Vec<_>>(), vec![at(30, 8)]);
+    for (area, zone) in [
+        (((31, -55), (36, 7)), crate::command::Zone::ResidentialLow),
+        (((24, -55), (29, 7)), crate::command::Zone::ResidentialLow),
+        (((31, 9), (36, 58)), crate::command::Zone::Industrial),
+        (((24, 9), (29, 58)), crate::command::Zone::Industrial),
+    ] {
+        let c = w.apply(&Command::PaintZone {
+            area: TileRect::from_corners(at(area.0.0, area.0.1), at(area.1.0, area.1.1)),
+            zone: Some(zone),
+        });
+        assert!(
+            matches!(c, ApplyOutcome::Applied | ApplyOutcome::AppliedPartly(_)),
+            "{c:?}"
+        );
+    }
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, -5),
+        (ServiceKind::WaterPump, 5),
+        (ServiceKind::WaterPump, 8),
+    ] {
+        ok(w.apply(&Command::PlaceBuilding {
+            kind,
+            at: at(x, -61),
+            rotation: 2,
+        }));
+    }
+    ok(w.apply(&Command::CreateLine { from: a, to: b }));
+    let line = w.rail().lines().next().unwrap().0;
+    ok(w.apply(&Command::SetLineTrains { line, trains: 2 }));
+    w
+}
+
+/// 両方の向きから列車が来る踏切のすぐ手前の駐車場から出る車も、閉じた踏切の手前で待つ。閉じたあとに踏切に
+/// 入る車と人はいないので、閉じてから [`LATE_TICKS`] tick たった踏切の中には、車も人もいない。列車と
+/// ぶつかりかけることはなく、閉じている長さは救済（300 tick）よりずっと短い。
+#[test]
+fn cars_leaving_lots_next_to_a_two_way_crossing_wait_for_trains() {
+    let tile = at(30, 8);
+    let mut w = two_way_crossing_town();
+    let mut late = Vec::new();
+    for _ in 0..3 * crate::TICKS_PER_DAY {
+        w.step();
+        let Some(since) = w.rail().closed_since(tile) else {
+            continue;
+        };
+        let now = w.tick().0;
+        if now - since < LATE_TICKS {
+            continue;
+        }
+        let closed = BTreeSet::from([tile]);
+        let rail = crate::movement::RailCrossings::new(w.network(), [tile], &closed);
+        if rail.traffic(w.trips()).0.contains(&tile) {
+            late.push(now);
+        }
+    }
+    let tally = w.rail().crossing_tally();
+    assert!(late.is_empty(), "閉じたあとに踏切に入った：{late:?}");
+    assert!(tally.closures > 50, "{tally:?}");
+    assert!(tally.wait > 0, "車が通らない {tally:?}");
+    assert_eq!(tally.overrun, 0, "{tally:?}");
+    assert!(tally.longest_closed <= 60, "{tally:?}");
+    assert_eq!(w.trips().rescues().teleported, 0);
+}
+
+/// 閉じる前に踏切に入った車と人が、踏切を抜けきるまでの tick の上限。止まっていた車でも 3 tick で抜ける。
+const LATE_TICKS: u64 = 8;
