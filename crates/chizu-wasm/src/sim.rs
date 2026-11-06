@@ -533,6 +533,34 @@ impl Sim {
         crate::inspect::encode(found)
     }
 
+    /// 長方形を取り壊したときに消えるものを、状態を変えずに求める。範囲が世界の外なら空。
+    ///
+    /// 先頭から、消える道路のマスの数、施設の数、建物の数、家をなくす世帯の数、道路の区間の数が続き、
+    /// 区間ごとに `[始点の x, 始点の y, 終点の x, 終点の y]`、施設ごとに `[min の x, min の y, max の x, max の y]`、
+    /// 建物ごとに同じ 4 つが、この順に並ぶ。
+    pub fn bulldoze_preview(&self, a: TilePos, b: TilePos) -> Vec<f64> {
+        let area = chizu_core::TileRect::from_corners(a, b);
+        if !area.in_world() {
+            return Vec::new();
+        }
+        let p = self.world.bulldoze_preview(area);
+        let mut out = vec![
+            p.road_tiles as f64,
+            p.facilities.len() as f64,
+            p.buildings.len() as f64,
+            p.displaced_households as f64,
+            p.segments.len() as f64,
+        ];
+        for l in &p.segments {
+            let (s, e) = (l.start, l.end());
+            out.extend([s.x, s.y, e.x, e.y].map(|v| v as f64));
+        }
+        for r in p.facilities.iter().chain(&p.buildings) {
+            out.extend([r.min.x, r.min.y, r.max.x, r.max.y].map(|v| v as f64));
+        }
+        out
+    }
+
     /// 施設を、1 つにつき `[min の x, min の y, max の x, max の y, 種類]` の 5 つの数で返す。
     /// 種類は `ServiceKind` の値である。
     pub fn facilities(&self) -> Vec<f64> {
@@ -1363,6 +1391,22 @@ mod tests {
         let lonely = sim.service_probe(ServiceKind::WaterPump, TilePos::new(150, a + 1));
         assert_eq!(lonely[0], Err(DenyReason::NoRoadAccess));
         assert!(lonely.iter().all(Result::is_err), "{lonely:?}");
+    }
+
+    #[test]
+    fn bulldoze_preview_lists_the_whole_segment_for_one_tile() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((10, 10), (30, 10))).unwrap();
+        let before = sim.world().network().road_tile_count();
+        let p = sim.bulldoze_preview(TilePos::new(20, 10), TilePos::new(20, 10));
+        // 道路のマス、施設、建物、家をなくす世帯、区間の数の順で、区間は両端のマスで指す
+        assert_eq!(&p[..5], &[21.0, 0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(&p[5..9], &[10.0, 10.0, 30.0, 10.0]);
+        assert_eq!(p.len(), 9);
+        // 見積もりでは街は変わらず、世界の外は空を返す
+        assert_eq!(sim.world().network().road_tile_count(), before);
+        let far = TilePos::new(1 << 40, 0);
+        assert!(sim.bulldoze_preview(far, far).is_empty());
     }
 
     #[test]

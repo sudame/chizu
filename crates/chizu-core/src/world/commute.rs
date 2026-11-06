@@ -118,6 +118,7 @@ impl World {
     /// 世帯が越してきたり、家をなくしたり、住宅の段階が上がったりしたあとに呼ぶ。
     /// 枠をなくした世帯と、借りた枠から自宅の枠に移った世帯の停めてある車は、駐車場から外す。
     pub(super) fn assign_car_places(&mut self) {
+        let before = self.car_places.clone();
         let p = &self.population;
         let homes: Vec<_> = p
             .household_ids()
@@ -133,6 +134,28 @@ impl World {
         }
         self.rent_shared_lots();
         self.sync_rented();
+        self.place_new_cars(&before);
+    }
+
+    /// 枠が `before` から変わった世帯（枠を得たか、借りた枠から自宅の枠に移った世帯）のうち、車を持つ世帯
+    /// （[`CAR_OWNERSHIP_PERCENT`]）の車を、その枠に停めた状態にする。車がもうどこかにある世帯はそのままにする。
+    /// 停めた住民は、世帯の住民で ID のいちばん小さい人とする。車を持たない世帯は、今までどおり車で出るときに
+    /// 出発の建物から車が現れる。世帯の枠を変えて [`Self::sync_rented`] を呼んだあとに呼ぶ。
+    fn place_new_cars(&mut self, before: &CarPlaces) {
+        let p = &self.population;
+        let placing: Vec<(HouseholdId, CitizenId, LotId)> = self
+            .car_places
+            .iter()
+            .filter(|(h, place)| before.get(*h) != Some(*place))
+            .filter(|(h, _)| self.owns_car(*h) && self.trips.household_car(*h).is_none())
+            .filter_map(|(h, _)| {
+                let by = p.members(h)?.iter().min().copied()?;
+                Some((h, by, self.own_lot(h)?))
+            })
+            .collect();
+        for (h, by, lot) in placing {
+            self.trips.place_car(h, by, lot);
+        }
     }
 
     /// 自宅の枠のない、家のある世帯に、共同の駐車場の枠を世帯の ID の順に貸す。家の出入口のマスから
@@ -202,6 +225,7 @@ impl World {
         if !self.facilities.iter().any(|f| f.kind.is_parking()) {
             return;
         }
+        let before = self.car_places.clone();
         let p = &self.population;
         let fee = i64::from(self.parking_fee);
         let over: Vec<HouseholdId> = self
@@ -219,6 +243,7 @@ impl World {
         }
         self.rent_shared_lots();
         self.sync_rented();
+        self.place_new_cars(&before);
     }
 
     /// 取り壊した共同の駐車場 `corner` を借りていた世帯の枠をなくし、停まっていた車も消す。
@@ -730,6 +755,66 @@ mod car_place_tests {
             counts.get(&garage).copied().unwrap_or(0) > 12,
             "駐車場ビルを借りた世帯が少ない: {counts:?}"
         );
+        HOME_SPACES_LIMIT.with(|l| l.set(None));
+    }
+
+    /// 車を持つ世帯の車は、自宅の枠か借りた枠を得た tick から、その枠に停まっている。同じ tick に乗って出ていれば、
+    /// 乗っている。車を持たない世帯の車は、枠を得ても現れない。
+    #[test]
+    fn cars_are_parked_in_the_place_from_the_start() {
+        HOME_SPACES_LIMIT.with(|l| l.set(Some(1)));
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        place(&mut w, ServiceKind::ParkingGarage, (-20, 9));
+        let mut prev = w.car_places().clone();
+        let (mut home, mut rented, mut carless) = (0, 0, 0);
+        while w.tick.0 < 2 * TICKS_PER_DAY {
+            w.step();
+            for (h, place) in w.car_places().iter() {
+                if prev.get(h) == Some(place) {
+                    continue;
+                }
+                let car = w.trips().household_car(h);
+                if !w.owns_car(h) {
+                    // 車を持たない世帯の車は、500m 以上の移動で車で出るときに現れる。枠を得る前は車で出られない。
+                    assert_eq!(car, None, "{h:?}");
+                    carless += 1;
+                    continue;
+                }
+                match car {
+                    Some(HouseholdCar::Parked { lot, .. }) => {
+                        assert_eq!(Some(lot), w.own_lot(h), "{h:?}");
+                    }
+                    Some(HouseholdCar::InUse(_)) => {}
+                    None => panic!("枠を得た世帯 {h:?} の車がどこにもない"),
+                }
+                match place {
+                    CarPlace::Home => home += 1,
+                    CarPlace::Shared(_) => rented += 1,
+                }
+            }
+            if w.tick.0 % 60 == 1 {
+                check_rented(&w);
+            }
+            prev = w.car_places().clone();
+        }
+        assert!(home > 10, "自宅の枠を得た世帯が少ない: {home}");
+        assert!(rented > 10, "借りた枠を得た世帯が少ない: {rented}");
+        assert!(carless > 0, "車を持たない世帯が枠を得ていない");
+        // 借りた枠に停まっている台数と、世帯の車の表が合う。
+        for f in w.facilities().iter().filter(|f| f.kind.is_parking()) {
+            let c = f.area.min;
+            let parked = w
+                .car_places()
+                .iter()
+                .filter(|(h, _)| {
+                    matches!(
+                        w.trips().household_car(*h),
+                        Some(HouseholdCar::Parked { lot, .. }) if lot == LotId::Rented(c)
+                    )
+                })
+                .count();
+            assert_eq!(w.trips().shared_lot(c).rented_parked as usize, parked);
+        }
         HOME_SPACES_LIMIT.with(|l| l.set(None));
     }
 }

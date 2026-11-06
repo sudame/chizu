@@ -21,7 +21,7 @@ use crate::clock::TICKS_PER_DAY;
 use crate::command::ServiceKind;
 use crate::command::{Density, Zone, ZoneKind};
 use crate::id::BuildingId;
-use crate::network::{DIAGONAL_TILE_MM, Dir, LaneMode, LinkId, TILE_MM};
+use crate::network::{DIAGONAL_TILE_MM, Dir, LaneMode, LinkId, SegmentId, TILE_MM};
 use crate::rail::STATION_TRACK_ROW;
 use crate::rng::{RngPurpose, rng};
 use crate::round;
@@ -249,6 +249,16 @@ impl World {
     /// 斜め `(dx, dy)` なら、`(dx, 0)` と `(0, dy)` の 1 歩先の 2 マスを続けて通る斜めの区間に面する。
     /// 出入口は 2 マスの中心のあいだの点である。
     fn frontage(&self, front: TilePos, toward_road: (i64, i64)) -> Option<(LinkId, LaneOffset)> {
+        self.frontage_without(front, toward_road, &BTreeSet::new())
+    }
+
+    /// [`World::frontage`] を、区間 `gone` がなかったものとして求める。取り壊す前に、面した道路が残るかを見るのに使う。
+    pub(super) fn frontage_without(
+        &self,
+        front: TilePos,
+        toward_road: (i64, i64),
+        gone: &BTreeSet<SegmentId>,
+    ) -> Option<(LinkId, LaneOffset)> {
         let (tx, ty) = toward_road;
         let diagonal = is_diagonal(toward_road);
         let (p, q) = if diagonal {
@@ -258,7 +268,7 @@ impl World {
             (road, road)
         };
         self.network.segments_through(p).into_iter().find_map(|s| {
-            if !self.network.segment(s)?.kind.has_sidewalks() {
+            if gone.contains(&s) || !self.network.segment(s)?.kind.has_sidewalks() {
                 return None;
             }
             let line = self.network.segment_line(s)?;
@@ -1627,6 +1637,72 @@ mod tests {
             w.apply(&empty),
             ApplyOutcome::Denied(DenyReason::NothingToBulldoze)
         );
+    }
+
+    /// 取り壊しの見積もりは、実際に取り壊した前後の差と同じになり、見積もりで街は変わらない。
+    #[test]
+    fn bulldoze_preview_matches_what_the_bulldoze_removes() {
+        let mut w = served_street();
+        run(&mut w, 30 * 60);
+        let p = w.population();
+        let home = p
+            .household_ids()
+            .find_map(|h| p.home(h).flatten())
+            .expect("住む世帯がない");
+        let b = w.buildings().get(home).unwrap().area;
+        let areas = [
+            // 道路の 1 マスだけでも、区間全体が消えて沿道の建物も消える。
+            rect((20, 10), (20, 10)),
+            // 建物の 1 マス。
+            rect((b.max.x, b.max.y), (b.max.x, b.max.y)),
+            // 施設の 1 マス。
+            rect((6, 8), (6, 8)),
+            rect((0, 0), (40, 40)),
+            rect((100, 100), (101, 101)),
+        ];
+        for area in areas {
+            let before = w.clone();
+            let preview = w.bulldoze_preview(area);
+            assert_eq!(w, before, "{area:?}");
+            let mut after = w.clone();
+            let outcome = after.apply(&Command::Bulldoze { area });
+            if preview.segments.is_empty()
+                && preview.facilities.is_empty()
+                && preview.buildings.is_empty()
+            {
+                assert_eq!(outcome, ApplyOutcome::Denied(DenyReason::NothingToBulldoze));
+                continue;
+            }
+            assert_eq!(outcome, ApplyOutcome::Applied, "{area:?}");
+            let gone = |id: &BuildingId| after.buildings().get(*id).is_none();
+            let ids: Vec<BuildingId> = w.buildings().iter().map(|(id, _)| id).collect();
+            assert_eq!(
+                preview.buildings.len(),
+                ids.iter().filter(|id| gone(id)).count(),
+                "{area:?}"
+            );
+            assert_eq!(
+                preview.facilities.len(),
+                w.facilities().len() - after.facilities().len(),
+                "{area:?}"
+            );
+            assert_eq!(
+                preview.road_tiles as usize,
+                w.network().road_tile_count() - after.network().road_tile_count(),
+                "{area:?}"
+            );
+            let p = w.population();
+            let displaced = p
+                .household_ids()
+                .filter_map(|h| p.home(h).flatten())
+                .filter(|id| gone(id))
+                .count();
+            assert_eq!(preview.displaced_households as usize, displaced, "{area:?}");
+        }
+        // 道路の 1 マスの見積もりは、区間の全体と、沿道の建物を含む。
+        let one = w.bulldoze_preview(rect((20, 10), (20, 10)));
+        assert!(one.road_tiles > 1);
+        assert!(!one.buildings.is_empty());
     }
 
     /// 建物の 1 マスにかかる長方形でも、建物ごと取り壊す。区画と道路は残り、住む世帯は家なしに、

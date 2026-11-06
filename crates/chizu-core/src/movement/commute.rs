@@ -11,7 +11,8 @@
 //! 家から出るときか、自分で停めた車のとき（満車で近くの別の建物に停めたときも含む）だけである。
 //! 職場が変わるかなくなった住民が家でない所に停めた車は、どこにもないものに戻す（[`Trips::return_car`]）。
 //! ほかの住民が乗っているときや、離れた所に停めてあるときは、車がないものとして歩く。
-//! 世帯の車がまだどこにもなければ、車は出発の建物から現れる。停めてある台数は世帯の数を超えて増えない。
+//! 車を持つ世帯の車は、枠を得たときから枠に停まっている（[`Trips::place_car`]）。走っているあいだに車をなくした世帯と、
+//! 車を持たない世帯の車はどこにもなく、次に車で出るときに出発の建物から現れる。停めてある台数は世帯の数を超えて増えない。
 //! 共同の駐車場の枠を借りた世帯（[`CarPlace::Shared`]）の車は、家にいるあいだ借りた枠に停まり、
 //! 家と借りた枠のあいだは歩く。
 
@@ -297,6 +298,19 @@ impl Trips {
         if let Some(HouseholdCar::Parked { lot, .. }) = self.commuters.cars.remove(&household) {
             self.parking.unpark(lot);
         }
+    }
+
+    /// 車がまだどこにもない世帯 `household` の車を、世帯の枠のある駐車場 `lot` に停めた状態にする。
+    /// 停めた住民は `by` とする。枠を得た世帯の車が、初めて車で出る前から枠に停まっているようにする。
+    pub fn place_car(&mut self, household: HouseholdId, by: CitizenId, lot: LotId) {
+        assert!(
+            !self.commuters.cars.contains_key(&household),
+            "車のある世帯に車を置いた"
+        );
+        self.parking.put_back(lot);
+        self.commuters
+            .cars
+            .insert(household, HouseholdCar::Parked { lot, by });
     }
 
     /// 住民 `citizen` が世帯の枠（`own`。自宅か借りた枠）でない所に停めた世帯の車を、どこにもないものに戻す。
