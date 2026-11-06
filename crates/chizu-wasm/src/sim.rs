@@ -896,6 +896,11 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::CrosswalkUnchanged => "横断歩道はもうその状態になっている",
         DenyReason::RailTooSharp => "線路はノードで 45 度までしか曲げられない",
         DenyReason::RailTooManyBranches => "線路の分岐は 1 つのノードに 1 つまで",
+        DenyReason::RailNoRoute => "途中で向きを変えずに線路で届かない",
+        DenyReason::NoSuchStation => "その駅はない",
+        DenyReason::NoSuchLine => "その路線はない",
+        DenyReason::LineLimit => "路線の数か、路線の駅の数が上限に届いている",
+        DenyReason::StationInLine => "その駅はもう路線に入っている",
     }
 }
 

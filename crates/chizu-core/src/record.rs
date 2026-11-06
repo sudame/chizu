@@ -44,17 +44,22 @@
 //! | 10 | `SetCrosswalk` | index `u32`、generation `u16`、arm `u8`（`Heading` の値）、on `u8`（0 か 1） |
 //! | 11 | `SetParkingFee` | fee `u16` |
 //! | 12 | `BuildRail` | from `TilePos`、to `TilePos` |
+//! | 13 | `CreateLine` | from の index `u32`、generation `u16`、to の index `u32`、generation `u16`（駅の ID） |
+//! | 14 | `ExtendLine` | line の index `u32`、generation `u16`、station の index `u32`、generation `u16` |
+//! | 15 | `RemoveLine` | line の index `u32`、generation `u16` |
+//! | 16 | `SetLineTrains` | line の index `u32`、generation `u16`、trains `u8`（0〜16） |
 //!
 //! 形式を変えるときは版を上げる。種類の番号は使い回さない。種類を足すだけなら、古い記録はそのまま
 //! 読めるので版は上げない。`PaintZone` の区画に低密度の住宅（5）を足したときも、同じ理由で版を上げていない。
 //! 1 は前から住宅で、いまは高密度の住宅と読む。`BuildRail`（12）と、`PlaceBuilding` の駅（施設の種類 5）を足したときも
-//! 同じ理由で版を上げていない。
+//! 同じ理由で版を上げていない。路線のコマンド（13〜16）も同じである。
 
 use core::fmt;
 
 use crate::command::{
     Command, Heading, InvalidCommand, NodeId, RoadKind, ServiceKind, SimSpeed, Zone, ZoneKind,
 };
+use crate::rail::{LineId, StationId};
 use crate::tile::{ChunkCoord, TilePos, TileRect};
 use crate::units::Tick;
 use crate::world::{ApplyOutcome, DenyReason, World};
@@ -454,6 +459,31 @@ fn encode_command(w: &mut Writer, c: &Command) {
             w.tile(from);
             w.tile(to);
         }
+        Command::CreateLine { from, to } => {
+            w.u8(13);
+            w.u32(from.index);
+            w.u16(from.generation);
+            w.u32(to.index);
+            w.u16(to.generation);
+        }
+        Command::ExtendLine { line, station } => {
+            w.u8(14);
+            w.u32(line.index);
+            w.u16(line.generation);
+            w.u32(station.index);
+            w.u16(station.generation);
+        }
+        Command::RemoveLine { line } => {
+            w.u8(15);
+            w.u32(line.index);
+            w.u16(line.generation);
+        }
+        Command::SetLineTrains { line, trains } => {
+            w.u8(16);
+            w.u32(line.index);
+            w.u16(line.generation);
+            w.u8(trains);
+        }
     }
 }
 
@@ -520,6 +550,39 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
             from: r.tile()?,
             to: r.tile()?,
         },
+        13 => Command::CreateLine {
+            from: StationId {
+                index: r.u32()?,
+                generation: r.u16()?,
+            },
+            to: StationId {
+                index: r.u32()?,
+                generation: r.u16()?,
+            },
+        },
+        14 => Command::ExtendLine {
+            line: LineId {
+                index: r.u32()?,
+                generation: r.u16()?,
+            },
+            station: StationId {
+                index: r.u32()?,
+                generation: r.u16()?,
+            },
+        },
+        15 => Command::RemoveLine {
+            line: LineId {
+                index: r.u32()?,
+                generation: r.u16()?,
+            },
+        },
+        16 => Command::SetLineTrains {
+            line: LineId {
+                index: r.u32()?,
+                generation: r.u16()?,
+            },
+            trains: r.u8()?,
+        },
         other => return Err(DecodeError::UnknownCommand(other)),
     };
     Ok(c)
@@ -574,6 +637,7 @@ pub fn replay(world: &mut World, log: &CommandLog, ticks: u64) -> ReplayStats {
 mod tests {
     use super::*;
     use crate::command::{MAX_PARKING_FEE, MAX_TAX_PERMILLE};
+    use crate::rail::line::MAX_LINE_TRAINS;
     use crate::tile::WORLD_LIMIT;
     use proptest::prelude::*;
 
@@ -642,6 +706,39 @@ mod tests {
                 kind: ServiceKind::Station,
                 at: TilePos::new(-30, 12),
                 rotation: 0,
+            },
+            Command::CreateLine {
+                from: StationId {
+                    index: 0,
+                    generation: 0,
+                },
+                to: StationId {
+                    index: 7,
+                    generation: 3,
+                },
+            },
+            Command::ExtendLine {
+                line: LineId {
+                    index: 1,
+                    generation: 2,
+                },
+                station: StationId {
+                    index: 3,
+                    generation: 4,
+                },
+            },
+            Command::SetLineTrains {
+                line: LineId {
+                    index: 0,
+                    generation: 0,
+                },
+                trains: MAX_LINE_TRAINS,
+            },
+            Command::RemoveLine {
+                line: LineId {
+                    index: 5,
+                    generation: 6,
+                },
             },
         ]
     }
@@ -752,9 +849,18 @@ mod tests {
         assert!(invalid_command(&[11, 51, 0])); // 駐車場の料金 51
         assert!(CommandLog::decode(&single(0, 0, &[11, 50, 0])).is_ok());
         assert_eq!(
-            CommandLog::decode(&single(0, 0, &[13])),
-            Err(DecodeError::UnknownCommand(13))
+            CommandLog::decode(&single(0, 0, &[17])),
+            Err(DecodeError::UnknownCommand(17))
         );
+        // 列車の本数は 0〜16 だけを読む。
+        let trains = |n: u8| {
+            let mut c = vec![16];
+            c.extend_from_slice(&[0; 6]);
+            c.push(n);
+            c
+        };
+        assert!(CommandLog::decode(&single(0, 0, &trains(16))).is_ok());
+        assert!(invalid_command(&trains(17)));
         assert!(invalid(&[
             4, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
         ])); // 施設の種類 6
@@ -1001,13 +1107,16 @@ mod tests {
                 applied: 8,
                 not_implemented: 0,
                 rejected: 0,
-                denied: 6,
+                denied: 10,
                 denied_by: {
                     let mut by = [0; DenyReason::ALL.len()];
                     by[DenyReason::NotJunction.index()] = 2;
                     by[DenyReason::NoRoadAccess.index()] = 2;
                     by[DenyReason::NothingToBulldoze.index()] = 1;
                     by[DenyReason::NotAdjacent.index()] = 1;
+                    // 駅を置けていないので、路線を作れず、路線もない。
+                    by[DenyReason::NoSuchStation.index()] = 1;
+                    by[DenyReason::NoSuchLine.index()] = 3;
                     by
                 },
             }
@@ -1115,6 +1224,23 @@ mod tests {
                     from: TilePos::new(x, y),
                     to: TilePos::new(x + sx * n, y + sy * n),
                 }),
+            line_command(),
+        ]
+    }
+
+    /// 路線のコマンド。ID はどの値も指せる。
+    fn line_command() -> impl Strategy<Value = Command> {
+        let station =
+            (0_u32..4, 0_u16..2).prop_map(|(index, generation)| StationId { index, generation });
+        let line =
+            (0_u32..4, 0_u16..2).prop_map(|(index, generation)| LineId { index, generation });
+        prop_oneof![
+            (station.clone(), station.clone())
+                .prop_map(|(from, to)| Command::CreateLine { from, to }),
+            (line.clone(), station)
+                .prop_map(|(line, station)| Command::ExtendLine { line, station }),
+            line.clone().prop_map(|line| Command::RemoveLine { line }),
+            (line, 0_u8..=20).prop_map(|(line, trains)| Command::SetLineTrains { line, trains }),
         ]
     }
 

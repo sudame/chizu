@@ -637,6 +637,80 @@ fn act_builds_rail_and_a_station_and_observe_and_map_show_them() {
     );
 }
 
+/// 駅 2 つを結ぶ路線を作って列車を走らせると、observe の rail に路線と列車が出て、鉄道の維持費に列車の分が入る。
+#[test]
+fn act_creates_a_line_and_observe_shows_the_trains() {
+    let dir = session("agent-rail-line");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "0"]);
+    let cmds = write(
+        &dir.join("r.json"),
+        r#"[{"type":"BuildRoad","from":[0,10],"to":[70,10],"kind":"Small"},
+            {"type":"PlaceBuilding","kind":"Station","at":[12,9],"rotation":2},
+            {"type":"PlaceBuilding","kind":"Station","at":[62,9],"rotation":2},
+            {"type":"BuildRail","from":[12,8],"to":[53,8]},
+            {"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":1,"generation":0}},
+            {"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":4},
+            {"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":0,"generation":0}},
+            {"type":"RemoveLine","line":{"index":3,"generation":0}}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let outcomes: Vec<(&str, Option<&str>)> = acted["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["outcome"].as_str().unwrap(), r["reason"].as_str()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("Applied", None),
+            ("Applied", None),
+            ("Applied", None),
+            ("Applied", None),
+            ("Applied", None),
+            ("Applied", None),
+            ("Denied", Some("StationInLine")),
+            ("Denied", Some("NoSuchLine")),
+        ],
+        "{acted}"
+    );
+    let before = json(&cli(&["agent", "observe", d]));
+    cli(&["agent", "advance", d, "1000"]);
+    let o = json(&cli(&["agent", "observe", d]));
+    let rail = &o["rail"];
+    let lines = rail["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 1, "{rail}");
+    assert_eq!(lines[0]["trains"], 4, "{rail}");
+    assert_eq!(lines[0]["cap"], 3, "{rail}");
+    assert_eq!(lines[0]["running"], 3, "{rail}");
+    assert_eq!(lines[0]["stopped"], false, "{rail}");
+    assert_eq!(
+        lines[0]["stations"],
+        serde_json::json!([{"index":0,"generation":0},{"index":1,"generation":0}])
+    );
+    let trains = rail["trains"].as_array().unwrap();
+    assert_eq!(trains.len(), 3, "{rail}");
+    for t in trains {
+        let y = t["at"][1].as_i64().unwrap();
+        assert_eq!(y, 8, "{t}");
+        assert!(["E", "W"].contains(&t["heading"].as_str().unwrap()), "{t}");
+        assert!(t["nextStation"].is_object(), "{t}");
+    }
+    assert_eq!(rail["trainCount"], 3);
+    assert_eq!(rail["deadlock"], 0);
+    // 列車 3 本の 1 日の維持費 1800 が足される。
+    assert_eq!(
+        o["financesPerDay"]["railUpkeep"].as_i64().unwrap()
+            - before["financesPerDay"]["railUpkeep"].as_i64().unwrap(),
+        1_800
+    );
+    assert_eq!(
+        o["sinceLastObserve"]["changes"]["rail.trainCount"]["delta"],
+        3
+    );
+}
+
 /// 大きすぎる縮尺は、あふれずに断る。
 #[test]
 fn map_refuses_huge_scale() {

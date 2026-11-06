@@ -1,0 +1,704 @@
+//! 列車と閉塞（設計 3.10 の 3）。
+//!
+//! 列車は路線の進路（[`RailLine::path`]）の上を、どの速さでも 1 tick ずつ動く。位置は先頭がいる進路の要素と、
+//! その要素に入ってからの距離で持ち、尾は全長ぶん後ろにある（閉塞を押さえる長さは [`TRAIN_BLOCK_LEN_MM`]）。
+//! 乗る人はまだいない。
+//!
+//! 閉塞は、線路の向きごとのノードとノードのあいだと、分岐のノード（上りと下りをまとめて 1 つ）である
+//! （[`Block`]）。列車は先の閉塞を押さえてから入り、尾が抜けたら返す。押さえている閉塞は、列車の体がかかる
+//! 要素と、先頭より先に押さえた要素の数（[`Train::ahead`]）から求まるので、状態には持たない。
+//!
+//! 1 tick は次の順に進める。どれも列車か路線の ID の順で、結果は実行順に左右されない。
+//! 1. 駅に止まる時間と折り返しの時間を数える。
+//! 2. 先の閉塞を押さえる。同じ tick に押さえようとする列車は、待った長さの長い順、同じなら ID の順にする。
+//! 3. 押さえた範囲の中で速さを決めて進める。前の tick の状態と押さえた範囲だけを読む。
+//! 4. 路線の本数に足りなければ、最初の駅のホームが空いているときに列車を 1 本出す。
+//! 5. 押さえられずに止まった列車が互いを待つ輪を見つけたら、輪の中で ID のいちばん大きい列車を消す。
+//!
+//! 行き詰まりは次の 3 つの決まりで防ぐ。
+//! 1. 本数の上限（[`RailLine::cap`]）。
+//! 2. 終点の駅には、両方のホーム（着く側と、折り返して出る側）をまとめて押さえられるときだけ入る。
+//!    折り返したあとは着いた側のホームを返す。終点の両方のホームは、列車 1 本ぶんの閉塞として使われる。
+//! 3. ほかの路線と閉塞を共有する区間（[`Step::shared`]）では、次に止まる駅のホーム（終点なら両方のホーム）までを
+//!    まとめて押さえてから駅を出る。
+
+use std::cmp::Reverse;
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use super::line::{RailLine, Step, StepKind};
+use super::{LineId, Rail, RailNodeId, TrackId, TrainId};
+use crate::network::Dir;
+use crate::state_hash::{StateHash, StateHasher};
+use crate::units::{Money, Tick};
+
+/// 編成の全長（mm）。1 両 20m の 4 両である。
+pub const TRAIN_LEN_MM: i64 = 80_000;
+
+/// 列車が閉塞を押さえる長さ（mm）。全長から 1 マスを引いた 72m である。
+/// 閉塞はマスの中心のノードで区切るが、駅のホーム（80m）は駅の線路の両端のノードから半マスずつ外へ延びる。
+/// 先頭を駅の線路の先の端に止めた列車が、手前の閉塞にかからないよう、両端の半マスずつはノードのマスに収まるとみなす。
+pub const TRAIN_BLOCK_LEN_MM: i64 = TRAIN_LEN_MM - crate::network::TILE_MM;
+
+/// 最高の速さ（mm/tick）。時速 90km である。
+pub const TRAIN_MAX_SPEED: i64 = 25_000;
+
+/// 加速（mm/tick²）。
+pub const TRAIN_ACCEL: i64 = 800;
+
+/// 減速（mm/tick²）。
+pub const TRAIN_DECEL: i64 = 1_000;
+
+/// 45 度の曲がりと分岐を通るときの速さの上限（mm/tick）。時速 40km である。
+pub const TRAIN_SLOW_SPEED: i64 = 11_111;
+
+/// 駅に止まる時間（tick）。乗る人がまだいないので、いつもこの長さである。
+pub const DWELL_TICKS: u16 = 20;
+
+/// 終点で折り返す時間（tick）。このあいだは終点の駅の両方のホームを押さえる。
+pub const TURNBACK_TICKS: u16 = 30;
+
+/// 列車 1 本の 1 日の維持費。
+pub const TRAIN_UPKEEP_PER_DAY: Money = Money(600);
+
+/// 閉塞。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Block {
+    /// 分岐のノード。上りと下りをまとめて 1 つにする。
+    Junction(RailNodeId),
+    /// 線路の 1 つの向き。
+    Track(TrackId, Dir),
+}
+
+/// 列車の状態。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrainState {
+    /// 走っているか、先の閉塞を待って止まっている。
+    Running,
+    /// 駅に止まっている。`left` は残りの tick で、終点で 0 なら折り返す先のホームが空くのを待っている。
+    Dwell { left: u16 },
+    /// 終点で折り返している。`left` は残りの tick である。
+    Turnback { left: u16 },
+    /// 駅を出るのを待っている（間を空ける決まりか、先の閉塞を待つ）。
+    Ready,
+}
+
+/// 列車。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Train {
+    pub line: LineId,
+    /// 先頭がいる進路の要素の番号。
+    pub pos: u32,
+    /// 先頭がいる線路と向き。進路の `pos` の要素と同じで、線路が変わって進路を選び直したときに、列車を
+    /// 新しい進路の上に置き直すのに使う。
+    pub track: TrackId,
+    pub dir: Dir,
+    /// 先頭が要素に入ってから進んだ距離（mm）。
+    pub offset: i64,
+    /// 速さ（mm/tick）。直前の tick に進んだ距離である。
+    pub speed: i64,
+    /// 先頭がいる要素より先に押さえた要素の数。
+    pub ahead: u32,
+    pub state: TrainState,
+    /// 先の閉塞を押さえられずに待った tick。押さえる順を決めるのに使う。
+    pub waited: u32,
+}
+
+/// 読み取り用の数。状態ハッシュには入れない。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RailTally {
+    /// 列車が互いを待つ輪を見つけて、列車を消した回数。
+    pub deadlock: u64,
+}
+
+fn isqrt(v: i64) -> i64 {
+    let r = u64::try_from(v).expect("負の数の平方根").isqrt();
+    i64::try_from(r).expect("平方根があふれた")
+}
+
+/// 先の閉塞を押さえようとした結果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reserve {
+    /// 何も要らなかったか、押さえられた。
+    Done,
+    /// 押さえられなかった。押さえている列車がいれば、その列車。
+    Blocked(Option<TrainId>),
+}
+
+impl RailLine {
+    /// 先頭が `pos` の要素の `offset` にいる列車の、尾がいる要素の番号。
+    pub(crate) fn tail(&self, pos: u32, offset: i64) -> u32 {
+        let mut rest = TRAIN_BLOCK_LEN_MM - offset;
+        let mut i = pos;
+        for _ in 0..self.len() {
+            if rest <= 0 {
+                break;
+            }
+            i = self.prev(i);
+            rest -= self.step(i).len;
+        }
+        i
+    }
+
+    /// 列車が押さえている閉塞。体がかかる要素（尾の要素の入るところの分岐は除く）と、先に押さえた要素の閉塞である。
+    pub(crate) fn held_blocks(&self, t: &Train) -> Vec<Block> {
+        let tail = self.tail(t.pos, t.offset);
+        let s = self.step(tail);
+        let mut out = vec![Block::Track(s.track, s.dir)];
+        let mut i = tail;
+        while i != t.pos {
+            i = self.next(i);
+            out.extend(self.step(i).blocks());
+        }
+        for _ in 0..t.ahead {
+            i = self.next(i);
+            out.extend(self.step(i).blocks());
+        }
+        out
+    }
+
+    /// 先頭から、`k` 個先の要素の先の端までの距離。
+    fn distance_to_end(&self, t: &Train, k: u32) -> i64 {
+        let mut d = self.step(t.pos).len - t.offset;
+        let mut i = t.pos;
+        for _ in 0..k {
+            i = self.next(i);
+            d += self.step(i).len;
+        }
+        d
+    }
+
+    /// 走っている列車が次に止まる要素。先頭が要素の先の端にいるなら、その要素は通り過ぎたものとする。
+    fn upcoming_stop(&self, t: &Train) -> u32 {
+        let from = if t.offset < self.step(t.pos).len {
+            t.pos
+        } else {
+            self.next(t.pos)
+        };
+        self.next_stop(from)
+    }
+}
+
+impl Rail {
+    /// 列車を ID の順に返す。
+    pub fn trains(&self) -> impl Iterator<Item = (TrainId, &Train)> {
+        self.trains.iter()
+    }
+
+    pub fn train(&self, id: TrainId) -> Option<&Train> {
+        self.trains.get(id)
+    }
+
+    /// 走っている列車の数。
+    pub fn train_count(&self) -> usize {
+        self.trains.iter().count()
+    }
+
+    pub fn tally(&self) -> RailTally {
+        self.tally
+    }
+
+    /// 列車の体がかかる要素の番号。尾の要素から先頭の要素までである。
+    pub(crate) fn body_steps(&self, line: &RailLine, t: &Train) -> Vec<u32> {
+        let mut i = line.tail(t.pos, t.offset);
+        let mut out = vec![i];
+        while i != t.pos {
+            i = line.next(i);
+            out.push(i);
+        }
+        out
+    }
+
+    /// 列車が押さえている閉塞と、押さえている列車。
+    pub fn occupancy(&self) -> BTreeMap<Block, TrainId> {
+        let mut held = BTreeMap::new();
+        for (id, t) in self.trains.iter() {
+            if let Some(line) = self.lines.get(t.line) {
+                for b in line.held_blocks(t) {
+                    held.entry(b).or_insert(id);
+                }
+            }
+        }
+        held
+    }
+
+    pub(crate) fn remove_trains_where(&mut self, pred: impl Fn(&Train) -> bool) {
+        let gone: Vec<TrainId> = self
+            .trains
+            .iter()
+            .filter(|(_, t)| pred(t))
+            .map(|(id, _)| id)
+            .collect();
+        for id in gone {
+            self.trains.remove(id);
+        }
+    }
+
+    /// 線路 `old` を 2 本に分けたときに、その上の列車を同じ位置の分けた線路へ移す。
+    /// `first` は線路の `a` の側、`second` は `b` の側で、それぞれの長さを添える。
+    pub(crate) fn move_trains_off(
+        &mut self,
+        old: TrackId,
+        first: (TrackId, i64),
+        second: (TrackId, i64),
+    ) {
+        let ids: Vec<TrainId> = self
+            .trains
+            .iter()
+            .filter(|(_, t)| t.track == old)
+            .map(|(id, _)| id)
+            .collect();
+        for id in ids {
+            let t = self.trains.get_mut(id).expect("列車がない");
+            // 進む向きに先に通る線路と、あとに通る線路。
+            let (near, far) = match t.dir {
+                Dir::Forward => (first, second),
+                Dir::Backward => (second, first),
+            };
+            if t.offset <= near.1 {
+                t.track = near.0;
+            } else {
+                t.track = far.0;
+                t.offset -= near.1;
+            }
+        }
+    }
+
+    /// 路線の進路が替わったか、線路が分かれたあとに、路線の列車を進路の上の同じ線路と向きの要素へ置き直す。
+    /// 置ける要素がなければ列車を消す。進路が替わったときは、先に押さえた要素を返す。
+    pub(crate) fn relocate_trains(&mut self, line_id: LineId) {
+        let Some(line) = self.lines.get(line_id) else {
+            return;
+        };
+        let ids: Vec<TrainId> = self
+            .trains
+            .iter()
+            .filter(|(_, t)| t.line == line_id)
+            .map(|(id, _)| id)
+            .collect();
+        let mut gone = Vec::new();
+        for id in ids {
+            let t = self.trains.get_mut(id).expect("列車がない");
+            let at = |i: u32| {
+                let s = line.step(i);
+                s.track == t.track && s.dir == t.dir
+            };
+            if (t.pos as usize) < line.path.len() && at(t.pos) {
+                continue;
+            }
+            let Some(i) = (0..line.len()).find(|i| at(*i)) else {
+                gone.push(id);
+                continue;
+            };
+            let s = line.step(i);
+            t.pos = i;
+            t.ahead = 0;
+            t.offset = t.offset.min(s.len);
+            let keeps = match t.state {
+                TrainState::Running => true,
+                TrainState::Dwell { .. } => s.is_stop() && t.offset == s.len,
+                TrainState::Turnback { .. } => s.kind == StepKind::Terminal && t.offset == s.len,
+                TrainState::Ready => s.depart && t.offset == s.len,
+            };
+            if !keeps {
+                t.state = TrainState::Running;
+                t.speed = 0;
+            }
+        }
+        for id in gone {
+            self.trains.remove(id);
+        }
+    }
+
+    /// 列車を 1 tick 進める。
+    pub fn step(&mut self, tick: Tick) {
+        if self.lines.is_unused() {
+            return;
+        }
+        self.count_down();
+        let mut held = self.occupancy();
+        let blocked = self.reserve(tick.0, &mut held);
+        self.run();
+        // 新しい列車は、走っている列車が閉塞を押さえ終えてから出す。行き詰まりの輪から列車を消したとき、
+        // 空いたホームを待っていた列車が、出直す列車より先に入れるようにするためである。
+        let mut held = self.occupancy();
+        self.spawn_trains(&mut held);
+        self.break_deadlocks(&blocked);
+    }
+
+    /// 本数に足りない路線の最初の駅に、ホームが空いていれば列車を 1 本出す。
+    fn spawn_trains(&mut self, held: &mut BTreeMap<Block, TrainId>) {
+        let mut counts = BTreeMap::<LineId, u8>::new();
+        for (_, t) in self.trains.iter() {
+            *counts.entry(t.line).or_default() += 1;
+        }
+        let Rail { lines, trains, .. } = self;
+        for (id, line) in lines.iter() {
+            if line.stopped || counts.get(&id).copied().unwrap_or(0) >= line.allowed() {
+                continue;
+            }
+            let first: &Step = line.step(0);
+            let t = Train {
+                line: id,
+                pos: 0,
+                track: first.track,
+                dir: first.dir,
+                offset: first.len,
+                speed: 0,
+                ahead: 0,
+                state: TrainState::Ready,
+                waited: 0,
+            };
+            let blocks = line.held_blocks(&t);
+            if blocks.iter().all(|b| !held.contains_key(b)) {
+                let tid = trains.insert(t);
+                for b in blocks {
+                    held.insert(b, tid);
+                }
+            }
+        }
+    }
+
+    /// 駅に止まる時間と折り返しの時間を数える。折り返し終えた列車は、同じ駅の線路の逆の向きへ移る。
+    fn count_down(&mut self) {
+        let Rail { lines, trains, .. } = self;
+        let ids: Vec<TrainId> = trains.iter().map(|(id, _)| id).collect();
+        for id in ids {
+            let t = trains.get_mut(id).expect("列車がない");
+            let line = lines.get(t.line).expect("列車の路線がない");
+            match t.state {
+                TrainState::Dwell { left } if left > 1 => {
+                    t.state = TrainState::Dwell { left: left - 1 };
+                }
+                TrainState::Dwell { .. } => {
+                    t.state = if line.step(t.pos).kind != StepKind::Terminal {
+                        TrainState::Ready
+                    } else if t.ahead > 0 {
+                        // 折り返す先のホームを押さえてから折り返す。
+                        TrainState::Turnback {
+                            left: TURNBACK_TICKS,
+                        }
+                    } else {
+                        TrainState::Dwell { left: 0 }
+                    };
+                }
+                TrainState::Turnback { left } if left > 1 => {
+                    t.state = TrainState::Turnback { left: left - 1 };
+                }
+                TrainState::Turnback { .. } => {
+                    t.pos = line.next(t.pos);
+                    t.ahead -= 1;
+                    let s = line.step(t.pos);
+                    t.track = s.track;
+                    t.dir = s.dir;
+                    t.offset = s.len;
+                    t.state = TrainState::Ready;
+                }
+                TrainState::Running | TrainState::Ready => {}
+            }
+        }
+    }
+
+    /// 先の閉塞を押さえる。押さえられなかった列車と、その閉塞を押さえている列車を返す。
+    fn reserve(
+        &mut self,
+        now: u64,
+        held: &mut BTreeMap<Block, TrainId>,
+    ) -> BTreeMap<TrainId, Option<TrainId>> {
+        let mut order: Vec<(Reverse<u32>, TrainId)> = self
+            .trains
+            .iter()
+            .map(|(id, t)| (Reverse(t.waited), id))
+            .collect();
+        order.sort_unstable();
+        let mut blocked = BTreeMap::new();
+        let mut departed = Vec::new();
+        let Rail {
+            lines,
+            trains,
+            tracks,
+            ..
+        } = self;
+        for (_, id) in order {
+            let t = trains.get_mut(id).expect("列車がない");
+            let line = lines.get(t.line).expect("列車の路線がない");
+            let mut grant = |t: &mut Train, k_from: u32, k_to: u32| -> Reserve {
+                // 先頭から k_from 個先から k_to 個先までの要素を、まとめて押さえる。
+                let k_to = k_to.min(line.len() - 1);
+                if k_from > k_to {
+                    return Reserve::Done;
+                }
+                let steps: Vec<u32> = (k_from..=k_to).map(|k| (t.pos + k) % line.len()).collect();
+                for i in &steps {
+                    let s = line.step(*i);
+                    if tracks.get(s.track).is_none() {
+                        return Reserve::Blocked(None);
+                    }
+                    for b in s.blocks() {
+                        if let Some(h) = held.get(&b)
+                            && *h != id
+                        {
+                            return Reserve::Blocked(Some(*h));
+                        }
+                    }
+                }
+                for i in &steps {
+                    for b in line.step(*i).blocks() {
+                        held.insert(b, id);
+                    }
+                }
+                t.ahead = k_to;
+                Reserve::Done
+            };
+            let result = match t.state {
+                TrainState::Ready => {
+                    let gap_ok = line
+                        .departed
+                        .get(&t.pos)
+                        .is_none_or(|last| now >= last + line.departure_gap());
+                    if line.stopped || !gap_ok {
+                        None
+                    } else {
+                        let s = line.next_stop(line.next(t.pos));
+                        let ds = line.distance(t.pos, s);
+                        let terminal = line.step(s).kind == StepKind::Terminal;
+                        let end = if line.step(t.pos).shared {
+                            // 決まりの 3：次に止まる駅のホームまで（終点なら両方のホーム）をまとめて押さえる。
+                            ds + u32::from(terminal)
+                        } else if ds == 1 && terminal {
+                            2
+                        } else {
+                            1
+                        };
+                        let r = grant(t, t.ahead + 1, end);
+                        if r == Reserve::Done {
+                            t.state = TrainState::Running;
+                            departed.push((t.line, t.pos));
+                        }
+                        Some(r)
+                    }
+                }
+                TrainState::Dwell { .. } | TrainState::Turnback { .. } => {
+                    // 決まりの 2 の両方のホームを押さえ直す（線路が変わって先に押さえた要素を返したとき）。
+                    if line.step(t.pos).kind == StepKind::Terminal && t.ahead < 1 {
+                        Some(grant(t, 1, 1))
+                    } else {
+                        None
+                    }
+                }
+                TrainState::Running => {
+                    let s = line.upcoming_stop(t);
+                    let ds = line.distance(t.pos, s);
+                    let terminal = line.step(s).kind == StepKind::Terminal;
+                    let mut r = None;
+                    loop {
+                        if t.ahead >= ds {
+                            // 決まりの 2：終点に入るなら、両方のホームを押さえてある。
+                            if terminal && t.ahead < ds + 1 {
+                                r = Some(grant(t, t.ahead + 1, ds + 1));
+                            }
+                            break;
+                        }
+                        let room = line.distance_to_end(t, t.ahead);
+                        let need =
+                            t.speed * t.speed / (2 * TRAIN_DECEL) + 2 * (t.speed + TRAIN_ACCEL);
+                        if room >= need {
+                            break;
+                        }
+                        let next = t.ahead + 1;
+                        let end = if next == ds && terminal { ds + 1 } else { next };
+                        let got = grant(t, next, end);
+                        r = Some(got);
+                        if got != Reserve::Done {
+                            break;
+                        }
+                    }
+                    r
+                }
+            };
+            match result {
+                Some(Reserve::Blocked(by)) => {
+                    t.waited = t.waited.saturating_add(1);
+                    blocked.insert(id, by);
+                }
+                Some(Reserve::Done) => t.waited = 0,
+                None => {}
+            }
+        }
+        for (line, pos) in departed {
+            if let Some(l) = self.lines.get_mut(line) {
+                l.departed.insert(pos, now);
+            }
+        }
+        blocked
+    }
+
+    /// 走っている列車を、押さえた範囲の中で進める。次に止まる駅の先の端に着いた列車は止まる。
+    fn run(&mut self) {
+        let ids: Vec<TrainId> = self
+            .trains
+            .iter()
+            .filter(|(_, t)| t.state == TrainState::Running)
+            .map(|(id, _)| id)
+            .collect();
+        let mut arrived = Vec::new();
+        {
+            let Rail { lines, trains, .. } = self;
+            for id in ids {
+                let t = trains.get_mut(id).expect("列車がない");
+                let line = lines.get(t.line).expect("列車の路線がない");
+                let moved = advance(line, t);
+                if moved > 0 && t.offset == line.step(t.pos).len && line.step(t.pos).is_stop() {
+                    t.state = TrainState::Dwell { left: DWELL_TICKS };
+                    t.speed = 0;
+                    arrived.push(id);
+                }
+            }
+        }
+        for id in arrived {
+            self.retire_if_extra(id);
+        }
+    }
+
+    /// 駅に着いた列車が、路線の本数を超えた分なら消す。決めた本数を減らした分は終点（環状なら次の駅）で、
+    /// 行き詰まりを防ぐ上限を超えた分は次の駅で消す。
+    fn retire_if_extra(&mut self, id: TrainId) {
+        let t = *self.trains.get(id).expect("列車がない");
+        let line = self.lines.get(t.line).expect("列車の路線がない");
+        let count = self.trains.iter().filter(|(_, o)| o.line == t.line).count();
+        let count = u8::try_from(count).unwrap_or(u8::MAX);
+        let here = line.step(t.pos).kind == StepKind::Terminal || line.looped;
+        if count > line.allowed() && (here || count > line.cap()) {
+            self.trains.remove(id);
+        }
+    }
+
+    /// 押さえられずに止まった列車の「待つ相手」を ID の順にたどり、輪になっていれば、輪の中で ID の
+    /// いちばん大きい列車を消して数える。路線の本数は変えないので、消えた列車は最初の駅が空いたら出直す。
+    fn break_deadlocks(&mut self, blocked: &BTreeMap<TrainId, Option<TrainId>>) {
+        let halted = |t: &Train| match t.state {
+            TrainState::Ready | TrainState::Dwell { left: 0 } => true,
+            TrainState::Running => t.speed == 0 && t.ahead == 0,
+            TrainState::Dwell { .. } | TrainState::Turnback { .. } => false,
+        };
+        let waits: BTreeMap<TrainId, TrainId> = blocked
+            .iter()
+            .filter_map(|(w, by)| Some((*w, (*by)?)))
+            .filter(|(w, h)| {
+                self.trains.get(*w).is_some_and(halted) && self.trains.get(*h).is_some()
+            })
+            .collect();
+        let mut done = BTreeMap::<TrainId, ()>::new();
+        let mut victims = Vec::new();
+        for start in waits.keys() {
+            let mut chain: Vec<TrainId> = Vec::new();
+            let mut cur = *start;
+            loop {
+                if done.contains_key(&cur) {
+                    break;
+                }
+                if let Some(at) = chain.iter().position(|c| *c == cur) {
+                    let victim = *chain[at..].iter().max().expect("輪が空");
+                    victims.push(victim);
+                    break;
+                }
+                chain.push(cur);
+                match waits.get(&cur) {
+                    Some(next) => cur = *next,
+                    None => break,
+                }
+            }
+            for c in chain {
+                done.insert(c, ());
+            }
+        }
+        for v in victims {
+            self.trains.remove(v);
+            self.tally.deadlock += 1;
+        }
+    }
+}
+
+/// 列車を押さえた範囲の中で 1 tick 進め、進んだ距離を返す。
+fn advance(line: &RailLine, t: &mut Train) -> i64 {
+    let tail = line.tail(t.pos, t.offset);
+    // 体が曲がりか分岐にかかっていれば、遅い速さに抑える。
+    let mut i = tail;
+    let mut cap = TRAIN_MAX_SPEED;
+    while i != t.pos {
+        i = line.next(i);
+        if line.step(i).slow {
+            cap = TRAIN_SLOW_SPEED;
+        }
+    }
+    let s = line.upcoming_stop(t);
+    let ds = line.distance(t.pos, s);
+    let reach = t.ahead.min(ds);
+    let limit = line.distance_to_end(t, reach);
+    let mut v = (t.speed + TRAIN_ACCEL)
+        .min(cap)
+        .min(isqrt(2 * TRAIN_DECEL * limit));
+    // 先の曲がりと分岐の手前で、遅い速さまで落とせるようにする。
+    let mut d = line.step(t.pos).len - t.offset;
+    let mut j = t.pos;
+    for _ in 0..reach {
+        j = line.next(j);
+        if line.step(j).slow {
+            v = v.min(isqrt(
+                TRAIN_SLOW_SPEED * TRAIN_SLOW_SPEED + 2 * TRAIN_DECEL * d,
+            ));
+        }
+        d += line.step(j).len;
+    }
+    let moved = v.min(limit).max(0);
+    let mut rest = moved;
+    while rest > 0 {
+        let room = line.step(t.pos).len - t.offset;
+        if rest <= room {
+            t.offset += rest;
+            rest = 0;
+        } else {
+            rest -= room;
+            t.pos = line.next(t.pos);
+            t.ahead -= 1;
+            t.offset = 0;
+        }
+    }
+    let s = line.step(t.pos);
+    t.track = s.track;
+    t.dir = s.dir;
+    t.speed = moved;
+    moved
+}
+
+impl StateHash for TrainState {
+    fn write_state(&self, h: &mut StateHasher) {
+        match *self {
+            TrainState::Running => h.write(&0_u8),
+            TrainState::Dwell { left } => {
+                h.write(&1_u8);
+                h.write(&left);
+            }
+            TrainState::Turnback { left } => {
+                h.write(&2_u8);
+                h.write(&left);
+            }
+            TrainState::Ready => h.write(&3_u8),
+        }
+    }
+}
+
+impl StateHash for Train {
+    fn write_state(&self, h: &mut StateHasher) {
+        h.write(&self.line);
+        h.write(&self.pos);
+        h.write(&self.track);
+        h.write(&(self.dir as u8));
+        h.write(&self.offset);
+        h.write(&self.speed);
+        h.write(&self.ahead);
+        h.write(&self.state);
+        h.write(&self.waited);
+    }
+}

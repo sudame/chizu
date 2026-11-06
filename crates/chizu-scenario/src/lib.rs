@@ -3,12 +3,127 @@
 use chizu_core::citizens::draw_household;
 use chizu_core::routing::{ROUTE_VARIANTS, RouteRequest};
 use chizu_core::{
-    CHUNK_SIDE, ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network, Population,
-    RngPurpose, RoadKind, ServiceKind, Tick, TilePos, TileRect, World, ZoneKind, rng,
+    ApplyOutcome, CHUNK_SIDE, ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network,
+    Population, Rail, RngPurpose, RoadKind, ServiceKind, Tick, TilePos, TileRect, World, ZoneKind,
+    rng,
 };
 use chizu_core::{LaneOffset, SidewalkPos};
 
 pub mod perf;
+
+/// [`rail_trains_city`] の路線の数。街に置ける路線の上限である。
+pub const RAIL_BENCH_LINES: usize = 64;
+
+/// [`rail_trains_city`] の路線ごとの列車の本数。64 本の路線と合わせて 512 本にする。
+pub const RAIL_BENCH_TRAINS: u8 = 8;
+
+/// 駅 2 つを 156 マス（区切りのノードで 4 つの閉塞）の線路で結んだ往復の路線を、`lines` 本並べた街。
+/// 路線ごとに [`RAIL_BENCH_TRAINS`] 本を走らせるよう決めてある（上限は 9 本）。
+/// 原点のまわりの 17×17 チャンクを買い、水辺のない所を左上から順に探して置く。
+pub fn rail_trains_city(seed: u64, lines: usize) -> World {
+    const R: i32 = 8;
+    let mut w = World::new_with_money(seed, Money(i64::MAX / 4)).with_unlimited_land();
+    // 買った土地に辺で接するチャンクしか買えないので、内側から外へ買い広げる。
+    for ring in 2..=R {
+        for cy in -ring..=ring {
+            for cx in -ring..=ring {
+                if cx.abs().max(cy.abs()) == ring {
+                    w.apply(&Command::BuyChunk {
+                        coord: ChunkCoord::new(cx, cy),
+                    });
+                }
+            }
+        }
+    }
+    for cy in -R..=R {
+        for cx in -R..=R {
+            w.apply(&Command::BuyChunk {
+                coord: ChunkCoord::new(cx, cy),
+            });
+        }
+    }
+    let side = CHUNK_SIDE as i64;
+    let (min, max) = (-i64::from(R) * side, (i64::from(R) + 1) * side - 1);
+    // 道路（y）、駅舎とホーム（y - 1）、駅の線路（y - 2）、ホーム（y - 3）の 4 行と、間の 2 行。
+    const WIDTH: i64 = 180;
+    let mut made = 0;
+    let mut y = min + 4;
+    while made < lines && y <= max {
+        let mut x = min;
+        while made < lines && x + WIDTH <= max {
+            let land = (x..=x + WIDTH)
+                .all(|tx| (y - 3..=y).all(|ty| w.is_buildable(TilePos::new(tx, ty))));
+            if land && place_rail_line(&mut w, x, y) {
+                made += 1;
+                x += WIDTH + 4;
+            } else {
+                x += 8;
+            }
+        }
+        y += 6;
+    }
+    assert_eq!(made, lines, "路線を置ききれない");
+    w
+}
+
+/// `x` から東へ、y の道路に面した駅 2 つと線路を置き、路線を作る。置けなければ偽を返す。
+fn place_rail_line(w: &mut World, x: i64, y: i64) -> bool {
+    let commands = [
+        Command::BuildRoad {
+            from: TilePos::new(x, y),
+            to: TilePos::new(x + 180, y),
+            kind: RoadKind::Small,
+        },
+        Command::PlaceBuilding {
+            kind: ServiceKind::Station,
+            at: TilePos::new(x + 12, y - 1),
+            rotation: 2,
+        },
+        Command::PlaceBuilding {
+            kind: ServiceKind::Station,
+            at: TilePos::new(x + 177, y - 1),
+            rotation: 2,
+        },
+        Command::BuildRail {
+            from: TilePos::new(x + 12, y - 2),
+            to: TilePos::new(x + 168, y - 2),
+        },
+    ];
+    if !commands.iter().all(|c| w.apply(c) == ApplyOutcome::Applied) {
+        return false;
+    }
+    let station = |tx| {
+        w.rail()
+            .station_at(TilePos::new(tx, y - 2))
+            .expect("駅がない")
+    };
+    let (from, to) = (station(x + 12), station(x + 177));
+    if w.apply(&Command::CreateLine { from, to }) != ApplyOutcome::Applied {
+        return false;
+    }
+    let (line, _) = w.rail().lines().last().expect("路線がない");
+    w.apply(&Command::SetLineTrains {
+        line,
+        trains: RAIL_BENCH_TRAINS,
+    }) == ApplyOutcome::Applied
+}
+
+/// [`rail_trains_city`] の線路の網を、列車がすべて現れるまで回したもの。
+pub fn rail_trains_running(seed: u64, lines: usize) -> Rail {
+    let w = rail_trains_city(seed, lines);
+    let mut rail = w.rail().clone();
+    let want = lines * usize::from(RAIL_BENCH_TRAINS);
+    let mut tick = w.tick();
+    for _ in 0..20_000 {
+        rail.step(tick);
+        tick = tick.next();
+        if rail.train_count() == want {
+            break;
+        }
+    }
+    assert_eq!(rail.train_count(), want, "列車が出そろわない");
+    rail
+}
 
 pub use chizu_core::citizens::MAX_HOUSEHOLD_SIZE;
 
