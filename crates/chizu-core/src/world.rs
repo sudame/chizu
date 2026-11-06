@@ -598,9 +598,23 @@ impl World {
         let Ok(line) = Line::between(from, to) else {
             return ApplyOutcome::Rejected;
         };
-        if let Err(reason) = line.tiles().try_for_each(|t| self.check_buildable(t)) {
+        let cost = match self.check_build_rail(&line) {
+            Ok(cost) => cost,
+            Err(reason) => return ApplyOutcome::Denied(reason),
+        };
+        if let Err(reason) = self.rail.build_rail(&line) {
             return ApplyOutcome::Denied(reason);
         }
+        self.money = self.money - cost;
+        self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
+        self.refresh_buildings();
+        ApplyOutcome::Applied
+    }
+
+    /// 線路を引けるかを、状態を変えずに調べる。引けるなら建設費を返す。
+    /// 画面が引く前に理由と費用を示すために公開してあり、`BuildRail` の適用と同じ順で調べる。
+    pub fn check_build_rail(&self, line: &Line) -> Result<Money, DenyReason> {
+        line.tiles().try_for_each(|t| self.check_buildable(t))?;
         let blocked = (0..=line.len).any(|k| {
             let t = line.tile(k);
             match self.tile_state(t).map(|(_, u)| u) {
@@ -612,23 +626,18 @@ impl World {
             }
         });
         if blocked {
-            return ApplyOutcome::Denied(DenyReason::Occupied);
+            return Err(DenyReason::Occupied);
         }
         // 踏切はまだないので、道路とマスの角で交わる線路も断る。
-        if self.network.crosses_corner(&line) {
-            return ApplyOutcome::Denied(DenyReason::CornerCrossing);
+        if self.network.crosses_corner(line) {
+            return Err(DenyReason::CornerCrossing);
         }
-        let cost = rail_cost(&line);
+        let cost = rail_cost(line);
         if self.money < cost {
-            return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
+            return Err(DenyReason::NotEnoughMoney);
         }
-        if let Err(reason) = self.rail.build_rail(&line) {
-            return ApplyOutcome::Denied(reason);
-        }
-        self.money = self.money - cost;
-        self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
-        self.refresh_buildings();
-        ApplyOutcome::Applied
+        self.rail.check_rail(line)?;
+        Ok(cost)
     }
 
     /// 線路の網と駅。

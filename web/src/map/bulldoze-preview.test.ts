@@ -3,6 +3,7 @@ import {
   bulldozeSummary,
   isEmptyPreview,
   parseBulldozePreview,
+  removedRailTiles,
   removedRoadTiles,
 } from "./bulldoze-preview.ts";
 
@@ -91,5 +92,16 @@ describe("removedRoadTiles", () => {
       { x: 1, y: 1 },
       { x: 2, y: 2 },
     ]);
+  });
+});
+
+describe("removedRailTiles", () => {
+  test("線路が通るマスをすべて挙げ、つながる端のマスは 1 度だけ", () => {
+    const p = parseBulldozePreview(RAIL);
+    const tiles = p ? removedRailTiles(p) : [];
+    // 駅の線路（x 3〜12）と外の線路（x 12〜20）は x = 12 で重なる。y = 8 の 18 マス
+    expect(tiles).toHaveLength(18);
+    expect(tiles).toContainEqual({ x: 3, y: 8 });
+    expect(tiles).toContainEqual({ x: 20, y: 8 });
   });
 });

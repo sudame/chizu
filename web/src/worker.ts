@@ -99,6 +99,19 @@ function sendRoads(sim: Simulation): void {
   reply({ kind: "roads", revision, segments, nodes }, [segments.buffer, nodes.buffer]);
 }
 
+// 線路と駅は版が変わったときだけ、全体を送り直す。線路は数百本ほどで、道路網と同じ考え方で足りる
+let sentRailRevision = -1;
+function sendRail(sim: Simulation): void {
+  const revision = sim.rail_revision();
+  if (revision === sentRailRevision) {
+    return;
+  }
+  sentRailRevision = revision;
+  const tracks = sim.rail_tracks();
+  const stations = sim.rail_stations();
+  reply({ kind: "rail", revision, tracks, stations }, [tracks.buffer, stations.buffer]);
+}
+
 // 車を描く道筋は、新しく求めたものだけを送る。枠が指す道筋を画面が先に受け取れるよう、枠を書く前に送る
 function sendMoverPaths(sim: Simulation): void {
   const data = sim.take_mover_paths();
@@ -239,6 +252,7 @@ function run(sim: Simulation): {
     sim.publish();
     sendOutcomes(sim);
     sendRoads(sim);
+    sendRail(sim);
     sendSignals(sim);
     sendBuildings(sim);
     sendParked(sim, now, paused);
@@ -304,6 +318,7 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         submit(sim, message.id, message.command);
         sendOutcomes(sim);
         sendRoads(sim);
+        sendRail(sim);
         sendSignals(sim);
         sendBuildings(sim);
         sendParked(sim, performance.now(), false, true);
@@ -327,6 +342,12 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         // 共同の駐車場は、届く範囲の中の車を持てない世帯の数も添える
         const carless = isParking(service) ? sim.carless_in_range(x, y) : 0;
         reply({ kind: "service-probe", service, x, y, results, carless });
+        break;
+      }
+      case "probe-rail": {
+        const { x0, y0, x1, y1 } = message;
+        const [reason, cost] = sim.rail_probe(x0, y0, x1, y1) as [string | null, number];
+        reply({ kind: "rail-probe", x0, y0, x1, y1, reason, cost });
         break;
       }
       case "inspect": {

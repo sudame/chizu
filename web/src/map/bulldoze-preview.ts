@@ -74,6 +74,22 @@ export function parseBulldozePreview(info: ArrayLike<number>): BulldozePreview |
   };
 }
 
+/** 消える線路が通るマス。線路の端のノードは隣の線路と重なるので、1 度だけ挙げる。 */
+export function removedRailTiles(p: BulldozePreview): Tile[] {
+  const seen = new Set<string>();
+  const out: Tile[] = [];
+  for (const { from, to } of p.tracks) {
+    for (const t of tilesOnSegment(from, to)) {
+      const key = `${t.x},${t.y}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(t);
+      }
+    }
+  }
+  return out;
+}
+
 /** 消えるものがあるか。 */
 export function isEmptyPreview(p: BulldozePreview): boolean {
   return (

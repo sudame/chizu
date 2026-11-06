@@ -74,6 +74,8 @@ pub struct Sim {
     buildings_version: Cell<Option<(usize, u64, f64)>>,
     /// 街の数字の電気と水道の分の控え。`(供給の版, 値)` で、版が変わったときだけ計算し直す。
     utility_cache: Cell<Option<(u64, [f64; 15])>>,
+    /// 線路と駅の版。線路や駅を変えうるコマンドを受けるたびに上げる。画面向けで、状態には入れない。
+    rail_revision: u64,
 }
 
 /// 記録したコマンドを適用した結果。
@@ -106,6 +108,7 @@ impl Sim {
             unrecorded_ops: 0,
             buildings_version: Cell::new(None),
             utility_cache: Cell::new(None),
+            rail_revision: 0,
             edge_signatures: BTreeMap::new(),
         };
         sim.note_edge_changes();
@@ -143,6 +146,12 @@ impl Sim {
         let seq = self.log.record(self.world.tick(), command)?;
         let touched = self.lines_touched_by(&command);
         let outcome = self.world.apply_recorded(seq, &command);
+        if matches!(
+            command,
+            Command::BuildRail { .. } | Command::Bulldoze { .. } | Command::PlaceBuilding { .. }
+        ) {
+            self.rail_revision += 1;
+        }
         if outcome == ApplyOutcome::Applied {
             self.mark_near_road_changes(&touched);
             // 隣のチャンクを買うと、辺の近くの塗れるマスが変わる。
@@ -470,6 +479,7 @@ impl Sim {
         let mut h = StateHasher::new();
         h.write(self.world.buildings());
         h.write(self.world.facilities());
+        h.write(self.world.rail());
         (h.finish() & ((1 << 52) - 1)) as f64
     }
 
@@ -578,7 +588,56 @@ impl Sim {
             out.extend([a.min.x, a.min.y, a.max.x, a.max.y].map(|v| v as f64));
             out.push(f64::from(f.kind as u8));
         }
+        // 駅は施設の一覧に入らないが、画面では施設の記号と名前で示すので、続けて並べる
+        for (_, st) in self.world.rail().stations() {
+            let a = st.area;
+            out.extend([a.min.x, a.min.y, a.max.x, a.max.y].map(|v| v as f64));
+            out.push(f64::from(ServiceKind::Station as u8));
+        }
         out
+    }
+
+    /// 線路と駅の版。画面は、この値が変わったときだけ線路と駅の形を受け取り直す。
+    pub fn rail_revision(&self) -> u64 {
+        self.rail_revision
+    }
+
+    /// 線路を、1 本につき `[a の x, a の y, b の x, b の y, 駅の線路か（0 か 1）]` の 5 つの数で返す。
+    /// 座標は端のノードのマスで、線路は複線の 1 組である。
+    pub fn rail_tracks(&self) -> Vec<f64> {
+        let rail = self.world.rail();
+        let mut out = Vec::new();
+        for (id, track) in rail.tracks() {
+            let line = rail.track_line(id).expect("線路の直線がない");
+            let end = line.end();
+            out.extend([line.start.x, line.start.y, end.x, end.y].map(|v| v as f64));
+            out.push(f64::from(u8::from(track.station.is_some())));
+        }
+        out
+    }
+
+    /// 駅を、1 つにつき `[min の x, min の y, max の x, max の y, 道路へ向かう 1 歩の x, y]` の 6 つの数で返す。
+    pub fn rail_stations(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for (_, st) in self.world.rail().stations() {
+            let a = st.area;
+            out.extend([a.min.x, a.min.y, a.max.x, a.max.y].map(|v| v as f64));
+            out.extend([st.toward_road.0, st.toward_road.1].map(|v| v as f64));
+        }
+        out
+    }
+
+    /// 線路を `from` から `to` に引けるかを、状態を変えずに調べる。引けないときは理由の文を、
+    /// 引けるなら `None` を返し、どちらも建設費を添える。直線の形が正しくないときの建設費は 0 である。
+    pub fn rail_probe(&self, from: TilePos, to: TilePos) -> (Option<&'static str>, i64) {
+        let Ok(line) = Line::between(from, to) else {
+            return (Some("線路は縦横か 45 度の直線で、1,024 マスまで引ける"), 0);
+        };
+        let cost = chizu_core::rail::rail_cost(&line).0;
+        match self.world.check_build_rail(&line) {
+            Ok(_) => (None, cost),
+            Err(reason) => (Some(deny_text(reason)), cost),
+        }
     }
 
     /// 街の数字を次の 26 個の数で返す。建物の数、世帯の上限、雇える職場の数（税率が高いと建物の上限より少ない）、
@@ -749,7 +808,7 @@ impl Sim {
     }
 
     /// 収支の見込みを次の数で返す。税率の上限（‰）、区画の種類ごとの税率（‰）、区画の種類ごとの税収、
-    /// 道路の維持費、発電所と浄水場の維持費、共同の駐車場の維持費、共同の駐車場の料金、料金の上限、料金の収入。
+    /// 道路の維持費、発電所と浄水場の維持費、共同の駐車場の維持費、共同の駐車場の料金、料金の上限、料金の収入、鉄道の維持費。
     /// 区画の種類の順は住宅、商業、工業、オフィス。金額はどれも 1 日あたりである。
     pub fn finance(&self) -> Vec<f64> {
         let f = self.world.finances();
@@ -762,6 +821,7 @@ impl Sim {
         out.push(f64::from(self.world.parking_fee()));
         out.push(f64::from(chizu_core::command::MAX_PARKING_FEE));
         out.push(f.parking_fees.0 as f64);
+        out.push(f.rail_upkeep.0 as f64);
         out
     }
 
@@ -1442,6 +1502,84 @@ mod tests {
     }
 
     #[test]
+    fn rail_probe_gives_the_reason_and_the_cost_without_changing_the_city() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 10), (30, 10))).unwrap();
+        let money = sim.world().money();
+        // 空き地に引ける線路は、理由がなく、中核の建設費と同じ額になる
+        let (reason, cost) = sim.rail_probe(TilePos::new(2, 4), TilePos::new(12, 4));
+        assert_eq!(reason, None);
+        assert_eq!(
+            cost,
+            chizu_core::rail::rail_cost(
+                &Line::between(TilePos::new(2, 4), TilePos::new(12, 4)).unwrap()
+            )
+            .0
+        );
+        // 道路のマスを通る線路は断る
+        let (reason, _) = sim.rail_probe(TilePos::new(5, 6), TilePos::new(5, 14));
+        assert_eq!(reason, Some(deny_text(DenyReason::Occupied)));
+        // 直線でない指定は形の誤りとして断り、建設費は 0
+        let (reason, cost) = sim.rail_probe(TilePos::new(0, 0), TilePos::new(5, 2));
+        assert!(reason.is_some());
+        assert_eq!(cost, 0);
+        assert_eq!(sim.world().money(), money);
+        assert_eq!(sim.world().rail().tracks().count(), 0);
+    }
+
+    #[test]
+    fn rail_data_follows_the_commands() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 10), (30, 10))).unwrap();
+        let before = sim.rail_revision();
+        assert!(sim.rail_tracks().is_empty());
+        assert!(sim.rail_stations().is_empty());
+        sim.submit(Command::PlaceBuilding {
+            kind: ServiceKind::Station,
+            at: TilePos::new(12, 9),
+            rotation: 2,
+        })
+        .unwrap();
+        sim.submit(Command::BuildRail {
+            from: TilePos::new(12, 8),
+            to: TilePos::new(20, 8),
+        })
+        .unwrap();
+        assert!(sim.rail_revision() > before);
+        // 駅の線路と外の線路の 2 本で、駅の線路だけ印が立つ
+        let tracks = sim.rail_tracks();
+        assert_eq!(tracks.len(), 10);
+        assert_eq!(tracks.iter().skip(4).step_by(5).sum::<f64>(), 1.0);
+        // 駅の敷地と道路へ向かう向き
+        assert_eq!(sim.rail_stations(), vec![3.0, 7.0, 12.0, 9.0, 0.0, 1.0]);
+        // 駅は施設の記号と名前を出すため、施設の並びの最後に添える
+        let facilities = sim.facilities();
+        assert_eq!(
+            &facilities[facilities.len() - 5..],
+            &[3.0, 7.0, 12.0, 9.0, 5.0]
+        );
+        // 線路の維持費が収支の最後に出る
+        let finance = sim.finance();
+        assert_eq!(finance.len(), 17);
+        assert_eq!(finance[16], sim.world().finances().rail_upkeep.0 as f64);
+        assert!(finance[16] > 0.0);
+    }
+
+    #[test]
+    fn the_station_changes_the_buildings_version() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 10), (30, 10))).unwrap();
+        let before = sim.buildings_version();
+        sim.submit(Command::PlaceBuilding {
+            kind: ServiceKind::Station,
+            at: TilePos::new(12, 9),
+            rotation: 2,
+        })
+        .unwrap();
+        assert_ne!(sim.buildings_version(), before);
+    }
+
+    #[test]
     fn cached_buildings_version_follows_supply_changes() {
         let mut sim = Sim::new(0);
         sim.submit(road((10, 10), (30, 10))).unwrap();
@@ -1659,7 +1797,7 @@ mod tests {
     fn finance_follows_tax_rate_commands_and_the_log() {
         let mut sim = Sim::new(0);
         let before = sim.finance();
-        assert_eq!(before.len(), 16);
+        assert_eq!(before.len(), 17);
         assert_eq!(before[0], f64::from(MAX_TAX_PERMILLE));
         // 住宅、商業、工業、オフィスの順の税率
         assert_eq!(&before[1..5], &[100.0; 4]);
@@ -2029,7 +2167,7 @@ mod tests {
     fn finance_includes_the_parking_fee_and_its_income() {
         let (mut sim, _guard) = crate::test_town::carless_town(1);
         let f = sim.finance();
-        assert_eq!(f.len(), 16);
+        assert_eq!(f.len(), 17);
         assert_eq!(f[13], f64::from(chizu_core::world::INITIAL_PARKING_FEE));
         assert_eq!(f[14], f64::from(chizu_core::command::MAX_PARKING_FEE));
         assert_eq!(f[15], 0.0);
