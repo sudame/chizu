@@ -1354,6 +1354,8 @@ const MESH_NAMES = [
   "railSleepers",
   "railStation",
   "railStationFine",
+  "railLines",
+  "railLinesNear",
   "minor",
   "major",
   "lanes",
@@ -1403,6 +1405,9 @@ export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
     ["railSleepers", w.fine],
     ["railStation", w.detail],
     ["railStationFine", w.fine],
+    // 路線の色の線は、引きと標準で線路の上に太く、寄りに入るにつれて複線の真ん中の細い線に替わる（lines.ts）
+    ["railLines", 1 - w.detail],
+    ["railLinesNear", w.detail],
     ["minor", lines],
     ["major", lines],
     ["lanes", w.detail],
@@ -1528,6 +1533,12 @@ export class RoadLayer {
     this.#upload("railSleepers", meshes.sleepers);
     this.#upload("railStation", meshes.station);
     this.#upload("railStationFine", meshes.stationFine);
+  }
+
+  /** 路線の色の線（lines.ts）。 */
+  setRailLines(meshes: { far: MeshSource; near: MeshSource }): void {
+    this.#upload("railLines", meshes.far);
+    this.#upload("railLinesNear", meshes.near);
   }
 
   setSignals(geometry: Geometry): void {

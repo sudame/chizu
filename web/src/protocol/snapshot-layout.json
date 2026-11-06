@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "slotCount": 3,
   "controlWords": 4,
   "control": {
@@ -13,7 +13,7 @@
     "latest": 1,
     "reader": 2
   },
-  "slotHeaderWords": 12,
+  "slotHeaderWords": 16,
   "header": {
     "tickLo": 0,
     "tickHi": 1,
@@ -26,7 +26,10 @@
     "paused": 8,
     "moverCount": 9,
     "baseCx": 10,
-    "baseCy": 11
+    "baseCy": 11,
+    "trainCarCount": 12,
+    "trainBaseCx": 13,
+    "trainBaseCy": 14
   },
   "moverWords": 8,
   "mover": {
@@ -40,6 +43,8 @@
     "frac": 7
   },
   "maxMovers": 20000,
-  "slotWords": 160012,
-  "totalWords": 480040
+  "maxTrainCars": 4096,
+  "carsStart": 160016,
+  "slotWords": 192784,
+  "totalWords": 578356
 }

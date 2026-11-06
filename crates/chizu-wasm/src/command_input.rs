@@ -5,6 +5,7 @@
 
 use core::fmt;
 
+use chizu_core::rail::{LineId, StationId};
 use chizu_core::{
     ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, Zone,
     ZoneKind,
@@ -40,6 +41,8 @@ pub enum InputError {
     NoNode,
     /// 腕の向き（dx、dy）が 8 方向の 1 歩でない。
     BadArm,
+    /// 路線に入れる駅を指したマスに駅がない。
+    NoStation,
 }
 
 impl fmt::Display for InputError {
@@ -63,6 +66,7 @@ impl fmt::Display for InputError {
             InputError::BadBool(name) => write!(f, "{name} が真偽値でない"),
             InputError::NoNode => write!(f, "そのマスに交差点がない"),
             InputError::BadArm => write!(f, "腕の向き dx、dy は -1、0、1 の 8 方向で指定する"),
+            InputError::NoStation => write!(f, "そのマスに駅がない"),
             InputError::BadTaxZone => write!(
                 f,
                 "zone は Residential、Commercial、Industrial、Office のどれかで指定する"
@@ -79,10 +83,12 @@ impl std::error::Error for InputError {}
 
 /// `is_object` は入力がオブジェクトか、`field` は名前を渡すとそのフィールドを読む関数である。
 /// `node_at` はマスにあるノードを引く関数で、マスで指す信号のコマンドをノードの ID に直すのに使う。
+/// `station_at` は敷地にマスを含む駅を引く関数で、マスで指す路線のコマンドを駅の ID に直すのに使う。
 pub fn parse(
     is_object: bool,
     field: impl Fn(&str) -> Field,
     node_at: impl Fn(TilePos) -> Option<NodeId>,
+    station_at: impl Fn(TilePos) -> Option<StationId>,
 ) -> Result<Command, InputError> {
     if !is_object {
         return Err(InputError::NotObject);
@@ -174,6 +180,31 @@ pub fn parse(
             from: tile(&field, "fromX", "fromY")?,
             to: tile(&field, "toX", "toY")?,
         }),
+        "CreateLine" => {
+            let station = |x, y| -> Result<StationId, InputError> {
+                station_at(tile(&field, x, y)?).ok_or(InputError::NoStation)
+            };
+            Ok(Command::CreateLine {
+                from: station("fromX", "fromY")?,
+                to: station("toX", "toY")?,
+            })
+        }
+        "ExtendLine" => Ok(Command::ExtendLine {
+            line: line_id(&field)?,
+            station: station_at(tile(&field, "atX", "atY")?).ok_or(InputError::NoStation)?,
+        }),
+        "RemoveLine" => Ok(Command::RemoveLine {
+            line: line_id(&field)?,
+        }),
+        "SetLineTrains" => {
+            // 上限の検査は Command::validate に任せる
+            let trains = integer(&field, "trains")
+                .and_then(|v| u8::try_from(v).map_err(|_| InputError::BadInteger("trains")))?;
+            Ok(Command::SetLineTrains {
+                line: line_id(&field)?,
+                trains,
+            })
+        }
         "PlaceBuilding" => {
             let kind = match field("service") {
                 Field::Text(t) if t == "PowerPlant" => ServiceKind::PowerPlant,
@@ -232,6 +263,15 @@ fn integer(field: &impl Fn(&str) -> Field, name: &'static str) -> Result<i64, In
     }
 }
 
+/// 路線の ID。画面は一覧に添えた添え字と世代をそのまま返す。
+fn line_id(field: &impl Fn(&str) -> Field) -> Result<LineId, InputError> {
+    let index = integer(field, "lineIndex")
+        .and_then(|v| u32::try_from(v).map_err(|_| InputError::BadInteger("lineIndex")))?;
+    let generation = integer(field, "lineGeneration")
+        .and_then(|v| u16::try_from(v).map_err(|_| InputError::BadInteger("lineGeneration")))?;
+    Ok(LineId { index, generation })
+}
+
 fn tile(
     field: &impl Fn(&str) -> Field,
     x: &'static str,
@@ -248,6 +288,19 @@ fn integer_u16(v: f64) -> Option<u16> {
 mod tests {
     use super::*;
 
+    /// 敷地のマス (1, 1) と (30, 30) にだけ駅がある。
+    fn station_at(t: TilePos) -> Option<StationId> {
+        let index = match (t.x, t.y) {
+            (1, 1) => 0,
+            (30, 30) => 1,
+            _ => return None,
+        };
+        Some(StationId {
+            index,
+            generation: 0,
+        })
+    }
+
     fn object(fields: &[(&str, Field)]) -> Result<Command, InputError> {
         parse(
             true,
@@ -263,6 +316,7 @@ mod tests {
                     generation: 2,
                 })
             },
+            station_at,
         )
     }
 
@@ -321,6 +375,71 @@ mod tests {
         assert_eq!(crosswalk(3.0, 2.0, 0.0), Err(InputError::BadArm));
     }
 
+    #[test]
+    fn line_commands_find_the_stations_by_tile() {
+        let num = |v: f64| Field::Number(v);
+        let create = |to_x: f64| {
+            object(&[
+                ("kind", Field::Text("CreateLine".into())),
+                ("fromX", num(1.0)),
+                ("fromY", num(1.0)),
+                ("toX", num(to_x)),
+                ("toY", num(30.0)),
+            ])
+        };
+        assert_eq!(
+            create(30.0),
+            Ok(Command::CreateLine {
+                from: station_at(TilePos::new(1, 1)).unwrap(),
+                to: station_at(TilePos::new(30, 30)).unwrap(),
+            })
+        );
+        assert_eq!(create(5.0), Err(InputError::NoStation));
+        let line = |kind: &str, extra: &[(&str, Field)]| {
+            let mut fields = vec![
+                ("kind", Field::Text(kind.into())),
+                ("lineIndex", num(4.0)),
+                ("lineGeneration", num(1.0)),
+            ];
+            fields.extend(extra.iter().cloned());
+            object(&fields)
+        };
+        let id = LineId {
+            index: 4,
+            generation: 1,
+        };
+        assert_eq!(
+            line("RemoveLine", &[]),
+            Ok(Command::RemoveLine { line: id })
+        );
+        assert_eq!(
+            line("SetLineTrains", &[("trains", num(3.0))]),
+            Ok(Command::SetLineTrains {
+                line: id,
+                trains: 3
+            })
+        );
+        assert_eq!(
+            line("SetLineTrains", &[("trains", num(300.0))]),
+            Err(InputError::BadInteger("trains"))
+        );
+        assert_eq!(
+            line("ExtendLine", &[("atX", num(30.0)), ("atY", num(30.0))]),
+            Ok(Command::ExtendLine {
+                line: id,
+                station: station_at(TilePos::new(30, 30)).unwrap(),
+            })
+        );
+        assert_eq!(
+            line("ExtendLine", &[("atX", num(2.0)), ("atY", num(30.0))]),
+            Err(InputError::NoStation)
+        );
+        assert_eq!(
+            object(&[("kind", Field::Text("RemoveLine".into()))]),
+            Err(InputError::BadInteger("lineIndex"))
+        );
+    }
+
     fn speed(value: Field) -> Result<Command, InputError> {
         object(&[
             ("kind", Field::Text("SetSimSpeed".into())),
@@ -347,7 +466,12 @@ mod tests {
     #[test]
     fn rejects_non_objects() {
         assert_eq!(
-            parse(false, |_| Field::Text("SetSimSpeed".into()), |_| None),
+            parse(
+                false,
+                |_| Field::Text("SetSimSpeed".into()),
+                |_| None,
+                |_| None
+            ),
             Err(InputError::NotObject)
         );
     }

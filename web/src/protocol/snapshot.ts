@@ -18,6 +18,11 @@ export type SnapshotHeader = {
   /** 移動体の座標の基準にするチャンク。移動体の x・y はこのチャンクの原点からのマスの数である。 */
   baseCx: number;
   baseCy: number;
+  /** 列車の車両の数。 */
+  trainCarCount: number;
+  /** 車両の座標の基準にするチャンク。車両の x・y はこのチャンクの原点からのマスの数である。 */
+  trainBaseCx: number;
+  trainBaseCy: number;
 };
 
 /** 枠 `slot` の先頭の語の、バッファの中での語の位置。 */
@@ -75,6 +80,9 @@ export class SnapshotReader {
       moverCount: w(h.moverCount),
       baseCx: this.#signed[base + h.baseCx] ?? 0,
       baseCy: this.#signed[base + h.baseCy] ?? 0,
+      trainCarCount: w(h.trainCarCount),
+      trainBaseCx: this.#signed[base + h.trainBaseCx] ?? 0,
+      trainBaseCy: this.#signed[base + h.trainBaseCy] ?? 0,
     };
   }
 
@@ -85,6 +93,16 @@ export class SnapshotReader {
   movers(count: number): Uint32Array {
     const start = slotBase(this.#reading) + layout.slotHeaderWords;
     const n = Math.min(count, layout.maxMovers);
+    return this.#words.subarray(start, start + n * layout.moverWords);
+  }
+
+  /**
+   * 読んでいる枠の列車の車両の語を、1 両 moverWords 語（移動体と同じ並び）で並べたまま返す。中身は次に acquire するまで変わらない。
+   * count は acquire が返した trainCarCount にする。
+   */
+  cars(count: number): Uint32Array {
+    const start = slotBase(this.#reading) + layout.carsStart;
+    const n = Math.min(count, layout.maxTrainCars);
     return this.#words.subarray(start, start + n * layout.moverWords);
   }
 }

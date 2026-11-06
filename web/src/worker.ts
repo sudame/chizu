@@ -109,7 +109,12 @@ function sendRail(sim: Simulation): void {
   sentRailRevision = revision;
   const tracks = sim.rail_tracks();
   const stations = sim.rail_stations();
-  reply({ kind: "rail", revision, tracks, stations }, [tracks.buffer, stations.buffer]);
+  const lines = sim.rail_lines();
+  reply({ kind: "rail", revision, tracks, stations, lines }, [
+    tracks.buffer,
+    stations.buffer,
+    lines.buffer,
+  ]);
 }
 
 // 車を描く道筋は、新しく求めたものだけを送る。枠が指す道筋を画面が先に受け取れるよう、枠を書く前に送る

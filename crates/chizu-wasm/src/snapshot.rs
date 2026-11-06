@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// 配置の版。配置を変えたら上げる。
-pub const LAYOUT_VERSION: u32 = 4;
+pub const LAYOUT_VERSION: u32 = 5;
 
 pub const SLOT_COUNT: u32 = 3;
 /// 枠の前に置く制御の語の数。
@@ -52,11 +52,16 @@ pub mod header {
     /// 移動体の座標の基準にするチャンクの座標（`i32` のビット列）。
     pub const BASE_CX: usize = 10;
     pub const BASE_CY: usize = 11;
+    /// 列車の車両の数。車両は移動体の枠のあとに、移動体と同じ語の並びで置く。
+    pub const TRAIN_CAR_COUNT: usize = 12;
+    /// 車両の座標の基準にするチャンクの座標（`i32` のビット列）。移動体の基準とは別に決める。
+    pub const TRAIN_BASE_CX: usize = 13;
+    pub const TRAIN_BASE_CY: usize = 14;
 }
 
 /// 枠の先頭の数値に充てる語の数。移動体の配列の始まりが、枠の先頭から 16 バイトの倍数の位置に来るよう、
 /// 4 の倍数にする。バッファそのものの先頭の位置は 4 バイト境界にしか乗せていない。
-pub const SLOT_HEADER_WORDS: usize = 12;
+pub const SLOT_HEADER_WORDS: usize = 16;
 
 /// 移動体 1 体の語の数（32 バイト）。中の語の位置は [`mover`] にある。
 pub const MOVER_WORDS: usize = 8;
@@ -84,7 +89,15 @@ pub mod mover {
 /// 1 枠に入る移動体の上限。
 pub const MAX_MOVERS: usize = 20_000;
 
-pub const SLOT_WORDS: usize = SLOT_HEADER_WORDS + MAX_MOVERS * MOVER_WORDS;
+/// 1 枠に入る車両の上限。路線の上限（64）× 1 路線の列車の上限（16）× 1 編成の両数（4）である。
+/// 車両 1 両の語の並びは移動体と同じ（[`mover`]）。種類の上位ビットは列車（3）と路線の色の番号、
+/// 移動の添え字は `列車の添え字 × 4 + 先頭からの順番`、世代は列車の世代を入れる。
+pub const MAX_TRAIN_CARS: usize = 4_096;
+
+/// 車両の並びが始まる、枠の中での語の位置。
+pub const CARS_AT: usize = SLOT_HEADER_WORDS + MAX_MOVERS * MOVER_WORDS;
+
+pub const SLOT_WORDS: usize = CARS_AT + MAX_TRAIN_CARS * MOVER_WORDS;
 pub const TOTAL_WORDS: usize = CONTROL_WORDS + SLOT_COUNT as usize * SLOT_WORDS;
 
 const _: () = assert!(SLOT_HEADER_WORDS.is_multiple_of(4));
@@ -104,6 +117,9 @@ pub struct Header {
     /// 移動体の座標の基準にするチャンク。
     pub base_cx: i32,
     pub base_cy: i32,
+    /// 車両の座標の基準にするチャンク。
+    pub train_base_cx: i32,
+    pub train_base_cy: i32,
 }
 
 /// 描画用の移動体。
@@ -151,9 +167,11 @@ impl TripleBuffer {
         self.words.as_ptr() as usize
     }
 
-    /// 書き込み中の枠に書き、最新の枠として渡す。`movers` が上限を超えた分は捨てる。
-    pub fn publish(&mut self, header: &Header, movers: &[Mover]) {
+    /// 書き込み中の枠に書き、最新の枠として渡す。`movers` と `cars` が上限を超えた分は捨てる。
+    /// `cars` は列車の車両で、移動体と同じ形で書く。
+    pub fn publish(&mut self, header: &Header, movers: &[Mover], cars: &[Mover]) {
         let movers = &movers[..movers.len().min(MAX_MOVERS)];
+        let cars = &cars[..cars.len().min(MAX_TRAIN_CARS)];
         let base = CONTROL_WORDS + self.writing as usize * SLOT_WORDS;
         let slot = &self.words[base..base + SLOT_WORDS];
         let put = |i: usize, v: u32| slot[i].store(v, Ordering::Relaxed);
@@ -171,9 +189,12 @@ impl TripleBuffer {
         put(header::MOVER_COUNT, movers.len() as u32);
         put(header::BASE_CX, header.base_cx as u32);
         put(header::BASE_CY, header.base_cy as u32);
+        // 上限で切ってあるので u32 に収まる。
+        put(header::TRAIN_CAR_COUNT, cars.len() as u32);
+        put(header::TRAIN_BASE_CX, header.train_base_cx as u32);
+        put(header::TRAIN_BASE_CY, header.train_base_cy as u32);
 
-        for (i, m) in movers.iter().enumerate() {
-            let at = SLOT_HEADER_WORDS + i * MOVER_WORDS;
+        let write = |at: usize, m: &Mover| {
             put(at + mover::X, m.x.to_bits());
             put(at + mover::Y, m.y.to_bits());
             put(
@@ -185,6 +206,12 @@ impl TripleBuffer {
             put(at + mover::PATH, m.path);
             put(at + mover::VIA, m.via);
             put(at + mover::FRAC, m.frac.to_bits());
+        };
+        for (i, m) in movers.iter().enumerate() {
+            write(SLOT_HEADER_WORDS + i * MOVER_WORDS, m);
+        }
+        for (i, m) in cars.iter().enumerate() {
+            write(CARS_AT + i * MOVER_WORDS, m);
         }
 
         let previous = self.words[LATEST].swap(self.writing | FRESH, Ordering::AcqRel);
@@ -223,7 +250,10 @@ pub fn layout_json() -> String {
     "paused": {},
     "moverCount": {},
     "baseCx": {},
-    "baseCy": {}
+    "baseCy": {},
+    "trainCarCount": {},
+    "trainBaseCx": {},
+    "trainBaseCy": {}
   }},
   "moverWords": {MOVER_WORDS},
   "mover": {{
@@ -237,6 +267,8 @@ pub fn layout_json() -> String {
     "frac": {}
   }},
   "maxMovers": {MAX_MOVERS},
+  "maxTrainCars": {MAX_TRAIN_CARS},
+  "carsStart": {CARS_AT},
   "slotWords": {SLOT_WORDS},
   "totalWords": {TOTAL_WORDS}
 }}
@@ -253,6 +285,9 @@ pub fn layout_json() -> String {
         header::MOVER_COUNT,
         header::BASE_CX,
         header::BASE_CY,
+        header::TRAIN_CAR_COUNT,
+        header::TRAIN_BASE_CX,
+        header::TRAIN_BASE_CY,
         mover::X,
         mover::Y,
         mover::HEADING_KIND,
@@ -304,6 +339,8 @@ mod tests {
             paused: true,
             base_cx: -3,
             base_cy: 5,
+            train_base_cx: 2,
+            train_base_cy: -7,
         }
     }
 
@@ -311,8 +348,8 @@ mod tests {
     /// 読み手は最初の枠を持ったまま、2 回目に書いた枠を受け取ることになる。
     fn fixture_bytes() -> Vec<u8> {
         let mut buf = TripleBuffer::new();
-        buf.publish(&header(1), &[]);
-        buf.publish(&fixture_header(), &[]);
+        buf.publish(&header(1), &[], &[]);
+        buf.publish(&fixture_header(), &[], &[]);
         let mut words: Vec<u32> = (0..CONTROL_WORDS)
             .map(|i| buf.words[i].load(Ordering::Relaxed))
             .collect();
@@ -375,7 +412,7 @@ mod tests {
         assert_eq!(r.acquire(&buf), INITIAL_READER);
 
         for tick in 1..=10_u64 {
-            buf.publish(&header(tick), &[]);
+            buf.publish(&header(tick), &[], &[]);
             if tick % 3 == 0 {
                 continue;
             }
@@ -403,7 +440,7 @@ mod tests {
             via: 5,
             frac: 0.25,
         };
-        buf.publish(&header(0), &[m]);
+        buf.publish(&header(0), &[m], &[]);
         let mut r = Reader {
             reading: INITIAL_READER,
         };
@@ -418,5 +455,81 @@ mod tests {
         assert_eq!(r.word(&buf, at + mover::PATH), 11);
         assert_eq!(r.word(&buf, at + mover::VIA), 5);
         assert_eq!(f32::from_bits(r.word(&buf, at + mover::FRAC)), 0.25);
+    }
+
+    #[test]
+    fn writes_cars_after_the_movers_with_their_own_base() {
+        let mut buf = TripleBuffer::new();
+        let mover = Mover {
+            x: 1.0,
+            y: 2.0,
+            heading: 3,
+            kind: 2,
+            id: 9,
+            generation: 0,
+            path: 0,
+            via: 0,
+            frac: 0.0,
+        };
+        let car = Mover {
+            x: -4.5,
+            y: 6.25,
+            heading: 0x4000,
+            kind: 3 | (5 << 2),
+            id: 13,
+            generation: 2,
+            path: 0,
+            via: 0,
+            frac: 0.0,
+        };
+        let header = Header {
+            train_base_cx: -2,
+            train_base_cy: 7,
+            ..header(0)
+        };
+        buf.publish(&header, &[mover], &[car, car]);
+        let mut r = Reader {
+            reading: INITIAL_READER,
+        };
+        r.acquire(&buf);
+        assert_eq!(r.word(&buf, header::MOVER_COUNT), 1);
+        assert_eq!(r.word(&buf, header::TRAIN_CAR_COUNT), 2);
+        assert_eq!(r.word(&buf, header::TRAIN_BASE_CX) as i32, -2);
+        assert_eq!(r.word(&buf, header::TRAIN_BASE_CY) as i32, 7);
+        for i in 0..2 {
+            let at = CARS_AT + i * MOVER_WORDS;
+            assert_eq!(f32::from_bits(r.word(&buf, at + mover::X)), -4.5);
+            assert_eq!(f32::from_bits(r.word(&buf, at + mover::Y)), 6.25);
+            assert_eq!(r.word(&buf, at + mover::HEADING_KIND), (23 << 16) | 0x4000);
+            assert_eq!(r.word(&buf, at + mover::ID), 13);
+            assert_eq!(r.word(&buf, at + mover::GENERATION), 2);
+        }
+        // 移動体の欄は車両に上書きされない
+        assert_eq!(r.word(&buf, SLOT_HEADER_WORDS + mover::ID), 9);
+    }
+
+    #[test]
+    fn cars_over_the_limit_are_dropped() {
+        let mut buf = TripleBuffer::new();
+        let car = Mover {
+            x: 0.0,
+            y: 0.0,
+            heading: 0,
+            kind: 3,
+            id: 0,
+            generation: 0,
+            path: 0,
+            via: 0,
+            frac: 0.0,
+        };
+        buf.publish(&header(0), &[], &vec![car; MAX_TRAIN_CARS + 10]);
+        let mut r = Reader {
+            reading: INITIAL_READER,
+        };
+        r.acquire(&buf);
+        assert_eq!(
+            r.word(&buf, header::TRAIN_CAR_COUNT) as usize,
+            MAX_TRAIN_CARS
+        );
     }
 }

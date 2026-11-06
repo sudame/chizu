@@ -67,7 +67,32 @@ describe("三重バッファ", () => {
       moverCount: 0,
       baseCx: -3,
       baseCy: 5,
+      trainCarCount: 0,
+      trainBaseCx: 2,
+      trainBaseCy: -7,
     });
+  });
+
+  test("列車の車両は移動体のあとに、移動体と同じ語の並びで置かれる", () => {
+    const buffer = allocateSnapshotBuffer();
+    const writer = new TestWriter(buffer);
+    const reader = new SnapshotReader(buffer, 0);
+    writer.publish((words, base) => {
+      words[base + layout.header.trainCarCount] = 2;
+      for (let i = 0; i < 2; i++) {
+        const at = base + layout.carsStart + i * layout.moverWords;
+        words[at + layout.mover.id] = 40 + i;
+      }
+    });
+    const header = reader.acquire();
+    expect(header?.trainCarCount).toBe(2);
+    const cars = reader.cars(header?.trainCarCount ?? 0);
+    expect(cars.length).toBe(2 * layout.moverWords);
+    expect(cars[layout.mover.id]).toBe(40);
+    expect(cars[layout.moverWords + layout.mover.id]).toBe(41);
+    // 移動体の欄とは重ならない
+    expect(layout.carsStart).toBe(layout.slotHeaderWords + layout.maxMovers * layout.moverWords);
+    expect(reader.cars(10 ** 6).length).toBe(layout.maxTrainCars * layout.moverWords);
   });
 
   test("読み手は最新の枠を読み、書き手の枠とは重ならない", () => {

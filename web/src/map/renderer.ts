@@ -27,6 +27,7 @@ import {
 import { buildingEdgeColor, RoadLayer, ZONE_COLORS, zoneGroundColor } from "./roads.ts";
 import { stageWeights } from "./stages.ts";
 import { demandColor, demandShare } from "./themes.ts";
+import { TrainLayer } from "./trains.ts";
 
 const vec3 = ([r, g, b]: readonly number[]) => `vec3(${r}, ${g}, ${b})`;
 
@@ -239,6 +240,8 @@ export class MapRenderer {
   readonly layers: LayerOverlay;
   /** 移動体。道路の上に重ねて描く。 */
   readonly movers: MoverLayer;
+  /** 列車。線路の上に重ねて描く。 */
+  readonly trains: TrainLayer;
   readonly #textures = new Map<string, Texture>();
   readonly #u: Record<
     "offset" | "size" | "viewport" | "tiles" | "owned" | "zonable" | "hatch" | "block" | "pattern",
@@ -306,6 +309,7 @@ export class MapRenderer {
     this.roads = new RoadLayer(gl, (v, f) => link(gl, v, f));
     this.layers = new LayerOverlay(gl, (v, f) => link(gl, v, f));
     this.movers = new MoverLayer(gl, (v, f) => link(gl, v, f));
+    this.trains = new TrainLayer(gl, (v, f) => link(gl, v, f));
   }
 
   /** チャンクのテクスチャを作るか、中身を書き換える。 */

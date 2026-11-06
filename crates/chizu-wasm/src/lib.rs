@@ -11,6 +11,7 @@ pub mod sim;
 pub mod snapshot;
 #[cfg(test)]
 mod test_town;
+pub mod trains;
 pub mod walk_path;
 
 use chizu_core::network::{DIAGONAL_TILE_MM, TILE_MM, road_cost_per_tile};
@@ -96,8 +97,12 @@ impl Simulation {
 
     /// 画面から届いたコマンドを `Command` に直し、検証して記録し、その場で適用する。記録した番号を返す。
     pub fn submit(&mut self, command: JsValue) -> Result<f64, JsError> {
-        let net = self.0.world().network();
-        let command = command_from_js(&command, |t| net.node_at(t))?;
+        let world = self.0.world();
+        let command = command_from_js(
+            &command,
+            |t| world.network().node_at(t),
+            |t| world.rail().station_at(t),
+        )?;
         self.0
             .submit(command)
             .map(|seq| seq as f64)
@@ -223,6 +228,11 @@ impl Simulation {
     /// 駅ごとに `[min の x, min の y, max の x, max の y, 道路へ向かう 1 歩の x, y]`。
     pub fn rail_stations(&self) -> Vec<f64> {
         self.0.rail_stations()
+    }
+
+    /// 路線の一覧。並びは `Sim::rail_lines` のとおりである。
+    pub fn rail_lines(&self) -> Vec<f64> {
+        self.0.rail_lines()
     }
 
     /// 線路を (x0, y0) から (x1, y1) に引けるかと建設費を、`[理由の文か null, 建設費]` で返す。
@@ -416,6 +426,7 @@ impl Simulation {
 fn command_from_js(
     value: &JsValue,
     node_at: impl Fn(TilePos) -> Option<chizu_core::NodeId>,
+    station_at: impl Fn(TilePos) -> Option<chizu_core::rail::StationId>,
 ) -> Result<Command, JsError> {
     let field = |name: &str| match Reflect::get(value, &JsValue::from_str(name)) {
         Ok(v) if v.is_undefined() => Field::Missing,
@@ -427,7 +438,7 @@ fn command_from_js(
         },
         Err(_) => Field::Missing,
     };
-    command_input::parse(value.is_object(), field, node_at)
+    command_input::parse(value.is_object(), field, node_at, station_at)
         .map_err(|e| JsError::new(&e.to_string()))
 }
 

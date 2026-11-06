@@ -90,4 +90,12 @@ describe("縮尺の段", () => {
     expect(moverArea(range, 11.9)).toBeNull();
     expect(moverArea(range, 12)).toEqual({ minX: 0, minY: 0, maxX: 127, maxY: 63 });
   });
+
+  test("列車は引きでは点、標準からは 4 両の形で、入れ替わるあいだは両方が出る", () => {
+    expect(stageWeights(2)).toMatchObject({ trainDot: 1, trains: 0 });
+    expect(stageWeights(8)).toMatchObject({ trainDot: 0, trains: 1 });
+    const mid = stageWeights(4);
+    expect(mid.trainDot).toBeCloseTo(0.5);
+    expect(mid.trains).toBeCloseTo(0.5);
+  });
 });
