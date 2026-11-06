@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { lineRow } from "../line-panel.ts";
+import { capZeroReason, lineRow } from "../line-panel.ts";
 import {
   abandonPending,
   adoptCreated,
@@ -24,13 +24,31 @@ import {
 } from "./lines.ts";
 
 /** 駅 (0,0) と (30,0) を結ぶ路線の rail_lines の並び。 */
-function encode(index: number, opts: { stopped?: number; trains?: number; cap?: number } = {}) {
+function encode(
+  index: number,
+  opts: { stopped?: number; trains?: number; cap?: number; shared?: number[][] } = {},
+) {
   const trains = opts.trains ?? 2;
   const cap = opts.cap ?? 3;
   return [
-    ...[index, 0, 0, trains, cap, Math.min(trains, cap), opts.stopped ?? 0, 100, 600, 2, 1],
+    ...[
+      index,
+      0,
+      0,
+      trains,
+      cap,
+      Math.min(trains, cap),
+      opts.stopped ?? 0,
+      100,
+      600,
+      2,
+      1,
+      4,
+      opts.shared?.length ?? 0,
+    ],
     ...[0, 0, 30, 0],
     ...[3, 5, 25, 5],
+    ...(opts.shared ?? []).flat(),
   ];
 }
 
@@ -115,6 +133,27 @@ describe("路線の一覧", () => {
     expect(lineRow(stopped, name).warning).toContain("止まっている");
     expect(lineRow(zero, name).warning).toContain("上限が 0");
     expect(lineRow(zero, name).canAdd).toBe(false);
+  });
+
+  test("上限が 0 の理由に、共有している路線の名前を出す", () => {
+    const [shared] = parseLines(
+      encode(2, {
+        cap: 0,
+        shared: [
+          [0, 0],
+          [9, 0],
+        ],
+      }),
+    );
+    const [few] = parseLines(encode(2, { cap: 0 }));
+    if (!shared || !few) throw new Error("読めない");
+    expect(shared.sharedWith).toEqual([
+      { index: 0, generation: 0 },
+      { index: 9, generation: 0 },
+    ]);
+    expect(capZeroReason(shared)).toContain("青線、緑線（2）と進路を共有");
+    expect(lineRow(shared, () => "").warning).toContain("青線");
+    expect(capZeroReason(few)).toContain("待てる所が足りない");
   });
 });
 
