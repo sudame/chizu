@@ -608,6 +608,12 @@ fn a_station_track_crosses_the_road_right_past_its_end() {
 /// 交差点を置いた街。北の住宅から南の工場へ通う車が踏切を渡ってすぐ交差点に入り、交差点の東の住宅から来る車も
 /// 交差点で南へ曲がる。朝は北から来る車の列が、交差点の停止線から踏切の手前まで延びる。
 fn junction_crossing_town(trains: u8) -> World {
+    junction_crossing_town_with(trains, false)
+}
+
+/// [`junction_crossing_town`]。`jammed_beyond` なら、踏切の北に 1 マス挟んだ (13, 6) にも交差点を置く。
+/// 夕方に南から北へ帰る車は、交差点を出てすぐ踏切を渡り、その先の交差点の手前で詰まる。
+fn junction_crossing_town_with(trains: u8, jammed_beyond: bool) -> World {
     let seed = 6;
     assert_eq!(crate::world::highway_line(seed).start, at(20, -64));
     let (mut w, a, b) = crossing_world_with(
@@ -617,6 +623,9 @@ fn junction_crossing_town(trains: u8) -> World {
     ok(road(&mut w, (20, -60), (-10, -60)));
     ok(road(&mut w, (13, -60), (13, 60)));
     ok(road(&mut w, (12, 10), (40, 10)));
+    if jammed_beyond {
+        ok(road(&mut w, (12, 6), (40, 6)));
+    }
     assert_eq!(w.rail().crossings().collect::<Vec<_>>(), vec![at(13, 8)]);
     let node = w.network().node_at(at(13, 10)).expect("交差点がない");
     ok(w.apply(&Command::SetSignal { node, on: true }));
@@ -696,5 +705,30 @@ fn a_crossing_next_to_a_busy_junction_keeps_cars_off_the_tracks() {
         assert!(tally.longest_closed <= 60, "列車 {trains} 本：{tally:?}");
         assert_eq!(r.teleported, 0, "列車 {trains} 本：{r:?}");
         assert_eq!(r.passed_stuck, 0, "列車 {trains} 本：{r:?}");
+    }
+}
+
+/// 交差点を出てすぐの踏切の先が詰まっても、開いた踏切の手前で止まる車が交差点の四角の中に残らない。
+#[test]
+fn a_jam_beyond_the_crossing_keeps_cars_out_of_the_junction_box() {
+    for trains in [0, 1] {
+        let mut w = junction_crossing_town_with(trains, true);
+        let node = w.network().node_at(at(13, 10)).expect("交差点がない");
+        let mut boxed = Vec::new();
+        let mut held = 0_u64;
+        for _ in 0..3 * crate::TICKS_PER_DAY {
+            w.step();
+            let closed = w.rail().closed_crossings();
+            let rail = crate::movement::RailCrossings::new(w.network(), [at(13, 8)], &closed);
+            held += rail.stopped_cars(w.trips()).1;
+            if crate::movement::RailCrossings::stopped_in_box(w.network(), w.trips(), node) > 0 {
+                boxed.push(w.tick().0);
+            }
+        }
+        assert!(
+            boxed.is_empty(),
+            "列車 {trains} 本：交差点の四角の中で止まった車 {boxed:?}（踏切の手前で止まった延べ {held}）"
+        );
+        assert!(held > 0, "列車 {trains} 本：踏切の手前で止まる車が出ない");
     }
 }

@@ -1163,7 +1163,6 @@ fn exit_lane(
     );
     let clear = i64::from(clear_line(net, next).0);
     let stop = i64::from(stop_line(net, next).0);
-    let wall = crossing_wall(net, rail, next);
     let room = |l: &LaneId| {
         let fit = LaneFit {
             base: 1,
@@ -1173,19 +1172,43 @@ fn exit_lane(
             stop,
             need,
         };
-        fit.roomy(st.tails.get(l), wall)
+        fit.roomy(
+            st.tails.get(l),
+            crossing_wall(net, rail, next, st.tails.get(l), stop),
+        )
     };
     let to_lane = junction_lane(net, conn, st, t, node, next, after, room);
     (to_lane, room(&to_lane))
 }
 
-/// 交差点の先のリンク `next` の、閉じたかもうすぐ閉じる踏切の手前で止まった車とみなす位置（[`RailCrossings::closing_wall`]）。
-fn crossing_wall(net: &Network, rail: &RailCrossings, next: LinkId) -> Option<i64> {
+/// 交差点の先のリンク `next` の、踏切の手前で止まった車とみなす位置（[`RailCrossings::closing_wall`]）。
+/// 閉じたかもうすぐ閉じる踏切に加えて、開いていても先に車 1 台が抜けきる空きがない踏切の手前で止まる車も数える
+/// （[`RailCrossings::no_room_zones`] と同じ決まり）。空きは、`tail`（`next` の車線の車）のうち踏切の向こうの
+/// 端より先で最も後ろの車が減速の上限で止まった所から車間を空けた所までで、その車がいなければ停止線 `stop`
+/// までで測る。踏切の手前で止まる車の後ろに並ぶ車が、交差点の四角の中に残らないようにするためである。
+fn crossing_wall(
+    net: &Network,
+    rail: &RailCrossings,
+    next: LinkId,
+    tail: Option<&Tail>,
+    stop: i64,
+) -> Option<i64> {
     if rail.is_empty() {
         return None;
     }
     let len = super::pos::link_geometry(net, next)?.2.0;
-    rail.closing_wall(next, len)
+    if let Some(w) = rail.closing_wall(next, len) {
+        return Some(w);
+    }
+    rail.on_link(next, len).iter().find_map(|c| {
+        let ahead = tail.and_then(|t| t.0.iter().find(|x| x.0 > i64::from(c.near)));
+        let bound = match ahead {
+            Some(&(a, v)) => a + braking_distance(v.max(0)) - i64::from(SPACING),
+            None => stop,
+        };
+        (bound < i64::from(c.far) + i64::from(CAR_LENGTH / 2))
+            .then(|| i64::from(jay_line(rail_crossing::zone_of(c.near))) + i64::from(SPACING))
+    })
 }
 
 /// 交差点を抜けきる空きの見込み方（[`Tail::roomy`]）。`back` は、最後尾が交差点を抜けていく車かを、何 tick 分
@@ -1548,7 +1571,10 @@ pub(super) fn step(
                 stop,
                 need,
             };
-            if !fit.roomy(last.get(&lane), crossing_wall(net, rail, next)) {
+            if !fit.roomy(
+                last.get(&lane),
+                crossing_wall(net, rail, next, last.get(&lane), stop),
+            ) {
                 (t.offset, t.speed) = (LaneOffset(line), MmPerTick::ZERO);
                 continue;
             }
