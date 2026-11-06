@@ -111,7 +111,7 @@ fn facility_info(world: &World, f: &chizu_core::service::Facility) -> Found {
         ParkingInfo {
             spaces: u64::from(f.kind.parking_spaces()),
             rented: u64::from(lot.rented),
-            parked: u64::from(lot.rented_parked) + u64::from(lot.visitors.parked),
+            parked: lot.parked(),
             visitors: u64::from(lot.visitors.parked) + u64::from(lot.visitors.reserved),
         }
     });

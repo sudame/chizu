@@ -88,7 +88,8 @@ export const FACILITY_STYLES: Readonly<Record<number, FacilityStyle>> = {
   2: { circle: "#12a4af", glyph: "drop", site: "#d3ecef", siteEdge: "#95c9d0", name: "#0b6f78" },
   // 共同の駐車場（平面と駐車場ビル）は、決まりの「交通」の系統の灰青にする
   3: { circle: "#5f6b7a", glyph: "parking", site: "#e4e7eb", siteEdge: "#b9c0c9", name: "#5f6368" },
-  4: { circle: "#5f6b7a", glyph: "parking", site: "#e4e7eb", siteEdge: "#b9c0c9", name: "#5f6368" },
+  // 駐車場ビルの敷地は、屋上の外周の壁に見えるよう、平面より暗くする（屋上の面は lots.ts の GARAGE_DECK_COLOR）
+  4: { circle: "#5f6b7a", glyph: "parking", site: "#c5ccd5", siteEdge: "#8f98a5", name: "#5f6368" },
 };
 
 /** 知らない種類の施設の見た目。決まりの「交通」の系統の灰青にする。 */

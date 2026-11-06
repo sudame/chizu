@@ -279,6 +279,11 @@ pub struct SharedLot {
 }
 
 impl SharedLot {
+    /// 停まっている車の台数。借りた世帯の車と、借りていない車（外来）の合計である。
+    pub fn parked(self) -> u64 {
+        u64::from(self.rented_parked) + u64::from(self.visitors.parked)
+    }
+
     /// 台数 `spaces` の駐車場に、外来の車か新しく借りる世帯のための空きがあるか。
     pub fn has_room(self, spaces: u32) -> bool {
         u64::from(self.rented) + u64::from(self.visitors.parked) + u64::from(self.visitors.reserved)
@@ -608,11 +613,17 @@ pub fn lot_spot(net: &Network, b: &Building, seed: u64) -> Option<SidewalkPos> {
 /// 近い交差点から遠い側の端のマスの真ん中にとる（[`lot_spot`]）。歩道の上でもあり、同じ側の車のリンクの上でもある。
 /// 端が道路の上に取れなければ、正面のマス（`Facility::front`）の前にする。面した道路がなければ `None`。
 pub fn facility_spot(net: &Network, f: &Facility) -> Option<SidewalkPos> {
+    facility_choice(net, f).map(|(p, _)| p)
+}
+
+/// 共同の駐車場の出入りの位置と、それが間口のどちらの端にあるか。端が道路の上に取れず、
+/// 正面のマスの前にしたときの端は `None`。[`facility_spot`] と [`facility_end`] が共用する。
+fn facility_choice(net: &Network, f: &Facility) -> Option<(SidewalkPos, Option<LotEnd>)> {
     let link = f.entrance?;
     let (_, step, _) = pos::link_geometry(net, link)?;
     let site = (f.front, f.toward_road, f.area);
-    if let Some((p, _)) = end_spot(net, link, site, step, (TILE_MM / 2, false)) {
-        return Some(p);
+    if let Some((p, end)) = end_spot(net, link, site, step, (TILE_MM / 2, false)) {
+        return Some((p, Some(end)));
     }
     let line = net.segment_line(link.segment)?;
     let road = TilePos::new(
@@ -625,7 +636,7 @@ pub fn facility_spot(net: &Network, f: &Facility) -> Option<SidewalkPos> {
         Dir::Backward => line.len.checked_sub(k)?,
     };
     let at = steps.checked_mul(u64::try_from(TILE_MM).ok()?)?;
-    SidewalkPos::on_any_link(net, link, LaneOffset(u32::try_from(at).ok()?))
+    SidewalkPos::on_any_link(net, link, LaneOffset(u32::try_from(at).ok()?)).map(|p| (p, None))
 }
 
 /// 切り欠いた駐車場が寄る、間口の端。
@@ -635,6 +646,21 @@ pub enum LotEnd {
     Front,
     /// 間口を `front` から進んだ先の、もう一方の端。
     Far,
+}
+
+/// 共同の駐車場の出入りの位置がある、間口の端（[`facility_spot`] が選ぶ端と同じ）。出入りの位置が
+/// 端に取れないときは、間口に沿う向きがワールド座標の大きい側へ向かうほうの端を返す。描画が枠の向きを決めるのに使う。
+pub fn facility_end(net: &Network, f: &Facility) -> LotEnd {
+    facility_choice(net, f)
+        .and_then(|(_, end)| end)
+        .unwrap_or_else(|| {
+            let (tx, ty) = f.toward_road;
+            if tx - ty > 0 {
+                LotEnd::Far
+            } else {
+                LotEnd::Front
+            }
+        })
 }
 
 /// 切り欠いた駐車場が寄る端。[`lot_spot`] が選ぶ端と同じである。出入りの位置が道路の上に取れず、

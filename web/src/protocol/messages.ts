@@ -116,7 +116,7 @@ export function lotsWellFormed(data: Float64Array): boolean {
   }
   return i === data.length;
 }
-/** 停めてある台数 1 件の数の個数（建物の min の x と y、停めてある台数、そのうち建物の中の台数）。chizu-wasm の parked と同じ。 */
+/** 停めてある台数 1 件の数の個数（建物か共同の駐車場の min の x と y、停めてある台数、そのうち建物の中の台数）。chizu-wasm の parked と同じ。 */
 export const PARKED_STRIDE = 4;
 /** 建物の供給の値のうち、電気が届いていることを表す値。水道は 2 を足す。 */
 export const SUPPLY_POWER = 1;
@@ -270,7 +270,7 @@ export type WorkerToMain =
   /**
    * 建物と街の数字。建物の表か道路網が変わったときだけ送る。stats は chizu-wasm の city_stats で、
    * 建物の数、世帯の上限、職場の上限、住宅・商業・工業・オフィスの需要の順に並び、最後に需要の内訳が続く。
-   * lots は chizu-wasm の lots で、敷地を切り欠いた駐車場の形が、切り欠く建物の分だけ並ぶ（並びは map/lots.ts にある）。
+   * lots は chizu-wasm の lots で、敷地を切り欠いた駐車場の形が、切り欠く建物の分だけ並び、続けて共同の駐車場の枠の並びが並ぶ（並びは map/lots.ts にある）。
    * どちらの端に寄せるかが道路網で変わるので、道路網が変わったときにも送り直す。
    */
   | {
