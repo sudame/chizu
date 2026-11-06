@@ -9,7 +9,7 @@
 use chizu_core::building::{
     Building, LANE_WIDTH_MM, ParkingCut, SLOT_DEPTH_MM, SLOT_WIDTH_MM, SLOTS_PER_TILE,
 };
-use chizu_core::movement::{LotEnd, facility_end, lot_end};
+use chizu_core::movement::{LotEnd, SharedLot, facility_end, lot_end};
 use chizu_core::network::{Network, TILE_MM};
 use chizu_core::service::Facility;
 use chizu_core::world::World;
@@ -343,29 +343,22 @@ pub fn encode_parked(world: &World) -> Vec<f64> {
         ]);
     }
     for f in world.facilities().iter().filter(|f| f.kind.is_parking()) {
-        let n = shared_lot_cars(world, f);
+        let n = visible_cars(world.trips().shared_lot(f.area.min), f.kind);
         if n == 0 {
             continue;
         }
-        // 駐車場ビルは屋上の枠が台数の 1/5 なので、見える台数も比べて縮める（端数は切り上げ、1 台でもあれば 1 台は見える）
-        let spaces = u64::from(f.kind.parking_spaces());
-        let visible = u64::from(visible_spaces(f.kind));
-        out.extend([
-            f.area.min.x as f64,
-            f.area.min.y as f64,
-            (n * visible).div_ceil(spaces) as f64,
-            0.0,
-        ]);
+        out.extend([f.area.min.x as f64, f.area.min.y as f64, n as f64, 0.0]);
     }
     out
 }
 
 /// 共同の駐車場に停まって見える車の台数。借りた世帯の停めた車と、借りていない車（外来）の停めた車の合計で、
 /// 台数を超えない。借りた世帯の車が出かけているあいだは、その枠は空いて見える。
-fn shared_lot_cars(world: &World, f: &Facility) -> u64 {
-    let lot = world.trips().shared_lot(f.area.min);
-    let n = u64::from(lot.rented_parked) + u64::from(lot.visitors.parked);
-    n.min(u64::from(f.kind.parking_spaces()))
+/// 駐車場ビルは屋上の枠が台数の 1/5 なので、見える台数も比べて縮める（端数は切り上げ、1 台でもあれば 1 台は見える）。
+fn visible_cars(lot: SharedLot, kind: ServiceKind) -> u64 {
+    let spaces = u64::from(kind.parking_spaces());
+    let n = lot.parked().min(spaces);
+    (n * u64::from(visible_spaces(kind))).div_ceil(spaces)
 }
 
 #[cfg(test)]
@@ -936,33 +929,41 @@ mod tests {
         assert_eq!(data.len(), (8 + 7 * 2) + (8 + 7 * 4));
     }
 
-    /// 共同の駐車場に停まって見える台数は、借りた世帯の停めた車と外来の停めた車で、停まっていなければ記録に出ない。
+    /// 停まっていない共同の駐車場は記録に出ず、鍵は施設の角のマスと合う。
     #[test]
-    fn parked_cars_of_shared_lots_follow_the_cars_actually_parked() {
+    fn idle_shared_lots_are_left_out_of_the_parked_records() {
         use chizu_core::ServiceKind;
         let (mut sim, _guard) = crate::test_town::carless_town(1);
         crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
-        let mut seen = (false, false);
-        for _ in 0..12 {
-            sim.advance(chizu_core::TICKS_PER_DAY as u32 / 6);
-            let world = sim.world();
-            let lot = world.trips().shared_lot(TilePos::new(23, 8));
-            let want = u64::from(lot.rented_parked + lot.visitors.parked).min(12);
-            let rec = encode_parked(world)
-                .chunks(4)
-                .find(|r| r[0] == 23.0 && r[1] == 8.0)
-                .map(|r| (r[2], r[3]));
-            if want == 0 {
-                assert_eq!(rec, None);
-                seen.0 = true;
-            } else {
-                assert_eq!(rec, Some((want as f64, 0.0)));
-                seen.1 = true;
-            }
-        }
-        // 枠はすべて借りられていても、停まっている車の分しか描かない
-        let lot = sim.world().trips().shared_lot(TilePos::new(23, 8));
+        sim.advance(chizu_core::TICKS_PER_DAY as u32);
+        let world = sim.world();
+        let lot = world.trips().shared_lot(TilePos::new(23, 8));
         assert_eq!(lot.rented, 12, "枠がすべて借りられていない");
-        assert!(seen.0 || seen.1);
+        let rec = encode_parked(world)
+            .chunks(4)
+            .find(|r| r[0] == 23.0 && r[1] == 8.0)
+            .map(|r| (r[2], r[3]));
+        match visible_cars(lot, ServiceKind::ParkingLot) {
+            0 => assert_eq!(rec, None),
+            n => assert_eq!(rec, Some((n as f64, 0.0))),
+        }
+    }
+
+    /// 見える台数は、停まっている車の合計（台数で頭打ち）を、見える枠の数に比べて縮めたものである。
+    #[test]
+    fn visible_cars_count_parked_cars_and_shrink_for_garages() {
+        let lot = |rp, vp| SharedLot {
+            rented: 12,
+            rented_parked: rp,
+            visitors: chizu_core::movement::Lot {
+                parked: vp,
+                reserved: 0,
+            },
+        };
+        assert_eq!(visible_cars(lot(5, 3), ServiceKind::ParkingLot), 8);
+        assert_eq!(visible_cars(lot(1, 0), ServiceKind::ParkingGarage), 1);
+        assert_eq!(visible_cars(lot(5, 0), ServiceKind::ParkingGarage), 1);
+        assert_eq!(visible_cars(lot(6, 0), ServiceKind::ParkingGarage), 2);
+        assert_eq!(visible_cars(lot(200, 40), ServiceKind::ParkingGarage), 48);
     }
 }
