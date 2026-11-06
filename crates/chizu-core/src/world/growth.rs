@@ -690,6 +690,25 @@ impl World {
         Ok(entrance)
     }
 
+    /// 駅を `at` に `rotation` の向きで置いたときの出入口のマス。置けないなら `None`。状態は変えない。
+    /// 駅の徒歩圏の円を、置く前に出入口から描くのに使う。
+    pub fn station_door_if_placed(&self, at: TilePos, rotation: u8) -> Option<TilePos> {
+        let entrance = self
+            .check_service(ServiceKind::Station, at, rotation)
+            .ok()?;
+        let toward_road = DIRS[usize::from(rotation)];
+        let (w, k) = ServiceKind::Station.size();
+        let far = lot_tiles(at, toward_road, w, k).last().map(|(_, _, t)| t)?;
+        let site = Facility {
+            kind: ServiceKind::Station,
+            area: TileRect::from_corners(at, far),
+            front: at,
+            toward_road,
+            entrance: Some(entrance),
+        };
+        crate::movement::facility_spot(&self.network, &site).map(|p| p.tile)
+    }
+
     /// 公共の施設を置く。`at` から `DIRS[rotation]` へ 1 歩のマスが道路で、敷地は反対側へ延びる。
     pub(super) fn place_service(
         &mut self,

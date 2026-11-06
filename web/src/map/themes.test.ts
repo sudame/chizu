@@ -33,8 +33,18 @@ function memoryStorage(throws = false) {
 }
 
 describe("主題図の選択", () => {
-  test("なし、交通、電気、水道、駐車場、需要の順に並び、交通だけが交通のレイヤーを Worker に頼む", () => {
-    expect(THEMES.map((t) => t.label)).toEqual(["なし", "交通", "電気", "水道", "駐車場", "需要"]);
+  test("なし、交通、電気、水道、駐車場、公共交通、需要の順に並び、交通だけが交通のレイヤーを Worker に頼む", () => {
+    expect(THEMES.map((t) => t.label)).toEqual([
+      "なし",
+      "交通",
+      "電気",
+      "水道",
+      "駐車場",
+      "公共交通",
+      "需要",
+    ]);
+    // 公共交通の値は rail_stats で別に届くので、データレイヤーは頼まない
+    expect(themeOf("transit").layer).toBeNull();
     expect(themeOf("parking").layer).toBe(PARKING_LAYER);
     expect(themeOf("traffic").layer).toBe(TRAFFIC_LAYER);
     expect(themeOf("none").layer).toBeNull();

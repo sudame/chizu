@@ -464,6 +464,17 @@ async function checkRail(page: Page, at: string): Promise<void> {
   await moveTile(30, 31);
   await waitMap("servicePlaceable", "true", "eq");
   check(true, "駅の仮の表示は、道路に面した所で置けると示す");
+  // 駅まで歩く範囲の円は、中核が答える出入口から描く。出入口は道路（y = 32）の上にある
+  await page.waitForFunction(
+    () => (document.querySelector<HTMLElement>("#map")?.dataset.stationCatchment ?? "") !== "",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const door = (await map.getAttribute("data-station-catchment"))?.split(",").map(Number) ?? [];
+  check(
+    door.length === 4 && door[1] === 32 && door[2] === 0 && door[3] === 0,
+    `駅の仮の表示に、出入口と徒歩圏の世帯の数が届く（${door.join(",")}）`,
+  );
   await clickTile(30, 31);
   await waitMap("railStations", "0", "gt");
   check((await map.getAttribute("data-rail-stations")) === "1", "駅を置くと、駅が 1 つ描画に届く");
@@ -644,6 +655,43 @@ async function checkTrains(page: Page, at: string): Promise<void> {
   await page.locator("#pause").click();
   await page.keyboard.press("Escape");
   await shot("train-close");
+
+  // 主題図「公共交通」。下の地図を薄め、駅の徒歩圏の円と路線と駅を重ねる。駅ごとの数は Worker から届く
+  await chooseLayer(page, "transit");
+  await page.keyboard.press("Escape");
+  check(
+    (await page.locator("#layers").getAttribute("data-active")) === "transit",
+    "主題図に公共交通を選べる",
+  );
+  check((await page.locator("#theme-legend li").count()) === 4, "公共交通の凡例に 4 項目が出る");
+  await page.waitForFunction(
+    () => (document.querySelector<HTMLElement>("#map")?.dataset.railStats ?? "") !== "",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const stats = (await map.getAttribute("data-rail-stats"))?.split(",") ?? [];
+  check(stats.length === 2, `駅ごとの数が 2 駅ぶん届く（${stats.join(" ")}）`);
+  await page.waitForTimeout(500);
+  await shot("transit-close");
+  await measureCost("公共交通の主題図");
+  await zoomInTo(page, 16);
+  // 駅を「見る」の道具で押すと、検査の欄に駅の様子が出る
+  await pickTool(page, "none");
+  await clickTile(25, 30);
+  await page.locator("#inspector[data-title]").waitFor({ timeout: TIMEOUT_MS });
+  check(
+    (await page.locator("#inspector").getAttribute("data-title")) === "駅",
+    "駅を押すと、検査の欄に駅の様子が出る",
+  );
+  const rows = (await page.locator("#inspector dt").allTextContents()).join("|");
+  check(
+    rows.includes("待っている人") && rows.includes("徒歩圏の世帯") && rows.includes("止まる路線"),
+    `駅の検査の欄に、待っている人、徒歩圏の世帯、止まる路線が並ぶ（${rows}）`,
+  );
+  await shot("station-inspector");
+  await page.keyboard.press("Escape");
+  await chooseLayer(page, "traffic");
+  await page.keyboard.press("Escape");
   for (const [name, target] of [
     ["train-standard", 6],
     ["train-far", 2],
@@ -2636,9 +2684,9 @@ try {
   await page.locator("#layers-open").click();
   check(
     (await page.locator("#layer-panel").isVisible()) &&
-      (await page.locator("#layers button").count()) === 6 &&
+      (await page.locator("#layers button").count()) === 7 &&
       (await page.locator("#layer-panel #legend").count()) === 1,
-    "レイヤーのボタンで、なし、交通、電気、水道、駐車場、需要を選ぶパネルが開き、凡例も中にある",
+    "レイヤーのボタンで、なし、交通、電気、水道、駐車場、公共交通、需要を選ぶパネルが開き、凡例も中にある",
   );
   await page.mouse.click(cx, cy);
   check(!(await page.locator("#layer-panel").isVisible()), "パネルの外（地図）を押すと閉じる");

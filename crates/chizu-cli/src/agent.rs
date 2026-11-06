@@ -44,7 +44,7 @@ pub const USAGE: &str = r#"使い方:
                                              いまの tick でコマンドを順に適用し、記録に足す
   chizu-cli agent advance <dir> <tick 数>    時間を進める（1 tick はゲーム内の 12 秒、1 日は 7200 tick）
   chizu-cli agent observe <dir>              街の様子を JSON で出す（前の observe からの増減つき）
-  chizu-cli agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic|parking]
+  chizu-cli agent map <dir> <x0> <y0> <x1> <y1> [--scale N] [--layer traffic|parking|rail]
                                              範囲の地図を、1 マス 1 文字のマス目のテキストで出す
   chizu-cli agent export <dir>               セッションの再現手順を、Issue にそのまま貼れる markdown で出す
 
@@ -319,7 +319,9 @@ observe の rail（線路と駅）:
     長いほうで、乗り降りが 400 人を超えると延びる。
     待ち行列の先頭で 600 tick より長く待った人は、歩いて行き先へ向かう。
   stations の waiting 待っている人（乗り換えを待つ人も含む）、boarded と alighted 始まりからの乗った数と降りた数
-    （乗り換えも 1 回ずつ数える）、transfers 始まりからこの駅で乗り換えた数、transferWaiting この駅で乗り換えを待つ人。
+    （乗り換えも 1 回ずつ数える）、transfers 始まりからこの駅で乗り換えた数、transferWaiting この駅で乗り換えを待つ人、
+    households と carless 駅の徒歩圏（出入口のマスから 64 マス以内に、家の正面のマスがある）の世帯の数と、そのうち
+    車を持てない世帯の数（出入口がない駅は null）、door 出入口のマス（道路に面していない駅は null）。
   lines の measuredRoundTripTicks 測った時間を混ぜた 1 周の時間（tick）、boarded 始まりからの乗った数、waiting 待っている人、
     transfersIn 始まりから乗り換えてこの路線の列に並んだ数、
     leftBehindStops 直前に出た列車に乗りきれず人が残った（駅、向き）の数、loadPermille いちばん混んだ列車の乗車率（‰）。
@@ -355,6 +357,11 @@ observe の removedCrosswalks:
   --layer traffic を付けると、道路の文字を種類の代わりに混み具合の段階にする（画面の「交通」のレイヤーと同じ計算）。
   --layer parking を付けると、車を持てない世帯のいる住宅を ! にし、共同の駐車場の文字を埋まり具合の段階
   （- 半分に満たない、+ 半分以上、# 8 割以上、X 満車。画面の「駐車場」のレイヤーと同じ計算）にする。
+  --layer rail を付けると、線路のマスを、通る路線の色の番号の文字（A B J K M N Q U が色の番号 0〜7、青 緑 橙 紫 桃 水 茶 黄緑の順）にする。
+  止まっている路線の線路は x、どの路線も通らない線路は T のままである。同じ線路を通る路線は、止まっていない路線の若い番号を出す。
+  乗りきれず人が残った駅か、待っている人が 100 人以上の駅は、E の代わりに ! を出し、駅の出入口から駅まで歩く範囲（64 マス）の中の、
+  ほかに何も載らない空きマスは : にする（画面の「公共交通」の主題図と同じ物差し）。凡例の下に、路線ごとの本数、走っている本数、
+  いちばん混んだ列車の乗車率、待っている人、止まっているか走れないかを 1 行ずつ付ける。
   文字は、「-」空いている、「+」やや混んでいる、「#」混んでいる、「X」詰まっている（車が多く、半分以上が止まっている）。
   区間の上の車の台数を、その区間に並べる台数（車線ごとに長さを 7m で割った台数の合計。最低 1 台）で割った占有率で決め、向きの違う 2 方向のうち混んでいるほうを取る。
   車が 1 台以下の区間は空いている（1 台しか並べない短い区間で、その 1 台が止まっているときを除く）。高速道路は H のままである。
@@ -2155,9 +2162,21 @@ fn rail(world: &World) -> Value {
             *transfer_waiting_at.entry(r.plan.alight).or_default() += 1;
         }
     }
+    // 駅の徒歩圏の世帯。出入口のない駅は数えない
+    let doors: Vec<Option<TilePos>> = rail
+        .stations()
+        .map(|(id, _)| world.station_door(id))
+        .collect();
+    let with_door: Vec<TilePos> = doors.iter().flatten().copied().collect();
+    let mut counted = world.catchments(&with_door).into_iter();
+    let catchments: Vec<Option<chizu_core::world::Catchment>> = doors
+        .iter()
+        .map(|d| d.and_then(|_| counted.next()))
+        .collect();
     let stations: Vec<Value> = rail
         .stations()
-        .map(|(id, s)| {
+        .zip(catchments.iter().zip(&doors))
+        .map(|((id, s), (near, door))| {
             let ends = rail.track_line(s.track).map(|l| {
                 let (a, b) = (l.start.min(l.end()), l.start.max(l.end()));
                 json!([tile(a), tile(b)])
@@ -2174,6 +2193,9 @@ fn rail(world: &World) -> Value {
                 "alighted": alighted,
                 "transfers": rides.station_transfers.get(&id).copied().unwrap_or(0),
                 "transferWaiting": transfer_waiting_at.get(&id).copied().unwrap_or(0),
+                "door": door.map(tile),
+                "households": near.map(|c| c.households),
+                "carless": near.map(|c| c.carless),
             })
         })
         .collect();
@@ -2271,12 +2293,6 @@ fn lines(world: &World) -> Value {
                 .iter()
                 .filter(|(_, line, _)| *line == id)
                 .count();
-            let fullest = rail
-                .trains()
-                .filter(|(_, t)| t.line == id)
-                .map(|(tid, _)| rail.aboard(tid).len())
-                .max()
-                .unwrap_or(0);
             json!({
                 "id": id_json(id.index, id.generation),
                 "stations": stations,
@@ -2293,7 +2309,7 @@ fn lines(world: &World) -> Value {
                 "transfersIn": rides.line_transfers.get(&id).copied().unwrap_or(0),
                 "waiting": waiting,
                 "leftBehindStops": left_behind,
-                "loadPermille": fullest * 1000 / chizu_core::rail::TRAIN_CAPACITY,
+                "loadPermille": rail.line_load_permille(id),
             })
         })
         .collect();

@@ -315,6 +315,32 @@ impl Rail {
         &self.left_behind
     }
 
+    /// 駅 `id` で待っている人の数。路線と向きによらない合計である。
+    pub fn waiting_at(&self, id: StationId) -> usize {
+        self.queues
+            .iter()
+            .filter(|((s, _, _), _)| *s == id)
+            .map(|(_, q)| q.len())
+            .sum()
+    }
+
+    /// 路線 `id` を走る列車のうち、いちばん混んだ列車の乗車率（‰）。画面の主題図と知らせ、chizu-cli が読む。
+    /// 走る列車がなければ 0 である。
+    pub fn line_load_permille(&self, id: LineId) -> u64 {
+        let fullest = self
+            .trains()
+            .filter(|(_, t)| t.line == id)
+            .map(|(tid, _)| self.aboard(tid).len())
+            .max()
+            .unwrap_or(0);
+        (fullest * 1000 / TRAIN_CAPACITY) as u64
+    }
+
+    /// 列車 `id` の乗車率（‰）。
+    pub fn train_load_permille(&self, id: TrainId) -> u64 {
+        (self.aboard(id).len() * 1000 / TRAIN_CAPACITY) as u64
+    }
+
     /// 運賃。
     pub fn fare(&self) -> u16 {
         self.fare

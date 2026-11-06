@@ -14,6 +14,15 @@ use crate::snapshot::{MAX_TRAIN_CARS, Mover};
 /// 上位 16 ビットのうち、下位 2 ビットが種類、残りが路線の色の番号になる。
 pub const KIND_TRAIN: u16 = 3;
 
+/// 種類の上位 16 ビットのうち、混み具合の段階（0〜3）を置く位置。路線の色の番号（3 ビット）の上である。
+/// 画面の `web/src/map/trains.ts` の `LOAD_SHIFT` と同じ。
+pub const LOAD_SHIFT: u16 = 5;
+
+/// 乗車率（‰）を、窓の濃さを決める段階（0〜3）にする。25% ごとに 1 段上がる。
+pub fn load_level(permille: u64) -> u16 {
+    (permille / 250).min(3) as u16
+}
+
 /// 1 編成の両数。設計 3.10 の 3。
 pub const CARS_PER_TRAIN: usize = 4;
 
@@ -101,6 +110,7 @@ pub fn collect_cars(world: &World, out: &mut Vec<Mover>) -> ChunkCoord {
             continue;
         }
         let color = line_color(train.line.index);
+        let load = load_level(rail.train_load_permille(id));
         for car in 0..CARS_PER_TRAIN {
             if cars.len() >= MAX_TRAIN_CARS {
                 break 'trains;
@@ -108,7 +118,7 @@ pub fn collect_cars(world: &World, out: &mut Vec<Mover>) -> ChunkCoord {
             // 車両の真ん中は、先頭から車両の半分の長さと、前の車両の長さのぶんだけ後ろにある
             let behind = CAR_LEN_MM / 2 + CAR_LEN_MM * car as i64;
             let (x, y, angle) = car_point(world, line, train, behind);
-            let kind = KIND_TRAIN | ((color as u16) << 2);
+            let kind = KIND_TRAIN | ((color as u16) << 2) | (load << LOAD_SHIFT);
             cars.push((
                 x,
                 y,

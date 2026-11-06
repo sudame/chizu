@@ -12,12 +12,13 @@ import {
   TRAFFIC_LAYER,
   TRAFFIC_LEVELS,
 } from "./layers.ts";
-import type { Color } from "./palette.ts";
+import { type Color, hex } from "./palette.ts";
 import { buildingEdgeColor, roadStyle } from "./roads.ts";
 import { stageWeights } from "./stages.ts";
+import { STATION_WALK_RADIUS } from "./tools.ts";
 import { TRAFFIC_UNCOUNTED_COLOR } from "./traffic.ts";
 
-export type ThemeId = "none" | "traffic" | "power" | "water" | "parking" | "demand";
+export type ThemeId = "none" | "traffic" | "power" | "water" | "parking" | "transit" | "demand";
 
 export type Theme = {
   id: ThemeId;
@@ -28,6 +29,9 @@ export type Theme = {
   swatch: Color | null;
 };
 
+/** 公共交通の主題図のボタンの見本の色。駅の丸と同じ交通の系統の灰青である。 */
+const TRANSIT_SWATCH = "#5f6b7a";
+
 /** パネルに並べる順。 */
 export const THEMES: readonly Theme[] = [
   { id: "none", label: "なし", layer: null, swatch: null },
@@ -35,6 +39,7 @@ export const THEMES: readonly Theme[] = [
   { id: "power", label: "電気", layer: 1, swatch: THEME_COLORS.suppliedBuilding },
   { id: "water", label: "水道", layer: 2, swatch: THEME_COLORS.enoughRoad },
   { id: "parking", label: "駐車場", layer: PARKING_LAYER, swatch: THEME_COLORS.lotNearlyFull },
+  { id: "transit", label: "公共交通", layer: null, swatch: hex(TRANSIT_SWATCH) },
   { id: "demand", label: "需要", layer: null, swatch: demandColor(1) },
 ];
 
@@ -211,6 +216,21 @@ export function themeLegend(
             color: cssColor(l.color),
           }),
         ),
+      ];
+    case "transit":
+      return [
+        {
+          label: `駅の徒歩圏（${STATION_WALK_RADIUS} マス）と世帯の数`,
+          kind: "fill",
+          color: cssColor(hex("#1a73e8", 0.35)),
+        },
+        { label: "路線：太いほど混んでいる", kind: "line", color: cssColor(hex("#0079c2")) },
+        {
+          label: "駅の丸：大きいほど乗り降りが多い",
+          kind: "fill",
+          color: cssColor(hex("#5f6b7a")),
+        },
+        { label: "乗りきれない人がいる駅", kind: "fill", color: cssColor(hex("#ea4335")) },
       ];
     case "demand":
       return ZONE_LABELS.map((label, i) => ({
