@@ -1,5 +1,5 @@
 {
-  "version": 5,
+  "version": 6,
   "slotCount": 3,
   "controlWords": 4,
   "control": {
@@ -29,7 +29,8 @@
     "baseCy": 11,
     "trainCarCount": 12,
     "trainBaseCx": 13,
-    "trainBaseCy": 14
+    "trainBaseCy": 14,
+    "closedCrossingCount": 15
   },
   "moverWords": 8,
   "mover": {
@@ -45,6 +46,9 @@
   "maxMovers": 20000,
   "maxTrainCars": 4096,
   "carsStart": 160016,
-  "slotWords": 192784,
-  "totalWords": 578356
+  "maxClosedCrossings": 1024,
+  "crossingWords": 2,
+  "crossingsStart": 192784,
+  "slotWords": 194832,
+  "totalWords": 584500
 }

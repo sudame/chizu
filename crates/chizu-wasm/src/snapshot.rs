@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 /// 配置の版。配置を変えたら上げる。
-pub const LAYOUT_VERSION: u32 = 5;
+pub const LAYOUT_VERSION: u32 = 6;
 
 pub const SLOT_COUNT: u32 = 3;
 /// 枠の前に置く制御の語の数。
@@ -57,6 +57,8 @@ pub mod header {
     /// 車両の座標の基準にするチャンクの座標（`i32` のビット列）。移動体の基準とは別に決める。
     pub const TRAIN_BASE_CX: usize = 13;
     pub const TRAIN_BASE_CY: usize = 14;
+    /// いま閉じている踏切の数。踏切のマスは車両のあとに、マスの順に置く。
+    pub const CLOSED_CROSSING_COUNT: usize = 15;
 }
 
 /// 枠の先頭の数値に充てる語の数。移動体の配列の始まりが、枠の先頭から 16 バイトの倍数の位置に来るよう、
@@ -97,7 +99,16 @@ pub const MAX_TRAIN_CARS: usize = 4_096;
 /// 車両の並びが始まる、枠の中での語の位置。
 pub const CARS_AT: usize = SLOT_HEADER_WORDS + MAX_MOVERS * MOVER_WORDS;
 
-pub const SLOT_WORDS: usize = CARS_AT + MAX_TRAIN_CARS * MOVER_WORDS;
+/// 閉じている踏切の語の数。マスの `x` と `y`（`i32` のビット列）を並べる。
+pub const CROSSING_WORDS: usize = 2;
+
+/// 1 枠に入る、閉じている踏切の上限。同時に閉じる踏切は列車の数に比べて少ないので、超えた分は捨てる。
+pub const MAX_CLOSED_CROSSINGS: usize = 1_024;
+
+/// 閉じている踏切の並びが始まる、枠の中での語の位置。
+pub const CROSSINGS_AT: usize = CARS_AT + MAX_TRAIN_CARS * MOVER_WORDS;
+
+pub const SLOT_WORDS: usize = CROSSINGS_AT + MAX_CLOSED_CROSSINGS * CROSSING_WORDS;
 pub const TOTAL_WORDS: usize = CONTROL_WORDS + SLOT_COUNT as usize * SLOT_WORDS;
 
 const _: () = assert!(SLOT_HEADER_WORDS.is_multiple_of(4));
@@ -168,10 +179,18 @@ impl TripleBuffer {
     }
 
     /// 書き込み中の枠に書き、最新の枠として渡す。`movers` と `cars` が上限を超えた分は捨てる。
-    /// `cars` は列車の車両で、移動体と同じ形で書く。
-    pub fn publish(&mut self, header: &Header, movers: &[Mover], cars: &[Mover]) {
+    /// `cars` は列車の車両で、移動体と同じ形で書く。`closed` はいま閉じている踏切のマスである。
+    /// 踏切の開け閉めは列車の位置と同じ tick で決まるので、車両と同じ枠に書き、画面で食い違わないようにする。
+    pub fn publish(
+        &mut self,
+        header: &Header,
+        movers: &[Mover],
+        cars: &[Mover],
+        closed: &[[i32; 2]],
+    ) {
         let movers = &movers[..movers.len().min(MAX_MOVERS)];
         let cars = &cars[..cars.len().min(MAX_TRAIN_CARS)];
+        let closed = &closed[..closed.len().min(MAX_CLOSED_CROSSINGS)];
         let base = CONTROL_WORDS + self.writing as usize * SLOT_WORDS;
         let slot = &self.words[base..base + SLOT_WORDS];
         let put = |i: usize, v: u32| slot[i].store(v, Ordering::Relaxed);
@@ -193,6 +212,8 @@ impl TripleBuffer {
         put(header::TRAIN_CAR_COUNT, cars.len() as u32);
         put(header::TRAIN_BASE_CX, header.train_base_cx as u32);
         put(header::TRAIN_BASE_CY, header.train_base_cy as u32);
+        // 上限で切ってあるので u32 に収まる。
+        put(header::CLOSED_CROSSING_COUNT, closed.len() as u32);
 
         let write = |at: usize, m: &Mover| {
             put(at + mover::X, m.x.to_bits());
@@ -212,6 +233,10 @@ impl TripleBuffer {
         }
         for (i, m) in cars.iter().enumerate() {
             write(CARS_AT + i * MOVER_WORDS, m);
+        }
+        for (i, [x, y]) in closed.iter().enumerate() {
+            put(CROSSINGS_AT + i * CROSSING_WORDS, *x as u32);
+            put(CROSSINGS_AT + i * CROSSING_WORDS + 1, *y as u32);
         }
 
         let previous = self.words[LATEST].swap(self.writing | FRESH, Ordering::AcqRel);
@@ -253,7 +278,8 @@ pub fn layout_json() -> String {
     "baseCy": {},
     "trainCarCount": {},
     "trainBaseCx": {},
-    "trainBaseCy": {}
+    "trainBaseCy": {},
+    "closedCrossingCount": {}
   }},
   "moverWords": {MOVER_WORDS},
   "mover": {{
@@ -269,6 +295,9 @@ pub fn layout_json() -> String {
   "maxMovers": {MAX_MOVERS},
   "maxTrainCars": {MAX_TRAIN_CARS},
   "carsStart": {CARS_AT},
+  "maxClosedCrossings": {MAX_CLOSED_CROSSINGS},
+  "crossingWords": {CROSSING_WORDS},
+  "crossingsStart": {CROSSINGS_AT},
   "slotWords": {SLOT_WORDS},
   "totalWords": {TOTAL_WORDS}
 }}
@@ -288,6 +317,7 @@ pub fn layout_json() -> String {
         header::TRAIN_CAR_COUNT,
         header::TRAIN_BASE_CX,
         header::TRAIN_BASE_CY,
+        header::CLOSED_CROSSING_COUNT,
         mover::X,
         mover::Y,
         mover::HEADING_KIND,
@@ -348,8 +378,8 @@ mod tests {
     /// 読み手は最初の枠を持ったまま、2 回目に書いた枠を受け取ることになる。
     fn fixture_bytes() -> Vec<u8> {
         let mut buf = TripleBuffer::new();
-        buf.publish(&header(1), &[], &[]);
-        buf.publish(&fixture_header(), &[], &[]);
+        buf.publish(&header(1), &[], &[], &[]);
+        buf.publish(&fixture_header(), &[], &[], &[]);
         let mut words: Vec<u32> = (0..CONTROL_WORDS)
             .map(|i| buf.words[i].load(Ordering::Relaxed))
             .collect();
@@ -412,7 +442,7 @@ mod tests {
         assert_eq!(r.acquire(&buf), INITIAL_READER);
 
         for tick in 1..=10_u64 {
-            buf.publish(&header(tick), &[], &[]);
+            buf.publish(&header(tick), &[], &[], &[]);
             if tick % 3 == 0 {
                 continue;
             }
@@ -440,7 +470,7 @@ mod tests {
             via: 5,
             frac: 0.25,
         };
-        buf.publish(&header(0), &[m], &[]);
+        buf.publish(&header(0), &[m], &[], &[]);
         let mut r = Reader {
             reading: INITIAL_READER,
         };
@@ -487,7 +517,7 @@ mod tests {
             train_base_cy: 7,
             ..header(0)
         };
-        buf.publish(&header, &[mover], &[car, car]);
+        buf.publish(&header, &[mover], &[car, car], &[]);
         let mut r = Reader {
             reading: INITIAL_READER,
         };
@@ -522,7 +552,7 @@ mod tests {
             via: 0,
             frac: 0.0,
         };
-        buf.publish(&header(0), &[], &vec![car; MAX_TRAIN_CARS + 10]);
+        buf.publish(&header(0), &[], &vec![car; MAX_TRAIN_CARS + 10], &[]);
         let mut r = Reader {
             reading: INITIAL_READER,
         };
@@ -530,6 +560,44 @@ mod tests {
         assert_eq!(
             r.word(&buf, header::TRAIN_CAR_COUNT) as usize,
             MAX_TRAIN_CARS
+        );
+    }
+
+    #[test]
+    fn writes_closed_crossings_after_the_cars() {
+        let mut buf = TripleBuffer::new();
+        buf.publish(&header(0), &[], &[], &[[3, -4], [70_000, 12]]);
+        let mut r = Reader {
+            reading: INITIAL_READER,
+        };
+        r.acquire(&buf);
+        assert_eq!(r.word(&buf, header::CLOSED_CROSSING_COUNT), 2);
+        assert_eq!(r.word(&buf, CROSSINGS_AT) as i32, 3);
+        assert_eq!(r.word(&buf, CROSSINGS_AT + 1) as i32, -4);
+        assert_eq!(r.word(&buf, CROSSINGS_AT + CROSSING_WORDS), 70_000);
+        assert_eq!(r.word(&buf, CROSSINGS_AT + CROSSING_WORDS + 1), 12);
+        // 次の枠では、閉じている踏切がなくなる
+        buf.publish(&header(1), &[], &[], &[]);
+        r.acquire(&buf);
+        assert_eq!(r.word(&buf, header::CLOSED_CROSSING_COUNT), 0);
+    }
+
+    #[test]
+    fn closed_crossings_over_the_limit_are_dropped() {
+        let mut buf = TripleBuffer::new();
+        buf.publish(
+            &header(0),
+            &[],
+            &[],
+            &vec![[1, 2]; MAX_CLOSED_CROSSINGS + 5],
+        );
+        let mut r = Reader {
+            reading: INITIAL_READER,
+        };
+        r.acquire(&buf);
+        assert_eq!(
+            r.word(&buf, header::CLOSED_CROSSING_COUNT) as usize,
+            MAX_CLOSED_CROSSINGS
         );
     }
 }

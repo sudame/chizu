@@ -23,6 +23,8 @@ export type SnapshotHeader = {
   /** 車両の座標の基準にするチャンク。車両の x・y はこのチャンクの原点からのマスの数である。 */
   trainBaseCx: number;
   trainBaseCy: number;
+  /** いま閉じている踏切の数。 */
+  closedCrossingCount: number;
 };
 
 /** 枠 `slot` の先頭の語の、バッファの中での語の位置。 */
@@ -83,6 +85,7 @@ export class SnapshotReader {
       trainCarCount: w(h.trainCarCount),
       trainBaseCx: this.#signed[base + h.trainBaseCx] ?? 0,
       trainBaseCy: this.#signed[base + h.trainBaseCy] ?? 0,
+      closedCrossingCount: w(h.closedCrossingCount),
     };
   }
 
@@ -104,5 +107,15 @@ export class SnapshotReader {
     const start = slotBase(this.#reading) + layout.carsStart;
     const n = Math.min(count, layout.maxTrainCars);
     return this.#words.subarray(start, start + n * layout.moverWords);
+  }
+
+  /**
+   * 読んでいる枠の、いま閉じている踏切のマスを、1 つ crossingWords 語（x、y）で並べたまま返す。
+   * 中身は次に acquire するまで変わらない。count は acquire が返した closedCrossingCount にする。
+   */
+  closedCrossings(count: number): Int32Array {
+    const start = slotBase(this.#reading) + layout.crossingsStart;
+    const n = Math.min(count, layout.maxClosedCrossings);
+    return this.#signed.subarray(start, start + n * layout.crossingWords);
   }
 }

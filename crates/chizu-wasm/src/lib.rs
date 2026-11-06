@@ -225,6 +225,11 @@ impl Simulation {
         self.0.rail_tracks()
     }
 
+    /// 踏切ごとに `[x, y, 道路の 1 歩の x, y, 線路の 1 歩の x, y, 道路の種類の番号]`。
+    pub fn rail_crossings(&self) -> Vec<f64> {
+        self.0.rail_crossings()
+    }
+
     /// 駅ごとに `[min の x, min の y, max の x, max の y, 道路へ向かう 1 歩の x, y]`。
     pub fn rail_stations(&self) -> Vec<f64> {
         self.0.rail_stations()

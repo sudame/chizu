@@ -82,9 +82,14 @@ import {
 } from "./map/palette.ts";
 import { ParkedCache, parseIndoorParked, parseParked } from "./map/parked.ts";
 import {
+  type CrossingMeshes,
+  closedCrossingMeshes,
+  crossingMeshes,
+  parseCrossings,
   parseStations,
   parseTracks,
   RAIL_MID_COLOR,
+  type RailCrossing,
   type RailMeshes,
   type RailStation,
   railMeshes,
@@ -320,6 +325,11 @@ let buildings: BuildingMeshes | null = null;
 let signals: Geometry | null = null;
 // 最後に届いた線路と駅
 let rail: RailMeshes | null = null;
+// 最後に届いた踏切。閉じている踏切は枠ごとに届くので、マスから形を引けるようにしておく
+let crossingBase: CrossingMeshes | null = null;
+let crossingInfo = new Map<string, RailCrossing>();
+// 最後に描いた、閉じている踏切の並び。変わったときだけ、棒と警報灯を作り直す
+let closedKey: string | null = null;
 // 最後に届いた駅と路線。路線の道具が駅を指すのと、路線の一覧に使う
 let railStations: RailStation[] = [];
 let railLines: RailLineInfo[] = [];
@@ -461,6 +471,10 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
   if (lineMeshesLast !== null) {
     renderer?.roads.setRailLines(lineMeshesLast);
   }
+  if (crossingBase !== null) {
+    renderer?.roads.setCrossings(crossingBase);
+  }
+  closedKey = null;
   detail.invalidate();
   parkedCars.invalidate();
   applyTheme();
@@ -497,6 +511,17 @@ function sendView(range: ChunkRange): void {
   });
 }
 
+// 閉じている踏切は、列車と同じ枠で届く。前の枠と変わったときだけ、遮断機の棒と警報灯を作り直す
+function rebuildClosedCrossings(closed: Int32Array): void {
+  const key = closed.join(",");
+  if (key === closedKey) {
+    return;
+  }
+  closedKey = key;
+  renderer?.roads.setClosedCrossings(closedCrossingMeshes(crossingInfo, closed));
+  // test:wasm が読む
+  mapCanvas.dataset.closedCrossings = String(closed.length / 2);
+}
 let trainDrawMs = 0;
 let mapDrawMs = 0;
 function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
@@ -505,6 +530,9 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
   const range = camera.visibleChunks(vp);
   sendView(range);
   rebuildTraffic();
+  if (header !== null) {
+    rebuildClosedCrossings(reader.closedCrossings(header.closedCrossingCount));
+  }
   rebuildDetail(vp);
   rebuildParked(vp);
   updateThemeLegend();
@@ -1586,6 +1614,11 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     rail = railMeshes(tracks, stations);
     renderer?.roads.setRail(rail);
     railStations = stations;
+    const crossings = parseCrossings(message.crossings);
+    crossingBase = crossingMeshes(crossings);
+    renderer?.roads.setCrossings(crossingBase);
+    crossingInfo = new Map(crossings.map((c) => [`${c.at.x},${c.at.y}`, c]));
+    closedKey = null;
     railLines = parseLines(message.lines);
     lineMeshesLast = lineMeshes(railLines);
     renderer?.roads.setRailLines(lineMeshesLast);
@@ -1604,6 +1637,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     // test:wasm が読む
     mapCanvas.dataset.railTracks = String(tracks.length);
     mapCanvas.dataset.railStations = String(stations.length);
+    mapCanvas.dataset.railCrossings = String(crossings.length);
     mapCanvas.dataset.railLines = String(railLines.length);
     mapCanvas.dataset.railRevision = String(message.revision);
     return;
