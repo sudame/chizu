@@ -481,11 +481,11 @@ async function checkRail(page: Page, at: string): Promise<void> {
   await waitMap("railTracks", String(tracks), "gt");
   await page.keyboard.press("Escape");
 
-  // 道路のマスを横切る線路は、引けないものとして示す
-  await clickTile(45, 28);
-  await moveTile(45, 36);
+  // 道路に沿う線路は、引けないものとして示す（道路の区間の途中を横切る線路は踏切になる）
+  await clickTile(42, 32);
+  await moveTile(48, 32);
   await waitMap("railPlaceable", "false", "eq");
-  check(true, "道路を横切る線路は、引けないものとして示す");
+  check(true, "道路に沿う線路は、引けないものとして示す");
   await page.keyboard.press("Escape");
 
   // 線路のマスの真ん中（上りと下りの線路の中心線）は、寄りの段では道床の色（#d8d3c7）で描かれる
