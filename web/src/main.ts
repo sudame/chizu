@@ -326,6 +326,7 @@ let railLines: RailLineInfo[] = [];
 let lineMeshesLast: { far: Geometry; near: Geometry } | null = null;
 // 路線の道具の途中の状態。路線を作るコマンドを送った時点で知っていた路線を覚え、できた路線を見分ける
 let lineDraft: LineDraft = EMPTY_DRAFT;
+const LOOPED_NOTICE = "環状にした路線は、これ以上駅を足せない";
 let knownLines = new Set<string>();
 // 細部の段で描き足すもの。細部の段に入っているときだけ、見えている範囲のぶんを作る
 const detail = new DetailCache();
@@ -1238,6 +1239,14 @@ function clickTile(at: Tile): void {
       toolMessage.textContent = "駅を押す";
       return;
     }
+    if (extendTarget(lineDraft, railLines)?.looped === true) {
+      // 環状にした路線は延ばせない。環状にしたのが届く前に押された場合
+      lineDraft = EMPTY_DRAFT;
+      toolMessage.textContent = LOOPED_NOTICE;
+      showLines();
+      updatePreview();
+      return;
+    }
     const known = new Set(railLines.map(lineKey));
     const step = clickStation(lineDraft, station.min);
     lineDraft = step.draft;
@@ -1581,9 +1590,15 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     lineMeshesLast = lineMeshes(railLines);
     renderer?.roads.setRailLines(lineMeshesLast);
     lineDraft = adoptCreated(lineDraft, railLines, knownLines);
-    // 延ばしていた路線が消えたら、延ばすのをやめる
-    if (lineDraft.extend !== null && extendTarget(lineDraft, railLines) === null) {
-      lineDraft = EMPTY_DRAFT;
+    // 延ばしていた路線が消えるか、環状になったら、延ばすのをやめる
+    if (lineDraft.extend !== null) {
+      const target = extendTarget(lineDraft, railLines);
+      if (target === null || target.looped) {
+        lineDraft = EMPTY_DRAFT;
+        if (target?.looped === true) {
+          toolMessage.textContent = LOOPED_NOTICE;
+        }
+      }
     }
     showLines();
     // test:wasm が読む

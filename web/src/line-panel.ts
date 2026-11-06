@@ -118,7 +118,12 @@ export function renderLines(
     remove.type = "button";
     remove.ariaLabel = `${row.name}を消す`;
     remove.addEventListener("click", () => handlers.send(removeLineCommand(ref)));
-    item.append(minus, plus, extend, remove);
+    // 環状にした路線は延ばせない
+    if (line.looped) {
+      item.append(minus, plus, remove);
+    } else {
+      item.append(minus, plus, extend, remove);
+    }
     item.append(element("span", "line-stops", row.stops));
     if (row.headway !== "") {
       item.append(element("span", "line-note", row.headway));

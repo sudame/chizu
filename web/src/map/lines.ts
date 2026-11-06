@@ -137,6 +137,25 @@ export const LINE_MIN_PX = 1.2;
 export const LINE_NEAR_HALF = 0.05;
 export const LINE_NEAR_MIN_PX = 0.8;
 
+/** 線路の幅（マス）。並べる線は、隙間を含めてこの幅に収める。 */
+export const TRACK_WIDTH = 0.8;
+/** 線と線の隙間は、線の太さのこの割合。 */
+export const LINE_GAP_RATIO = 0.1;
+/** 1 本の線路の上に並べる線の数の上限。これより多い路線は、最後の 1 本の位置に重ねて束ねる。 */
+export const MAX_LANES = 4;
+
+/**
+ * 同じ線路を通る路線が `count` 本あるときの並べ方。
+ * 並べる本数は `MAX_LANES` までで、1 本の太さ（半分）と、隣の線との中心の間隔を返す。
+ * 本数が増えても、半分の太さは 0 や負にならず、並べた幅は線路の幅（`TRACK_WIDTH`）を超えない。
+ */
+export function laneLayout(count: number): { lanes: number; half: number; pitch: number } {
+  const lanes = Math.max(1, Math.min(count, MAX_LANES));
+  const unit = 1 + LINE_GAP_RATIO;
+  const half = Math.min(LINE_HALF, TRACK_WIDTH / (2 * unit * lanes));
+  return { lanes, half, pitch: 2 * half * unit };
+}
+
 export type LineMeshes = {
   /** 引きと標準。 */
   far: Geometry;
@@ -146,7 +165,7 @@ export type LineMeshes = {
 
 /**
  * 路線を線路の上に路線の色で重ねる。止まっている路線は描かない。
- * 同じ線路を通る路線が複数あるときは、路線の添え字の順に横へ並べる（線路の幅に収まるよう、1 本の太さを抑える）。
+ * 同じ線路を通る路線が複数あるときは、路線の添え字の順に横へ並べる（線路の幅に収まるよう太さを抑え、並べきれない分は最後の位置に束ねる）。
  */
 export function lineMeshes(lines: readonly RailLineInfo[]): LineMeshes {
   const live = lines.filter((l) => !l.stopped && l.tracks.length > 0);
@@ -177,11 +196,11 @@ export function lineMeshes(lines: readonly RailLineInfo[]): LineMeshes {
     const color = hex(lineColorCode(line.index));
     for (const { a, b } of line.tracks) {
       const list = users.get(key(a, b)) ?? [line.index];
-      const n = list.length;
-      const slot = list.indexOf(line.index);
-      // a から b への右が正。線路の中心線を中心に、n 本を等しい幅で並べる
-      const half = Math.min(LINE_HALF, (0.8 - 0.1 * (n - 1)) / (2 * n));
-      const offset = (slot - (n - 1) / 2) * 2 * half * 1.1;
+      const { lanes, half, pitch } = laneLayout(list.length);
+      // 並べきれない路線は最後の位置に束ねる
+      const slot = Math.min(list.indexOf(line.index), lanes - 1);
+      // a から b への右が正。線路の中心線を中心に、lanes 本を等しい幅で並べる
+      const offset = (slot - (lanes - 1) / 2) * pitch;
       const forward = a.x < b.x || (a.x === b.x && a.y <= b.y);
       const shift = forward ? offset : -offset;
       meshes.far.strip(a, b, shift, half, color, LINE_MIN_PX);

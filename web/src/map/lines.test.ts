@@ -14,8 +14,12 @@ import {
   LINE_HEADER,
   lineColorIndex,
   lineMeshes,
+  LINE_MIN_PX,
+  laneLayout,
   lineName,
+  MAX_LANES,
   moveMinutes,
+  TRACK_WIDTH,
   parseLines,
 } from "./lines.ts";
 
@@ -65,6 +69,36 @@ describe("路線の一覧", () => {
     const one = lineMeshes(parseLines(encode(0)));
     expect(meshes.far.vertexCount).toBe(one.far.vertexCount * 2);
     expect(lineMeshes([]).far.vertexCount).toBe(0);
+  });
+
+  test("同じ線路を何本の路線が通っても、線は有限で線路の幅に収まる", () => {
+    for (const n of [1, 2, 3, 4, 5, 8, 9, 10, 64]) {
+      const { lanes, half, pitch } = laneLayout(n);
+      expect(lanes).toBe(Math.min(n, MAX_LANES));
+      expect(half).toBeGreaterThan(0);
+      expect(Number.isFinite(pitch)).toBe(true);
+      // 端の線の外側までの幅
+      expect((lanes - 1) * pitch + 2 * half).toBeLessThanOrEqual(TRACK_WIDTH + 1e-9);
+      // 隣の線と重ならない
+      expect(pitch).toBeGreaterThan(2 * half);
+
+      const lines = parseLines(Array.from({ length: n }, (_, i) => encode(i)).flat());
+      const meshes = lineMeshes(lines);
+      expect(meshes.far.vertexCount).toBe(6 * n);
+      for (const g of [meshes.far, meshes.near]) {
+        const data = g.build();
+        expect(data.every(Number.isFinite)).toBe(true);
+      }
+      // 頂点の横のずれは、線の外側まで含めて線路の幅の半分に収まる
+      const far = meshes.far.build();
+      const y = 5 + 0.5;
+      const stride = far.length / (6 * n);
+      for (let v = 0; v < 6 * n; v++) {
+        const off = (far[v * stride + 1] ?? 0) + meshes.far.origin.y - y;
+        expect(Math.abs(off) + half).toBeLessThanOrEqual(TRACK_WIDTH / 2 + 1e-6);
+      }
+    }
+    expect(LINE_MIN_PX).toBeGreaterThanOrEqual(1);
   });
 
   test("一覧の行に上限と止まっている印を出す", () => {

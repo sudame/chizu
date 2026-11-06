@@ -578,11 +578,16 @@ async function checkTrains(page: Page, at: string): Promise<void> {
   // 描画の重さ。倍率ごとに、地図全体と列車を描く JS の時間（ms、均した値）を読む。CHIZU_DRAW_COST を立てたときだけ出す
   const measureCost = async (label: string) => {
     if (process.env.CHIZU_DRAW_COST === undefined) return;
-    for (const target of [2, 6, 16, 40]) {
-      while (Math.abs(Number(await map.getAttribute("data-zoom")) - target) > target * 0.3) {
-        const now = Number(await map.getAttribute("data-zoom"));
-        await page.locator(now > target ? "#zoom-out" : "#zoom-in").click();
-        await page.waitForTimeout(150);
+    // map-style.md の決まりどおり、引き、標準、寄り、細部の上限（128）の 4 つの段を測る
+    for (const target of [2, 6, 16, MAX_ZOOM]) {
+      if (target === MAX_ZOOM) {
+        await zoomInTo(page, MAX_ZOOM);
+      } else {
+        while (Math.abs(Number(await map.getAttribute("data-zoom")) - target) > target * 0.3) {
+          const now = Number(await map.getAttribute("data-zoom"));
+          await page.locator(now > target ? "#zoom-out" : "#zoom-in").click();
+          await page.waitForTimeout(150);
+        }
       }
       await page.waitForTimeout(2500);
       const d = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
