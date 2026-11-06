@@ -1281,3 +1281,5 @@ fn settle_does_not_remove_more_trains_than_needed() {
     }
     assert_eq!(OVERDELETED.load(Ordering::Relaxed), 0);
 }
+
+mod ring;
