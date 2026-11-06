@@ -1133,10 +1133,19 @@ try {
     const awayLow = tilePoint(45, 45);
     await page.mouse.move(awayLow.x, awayLow.y);
     const wantLow = mixHex("#f0f5d6", "#e7efc3", blocks);
+    // 塗った区画（14〜18, 29〜31）は、時間が進むと家が建ち、その敷地の駐車場や私道の淡い面が
+    // 空きのマスの上にかかる。1 マスだけを読むと、そこに面がかかった回に地面の色と読めない。
+    // どの空きのマスにも面がかかるとは限らないので、区画の中の読めるマスを順に探す
     let low = await colorOfTile(16, 30);
     for (let i = 0; i < 50 && !near(low, wantLow, 4); i++) {
-      await page.waitForTimeout(100);
-      low = await colorOfTile(16, 30);
+      for (let y = 29; y <= 31 && !near(low, wantLow, 4); y++) {
+        for (let x = 14; x <= 18 && !near(low, wantLow, 4); x++) {
+          low = await colorOfTile(x, y);
+        }
+      }
+      if (!near(low, wantLow, 4)) {
+        await page.waitForTimeout(100);
+      }
     }
     check(
       lowZoned.command === "PaintZone" && lowZoned.outcome === "Applied" && near(low, wantLow, 4),
