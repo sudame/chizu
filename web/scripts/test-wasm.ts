@@ -579,7 +579,8 @@ async function checkTrains(page: Page, at: string): Promise<void> {
   const measureCost = async (label: string) => {
     if (process.env.CHIZU_DRAW_COST === undefined) return;
     // map-style.md の決まりどおり、引き、標準、寄り、細部の上限（128）の 4 つの段を測る
-    for (const target of [2, 6, 16, MAX_ZOOM]) {
+    // 最後は 16 に戻り、あとの確かめが使う倍率に近いところで終える
+    for (const target of [MAX_ZOOM, 2, 6, 16]) {
       if (target === MAX_ZOOM) {
         await zoomInTo(page, MAX_ZOOM);
       } else {

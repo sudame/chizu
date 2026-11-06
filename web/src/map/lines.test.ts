@@ -12,15 +12,15 @@ import {
 import {
   LINE_COLORS,
   LINE_HEADER,
-  lineColorIndex,
-  lineMeshes,
   LINE_MIN_PX,
   laneLayout,
+  lineColorIndex,
+  lineMeshes,
   lineName,
   MAX_LANES,
   moveMinutes,
-  TRACK_WIDTH,
   parseLines,
+  TRACK_WIDTH,
 } from "./lines.ts";
 
 /** 駅 (0,0) と (30,0) を結ぶ路線の rail_lines の並び。 */
