@@ -318,7 +318,7 @@ pub fn encode_facilities<'a>(
 /// `[建物の min の x, min の y, 停めてある台数, そのうち建物の中に停めてある台数]`。建物の番号の順に並べ、そのあとに共同の駐車場を続ける。
 /// 建物は `encode` と同じ鍵（min の x と y）で引く。台数は平面と建物の中の合計で、
 /// 平面の枠を先に埋めるものとして、平面の台数を超えた分を建物の中の台数にする。
-/// 共同の駐車場は、建物の中の台数を 0 とし、停まって見える台数（借りられている枠と外来の停めた台数。
+/// 共同の駐車場は、建物の中の台数を 0 とし、停まって見える台数（借りた世帯の停めた車と外来の停めた車。
 /// 駐車場ビルは屋上の枠に比べて縮めた台数）を送る。鍵は施設の占めるマスの min の x と y である。
 /// どの枠に置くかは画面が決める。状態は変えない。
 pub fn encode_parked(world: &World) -> Vec<f64> {
@@ -360,11 +360,11 @@ pub fn encode_parked(world: &World) -> Vec<f64> {
     out
 }
 
-/// 共同の駐車場に停まって見える車の台数。借りられている枠の数と、借りていない車（外来）の停めた台数の合計で、
-/// 台数を超えない。借りた世帯の車が出かけているあいだも、枠は空かない。
+/// 共同の駐車場に停まって見える車の台数。借りた世帯の停めた車と、借りていない車（外来）の停めた車の合計で、
+/// 台数を超えない。借りた世帯の車が出かけているあいだは、その枠は空いて見える。
 fn shared_lot_cars(world: &World, f: &Facility) -> u64 {
     let lot = world.trips().shared_lot(f.area.min);
-    let n = u64::from(lot.rented) + u64::from(lot.visitors.parked);
+    let n = u64::from(lot.rented_parked) + u64::from(lot.visitors.parked);
     n.min(u64::from(f.kind.parking_spaces()))
 }
 
@@ -936,25 +936,33 @@ mod tests {
         assert_eq!(data.len(), (8 + 7 * 2) + (8 + 7 * 4));
     }
 
-    /// 共同の駐車場に停まって見える台数は、借りられた枠と外来の停めた台数である。
+    /// 共同の駐車場に停まって見える台数は、借りた世帯の停めた車と外来の停めた車で、停まっていなければ記録に出ない。
     #[test]
-    fn parked_cars_of_shared_lots_follow_the_rented_spaces() {
+    fn parked_cars_of_shared_lots_follow_the_cars_actually_parked() {
         use chizu_core::ServiceKind;
         let (mut sim, _guard) = crate::test_town::carless_town(1);
         crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
-        sim.advance(chizu_core::TICKS_PER_DAY as u32);
-        let world = sim.world();
-        let lot = world.trips().shared_lot(TilePos::new(23, 8));
+        let mut seen = (false, false);
+        for _ in 0..12 {
+            sim.advance(chizu_core::TICKS_PER_DAY as u32 / 6);
+            let world = sim.world();
+            let lot = world.trips().shared_lot(TilePos::new(23, 8));
+            let want = u64::from(lot.rented_parked + lot.visitors.parked).min(12);
+            let rec = encode_parked(world)
+                .chunks(4)
+                .find(|r| r[0] == 23.0 && r[1] == 8.0)
+                .map(|r| (r[2], r[3]));
+            if want == 0 {
+                assert_eq!(rec, None);
+                seen.0 = true;
+            } else {
+                assert_eq!(rec, Some((want as f64, 0.0)));
+                seen.1 = true;
+            }
+        }
+        // 枠はすべて借りられていても、停まっている車の分しか描かない
+        let lot = sim.world().trips().shared_lot(TilePos::new(23, 8));
         assert_eq!(lot.rented, 12, "枠がすべて借りられていない");
-        let data = encode_parked(world);
-        let rec = data
-            .chunks(4)
-            .find(|r| r[0] == 23.0 && r[1] == 8.0)
-            .expect("共同の駐車場がない");
-        assert_eq!(
-            rec[2],
-            f64::from(lot.rented + lot.visitors.parked).min(12.0)
-        );
-        assert_eq!(rec[3], 0.0);
+        assert!(seen.0 || seen.1);
     }
 }
