@@ -65,7 +65,7 @@ observe の sinceLastObserve（前の observe からの増減）:
   new の直後の observe は、new が見た街との増減になる。前の observe がないとき（フィードバックのディレクトリなど）は null で、何も書かない。
 
 observe の buildings.lanes: 行き止まりの私道の脇に一軒家を並べた住宅。低密度の住宅の、間口 2 マスで奥行き 3 マス以上の敷地はすべてこれになる。
-  高密度の住宅では、段階 1〜2 の、間口 2 マスで奥行き 4 マス以上の住宅の一部（25%）がこれになる。
+  高密度の住宅には私道の敷地は建たない（古い保存データに残る高密度の私道の敷地は、通りに面した建物として振る舞う）。
   lots その建物の数、houses その家の数（世帯の数と同じ）。私道は map で = になる。住民と車は私道の入口から出入りする。
 observe の buildings.byZone は区画の大きな種類ごとの建物の数で、Residential は低密度と高密度の和である。
 observe の buildings.residentialByDensity: 住宅を密度で分けた数。high は高密度（PaintZone の Residential）、low は低密度（ResidentialLow）。
@@ -186,6 +186,7 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  full 範囲の中に共同の駐車場はあるがどれも空きがない、feeTooHigh 料金が世帯の払える上限を超える、
                  waiting 範囲の中に空きがあって料金も払えるので、次の決め直し（移住を見る間隔ごと）で借りる、
                  lotNotOnRoad 範囲の中に共同の駐車場はあるが、どれも道路に面していない（前の道路が消えた）ので貸せない。駐車場の前に道路を引く。
+                 範囲の中に貸せるほかの駐車場がある世帯は full などが先に選ばれるので、道路に面していない駐車場そのものは parking.lotsNotOnRoad で探す。
                  理由は状態に持たず、読み出すときに借りる決まりと同じ探し方で求める。
                  自宅の枠は住宅の駐車場の台数だけあり、建物に住む世帯に ID の順に配る（枠を持つ世帯からは取り上げない）。
                  自宅の枠のない世帯は、家の正面のマスから直線で 32 マスの中の共同の駐車場を近い順に試し、空きがあれば枠を借りる。
@@ -200,6 +201,9 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
                  carlessAreas 車を持てない世帯の多い所の上位 10 件。家の正面のマスを 8×8 マスの区切りで数え、世帯の多い順
                  （同じなら区切りの座標の x、y の順）に並べる。at 区切りの最小の座標、center 真ん中のマス、households 世帯の数、
                  reasons 理由ごとの数（noneReasons と同じ）。共同の駐車場を置く所を決める目安にする。
+                 lotsNotOnRoad 前の道路がなくなって、道路に面していない共同の駐車場。count 数、lots それぞれの at（sharedLots と同じ角のマス）、
+                 kind、spaces。貸せない駐車場で、近くの世帯の理由は、範囲の中にほかの駐車場があると満車や範囲外が先に選ばれ、
+                 noneReasons.lotNotOnRoad に出ないことがある。この数が 0 でなければ、at の駐車場の前に道路を引く。
                  sharedLots 共同の駐車場を置いた順に並べる。at 駐車場が占めるマスの最小の座標（世帯が借りた枠はこの角で指す）、
                  kind 種類（ParkingLot か ParkingGarage）、spaces 台数、rented 世帯に貸した枠の数、parked 停まっている台数で、
                  そのうち rentedParked 借りた世帯の車、visitorParked 借りていない車（外来）の台数、visitorReserved 外来の車の
@@ -418,6 +422,7 @@ observe の removedCrosswalks:
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
   {"type":"SetTaxRate","zone":"Residential"|"Commercial"|"Industrial"|"Office","permille":0..300}
       税率を千分率で決める。住宅の税率は低密度と高密度で 1 つで、Residential で決める（ResidentialLow は断る）。
+      範囲の外の値（permille、fee、speed、rotation）と選べない区画は、どれも Invalid で、「… は a から b の外にある」の形の文で断る。
   {"type":"SetParkingFee","fee":0..50}
       共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額）を、街で 1 つ決める。始めは 10。範囲の外は Invalid。
       料金が世帯の払える上限（蓄えに応じて 10〜49）を超えると、その世帯は借りない。借りている世帯は、
@@ -1546,6 +1551,7 @@ fn parking(world: &World) -> Value {
             },
         },
         "carlessAreas": carless_areas_json(&carless),
+        "lotsNotOnRoad": lots_not_on_road(world),
         "sharedLots": shared_lots(world),
     })
 }
@@ -1573,6 +1579,25 @@ fn carless_areas_json(carless: &[Carless]) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// observe の `parking.lotsNotOnRoad`。前の道路がなくなり、道路に面していない共同の駐車場の数と場所。
+/// 世帯の理由（`noneReasons`）は、範囲の中に貸せる駐車場があるとそちらを先に選ぶので、これは別に数える。
+fn lots_not_on_road(world: &World) -> Value {
+    let lots: Vec<Value> = world
+        .facilities()
+        .iter()
+        .filter(|f| f.kind.is_parking() && f.entrance.is_none())
+        .map(|f| {
+            let c = f.area.min;
+            json!({
+                "at": [c.x, c.y],
+                "kind": format!("{:?}", f.kind),
+                "spaces": f.kind.parking_spaces(),
+            })
+        })
+        .collect();
+    json!({"count": lots.len(), "lots": lots})
 }
 
 /// observe の `parking.sharedLots`。共同の駐車場を置いた順に並べる。
@@ -2134,6 +2159,7 @@ const WATCHED: &[&str] = &[
     "/financesPerDay/net",
     "/financesPerDay/parkingFees",
     "/parking/fee",
+    "/parking/lotsNotOnRoad/count",
     "/population/citizens",
     "/population/housedCitizens",
     "/population/households",
