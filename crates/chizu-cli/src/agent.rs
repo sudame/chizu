@@ -292,7 +292,7 @@ observe の rail（線路と駅）:
   facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅と列車の 1 日の維持費である。
   lines 路線ごとの id、stations 止まる駅の id の順、looped 環状か、trains 決めた本数、cap 行き詰まりを防ぐ本数の上限、
   capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
-    sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有する線路の向きは待てる所にならない）。
+    sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有の区画の枠を、これらの路線と分けている）。
   running 走っている本数、roundTripTicks 1 周の見込みの時間（tick）、headwayTicks 運転間隔の見込み（tick、列車がなければ null）、
   stopped 線路が変わって進路を選べず止まっているか（止まった路線の列車は消え、新しい列車も現れない）。
   trains 列車ごとの id、line 路線の id、at 先頭のマス、heading 進む向き（E、SE、S、SW、W、NW、N、NE）、
@@ -413,7 +413,7 @@ observe の removedCrosswalks:
       進路は線路の上の最短の道のりで選び、ノードで 45 度より大きく曲がる所と、途中で向きを変える所は通らない。
       そうしないと届かなければ Denied（RailNoRoute）。路線は往復し、両端の駅で折り返す。途中の駅は通り過ぎてよい。
       駅がなければ Denied（NoSuchStation）、同じ駅なら Denied（StationInLine）、路線が 64 本あれば Denied（LineLimit）。
-      作るとほかの路線の待てる所が足りなくなり、その路線の cap が 0 になる（走れなくなる）なら Denied（LineStarvesOther）。
+      作るとほかの路線の cap が 0 になる（共有の区画の枠を分けきれず、走れなくなる）なら Denied（LineStarvesOther）。
       cap が下がるが 0 にはならないなら受け付け、超えた分と、先を押さえ直せない列車はすぐに消える（act の結果の removedTrains）。
       作った路線の id は observe の rail.lines にある（作った順に、空いた番号から使う）。
   {"type":"ExtendLine","line":{"index":n,"generation":g},"station":{"index":n,"generation":g}}
@@ -425,10 +425,14 @@ observe の removedCrosswalks:
       路線をなくす。走っている列車も消える。
   {"type":"SetLineTrains","line":{"index":n,"generation":g},"trains":0..16}
       路線を走らせる列車の本数を決める。列車 1 本の維持費は 1 日 600。走るのは、行き詰まりを防ぐ上限（observe の
-      rail.lines の cap）までである。上限は、待てる所（ノードとノードのあいだの線路の向きごとで、72m 以上あり、ほかの路線が
-      使わないもの。終点の両方のホームは 1 つに数える）の数 − 1 である。列車は待てる所から次の待てる所までをまとめて
-      押さえて進むので、ほかの路線と共有する駅と線路では待たない。待てる所が 1 つ以下の路線（ほかの路線とすべて共有する
-      路線など）は cap が 0 で、列車は走らない。
+      rail.lines の cap）までである。待てる所は、ノードとノードのあいだの線路の向きごとで、72m 以上あり、終点の
+      折り返す前のホームでないもの（終点の両方のホームは 1 つに数える）である。ほかの路線と使う待てる所は共有の
+      待てる所で、続けて押さえて移れるものどうしが 1 つの共有の区画になる。ほかの路線と待てる所を共有しない路線の
+      cap は、待てる所の数 − 1。共有する路線は、自分だけの待てる所の続き（区間）が 1 つならその数、2 つ以上なら数の
+      和 − 1。自分だけの待てる所がない路線（区間運転、同じ駅を並べた路線など）は、区画の枠（区画の中だけを通る
+      待てる所の輪のうち短いものの長さ − 1）を区画を使う路線で分けた数である。列車は待てる所から次の待てる所までを
+      まとめて押さえて進み、区画に入るのは自分の路線の分の枠が空いているときだけである。待てる所が 1 つ以下の路線と、
+      区画の枠の分け前がない路線は cap が 0 で、列車は走らない。
       列車は 4 両 80m、時速 90km で、最初の駅に 1 本ずつ現れる。駅に 20 tick 止まり、終点では 30 tick かけて折り返す。
       同じ駅から前の列車が出てから、運転間隔（1 周の見込みの時間 ÷ 本数）の半分を空けて出る。先の閉塞を押さえてから
       入るので、2 本が同じ閉塞に入ることはない。本数を減らすと、終点で折り返す列車から消える。まだ乗る人はいない。
@@ -2949,7 +2953,7 @@ mod tests {
     }
 
     /// 上限が 0 になった路線は、止まっていなくても haltedLines に理由つきで出る。
-    /// 3 つの駅に路線 c–a と a–b を作ると、あとから作った a–b は c–a と待てる所を共有して上限が 0 になる。
+    /// 駅 a–b の区間運転を 4 本作ると、共有の区画の枠 3 を前の 3 本が使い、4 本目の上限が 0 になる。
     /// コマンドの前に a–b が走っていたことにして、前後の比べを確かめる。
     #[test]
     fn halted_lines_show_a_line_whose_cap_became_zero() {
@@ -2981,30 +2985,33 @@ mod tests {
             index,
             generation: 0,
         };
-        apply(Command::CreateLine {
-            from: st(2),
-            to: st(0),
-        });
-        apply(Command::CreateLine {
-            from: st(0),
-            to: st(1),
-        });
+        for _ in 0..4 {
+            apply(Command::CreateLine {
+                from: st(0),
+                to: st(1),
+            });
+        }
         let mut before = line_states(&w);
         let lines: Vec<_> = w.rail().lines().map(|(id, _)| id).collect();
-        assert_eq!(lines.len(), 2);
-        before.insert(lines[1], (true, 0));
+        assert_eq!(lines.len(), 4);
+        before.insert(lines[3], (true, 0));
         let mut out = json!({});
         note_line_changes(&mut out, &w, &before);
         let halted = out["haltedLines"].as_array().unwrap();
         assert_eq!(halted.len(), 1, "{out}");
         assert_eq!(
             halted[0]["id"],
-            id_json(lines[1].index, lines[1].generation)
+            id_json(lines[3].index, lines[3].generation)
         );
         assert_eq!(halted[0]["stopped"], false);
         assert_eq!(
             halted[0]["capReason"]["sharedWith"],
-            json!([id_json(lines[0].index, lines[0].generation)])
+            json!(
+                lines[..3]
+                    .iter()
+                    .map(|l| id_json(l.index, l.generation))
+                    .collect::<Vec<_>>()
+            )
         );
         assert!(out.get("removedTrains").is_none() && out.get("removedLines").is_none());
     }
