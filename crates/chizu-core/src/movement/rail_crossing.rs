@@ -232,6 +232,31 @@ impl RailCrossings {
         }
         (inside, waits)
     }
+
+    /// 体が踏切にかかったまま止まっている車のいる踏切と、開いた踏切の手前で車間ぶんの内に止まっている車の数。
+    /// 後者は、踏切の先に抜けきる空きがないか、前の車の列が踏切の手前まで延びて止まった車である。
+    #[cfg(test)]
+    pub(crate) fn stopped_cars(&self, trips: &Trips) -> (BTreeSet<TilePos>, u64) {
+        let mut inside = BTreeSet::new();
+        let mut held = 0_u64;
+        let half = i64::from(CAR_LENGTH / 2);
+        for (_, t) in trips.iter() {
+            if t.mode != LaneMode::Car || t.waiting || t.speed != MmPerTick::ZERO {
+                continue;
+            }
+            let at = i64::from(t.offset.0);
+            for c in self.on_link(t.link(), t.link_len.0) {
+                let (near, far) = (i64::from(c.near), i64::from(c.far));
+                if at - half < far && near < at + half {
+                    inside.insert(c.tile);
+                } else if !c.closed && at + half <= near && near - (at + half) < i64::from(SPACING)
+                {
+                    held += 1;
+                }
+            }
+        }
+        (inside, held)
+    }
 }
 
 /// 前の車（いまのリンクの始まりから数えた位置と速さ）が減速の上限で止まった所から、車間を空けた所。

@@ -640,6 +640,38 @@ fn crossing_holds(
     rail.no_room_zones((link, len, bound), after, front)
 }
 
+/// 体が踏切にかかった車の前の車。同じ車線に前の車がなく（`from_next`）、前の車が、ほかのリンクから交差点に
+/// 入って同じ車線へ向かう車（まだノードを越えていない車）なら、停止線までは進めるとみなす。
+///
+/// 踏切に入るときに抜けきる空きを確かめても、そのあとにほかの腕の車が交差点に入ると、その車を前の車として
+/// 車間を空けるので、交差点のすぐ手前の踏切では体が踏切に残ったまま止まる。その車は交差点の四角の中にいて、
+/// 停止線までの車線にはいないので、停止線まで進んでもぶつからない。停止線を越えるかは、ほかの車と同じく交差点の
+/// 譲り合いと先の車線の空きで決まる。
+fn clear_of_crossing(
+    net: &Network,
+    rail: &RailCrossings,
+    t: &Trip,
+    from_next: bool,
+    leader: Option<(LaneOffset, MmPerTick)>,
+) -> Option<(LaneOffset, MmPerTick)> {
+    let (at, _) = leader?;
+    if !from_next || t.bound.is_some() || at >= t.link_len || rail.is_empty() {
+        return leader;
+    }
+    let p = i64::from(t.offset.0);
+    let half = i64::from(CAR_LENGTH / 2);
+    let on = rail
+        .on_link(t.link(), t.link_len.0)
+        .iter()
+        .any(|c| p - half < i64::from(c.far) && i64::from(c.near) < p + half);
+    let line = LaneOffset(stop_line(net, t.link()).0.saturating_add(SPACING));
+    if on && at < line {
+        Some((line, MmPerTick::ZERO))
+    } else {
+        leader
+    }
+}
+
 /// 区間の途中の衝突区間の手前で止まる車が、衝突区間とのあいだに空ける距離（mm）。
 const JAY_STOP_GAP: u32 = 1_000;
 
@@ -1327,6 +1359,7 @@ pub(super) fn step(
                 v,
             ))
         });
+        let leader = clear_of_crossing(net, rail, t, ahead.is_none(), leader);
         // いまのリンクと、ノードの先の次のリンクの衝突区間。次のリンクの位置は、いまのリンクの始まりから数え直す。
         let here = occupied.zones.get(&t.link()).map_or(&[][..], Vec::as_slice);
         let ahead = next_lane
