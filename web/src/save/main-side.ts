@@ -52,7 +52,11 @@ const NOTICE_MS = 8000;
 /** 消える知らせ（うまくいったこと）か、閉じるまで残る知らせ（続く状態、失敗、規則の変化）か。 */
 type NoticeKind = "transient" | "sticky";
 
-export function setupSaves(worker: Worker, controls: HTMLElement): void {
+export function setupSaves(
+  worker: Worker,
+  controls: HTMLElement,
+  onNewCity: () => void = () => {},
+): void {
   const send = (message: SaveToWorker, transfer: Transferable[] = []) =>
     worker.postMessage(message, transfer);
   const storePromise = SaveStore.open();
@@ -316,6 +320,7 @@ export function setupSaves(worker: Worker, controls: HTMLElement): void {
         startDialog.close();
         // 別の街になるので、余りの減り方の控えは捨てる
         resetUtilityTrends();
+        onNewCity();
         saveButton.disabled = !storage;
         const loaded = message.loaded;
         if (loaded !== null && loading !== null) {

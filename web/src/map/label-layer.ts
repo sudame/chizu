@@ -39,12 +39,18 @@ import {
 } from "./labels.ts";
 import { chunkOf } from "./names.ts";
 import type { Tile } from "./roads.ts";
+import type { TransitText } from "./transit.ts";
 
 /** 施設の種類の番号のうち駅（ServiceKind::Station）。 */
 const STATION_KIND = 5;
 
 const FONT_FAMILY = '"Hiragino Sans", "Noto Sans JP", system-ui, sans-serif';
 const HALO = "#ffffff";
+// 公共交通の主題図の文字（駅の徒歩圏の世帯の数）。交通の系統の灰青より濃い色にする
+const TRANSIT_TEXT_PX = 12;
+const TRANSIT_TEXT_COLOR = "#3c4a5c";
+// この倍率より引くと、車を持てない世帯の数を省いて、世帯の数だけにする
+const TRANSIT_FULL_TEXT_ZOOM = 3;
 const SHIELD_COLOR = "#1e7b4a";
 const SHIELD_RADIUS = 5;
 const SHIELD_BORDER = 1.5;
@@ -91,6 +97,8 @@ export class LabelLayer {
   #parking: ParkingLabel[] = [];
   #parkingDirty = false;
   #symbols: PlacedSymbol[] = [];
+  /** 公共交通の主題図で、駅の丸の下に書く文字（徒歩圏の世帯の数）。主題図を選んでいなければ空。 */
+  #transit: TransitText[] = [];
   #roadsDirty = false;
   #placesDirty = false;
   #stage = STAGE_STANDARD;
@@ -200,6 +208,13 @@ export class LabelLayer {
       (f) => f.kind === STATION_KIND && f.members.some((m) => m.x === cx && m.y === cy),
     );
     return found?.name ?? null;
+  }
+
+  /** 公共交通の主題図の文字を差し替える。空にすれば消す。 */
+  setTransit(texts: readonly TransitText[]): void {
+    this.#transit = [...texts];
+    // 次のフレームで描き直す
+    this.#viewKey = "";
   }
 
   /** 毎フレーム呼ぶ。要るときだけ置き場所を求め直し、描き直す。 */
@@ -320,6 +335,7 @@ export class LabelLayer {
       ctx.clearRect(0, 0, width, height);
     }
     this.#drawSymbols(camera, viewport);
+    this.#drawTransit(camera, viewport);
     for (const { label, alpha } of this.#fader.items()) {
       const sprite = this.#sprite(label.text, label.style, label.vertical);
       const sx = (label.wx - camera.x) * camera.zoom + viewport.width / 2;
@@ -339,6 +355,34 @@ export class LabelLayer {
       }
     }
     ctx.globalAlpha = 1;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
+
+  /** 公共交通の主題図の、駅の徒歩圏の世帯の数。駅の記号の下に書く。画面の外のものは描かない。 */
+  #drawTransit(camera: CameraView, viewport: Viewport): void {
+    if (this.#transit.length === 0) {
+      return;
+    }
+    const ctx = this.#ctx;
+    const look = symbolLook(camera.zoom);
+    ctx.setTransform(this.#dpr, 0, 0, this.#dpr, 0, 0);
+    ctx.font = `600 ${TRANSIT_TEXT_PX}px ${FONT_FAMILY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = HALO;
+    ctx.fillStyle = TRANSIT_TEXT_COLOR;
+    for (const t of this.#transit) {
+      const sx = (t.x - camera.x) * camera.zoom + viewport.width / 2;
+      const sy = (t.y - camera.y) * camera.zoom + viewport.height / 2 + look.radius + 4;
+      if (sx < -200 || sy < -20 || sx > viewport.width + 200 || sy > viewport.height + 20) {
+        continue;
+      }
+      const text = camera.zoom < TRANSIT_FULL_TEXT_ZOOM ? t.short : t.text;
+      ctx.strokeText(text, sx, sy);
+      ctx.fillText(text, sx, sy);
+    }
     ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 

@@ -26,6 +26,13 @@ use crate::tile::TilePos;
 /// 駅まで歩く範囲（マス）。乗る駅と降りる駅の候補を探す範囲である。
 pub const STATION_WALK_RADIUS: i64 = 64;
 
+/// 家の正面のマス `at` が、出入口のマス `door` の徒歩圏（直線で [`STATION_WALK_RADIUS`] マス以内）に入るか。
+/// 候補の駅の探し方（[`RailPlanner`]）と、画面の主題図の円と世帯の数が、同じ物差しを使うためにある。
+pub fn in_walk_range(at: TilePos, door: TilePos) -> bool {
+    let (dx, dy) = (door.x - at.x, door.y - at.y);
+    dx * dx + dy * dy <= STATION_WALK_RADIUS * STATION_WALK_RADIUS
+}
+
 /// 出発の側と行き先の側で、それぞれ候補にする駅の数。
 pub const NEAR_STATIONS: usize = 3;
 
@@ -176,7 +183,6 @@ impl RailPlanner {
     /// [`NEAR_STATIONS`] つまで返す。値は `doors` の添え字と直線の距離（mm）である。
     fn near(&self, at: TilePos) -> SmallVec<[(u32, u64); NEAR_STATIONS]> {
         let (cx, cy) = cell_of(at);
-        let r2 = STATION_WALK_RADIUS * STATION_WALK_RADIUS;
         let mut found: SmallVec<[(i64, StationId, u32); 8]> = SmallVec::new();
         for x in cx - 1..=cx + 1 {
             for y in cy - 1..=cy + 1 {
@@ -185,10 +191,9 @@ impl RailPlanner {
                 };
                 for i in list {
                     let (id, t, _) = self.doors[*i as usize];
-                    let (dx, dy) = (t.x - at.x, t.y - at.y);
-                    let d2 = dx * dx + dy * dy;
-                    if d2 <= r2 {
-                        found.push((d2, id, *i));
+                    if in_walk_range(at, t) {
+                        let (dx, dy) = (t.x - at.x, t.y - at.y);
+                        found.push((dx * dx + dy * dy, id, *i));
                     }
                 }
             }

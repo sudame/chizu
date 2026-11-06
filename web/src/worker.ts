@@ -23,6 +23,7 @@ import { isParking, OVERVIEW_LENGTH, serviceCode } from "./protocol/messages.ts"
 import { layout } from "./protocol/snapshot.ts";
 import { startSimulation } from "./save/worker-side.ts";
 import { stepBudget, tickRate } from "./speed.ts";
+import { TICKS_PER_DAY } from "./utility-trend.ts";
 
 const SUM_N = 10_000_000;
 const FRAME_MS = 1000 / 60;
@@ -228,6 +229,54 @@ function sendFinance(sim: Simulation, now: number, force = false): void {
   }
 }
 
+// 駅と路線の読み取り用の数。徒歩圏の世帯を数え直すので、間引いて送る。駅も路線もなければ送らない
+// （前に送ったあとで全部なくなったときは、空の数を 1 回送って画面に消させる）
+const RAIL_STATS_INTERVAL_MS = 1000;
+let railStatsAt = Number.NEGATIVE_INFINITY;
+let sentRailStats = false;
+function sendRailStats(sim: Simulation, now: number, force = false): void {
+  if (!force && now - railStatsAt < RAIL_STATS_INTERVAL_MS) {
+    return;
+  }
+  railStatsAt = now;
+  const stats = sim.rail_stats();
+  const empty = stats[0] === 0 && stats[1] === 0;
+  if (empty && !sentRailStats) {
+    return;
+  }
+  sentRailStats = !empty;
+  reply({ kind: "rail-stats", tick: sim.current_tick(), stats }, [stats.buffer]);
+}
+
+// 日が変わった tick の乗り降りの積み上げ。画面の「今日の乗り降り」の起点になる。
+// rail_stats は約 1 秒ごとなので、その値を起点にすると日の頭の数秒（時間を速めるほど長い）が抜ける。
+// 日の変わり目で進める数を区切り、ちょうどの tick で軽い積み上げだけを送る。駅がなければ送らない
+function sendRailDay(sim: Simulation): void {
+  const tally = sim.rail_tally();
+  if (tally.length > 1) {
+    reply({ kind: "rail-day", tick: sim.current_tick(), tally }, [tally.buffer]);
+  }
+}
+
+/** `ticks` だけ進める。日の変わり目をまたぐときは、そこで区切って `sendRailDay` を呼ぶ。 */
+function advanceByDay(sim: Simulation, ticks: number): void {
+  let left = ticks;
+  while (left > 0) {
+    const tick = sim.current_tick();
+    const chunk = Math.min(left, TICKS_PER_DAY - (tick % TICKS_PER_DAY));
+    sim.advance(chunk);
+    const after = sim.current_tick();
+    if (after === tick) {
+      // 止まっていて進まない
+      return;
+    }
+    left -= chunk;
+    if (after % TICKS_PER_DAY === 0) {
+      sendRailDay(sim);
+    }
+  }
+}
+
 // 人口と幸福度は建物の表が変わらなくても動く。住民の数だけ数え直すので、間引いて送る。
 // 一時停止中は街が進まないので、最初の 1 回のあとは送らない。最初の 1 回を画面は基準にする
 const OVERVIEW_INTERVAL_MS = 500;
@@ -266,7 +315,7 @@ function run(sim: Simulation): {
     const step = stepBudget(budget, now - last, rate, paused, MAX_BACKLOG_SECONDS);
     budget = step.budget;
     last = now;
-    sim.advance(step.ticks);
+    advanceByDay(sim, step.ticks);
     sendMoverPaths(sim);
     sim.publish();
     sendOutcomes(sim);
@@ -279,6 +328,7 @@ function run(sim: Simulation): {
       sendCityStats(sim, now);
     }
     sendFinance(sim, now);
+    sendRailStats(sim, now);
     sendOverview(sim, now, paused);
     sendChunks(sim);
     layerSender.send(sim, reply, CHUNKS_PER_FRAME, now);
@@ -360,7 +410,9 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         const results = [...sim.service_probe(code, x, y)] as (string | null)[];
         // 共同の駐車場は、届く範囲の中の車を持てない世帯の数も添える
         const carless = isParking(service) ? sim.carless_in_range(x, y) : 0;
-        reply({ kind: "service-probe", service, x, y, results, carless });
+        // 駅は、向きごとの出入口と徒歩圏の世帯の数も添える
+        const doors = service === "Station" ? (sim.station_probe(x, y) as (number[] | null)[]) : [];
+        reply({ kind: "service-probe", service, x, y, results, carless, doors });
         break;
       }
       case "probe-rail": {

@@ -108,6 +108,68 @@ fn run(w: &mut World, ticks: u64) {
     }
 }
 
+/// 駅の徒歩圏の世帯の数は、家の正面のマスと駅の出入口のマスの直線で数える。
+/// 車を持てない世帯の数は、車を持てない世帯の一覧（`carless_households`）と同じ決まりで数える。
+#[test]
+fn catchment_counts_households_by_the_door_tile() {
+    let (mut w, _, west, east) = rail_town(5, 1);
+    run(&mut w, 2 * crate::clock::TICKS_PER_DAY);
+    let doors = [
+        w.station_door(west).expect("西の駅の出入口がない"),
+        w.station_door(east).expect("東の駅の出入口がない"),
+    ];
+    // 出入口は駅の敷地の外の道路側（y = 0 の通りの近く）にある
+    assert!((-1..=1).contains(&doors[0].y), "{:?}", doors[0]);
+    let got = w.catchments(&doors);
+    let p = w.population();
+    let mut want = [(0_u32, 0_u32); 2];
+    for h in p.household_ids() {
+        let Some(front) = p
+            .home(h)
+            .flatten()
+            .and_then(|id| w.buildings().get(id))
+            .map(|b| b.front)
+        else {
+            continue;
+        };
+        for (i, d) in doors.iter().enumerate() {
+            if choice::in_walk_range(front, *d) {
+                want[i].0 += 1;
+                want[i].1 += u32::from(w.car_places().get(h).is_none());
+            }
+        }
+    }
+    assert!(want[0].0 > 0, "西の駅の徒歩圏に世帯がいない");
+    for (g, (households, carless)) in got.iter().zip(want) {
+        assert_eq!((g.households, g.carless), (households, carless));
+    }
+    // 東は工場だけなので、徒歩圏に家はない
+    assert_eq!(got[1].households, 0);
+    let all = w
+        .carless_households()
+        .iter()
+        .filter(|c| choice::in_walk_range(c.front, doors[0]))
+        .count();
+    assert_eq!(got[0].carless as usize, all);
+}
+
+/// 置く前の出入口は、置いたあとの出入口と同じマスになる。置けない所は `None`。
+#[test]
+fn station_door_before_placing_matches_the_placed_one() {
+    let (mut w, _, _, _) = rail_town(5, 1);
+    // 通りの北側。南側は y = 2 の線路が通る
+    let spot = at(-100, -1);
+    let before = w.station_door_if_placed(spot, 2).expect("置ける所のはず");
+    ok(w.apply(&Command::PlaceBuilding {
+        kind: ServiceKind::Station,
+        at: spot,
+        rotation: 2,
+    }));
+    let id = w.rail().station_at(spot).expect("駅がない");
+    assert_eq!(w.station_door(id), Some(before));
+    assert_eq!(w.station_door_if_placed(spot, 2), None);
+}
+
 /// 乗る人と移動の整合。乗る人は休ませた移動を 1 つずつ持ち、その移動の住民がいる。待っている人は待ち行列に、
 /// 乗っている人は列車の並びに 1 回ずつ入っている。列車は定員を超えない。
 fn check(w: &World) {

@@ -32,7 +32,7 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ kind: "chunks", chunks: [] })).toBe(true);
     expect(isWorkerToMain(roads)).toBe(true);
     const probe = { kind: "service-probe", service: "WaterPump", x: 3, y: -4 };
-    const answer = { ...probe, carless: 0 };
+    const answer = { ...probe, carless: 0, doors: [] };
     expect(isWorkerToMain({ ...answer, results: [null, "道路に面していない", null, null] })).toBe(
       true,
     );
@@ -40,6 +40,15 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain({ ...answer, results: [null, 1, null, null] })).toBe(false);
     // 共同の駐車場の届く範囲の世帯の数が、数でなければ受け取らない
     expect(isWorkerToMain({ ...probe, results: [null, null, null, null] })).toBe(false);
+    // 駅の向きごとの出入口は配列で届く
+    expect(isWorkerToMain({ ...answer, results: [null, null, null, null], doors: 3 })).toBe(false);
+    const stats = { kind: "rail-stats", tick: 10, stats: new Float64Array(4) };
+    expect(isWorkerToMain(stats)).toBe(true);
+    expect(isWorkerToMain({ ...stats, tick: 1.5 })).toBe(false);
+    expect(isWorkerToMain({ ...stats, stats: [0, 0, 0, 0] })).toBe(false);
+    const day = { kind: "rail-day", tick: 7200, tally: new Float64Array(1) };
+    expect(isWorkerToMain(day)).toBe(true);
+    expect(isWorkerToMain({ ...day, tally: [0] })).toBe(false);
     const inspect = { kind: "inspect", query: { kind: "tile", x: 3, y: -4 }, info: [] };
     expect(isWorkerToMain(inspect)).toBe(true);
     expect(isWorkerToMain({ ...inspect, info: [2, 1, 1200, 1200] })).toBe(true);

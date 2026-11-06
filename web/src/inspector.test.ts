@@ -294,3 +294,69 @@ describe("setupInspector", () => {
     expect(rows[1]?.textContent).toBe("2 / 10 人");
   });
 });
+
+describe("駅", () => {
+  // [3, 待っている人, 乗った, 降りた, 徒歩圏の世帯, 車を持てない世帯, 残ったか, 路線の数, 路線の添え字 × 10, a, b]
+  const info = (over: Record<number, number> = {}) => {
+    const base = [3, 12, 340, 310, 480, 60, 0, 2, 0, 1, -1, -1, -1, -1, -1, -1, -1, -1, 4, 0];
+    return base.map((v, i) => over[i] ?? v);
+  };
+
+  it("駅を読む", () => {
+    expect(parseInspect(info())).toEqual({
+      kind: "station",
+      target: [3, 4, 0],
+      waiting: 12,
+      boarded: 340,
+      alighted: 310,
+      households: 480,
+      carless: 60,
+      leftBehind: false,
+      lines: [0, 1],
+    });
+    // 出入口がない駅は徒歩圏の世帯が -1 で届く
+    expect(parseInspect(info({ 4: -1, 5: -1 }))).toMatchObject({ households: null, carless: 0 });
+  });
+
+  it("待っている人、乗り降り、徒歩圏の世帯、止まる路線を出す", () => {
+    const view = parseInspect(info());
+    expect(view).not.toBeNull();
+    if (view === null) {
+      return;
+    }
+    const text = describeInspect(view, { boarded: 40, alighted: 35, fullDay: true });
+    expect(text.title).toBe("駅");
+    expect(text.rows).toEqual([
+      { label: "待っている人", value: "12 人" },
+      { label: "今日乗った人", value: "40 人" },
+      { label: "今日降りた人", value: "35 人" },
+      { label: "徒歩圏の世帯", value: "480 世帯（車を持てない 60）" },
+      { label: "止まる路線", value: "青線、緑線" },
+    ]);
+  });
+
+  it("日の変わり目を見ていないあいだは、開いてからの数だと書く", () => {
+    const view = parseInspect(info());
+    if (view === null) {
+      throw new Error("駅を読めない");
+    }
+    const rows = describeInspect(view, { boarded: 5, alighted: 4, fullDay: false }).rows;
+    expect(rows[1]?.label).toBe("乗った人（開いてから）");
+    // その日の数がなければ、始まりからの数を出す
+    expect(describeInspect(view).rows[1]).toEqual({
+      label: "乗った人（これまで）",
+      value: "340 人",
+    });
+  });
+
+  it("乗りきれず残ったときは混雑の行を足し、道路に面していない駅はそう書く", () => {
+    const view = parseInspect(info({ 6: 1, 4: -1, 5: -1, 7: 0 }));
+    if (view === null) {
+      throw new Error("駅を読めない");
+    }
+    const rows = describeInspect(view).rows;
+    expect(rows.map((r) => r.label)).toContain("混雑");
+    expect(rows.find((r) => r.label === "徒歩圏の世帯")?.value).toContain("道路に面していない");
+    expect(rows.find((r) => r.label === "止まる路線")?.value).toBe("なし");
+  });
+});

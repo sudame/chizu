@@ -240,6 +240,41 @@ impl Simulation {
         self.0.rail_lines()
     }
 
+    /// 駅と路線の読み取り用の数。並びは `Sim::rail_stats` のとおりである。
+    pub fn rail_stats(&self) -> Vec<f64> {
+        self.0.rail_stats()
+    }
+
+    /// 日の変わり目に控える、乗り降りの積み上げ。並びは `Sim::rail_tally` のとおりである。
+    pub fn rail_tally(&self) -> Vec<f64> {
+        self.0.rail_tally()
+    }
+
+    /// 駅を間口のマス (x, y) に置いたときの、向き 0〜3 ごとの `[出入口の x, y, 徒歩圏の世帯, 車を持てない世帯]`。
+    /// 置けない向きは null。
+    pub fn station_probe(&self, x: f64, y: f64) -> Result<js_sys::Array, JsError> {
+        let coord = |v: f64| {
+            (v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0)
+                .then_some(v as i64)
+                .ok_or_else(|| JsError::new("マスの座標が整数でない"))
+        };
+        let at = TilePos::new(coord(x)?, coord(y)?);
+        Ok(self
+            .0
+            .station_probe(at)
+            .iter()
+            .map(|r| match r {
+                Some(v) => JsValue::from(
+                    v.iter()
+                        .copied()
+                        .map(JsValue::from_f64)
+                        .collect::<js_sys::Array>(),
+                ),
+                None => JsValue::NULL,
+            })
+            .collect())
+    }
+
     /// 線路を (x0, y0) から (x1, y1) に引けるかと建設費を、`[理由の文か null, 建設費]` で返す。
     pub fn rail_probe(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Result<js_sys::Array, JsError> {
         let coord = |v: f64| {

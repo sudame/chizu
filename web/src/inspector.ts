@@ -1,6 +1,7 @@
 // 「見る」の道具で押した建物や施設の様子を出す小さなパネル。DOM に触るのは setupInspector だけで、
 // 数の読み方と文言は Vitest で確かめられる。
 
+import { lineName } from "./map/lines.ts";
 import {
   type InspectQuery,
   type InspectTarget,
@@ -12,6 +13,9 @@ import {
 
 /** chizu-wasm の inspect が返す数の個数。 */
 export const INSPECT_LENGTH = 20;
+
+/** 駅の欄に並べる、止まる路線の数の上限。chizu-wasm の inspect::STATION_LINES と同じ。 */
+export const STATION_LINES = 10;
 
 /** 幸福度とその要素の満点。chizu-core の HAPPINESS_MAX と同じ。 */
 export const HAPPINESS_MAX = 100;
@@ -82,7 +86,28 @@ export type FacilityView = {
   parking: ParkingView | null;
 };
 
-export type InspectView = BuildingView | FacilityView;
+/** 駅の様子。待っている人、乗り降りの数、徒歩圏の世帯、止まる路線。 */
+export type StationView = {
+  kind: "station";
+  target: InspectTarget;
+  waiting: number;
+  /** 始まりからの乗った人と降りた人。 */
+  boarded: number;
+  alighted: number;
+  /** 出入口の徒歩圏の世帯の数。出入口（道路に面した端）がなければ null。 */
+  households: number | null;
+  /** そのうち車を持てない世帯の数。 */
+  carless: number;
+  /** 直前の列車に乗りきれず人が残ったか。 */
+  leftBehind: boolean;
+  /** 駅に止まる路線の添え字。 */
+  lines: number[];
+};
+
+export type InspectView = BuildingView | FacilityView | StationView;
+
+/** 駅の欄に出す、その日の乗り降り。`fullDay` が偽なら、開いてからの数である。 */
+export type StationRides = { boarded: number; alighted: number; fullDay: boolean };
 
 const ZONES: Record<number, BuildingView["zone"]> = {
   1: "Residential",
@@ -105,6 +130,20 @@ export function parseInspect(numbers: ArrayLike<number>): InspectView | null {
   }
   const at = (i: number) => numbers[i] ?? -1;
   const target: InspectTarget = [at(0), at(INSPECT_LENGTH - 2), at(INSPECT_LENGTH - 1)];
+  if (at(0) === 3) {
+    const count = Math.min(Math.max(at(7), 0), STATION_LINES);
+    return {
+      kind: "station",
+      target,
+      waiting: at(1),
+      boarded: at(2),
+      alighted: at(3),
+      households: at(4) >= 0 ? at(4) : null,
+      carless: Math.max(at(5), 0),
+      leftBehind: at(6) === 1,
+      lines: Array.from({ length: count }, (_, i) => at(8 + i)),
+    };
+  }
   if (at(0) === 2) {
     const service = SERVICES[at(1)];
     if (service === undefined) {
@@ -180,8 +219,41 @@ export type InspectText = { title: string; rows: InspectRow[] };
 
 const reach = (ok: boolean) => (ok ? "届いている" : "届いていない");
 
-/** パネルに出す題と行。 */
-export function describeInspect(view: InspectView): InspectText {
+/** パネルに出す題と行。駅には、その日の乗り降り（`rides`）を添えられる。 */
+export function describeInspect(view: InspectView, rides: StationRides | null = null): InspectText {
+  if (view.kind === "station") {
+    const today = rides === null ? null : rides;
+    const rows: InspectRow[] = [
+      { label: "待っている人", value: `${n(view.waiting)} 人` },
+      today === null
+        ? { label: "乗った人（これまで）", value: `${n(view.boarded)} 人` }
+        : {
+            label: today.fullDay ? "今日乗った人" : "乗った人（開いてから）",
+            value: `${n(today.boarded)} 人`,
+          },
+      today === null
+        ? { label: "降りた人（これまで）", value: `${n(view.alighted)} 人` }
+        : {
+            label: today.fullDay ? "今日降りた人" : "降りた人（開いてから）",
+            value: `${n(today.alighted)} 人`,
+          },
+      {
+        label: "徒歩圏の世帯",
+        value:
+          view.households === null
+            ? "道路に面していないので、歩いて来られない"
+            : `${n(view.households)} 世帯（車を持てない ${n(view.carless)}）`,
+      },
+      {
+        label: "止まる路線",
+        value: view.lines.length === 0 ? "なし" : view.lines.map((l) => lineName(l)).join("、"),
+      },
+    ];
+    if (view.leftBehind) {
+      rows.push({ label: "混雑", value: "直前の列車に乗りきれず、人が残った" });
+    }
+    return { title: SERVICE_LABEL.Station, rows };
+  }
   if (view.kind === "facility") {
     const upkeep = { label: "維持費", value: `${n(view.upkeepPerDay)} / 日` };
     if (isParking(view.service) && view.parking !== null) {
@@ -281,8 +353,8 @@ export function applyInspectReply(
 }
 
 export type Inspector = {
-  /** 届いた様子で書き直す。null ならパネルを閉じる。 */
-  show: (view: InspectView | null) => void;
+  /** 届いた様子で書き直す。null ならパネルを閉じる。駅には、その日の乗り降りを添えられる。 */
+  show: (view: InspectView | null, rides?: StationRides | null) => void;
   close: () => void;
 };
 
@@ -313,12 +385,12 @@ export function setupInspector(panel: HTMLElement, onClose: () => void): Inspect
   });
   return {
     close,
-    show(view) {
+    show(view, rides = null) {
       if (view === null) {
         close();
         return;
       }
-      const text = describeInspect(view);
+      const text = describeInspect(view, rides);
       if (title.textContent !== text.title) {
         title.textContent = text.title;
       }
