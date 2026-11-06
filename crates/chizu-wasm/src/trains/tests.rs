@@ -106,3 +106,76 @@ fn trains_keep_to_the_left_of_their_direction_on_the_track() {
     }
     assert!(seen_east && seen_west, "往復の両方向を見ていない");
 }
+
+/// y = 10 の道路の西と東の切れ端に面した駅 2 つを、y = 8 の線路で結び、x = 30 の縦の道路で踏切を作った街。
+fn crossing_shuttle() -> Sim {
+    let world = World::new_with_money(0, Money(1_000_000_000)).with_unlimited_land();
+    let mut sim = Sim::from_parts(world, CommandLog::new());
+    let mut submit = |c: Command| {
+        sim.submit(c).unwrap();
+    };
+    for (from, to) in [((0, 10), (12, 10)), ((50, 10), (66, 10))] {
+        submit(Command::BuildRoad {
+            from: at(from.0, from.1),
+            to: at(to.0, to.1),
+            kind: RoadKind::Small,
+        });
+    }
+    for x in [12, 64] {
+        submit(Command::PlaceBuilding {
+            kind: ServiceKind::Station,
+            at: at(x, 9),
+            rotation: 2,
+        });
+    }
+    submit(Command::BuildRail {
+        from: at(12, 8),
+        to: at(55, 8),
+    });
+    submit(Command::BuildRoad {
+        from: at(30, 0),
+        to: at(30, 20),
+        kind: RoadKind::Small,
+    });
+    let ids: Vec<_> = sim.world().rail().stations().map(|(id, _)| id).collect();
+    sim.submit(Command::CreateLine {
+        from: ids[0],
+        to: ids[1],
+    })
+    .unwrap();
+    let line = sim.world().rail().lines().next().unwrap().0;
+    sim.submit(Command::SetLineTrains { line, trains: 1 })
+        .unwrap();
+    sim
+}
+
+#[test]
+fn a_crossing_is_sent_with_the_road_and_rail_directions() {
+    let sim = crossing_shuttle();
+    // 縦の道路（小は 1）と、横の線路
+    assert_eq!(
+        sim.rail_crossings(),
+        vec![30.0, 8.0, 0.0, 1.0, 1.0, 0.0, 1.0]
+    );
+}
+
+#[test]
+fn closed_crossings_follow_the_train() {
+    let mut sim = crossing_shuttle();
+    assert!(closed_crossings(sim.world()).is_empty());
+    let mut closed_ticks = 0;
+    let mut open_ticks = 0;
+    for _ in 0..3_000 {
+        sim.advance(1);
+        let closed = closed_crossings(sim.world());
+        if closed.is_empty() {
+            open_ticks += 1;
+        } else {
+            assert_eq!(closed, vec![[30, 8]]);
+            closed_ticks += 1;
+        }
+    }
+    // 列車が通るあいだだけ閉じる
+    assert!(closed_ticks > 0);
+    assert!(open_ticks > closed_ticks);
+}

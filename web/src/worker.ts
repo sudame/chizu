@@ -99,21 +99,35 @@ function sendRoads(sim: Simulation): void {
   reply({ kind: "roads", revision, segments, nodes }, [segments.buffer, nodes.buffer]);
 }
 
-// 線路と駅は版が変わったときだけ、全体を送り直す。線路は数百本ほどで、道路網と同じ考え方で足りる
+// 線路と駅は版が変わったときだけ、全体を送り直す。線路は数百本ほどで、道路網と同じ考え方で足りる。
+// 踏切は道路を引いても生まれるので、道路網の版が変わったときは踏切の一覧を求め、前と違うときも送り直す。
+// 閉じているかは毎 tick 変わるので、ここには入れず、三重バッファの枠で送る
 let sentRailRevision = -1;
+let checkedNetworkRevision = -1;
+let sentCrossings = "";
 function sendRail(sim: Simulation): void {
   const revision = sim.rail_revision();
-  if (revision === sentRailRevision) {
+  const networkRevision = sim.network_version();
+  if (revision === sentRailRevision && networkRevision === checkedNetworkRevision) {
+    return;
+  }
+  const crossings = sim.rail_crossings();
+  const crossingsKey = crossings.join(",");
+  const railChanged = revision !== sentRailRevision;
+  checkedNetworkRevision = networkRevision;
+  if (!railChanged && crossingsKey === sentCrossings) {
     return;
   }
   sentRailRevision = revision;
+  sentCrossings = crossingsKey;
   const tracks = sim.rail_tracks();
   const stations = sim.rail_stations();
   const lines = sim.rail_lines();
-  reply({ kind: "rail", revision, tracks, stations, lines }, [
+  reply({ kind: "rail", revision, tracks, stations, lines, crossings }, [
     tracks.buffer,
     stations.buffer,
     lines.buffer,
+    crossings.buffer,
   ]);
 }
 

@@ -78,6 +78,15 @@ fn car_point(world: &World, line: &RailLine, train: &Train, behind: i64) -> (f64
     point_on(world, line, i, 0)
 }
 
+/// いま閉じている踏切のマスを、マスの順に返す。車両と同じ枠に書いて、列車の位置と食い違わないようにする。
+pub fn closed_crossings(world: &World) -> Vec<[i32; 2]> {
+    let rail = world.rail();
+    rail.crossings()
+        .filter(|t| rail.closed_since(*t).is_some())
+        .filter_map(|t| Some([i32::try_from(t.x).ok()?, i32::try_from(t.y).ok()?]))
+        .collect()
+}
+
 /// 走っている列車の車両を `out` に入れ、車両の座標の基準にしたチャンクを返す。
 /// 車両は列車の ID の順に、先頭の車両から並べる。上限を超える分は書かない。
 pub fn collect_cars(world: &World, out: &mut Vec<Mover>) -> ChunkCoord {
