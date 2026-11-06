@@ -334,6 +334,7 @@ export class Geometry {
    * 半分の太さ `half` は世界の単位で、画面では `min` ピクセルを下回らない。
    * 両端は `trimA` と `trimB`（マス）だけ内側に縮める。`offset` の正は進む向き（a から b）の右である。
    * `extra` は画面で半分の太さに足すピクセル数、`dashPx` が正なら画面でその周期の破線にする。
+   * 破線の位置は、a の端で `alongStart`（世界の距離）から数え始める。
    */
   strip(
     a: Tile,
@@ -346,6 +347,7 @@ export class Geometry {
     trimB = 0,
     extra = 0,
     dashPx = 0,
+    alongStart = 0,
   ): void {
     const dx = b.x - a.x;
     const dy = b.y - a.y;
@@ -359,14 +361,14 @@ export class Geometry {
     const ay = a.y + 0.5 + uy * trimA + ny * offset;
     const bx = b.x + 0.5 - ux * trimB + nx * offset;
     const by = b.y + 0.5 - uy * trimB + ny * offset;
-    const along = len - trimA - trimB;
+    const along = len - trimA - trimB + alongStart;
     const v = (x: number, y: number, s: number, d: number) =>
       this.#vertex(x, y, nx * s, ny * s, half, min, color, extra, d, dashPx);
-    v(ax, ay, 1, 0);
-    v(ax, ay, -1, 0);
+    v(ax, ay, 1, alongStart);
+    v(ax, ay, -1, alongStart);
     v(bx, by, 1, along);
     v(bx, by, 1, along);
-    v(ax, ay, -1, 0);
+    v(ax, ay, -1, alongStart);
     v(bx, by, -1, along);
   }
 

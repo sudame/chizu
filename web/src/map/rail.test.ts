@@ -156,6 +156,40 @@ describe("曲がり角のつなぎ目", () => {
     }
   });
 
+  test("枕木は、曲がり角の二等分線の上の 1 本から前後へ並び、両端の隙間は枕木 1 本ぶんほどに収まる", () => {
+    const m = railMeshes(bend, []);
+    const data = m.sleepers.build();
+    // 破線のある帯（頂点 6 つ）ごとに、a の端と b の端の破線の位置と周期を読む
+    const strips: { d0: number; d1: number; period: number }[] = [];
+    for (let i = 0; i + 6 * 13 <= data.length; i += 6 * 13) {
+      const period = Math.abs(data[i + 12] ?? 0);
+      if (period > 0) {
+        strips.push({ d0: data[i + 11] ?? 0, d1: data[i + 2 * 13 + 11] ?? 0, period });
+      }
+    }
+    // 2 本の線路に、上りと下りの 2 レーンずつ
+    expect(strips.length).toBe(4);
+    for (const { d0, d1, period } of strips) {
+      // 破線は、位置 d の mod 周期が周期の半分より小さいときに描く
+      const firstOn = Math.ceil(d0 / period) * period;
+      const lastOnEnd = Math.floor(d1 / period) * period + period / 2;
+      const startGap = firstOn - d0;
+      const endGap = d1 - Math.min(lastOnEnd, d1);
+      expect(startGap).toBeLessThanOrEqual(period / 2 + 1e-6);
+      expect(endGap).toBeLessThanOrEqual(period / 2 + 1e-6);
+      // 角の隙間は、二等分線の上の枕木の厚みの半分と合わせても、枕木 1 本ぶん（周期）に収まる
+      expect(startGap + period / 4).toBeLessThan(period);
+    }
+    // 二等分線の上の枕木が、レーンごとに 1 本ある（頂点 6 つで、破線のない帯）
+    const solid = [];
+    for (let i = 0; i + 6 * 13 <= data.length; i += 6 * 13) {
+      if ((data[i + 12] ?? 0) === 0) {
+        solid.push(i);
+      }
+    }
+    expect(solid.length).toBe(2);
+  });
+
   test("まっすぐにつながる 2 本には、角も丸も足さない", () => {
     const straight = parseTracks([0, 0, 5, 0, 0, 5, 0, 9, 0, 0]);
     expect(points(railMeshes(straight, []).bed).length).toBe(2 * 6);

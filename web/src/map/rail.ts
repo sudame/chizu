@@ -40,6 +40,8 @@ const RAIL_MIN_PX = 0.5;
 /** 枕木の、世界の間隔（マス）と、枕木の長さの半分（マス）。間隔は 0.6m で、負にして世界の距離で破線にする。 */
 const SLEEPER_PERIOD = 0.075;
 const SLEEPER_HALF = 0.14;
+/** 枕木 1 本の、線路に沿った厚み（マス）。破線の周期の半分である。 */
+const SLEEPER_THICK = SLEEPER_PERIOD / 2;
 /** 駅舎を、駅の間口の両端からこれだけ（マス）内側に置く。 */
 const BUILDING_MARGIN = 1;
 /** 駅舎の、道路の側の列のうち、道路に近い側の厚み（マス）と、道路の側の縁からの余白（マス）。 */
@@ -236,13 +238,41 @@ class Joints {
     return Math.max(-limit, Math.min(limit, k));
   }
 
-  /** 枕木が曲がりの二等分線を越えて、隣の線路の枕木と重ならないための縮める長さ。外側の端の横幅 `reach` から決める。 */
-  sleeperTrim(track: number, end: End, reach: number): number | null {
+  /** 曲がり角か。 */
+  isBend(track: number, end: End): boolean {
+    return this.#bend(track, end) !== null;
+  }
+
+  /**
+   * 曲がり角の二等分線の上に、レーン `lane`（線路 i の中心線からのずれ）の枕木を 1 本置く。前後の枕木はこの枕木の
+   * 両側から始まるので、角の隙間が 1 本ぶんに収まる。通る向きで先に来る端の線路だけが置く。
+   */
+  bisectorSleeper(g: Geometry, track: number, end: End, lane: number): void {
+    const t = this.#tracks[track];
     const bend = this.#bend(track, end);
-    if (bend === null) {
-      return null;
+    if (t === undefined || bend === null || !bend.incoming) {
+      return;
     }
-    return Math.min((reach * Math.abs(bend.cross)) / (1 + bend.c), bend.len / 2);
+    const ends = this.#nodes.get(Joints.key(t[end])) ?? [];
+    const other = ends.find((e) => !(e.track === track && e.end === end));
+    if (other === undefined) {
+      return;
+    }
+    // 通る向き（この端から入って、もう一方の端へ出る）の法線の和が、二等分線の向きになる
+    const u0 = this.#outward(track, end);
+    const u1 = this.#outward(other.track, other.end);
+    const n1 = [u0[1], -u0[0]] as const;
+    const n2 = [-u1[1], u1[0]] as const;
+    const same = end === "b";
+    const o = same ? lane : -lane;
+    const point = (offset: number): [number, number] => [
+      node.x + 0.5 + (offset * (n1[0] + n2[0])) / (1 + bend.c),
+      node.y + 0.5 + (offset * (n1[1] + n2[1])) / (1 + bend.c),
+    ];
+    const node = t[end];
+    const p = point(o - SLEEPER_HALF);
+    const q = point(o + SLEEPER_HALF);
+    g.line(p[0], p[1], q[0], q[1], SLEEPER_THICK / 2, RAIL_SLEEPER_COLOR, 0);
   }
 
   /** 道床の面。曲がり角は二等分線で斜めに切り、行き止まりは半マス伸ばし、分岐は丸か四角で埋める。 */
@@ -331,19 +361,49 @@ export function railMeshes(
       const lane = side * TRACK_OFFSET;
       // 駅の線路は、両端が駅の敷地の端のマスの真ん中なので、敷地の端まで半マス伸ばす（曲がり角を除く）
       const ext = station ? -0.5 : 0;
-      const sleeperJoint = (end: End) => joints.sleeperTrim(i, end, Math.abs(lane) + SLEEPER_HALF);
-      meshes.sleepers.strip(
-        a,
-        b,
-        lane,
-        SLEEPER_HALF,
-        RAIL_SLEEPER_COLOR,
-        0,
-        sleeperJoint("a") ?? ext,
-        sleeperJoint("b") ?? ext,
-        0,
-        -SLEEPER_PERIOD,
-      );
+      // 曲がり角では、枕木を中心線の符号つきのマイターで切り、二等分線の上の枕木から前後へ並べる
+      const inset = (end: End) => {
+        const k = joints.trim(i, end, lane);
+        return k === null ? null : k + SLEEPER_THICK / 2;
+      };
+      const trimA = inset("a");
+      const trimB = inset("b");
+      joints.bisectorSleeper(meshes.sleepers, i, "a", lane);
+      joints.bisectorSleeper(meshes.sleepers, i, "b", lane);
+      if (trimA === null && trimB === null) {
+        meshes.sleepers.strip(
+          a,
+          b,
+          lane,
+          SLEEPER_HALF,
+          RAIL_SLEEPER_COLOR,
+          0,
+          ext,
+          ext,
+          0,
+          -SLEEPER_PERIOD,
+        );
+      } else {
+        const ta = trimA ?? ext;
+        const tb = trimB ?? ext;
+        // 両端の隙間が同じ（半周期）になるよう、周期を少しだけ伸ばし縮みさせて、間に枕木をちょうど並べる
+        const length = Math.hypot(b.x - a.x, b.y - a.y) - ta - tb;
+        const n = Math.max(1, Math.round(length / SLEEPER_PERIOD - 0.5));
+        const period = length / (n + 0.5);
+        meshes.sleepers.strip(
+          a,
+          b,
+          lane,
+          SLEEPER_HALF,
+          RAIL_SLEEPER_COLOR,
+          0,
+          ta,
+          tb,
+          0,
+          -period,
+          period / 2,
+        );
+      }
       for (const rail of [-1, 1]) {
         const o = lane + rail * RAIL_OFFSET;
         meshes.rails.strip(
