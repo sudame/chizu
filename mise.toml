@@ -85,6 +85,16 @@ run = "cargo"
 env = { RAYON_NUM_THREADS = "2" }
 run = "cargo nextest run --workspace"
 
+[tasks."golden:update"]
+description = "ゴールデンと書き出しをまとめて書き直す。意図して変えたときと、main との衝突を解いたあとにだけ回す。CI では回さない"
+# chizu-core のゴールデン（tests/golden/ の *.hash と *.rec、snapshot.hash）を先に書き直し、
+# そのあと chizu-wasm の書き出し（snapshot-layout.json、snapshot-fixture.bin、city-stats-layout.json）を書き直す
+env = { RAYON_NUM_THREADS = "2" }
+run = [
+  "CHIZU_UPDATE_GOLDEN=1 cargo nextest run -p chizu-core --test golden",
+  "CHIZU_UPDATE_LAYOUT=1 cargo nextest run -p chizu-wasm",
+]
+
 [tasks."test:web"]
 depends = ["install:web"]
 dir = "web"
