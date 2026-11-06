@@ -189,6 +189,7 @@ pub struct World {
     router: RouterSlot,
 }
 
+mod bulldoze;
 pub mod carless;
 mod commute;
 pub mod economy;
@@ -197,6 +198,7 @@ pub mod growth;
 pub mod people;
 mod traffic;
 
+pub use bulldoze::BulldozePreview;
 pub use traffic::{CarSample, CitizenPlaces, CommuteDistances, CommuteTimes, DayTraffic, Traffic};
 
 /// 網から作り直せる経路探索。状態に入れず、`World` どうしを比べるときも見ない。

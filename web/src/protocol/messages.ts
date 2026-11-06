@@ -194,6 +194,8 @@ export type MainToWorker =
   | { kind: "probe-service"; service: ServiceName; x: number; y: number }
   /** マス (x, y) にある建物か施設の様子を中核に問い合わせる。 */
   | { kind: "inspect"; query: InspectQuery }
+  /** 長方形 (x0, y0)-(x1, y1) を取り壊したときに消えるものを、状態を変えずに中核に問い合わせる。 */
+  | { kind: "bulldoze-preview"; x0: number; y0: number; x1: number; y1: number }
   /** フィードバックに添える状態と記録を求める。 */
   | { kind: "feedback" }
   /**
@@ -251,6 +253,8 @@ export type WorkerToMain =
     }
   /** inspect の答え。query は問い合わせの写しで、info は chizu-wasm の inspect の数。何もなければ空。 */
   | { kind: "inspect"; query: InspectQuery; info: number[] }
+  /** bulldoze-preview の答え。x0〜y1 は問い合わせの写しで、info は chizu-wasm の bulldoze_preview の数。 */
+  | { kind: "bulldoze-preview"; x0: number; y0: number; x1: number; y1: number; info: number[] }
   /** フィードバックの状態を返せなかった。 */
   | { kind: "feedback-error"; message: string }
   /**
@@ -462,6 +466,15 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
     case "inspect":
       return (
         isInspectQuery(v.query) &&
+        Array.isArray(v.info) &&
+        v.info.every((n) => typeof n === "number")
+      );
+    case "bulldoze-preview":
+      return (
+        Number.isInteger(v.x0) &&
+        Number.isInteger(v.y0) &&
+        Number.isInteger(v.x1) &&
+        Number.isInteger(v.y1) &&
         Array.isArray(v.info) &&
         v.info.every((n) => typeof n === "number")
       );

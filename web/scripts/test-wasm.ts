@@ -937,6 +937,38 @@ try {
     `同じ場所に引くと理由つきで断られる（${again.result.text}）`,
   );
 
+  // 取り壊しの道具は、1 マスのドラッグでも、実際に消える区間の全体と数を、取り壊す前に示す
+  await page.locator('button[data-tool="bulldoze"]').click();
+  const oneTile = tileCenter(20, 32);
+  await page.mouse.move(oneTile.x, oneTile.y);
+  await page.mouse.down();
+  await page.mouse.move(oneTile.x + 1, oneTile.y, { steps: 2 });
+  await page.waitForFunction(
+    () => Number(document.querySelector<HTMLElement>("#map")?.dataset.bulldozeRoadTiles ?? 0) > 1,
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const previewed = await map.evaluate((el) => ({
+    roadTiles: Number(el.dataset.bulldozeRoadTiles),
+    segments: Number(el.dataset.bulldozeSegments),
+    info: document.querySelector("#tool-info")?.textContent ?? "",
+  }));
+  check(
+    previewed.segments >= 1 && previewed.roadTiles > 1,
+    `1 マスのドラッグでも、区間全体の道路が消えると示される（${previewed.roadTiles} マス、${previewed.segments} 区間）`,
+  );
+  check(
+    previewed.info.startsWith("消える：道路"),
+    `消える数が道具の説明の欄に出る（${previewed.info}）`,
+  );
+  const [red = 0, green = 0, blue = 0] = await pixel(oneTile.x + 20, oneTile.y);
+  const redInside = [red, green, blue];
+  check(
+    red > green + 40 && red > blue + 40,
+    `ドラッグした 1 マスの外の、消える区間も赤く塗られる（${redInside.join(", ")}）`,
+  );
+  await page.mouse.up();
+  await page.keyboard.press("Escape");
   await page.locator('button[data-tool="bulldoze"]').click();
   const beforeBulldoze = await outcomeCount();
   await page.mouse.move(cx - 100, cy - 20);
