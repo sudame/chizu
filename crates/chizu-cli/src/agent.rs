@@ -440,9 +440,10 @@ observe の removedCrosswalks:
       道路の区間の途中のマスを横切る所は踏切になる（act の結果の crossings にマスが出る）。踏切にできないときは断る。
       道路に沿う（平行な）線路は Denied（Occupied）、道路のノード（交差点、曲がり角、端、つなぎ目）のマスか、線路の端を
       道路のマスに置くと Denied（NodeOnCrossing）、高速道路は Denied（HighwayCrossing）、まわりの 8 マスにほかの
-      踏切があると Denied（CrossingTooClose）、道路に沿って 2 マス以内に交差点か曲がり角があると
-      Denied（CrossingNearJunction）。道路を引いて線路を横切るときも同じ決まりで、線路の端、分岐、曲がりのノードの
-      マスと、既にある踏切のマスを通る道路は Denied（NodeOnCrossing）、既にある踏切から道路に沿って 2 マス以内に
+      踏切があると Denied（CrossingTooClose）、道路に沿って隣のマスに交差点か曲がり角があると
+      Denied（CrossingNearJunction）。交差点とのあいだに 1 マス挟めば置けるので、道路に平行な駅の線路を延ばして、
+      駅の端のすぐ先で交わる道路を渡れる。道路を引いて線路を横切るときも同じ決まりで、線路の端、分岐、曲がりのノードの
+      マスと、既にある踏切のマスを通る道路は Denied（NodeOnCrossing）、既にある踏切から道路に沿って隣のマスに
       交差点か曲がり角を作る道路も Denied（CrossingNearJunction）。踏切の両隣（線路に沿って）には線路のノードが置かれる。
       施設と駅のマスは通れない。ただし駅の線路の両端のマスでは、線路を始めても終えてもよい。建物のマスを通ると、
       その建物は取り壊される。

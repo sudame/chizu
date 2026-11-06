@@ -1088,7 +1088,7 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
             "ほかの路線と分ける待てる所の枠が足りず、その路線の列車が走れなくなる"
         }
         DenyReason::HighwayCrossing => "高速道路には踏切を置けない",
-        DenyReason::CrossingNearJunction => "踏切は交差点と曲がり角から道路に沿って 3 マス以上離す",
+        DenyReason::CrossingNearJunction => "踏切は交差点と曲がり角から道路に沿って 2 マス以上離す",
         DenyReason::NodeOnCrossing => {
             "踏切のマスでは、道路をつなぐ、分ける、曲げることも、線路の端や分岐を置くこともできない"
         }
@@ -1700,19 +1700,19 @@ mod tests {
         let mut sim = Sim::new(0);
         sim.submit(road((0, 10), (30, 10))).unwrap();
         sim.submit(road((20, 0), (20, 20))).unwrap();
-        // 交差点 (20, 10) から 2 マスの踏切になる線路は、近い交差点のマスを文に添えて断る
-        let (reason, _) = sim.rail_probe(TilePos::new(10, 12), TilePos::new(30, 12));
+        // 交差点 (20, 10) の隣の踏切になる線路は、近い交差点のマスを文に添えて断る
+        let (reason, _) = sim.rail_probe(TilePos::new(10, 11), TilePos::new(30, 11));
         let reason = reason.expect("断る");
         assert!(
             reason.starts_with(deny_text(DenyReason::CrossingNearJunction)),
             "{reason}"
         );
         assert!(
-            reason.contains("(20, 12)") && reason.contains("(20, 10)"),
+            reason.contains("(20, 11)") && reason.contains("(20, 10)"),
             "{reason}"
         );
-        // 3 マス離せば引ける
-        let (reason, _) = sim.rail_probe(TilePos::new(10, 13), TilePos::new(30, 13));
+        // 1 マス挟めば引ける
+        let (reason, _) = sim.rail_probe(TilePos::new(10, 12), TilePos::new(30, 12));
         assert_eq!(reason, None);
     }
 

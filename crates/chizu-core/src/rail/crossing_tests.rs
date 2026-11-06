@@ -119,25 +119,25 @@ fn crossings_are_denied_where_the_rules_do_not_hold() {
     // 隣の踏切。
     let c = road(&mut w, (31, 0), (31, 20));
     deny(&mut w, c, DenyReason::CrossingTooClose);
-    // 踏切から 2 マスの所に交差点を作る道路。3 マス離せばよい。
-    let c = road(&mut w, (25, 10), (30, 10));
+    // 踏切の隣に交差点を作る道路。1 マス挟めばよい。
+    let c = road(&mut w, (25, 9), (30, 9));
     deny(&mut w, c, DenyReason::CrossingNearJunction);
-    let c = road(&mut w, (25, 6), (30, 6));
+    let c = road(&mut w, (25, 7), (30, 7));
     deny(&mut w, c, DenyReason::CrossingNearJunction);
     // 踏切のマスを通る道路は、そこに交差点を作る。
     let c = road(&mut w, (26, 4), (34, 12));
     deny(&mut w, c, DenyReason::NodeOnCrossing);
     assert_eq!(w, before);
-    ok(road(&mut w, (25, 11), (30, 11)));
-    // 線路を引いて、交差点の 2 マス以内に踏切を作る。
-    let c = rail(&mut w, (40, 13), (20, 13));
+    ok(road(&mut w, (25, 10), (30, 10)));
+    // 線路を引いて、交差点の隣に踏切を作る。
+    let c = rail(&mut w, (40, 11), (20, 11));
     deny(&mut w, c, DenyReason::CrossingNearJunction);
-    // 曲がり角の 2 マス以内も断る。
+    // 曲がり角の隣も断る。
     ok(road(&mut w, (40, 0), (40, 20)));
     ok(road(&mut w, (40, 20), (45, 20)));
-    let c = rail(&mut w, (36, 18), (44, 18));
+    let c = rail(&mut w, (36, 19), (44, 19));
     deny(&mut w, c, DenyReason::CrossingNearJunction);
-    ok(rail(&mut w, (36, 17), (44, 17)));
+    ok(rail(&mut w, (36, 18), (44, 18)));
 }
 
 #[test]
@@ -545,20 +545,20 @@ fn crossing_denial_names_the_tile_that_got_in_the_way() {
     assert_eq!(d.reason, DenyReason::CrossingTooClose);
     assert_eq!(d.crossing, Some(at(31, 8)));
     assert_eq!(d.near, Some(at(30, 8)));
-    // 踏切から 2 マスの所に交差点を作る道路。
-    let d = denial(&w, road_cmd((25, 10), (30, 10))).expect("断る");
+    // 踏切の隣に交差点を作る道路。
+    let d = denial(&w, road_cmd((25, 9), (30, 9))).expect("断る");
     assert_eq!(d.reason, DenyReason::CrossingNearJunction);
     assert_eq!(d.crossing, Some(at(30, 8)));
-    assert_eq!(d.near, Some(at(30, 10)));
-    // 線路を引いて、交差点の 2 マス以内に踏切を作る。
+    assert_eq!(d.near, Some(at(30, 9)));
+    // 線路を引いて、交差点の隣に踏切を作る。
     ok(road(&mut w, (25, 11), (30, 11)));
     let rail_cmd = Command::BuildRail {
-        from: at(40, 13),
-        to: at(20, 13),
+        from: at(40, 12),
+        to: at(20, 12),
     };
     let d = denial(&w, rail_cmd).expect("断る");
     assert_eq!(d.reason, DenyReason::CrossingNearJunction);
-    assert_eq!(d.crossing, Some(at(30, 13)));
+    assert_eq!(d.crossing, Some(at(30, 12)));
     assert_eq!(d.near, Some(at(30, 11)));
     // 断らないコマンドには何も返さない。
     assert_eq!(denial(&w, road_cmd((60, 0), (60, 5))), None);
@@ -583,4 +583,118 @@ fn line_capacity_lists_the_short_tracks_a_branch_cuts_off() {
             .any(|s| s.from == at(19, 8) || s.to == at(19, 8)),
         "{after:?}"
     );
+}
+
+/// 道路に平行に置いた駅の線路（道路から 2 マス目）をまっすぐ延ばして、駅の端のすぐ先で交わる道路を渡れる。
+/// 踏切と交差点のあいだは 1 マスである。道路を先に引いても、線路を先に引いても同じである。
+#[test]
+fn a_station_track_crosses_the_road_right_past_its_end() {
+    // 線路が先。
+    let (mut w, _, _) = crossing_world();
+    ok(road(&mut w, (12, 10), (20, 10)));
+    ok(road(&mut w, (13, 0), (13, 20)));
+    assert!(w.network().node_at(at(13, 10)).is_some());
+    assert_eq!(w.rail().crossings().collect::<Vec<_>>(), vec![at(13, 8)]);
+    // 道路が先。
+    let mut w = World::new_with_money(0, Money(1_000_000_000)).with_unlimited_land();
+    ok(road(&mut w, (0, 10), (20, 10)));
+    ok(road(&mut w, (13, 0), (13, 20)));
+    station(&mut w, (12, 8));
+    ok(rail(&mut w, (12, 8), (30, 8)));
+    assert_eq!(w.rail().crossings().collect::<Vec<_>>(), vec![at(13, 8)]);
+}
+
+/// [`crossing_world`] の西の駅の端（x = 12）のすぐ先の踏切（x = 13）から 1 マス挟んだ (13, 10) に、信号のある
+/// 交差点を置いた街。北の住宅から南の工場へ通う車が踏切を渡ってすぐ交差点に入り、交差点の東の住宅から来る車も
+/// 交差点で南へ曲がる。朝は北から来る車の列が、交差点の停止線から踏切の手前まで延びる。
+fn junction_crossing_town(trains: u8) -> World {
+    let seed = 6;
+    assert_eq!(crate::world::highway_line(seed).start, at(20, -64));
+    let (mut w, a, b) = crossing_world_with(
+        World::new_with_money(seed, Money(1_000_000_000)).with_unlimited_land(),
+    );
+    ok(road(&mut w, (20, -64), (20, -60)));
+    ok(road(&mut w, (20, -60), (-10, -60)));
+    ok(road(&mut w, (13, -60), (13, 60)));
+    ok(road(&mut w, (12, 10), (40, 10)));
+    assert_eq!(w.rail().crossings().collect::<Vec<_>>(), vec![at(13, 8)]);
+    let node = w.network().node_at(at(13, 10)).expect("交差点がない");
+    ok(w.apply(&Command::SetSignal { node, on: true }));
+    for (area, zone) in [
+        (((14, -55), (19, 4)), crate::command::Zone::Residential),
+        (((7, -55), (12, 4)), crate::command::Zone::Residential),
+        (((14, 12), (19, 58)), crate::command::Zone::Industrial),
+        (((7, 14), (12, 58)), crate::command::Zone::Industrial),
+        (((21, 11), (39, 16)), crate::command::Zone::Residential),
+    ] {
+        let c = w.apply(&Command::PaintZone {
+            area: TileRect::from_corners(at(area.0.0, area.0.1), at(area.1.0, area.1.1)),
+            zone: Some(zone),
+        });
+        assert!(
+            matches!(c, ApplyOutcome::Applied | ApplyOutcome::AppliedPartly(_)),
+            "{c:?}"
+        );
+    }
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, -5),
+        (ServiceKind::WaterPump, 5),
+        (ServiceKind::WaterPump, 8),
+    ] {
+        ok(w.apply(&Command::PlaceBuilding {
+            kind,
+            at: at(x, -61),
+            rotation: 2,
+        }));
+    }
+    ok(w.apply(&Command::CreateLine { from: a, to: b }));
+    let line = w.rail().lines().next().unwrap().0;
+    ok(w.apply(&Command::SetLineTrains { line, trains }));
+    w
+}
+
+/// 交差点から 1 マス挟んだ踏切でも、交差点が詰まって踏切の上で止まる車は出ない。停止線で待つ車の後ろには、
+/// 踏切を抜けきった車が 1 台入れる。それより後ろの車は、抜けきる空きがないので踏切の手前で止まる。
+/// 交差点を出てすぐの踏切が閉じたかもうすぐ閉じるときは、その手前で止まる車の後ろに並ぶ空きがなければ交差点に
+/// 入らないので、交差点の四角の中で止まる車も出ない。
+#[test]
+fn a_crossing_next_to_a_busy_junction_keeps_cars_off_the_tracks() {
+    let tile = at(13, 8);
+    for trains in [1, 2] {
+        let mut w = junction_crossing_town(trains);
+        let node = w.network().node_at(at(13, 10)).expect("交差点がない");
+        let mut stuck = Vec::new();
+        let mut boxed = Vec::new();
+        let mut held = 0_u64;
+        for _ in 0..3 * crate::TICKS_PER_DAY {
+            w.step();
+            let closed = w.rail().closed_crossings();
+            let rail = crate::movement::RailCrossings::new(w.network(), [tile], &closed);
+            let (inside, h) = rail.stopped_cars(w.trips());
+            if !inside.is_empty() {
+                stuck.push(w.tick().0);
+            }
+            if crate::movement::RailCrossings::stopped_in_box(w.network(), w.trips(), node) > 0 {
+                boxed.push(w.tick().0);
+            }
+            held += h;
+        }
+        let tally = w.rail().crossing_tally();
+        let r = w.trips().rescues();
+        assert!(
+            stuck.is_empty(),
+            "列車 {trains} 本：踏切の上で止まった車 {stuck:?}"
+        );
+        assert!(
+            boxed.is_empty(),
+            "列車 {trains} 本：交差点の四角の中で止まった車 {boxed:?}"
+        );
+        assert!(held > 0, "列車 {trains} 本：交差点の列が踏切まで延びない");
+        assert!(tally.closures > 50, "列車 {trains} 本：{tally:?}");
+        assert!(tally.wait > 0, "列車 {trains} 本：車が通らない {tally:?}");
+        assert_eq!(tally.overrun, 0, "列車 {trains} 本：{tally:?}");
+        assert!(tally.longest_closed <= 60, "列車 {trains} 本：{tally:?}");
+        assert_eq!(r.teleported, 0, "列車 {trains} 本：{r:?}");
+        assert_eq!(r.passed_stuck, 0, "列車 {trains} 本：{r:?}");
+    }
 }

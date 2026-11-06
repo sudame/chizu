@@ -640,11 +640,43 @@ fn crossing_holds(
     rail.no_room_zones((link, len, bound), after, front)
 }
 
+/// 体が踏切にかかった車の前の車。同じ車線に前の車がなく（`from_next`）、前の車が、ほかのリンクから交差点に
+/// 入って同じ車線へ向かう車（まだノードを越えていない車）なら、停止線までは進めるとみなす。
+///
+/// 踏切に入るときに抜けきる空きを確かめても、そのあとにほかの腕の車が交差点に入ると、その車を前の車として
+/// 車間を空けるので、交差点のすぐ手前の踏切では体が踏切に残ったまま止まる。その車は交差点の四角の中にいて、
+/// 停止線までの車線にはいないので、停止線まで進んでもぶつからない。停止線を越えるかは、ほかの車と同じく交差点の
+/// 譲り合いと先の車線の空きで決まる。
+fn clear_of_crossing(
+    net: &Network,
+    rail: &RailCrossings,
+    t: &Trip,
+    from_next: bool,
+    leader: Option<(LaneOffset, MmPerTick)>,
+) -> Option<(LaneOffset, MmPerTick)> {
+    let (at, _) = leader?;
+    if !from_next || t.bound.is_some() || at >= t.link_len || rail.is_empty() {
+        return leader;
+    }
+    let p = i64::from(t.offset.0);
+    let half = i64::from(CAR_LENGTH / 2);
+    let on = rail
+        .on_link(t.link(), t.link_len.0)
+        .iter()
+        .any(|c| p - half < i64::from(c.far) && i64::from(c.near) < p + half);
+    let line = LaneOffset(stop_line(net, t.link()).0.saturating_add(SPACING));
+    if on && at < line {
+        Some((line, MmPerTick::ZERO))
+    } else {
+        leader
+    }
+}
+
 /// 区間の途中の衝突区間の手前で止まる車が、衝突区間とのあいだに空ける距離（mm）。
 const JAY_STOP_GAP: u32 = 1_000;
 
 /// 真ん中が `z` の衝突区間の手前で、車の前の端を止める位置。
-fn jay_line(z: u32) -> u32 {
+pub(super) fn jay_line(z: u32) -> u32 {
     z.saturating_sub(crossing::JAY_HALF_MM + JAY_STOP_GAP)
 }
 
@@ -818,7 +850,16 @@ pub(super) fn gate(
         // 動く見込みのない車に、渡ってよい窓を使わせない。最後尾が動いていれば空きはすぐにできるので、その車は数える。
         // 信号のない交差点では数える。人が先に渡ると、空きができたときに車が人の列に止められ、止まった車が増えた。
         let after = t.route.links.get(t.leg as usize + 2).copied();
-        let (to_lane, room) = exit_lane(net, conn, &st, t, node, next, after);
+        let (to_lane, room) = exit_lane(
+            net,
+            conn,
+            &st,
+            t,
+            node,
+            next,
+            after,
+            &RailCrossings::default(),
+        );
         if light.is_some()
             && !room
             && st
@@ -970,6 +1011,7 @@ fn clear_run(
 }
 
 /// `order[k]` の車について [`Look`] を作る。`order` は車線ごとに前から並べた車である。
+#[allow(clippy::too_many_arguments)]
 fn look(
     rows: &[Option<Trip>],
     net: &Network,
@@ -978,6 +1020,7 @@ fn look(
     order: &[(LaneId, core::cmp::Reverse<LaneOffset>, usize)],
     k: usize,
     zones: &BTreeMap<LinkId, Vec<u32>>,
+    rail: &RailCrossings,
 ) -> Look {
     let (lane, _, i) = order[k];
     let t = rows[i].as_ref().expect("車の主体がない");
@@ -1072,7 +1115,7 @@ fn look(
         out.next_lane = Some(choose_lane(net, conn, st, t.lane, node, next, after));
         return out;
     }
-    let (to_lane, room) = exit_lane(net, conn, st, t, node, next, after);
+    let (to_lane, room) = exit_lane(net, conn, st, t, node, next, after, rail);
     out.next_lane = Some(to_lane);
     in_box(Some(to_lane), &mut out);
     let seg = net.segment(t.link().segment).expect("リンクの区間がない");
@@ -1101,6 +1144,7 @@ fn look(
 /// ありそうか。先の車線の最後尾（停止線を越えてその車線へ向かう車を含む）がこの tick も同じ速さで進むとして決める。
 /// ただし、最後尾がまだ交差点の中にいれば、`t` が交差点を抜けきる所に着くまで同じ速さで進むとして決める（[`roomy`]）。
 /// 空きがなければ、車は停止線で止まる。
+#[allow(clippy::too_many_arguments)]
 fn exit_lane(
     net: &Network,
     conn: &[Connector],
@@ -1109,6 +1153,7 @@ fn exit_lane(
     node: NodeId,
     next: LinkId,
     after: Option<LinkId>,
+    rail: &RailCrossings,
 ) -> (LaneId, bool) {
     let need = i64::from(room_needed(net, node, next));
     let ticks = ticks_to(
@@ -1118,12 +1163,69 @@ fn exit_lane(
     );
     let clear = i64::from(clear_line(net, next).0);
     let stop = i64::from(stop_line(net, next).0);
+    let wall = crossing_wall(net, rail, next);
     let room = |l: &LaneId| {
-        st.last(*l)
-            .is_none_or(|(at, _)| st.tails[l].roomy(1, ticks, at < clear, stop, need))
+        let fit = LaneFit {
+            base: 1,
+            back: 0,
+            ticks,
+            clear,
+            stop,
+            need,
+        };
+        fit.roomy(st.tails.get(l), wall)
     };
     let to_lane = junction_lane(net, conn, st, t, node, next, after, room);
     (to_lane, room(&to_lane))
+}
+
+/// 交差点の先のリンク `next` の、閉じたかもうすぐ閉じる踏切の手前で止まった車とみなす位置（[`RailCrossings::closing_wall`]）。
+fn crossing_wall(net: &Network, rail: &RailCrossings, next: LinkId) -> Option<i64> {
+    if rail.is_empty() {
+        return None;
+    }
+    let len = super::pos::link_geometry(net, next)?.2.0;
+    rail.closing_wall(next, len)
+}
+
+/// 交差点を抜けきる空きの見込み方（[`Tail::roomy`]）。`back` は、最後尾が交差点を抜けていく車かを、何 tick 分
+/// 戻した位置で決めるか。
+struct LaneFit {
+    base: i64,
+    back: i64,
+    ticks: i64,
+    clear: i64,
+    stop: i64,
+    need: i64,
+}
+
+impl LaneFit {
+    /// 車線の車 `tail` に、出ていく腕の先の閉じたかもうすぐ閉じる踏切の手前で止まった車 `wall` を足して、入る車が
+    /// 交差点を抜けきる空きがありそうか。踏切の手前で止まる車の後ろに並ぶ車が、交差点の四角の中に残らないように
+    /// するためである。
+    fn roomy(&self, tail: Option<&Tail>, wall: Option<i64>) -> bool {
+        let walled;
+        let tail = match wall {
+            None => tail,
+            Some(w) => {
+                let mut cars = tail.map_or_else(Vec::new, |t| t.0.clone());
+                let k = cars.partition_point(|c| c.0 <= w);
+                cars.insert(k, (w, 0));
+                walled = Tail(cars);
+                Some(&walled)
+            }
+        };
+        tail.is_none_or(|t| {
+            let (at, v) = t.last();
+            t.roomy(
+                self.base,
+                self.ticks,
+                at - v * self.back < self.clear,
+                self.stop,
+                self.need,
+            )
+        })
+    }
 }
 
 /// 車 `t` が、いまの速さから加速の上限で速さを上げていき、いまのリンクの最高速度で `d` だけ進むのに要る
@@ -1273,7 +1375,7 @@ pub(super) fn step(
         .collect();
     order.sort_unstable();
     let rows_ro = &*rows;
-    let look_at = |k: usize| look(rows_ro, net, conn, &st, &order, k, &occupied.zones);
+    let look_at = |k: usize| look(rows_ro, net, conn, &st, &order, k, &occupied.zones, rail);
     #[cfg(feature = "parallel")]
     let looks: Vec<Look> = (0..order.len())
         .into_par_iter()
@@ -1327,6 +1429,7 @@ pub(super) fn step(
                 v,
             ))
         });
+        let leader = clear_of_crossing(net, rail, t, ahead.is_none(), leader);
         // いまのリンクと、ノードの先の次のリンクの衝突区間。次のリンクの位置は、いまのリンクの始まりから数え直す。
         let here = occupied.zones.get(&t.link()).map_or(&[][..], Vec::as_slice);
         let ahead = next_lane
@@ -1437,10 +1540,15 @@ pub(super) fn step(
             let clear = i64::from(clear_line(net, next).0);
             let stop = i64::from(stop_line(net, next).0);
             // 最後尾が交差点を抜けていく車かは、この tick に動く前の位置で決め、`exit_lane` と同じ見込みにする。
-            if last.get(&lane).is_some_and(|tail| {
-                let (r, v) = tail.last();
-                !tail.roomy(0, ticks, r - v < clear, stop, need)
-            }) {
+            let fit = LaneFit {
+                base: 0,
+                back: 1,
+                ticks,
+                clear,
+                stop,
+                need,
+            };
+            if !fit.roomy(last.get(&lane), crossing_wall(net, rail, next)) {
                 (t.offset, t.speed) = (LaneOffset(line), MmPerTick::ZERO);
                 continue;
             }

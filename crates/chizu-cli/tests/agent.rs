@@ -673,7 +673,7 @@ fn act_makes_a_crossing_and_observe_and_map_show_it() {
             {"type":"BuildRoad","from":[40,10],"to":[40,20],"kind":"Small"},
             {"type":"BuildRail","from":[20,0],"to":[20,20]},
             {"type":"BuildRail","from":[21,0],"to":[21,20]},
-            {"type":"BuildRail","from":[38,0],"to":[38,20]},
+            {"type":"BuildRail","from":[39,0],"to":[39,20]},
             {"type":"BuildRail","from":[10,10],"to":[10,20]}]"#,
     );
     let acted = json(&cli(&["agent", "act", d, &cmds]));
@@ -707,7 +707,7 @@ fn act_makes_a_crossing_and_observe_and_map_show_it() {
     );
     assert_eq!(
         acted["results"][4]["crossingNear"],
-        serde_json::json!({"crossing": [38, 10], "near": [40, 10], "nearKind": "junction"}),
+        serde_json::json!({"crossing": [39, 10], "near": [40, 10], "nearKind": "junction"}),
         "{acted}"
     );
     assert!(acted["results"][5].get("crossingNear").is_none(), "{acted}");
