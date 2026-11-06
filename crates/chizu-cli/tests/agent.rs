@@ -2011,16 +2011,29 @@ fn act_sets_the_parking_fee() {
     assert_eq!(seen["financesPerDay"]["parkingFees"], 0);
     let cmd = write(
         &dir.join("fee.json"),
-        r#"[{"type":"SetParkingFee","fee":30},{"type":"SetParkingFee","fee":51}]"#,
+        r#"[{"type":"SetParkingFee","fee":30},{"type":"SetParkingFee","fee":51},{"type":"SetParkingFee","fee":-1},{"type":"SetTaxRate","zone":"ResidentialLow","permille":100}]"#,
     );
     let acted = json(&cli(&["agent", "act", d, &cmd]));
+    let messages: Vec<&str> = acted["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .skip(1)
+        .map(|r| r["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(messages[0], "駐車場の料金 51 は 0 から 50 の外にある");
+    assert_eq!(messages[1], "駐車場の料金 -1 は 0 から 50 の外にある");
+    assert!(
+        messages[2].contains("ResidentialLow は選べない"),
+        "{messages:?}"
+    );
     let outcomes: Vec<&str> = acted["results"]
         .as_array()
         .unwrap()
         .iter()
         .map(|r| r["outcome"].as_str().unwrap())
         .collect();
-    assert_eq!(outcomes, ["Applied", "Invalid"]);
+    assert_eq!(outcomes, ["Applied", "Invalid", "Invalid", "Invalid"]);
     let seen = json(&cli(&["agent", "observe", d]));
     assert_eq!(seen["parking"]["fee"], 30);
     assert_eq!(

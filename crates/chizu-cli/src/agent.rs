@@ -391,6 +391,7 @@ observe の removedCrosswalks:
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
   {"type":"SetTaxRate","zone":"Residential"|"Commercial"|"Industrial"|"Office","permille":0..300}
       税率を千分率で決める。住宅の税率は低密度と高密度で 1 つで、Residential で決める（ResidentialLow は断る）。
+      範囲の外の値（permille、fee、speed、rotation）と選べない区画は、どれも Invalid で、「… は a から b の外にある」の形の文で断る。
   {"type":"SetParkingFee","fee":0..50}
       共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額）を、街で 1 つ決める。始めは 10。範囲の外は Invalid。
       料金が世帯の払える上限（蓄えに応じて 10〜49）を超えると、その世帯は借りない。借りている世帯は、
