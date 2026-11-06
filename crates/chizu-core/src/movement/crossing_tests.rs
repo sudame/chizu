@@ -465,6 +465,35 @@ fn a_lone_walker_at_a_signal_does_not_wait_for_the_cycle() {
 }
 
 #[test]
+fn the_green_moved_for_a_walker_lasts_while_it_is_on_the_crosswalk() {
+    // 車の来ない信号の十字路で、南の腕（y の向き）を渡る人。人の求めで x の向きに移した青は、人が
+    // 角に着いた tick だけでなく、渡っているあいだも続く。y の向きの青には戻らない。
+    let (mut n, node) = crossroads();
+    n.set_signal(node, true).unwrap();
+    let mut t = Town::new(n);
+    let mut crossed = 0;
+    let mut gone = false;
+    let mut on_before = false;
+    for k in 0..400_u64 {
+        if k == 120 {
+            t.walk(at(9, 10, (1, 0), 0), at(18, 10, (1, 0), 0));
+        }
+        t.step(node);
+        let lights = t.trips.lights().state(&t.net, node).unwrap().lights;
+        // 灯火は、その tick を進める前の位置から決まる。
+        if on_before {
+            crossed += 1;
+            assert_eq!(lights[0], signal::Light::Green, "x の青が続かない {k}");
+            assert_ne!(lights[2], signal::Light::Green, "y の青に戻った {k}");
+        }
+        on_before = !t.occupied().is_empty();
+        gone |= k > 120 && t.trips.iter().next().is_none();
+    }
+    assert!(crossed >= 3, "渡っているところを確かめられない {crossed}");
+    assert!(gone, "人が渡り終えない");
+}
+
+#[test]
 fn a_walker_at_a_signal_gets_across_a_steady_stream_of_cars_on_its_arm() {
     // 信号の十字路で、北から南へ直進する車が 2 tick ごとに来て、y の向きの車が途切れない。南の腕を渡る人は、
     // 信号のない交差点と同じく来た車を先に通し、待ちすぎた所で x の向きの青を引き止めて渡る。

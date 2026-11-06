@@ -18,7 +18,7 @@
 //! - ほかの軸に車が来ていなければ、段階の軸の車と、ほかの軸の腕を渡ろうと待つ人のために、骨組みの黄と
 //!   全方向の赤のあいだも段階の軸を青のままにする。来ていない向きのために、車と人を止めない。
 //! - どの軸にも車が来ておらず、段階の軸の腕を渡ろうと待つ人だけがいれば、次の軸を青にして、その人を
-//!   渡らせる。押しボタンの信号と同じく、人の求めで青を渡す。
+//!   渡らせる。押しボタンの信号と同じく、人の求めで青を渡し、その人が渡り終えるまで続ける。
 //! - 渡る腕の軸に車が来ていなければ、歩く人は骨組みの青の終わり際（[`WALK_CLEAR`]）でも渡り始める。
 //!   その軸が青になっても、待たせる車がいないからである。
 //! - 止まりきれない車のいる軸は、どの段階でも、その tick は黄にする。青をほかの軸へ移すのは、
@@ -74,6 +74,8 @@ pub struct AxisDemand {
     pub committed: bool,
     /// その軸の腕の横断歩道を、渡り始めようと待つ人がいる。
     pub walkers: bool,
+    /// その軸の腕の横断歩道を、いま渡っている人がいる。
+    pub crossing: bool,
     /// そのうち、[`PED_WAIT`](super::crossing::PED_WAIT) tick 以上待った人がいる。
     pub patient: bool,
 }
@@ -226,7 +228,8 @@ fn actuate(order: &[u8], phase: usize, fixed: Light, d: &[AxisDemand; 4]) -> [Li
         Some(b) if !at(own).cars && !others_patient => (b, Light::Green),
         Some(_) => (own, Light::Green),
         // ほかの軸に車が来ておらず、段階の軸の腕を渡ろうと待つ人だけがいれば、ほかの軸を青にして渡らせる。
-        None if !at(own).cars && at(own).walkers && !others_walk => {
+        // 渡り始めた人が渡り終えるまでは、移した青を続ける。灯火がその人の角に着くたびに戻らないようにする。
+        None if !at(own).cars && (at(own).walkers || at(own).crossing) && !others_walk => {
             (order[(phase + 1) % order.len()], Light::Green)
         }
         // ほかの軸に車が来ていなければ、段階の軸の車と、ほかの軸の腕を渡る人のために、骨組みの黄と赤の
