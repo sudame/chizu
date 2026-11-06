@@ -368,6 +368,39 @@ fn fewer_trains_retire_at_the_terminal() {
     assert_eq!(w.rail().train_count(), 0);
 }
 
+/// 終点で折り返せる本数（`turn_cap`）で抑える路線でも、本数を減らした分はその場では消えず、終点で消える。
+#[test]
+fn fewer_trains_under_a_turn_cap_retire_at_the_terminal() {
+    let (mut w, a, b) = shuttle_world();
+    w.lift_turn_caps(false);
+    let id = create(&mut w, a, b);
+    set_trains(&mut w, id, 2);
+    assert!(w.rail().line(id).unwrap().turn_cap() < line::MAX_LINE_TRAINS);
+    run(&mut w, 1_000, 600);
+    assert_eq!(w.rail().train_count(), 2);
+    set_trains(&mut w, id, 1);
+    assert_eq!(w.rail().train_count(), 2, "本数を減らしたその場で消えた");
+    let mut last = BTreeMap::new();
+    for _ in 0..2_000 {
+        last = w.rail().trains().map(|(t, s)| (t, s.pos)).collect();
+        w.step();
+        if w.rail().train_count() == 1 {
+            break;
+        }
+    }
+    assert_eq!(w.rail().train_count(), 1);
+    let line = w.rail().line(id).unwrap();
+    let (gone, pos) = last
+        .iter()
+        .find(|(t, _)| w.rail().trains().all(|(o, _)| o != **t))
+        .expect("消えた列車がない");
+    assert_eq!(
+        line.step(*pos).kind,
+        StepKind::Terminal,
+        "{gone:?} が終点の外で消えた"
+    );
+}
+
 /// 列車は駅に止まり、終点で折り返して、最高の速さを超えない。
 #[test]
 fn a_train_stops_turns_back_and_keeps_to_the_speed_limit() {

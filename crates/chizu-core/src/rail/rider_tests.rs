@@ -1038,6 +1038,14 @@ fn lines_ending_at_the_same_station_share_its_turns() {
     let rail = w.rail();
     assert_eq!(rail.line(first).unwrap().turn_cap(), 3);
     assert_eq!(rail.line(second).unwrap().turn_cap(), 1);
+    // 走らせ直すと、もう一方の路線の折り返せる本数は戻る。
+    ok(w.apply(&Command::SetLineTrains {
+        line: second,
+        trains: 6,
+    }));
+    let rail = w.rail();
+    assert_eq!(rail.line(first).unwrap().turn_cap(), 2);
+    assert_eq!(rail.line(second).unwrap().turn_cap(), 1);
 }
 
 /// 本数を多く決めても、列車は終点の手前に並ばず、1 周は見込みの時間で回る（#369）。前は、真ん中の駅で

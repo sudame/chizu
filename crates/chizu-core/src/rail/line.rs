@@ -155,6 +155,25 @@ pub(crate) struct LinePlan {
     pub(crate) turn_cap: u8,
 }
 
+impl LinePlan {
+    /// 終点で折り返せる本数（`turn_cap`）のほかが `other` と同じか。
+    fn same_zones(&self, other: &LinePlan) -> bool {
+        let LinePlan {
+            cap,
+            zone,
+            bin,
+            runs,
+            quota,
+            turn_cap: _,
+        } = self;
+        *cap == other.cap
+            && *zone == other.zone
+            && *bin == other.bin
+            && *runs == other.runs
+            && *quota == other.quota
+    }
+}
+
 impl RailLine {
     /// 行き詰まりを防ぐ本数の上限（決まりの 1）。16 と次の値の小さいほうである（`LinePlan`）。
     ///
@@ -1018,6 +1037,14 @@ impl Rail {
                 s.wait = is_wait(s);
             }
         }
+        for (id, plan) in self.current_plans() {
+            self.lines.get_mut(id).expect("路線がない").plan = plan;
+        }
+    }
+
+    /// いまの路線の進路と本数から作った、すべての路線の区分け。終点で折り返せる本数（`turn_caps`）も入れる。
+    /// 待てる所の印は、いまの印のまま使う。
+    fn current_plans(&self) -> BTreeMap<LineId, LinePlan> {
         let input: Vec<PlanLine> = self
             .lines
             .iter()
@@ -1038,9 +1065,7 @@ impl Rail {
                 plans.get_mut(&id).expect("路線がない").turn_cap = n;
             }
         }
-        for (id, plan) in plans {
-            self.lines.get_mut(id).expect("路線がない").plan = plan;
-        }
+        plans
     }
 
     /// 書き出しから読み戻したあとに、待てる所の区分けを作り直す。
@@ -1391,10 +1416,18 @@ impl Rail {
             stopped: line.stopped,
             trains,
         };
-        let plans = self.deny_change(&change)?;
+        self.deny_change(&change)?;
         self.lines.get_mut(id).expect("路線がない").trains = trains;
+        // 終点で折り返せる本数は、本数を 0 と 1 以上のあいだで変えると、同じ駅を終点にするほかの路線でも変わる。
+        // 区分けは変わらず、これだけが変わったときは、減らした分を終点まで走らせてから消す（`retire_if_extra`）。
+        // ほかの路線で下がった分は、作り直したあとに [`Rail::settle_trains`] がその場で消す。
+        let plans = self.current_plans();
         let same = self.lines.iter().all(|(l, line)| line.plan == plans[&l]);
-        if !same {
+        let same_zones = self
+            .lines
+            .iter()
+            .all(|(l, line)| line.plan.same_zones(&plans[&l]));
+        if !same_zones {
             // 枠の分を本数に合わせて分け直したので、本数を超えた列車を終点まで残すと、減った分の枠を待って
             // 止まる（本数 0 なら分が 0 で、区画に入れない）。ID の大きい列車から、すぐに消す。
             let allowed = usize::from(plans[&id].cap.min(trains));
@@ -1407,6 +1440,8 @@ impl Rail {
             for tid in extra {
                 self.drop_train(tid);
             }
+            self.mark_waits();
+        } else if !same {
             self.mark_waits();
         }
         Ok(())
