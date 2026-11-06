@@ -1177,3 +1177,106 @@ fn measure_turns() {
         }
     }
 }
+
+/// 駅 S1、S2、S3、J を西から東へ並べ、路線 A（S1、S3、J。S2 は止まらずに通り、S3 は止まって通り抜ける）と、路線 B
+/// （S2、S3。S3 を終点にする）を、本数 `a` と `b` で走らせた街（#377）。B は、A が止まって通り抜ける S3 の
+/// 東向きのホームで折り返し、A が止まらずに通る S2 の西向きのホームで折り返す。
+fn through_town(a: u8, b: u8) -> (World, [LineId; 2]) {
+    let (mut w, s) = street_town(
+        5,
+        &[-140, -100, -30, 125],
+        &[(-131, -100), (-91, -30), (-21, 125)],
+    );
+    ok(w.apply(&Command::CreateLine {
+        from: s[0],
+        to: s[2],
+    }));
+    let line_a = w.rail().lines().last().unwrap().0;
+    ok(w.apply(&Command::ExtendLine {
+        line: line_a,
+        station: s[3],
+    }));
+    ok(w.apply(&Command::CreateLine {
+        from: s[1],
+        to: s[2],
+    }));
+    let line_b = w.rail().lines().last().unwrap().0;
+    for (line, trains) in [(line_a, a), (line_b, b)] {
+        ok(w.apply(&Command::SetLineTrains { line, trains }));
+    }
+    (w, [line_a, line_b])
+}
+
+/// ほかの路線が通り抜ける駅を終点にする路線があっても、本数を多く決めて 1 周が延びない（#377）。前は、A の 1 周が
+/// 見込みの数倍に延び、乗る人が大きく減った。B が折り返すホームを A も使うので、折り返せる本数（`turn_cap`）には、
+/// A がそのホームを使う時間も入る。B が折り返せる本数で抑えられて余った区画の分は、A に回る。
+#[test]
+fn a_terminal_on_a_through_line_does_not_stretch_its_round_trip() {
+    let (mut w, [a, b]) = through_town(7, 3);
+    {
+        let rail = w.rail();
+        let (la, lb) = (rail.line(a).unwrap(), rail.line(b).unwrap());
+        // B の終点 S3 のホームは、A も止まって使うので、2 路線で分け合う。
+        let limit = rail.line_capacity(b).unwrap().turn_limit.unwrap();
+        assert_eq!(limit.platforms, 1);
+        assert_eq!(limit.shared_with, vec![a]);
+        assert!(lb.allowed() < 3);
+        // B は自分だけの待てる所を持たないので、区画の分は折り返せる本数まででよく、余りは A に回る。
+        let zone = lb.plan.quota.keys().next().copied().unwrap();
+        assert_eq!(lb.plan.quota[&zone], u32::from(lb.turn_cap()));
+        assert!(la.plan.quota[&zone] > 1, "{:?}", la.plan.quota);
+    }
+    run(&mut w, 2 * crate::TICKS_PER_DAY);
+    assert_eq!(w.rail().tally().deadlock, 0);
+    let la = w.rail().line(a).unwrap();
+    assert!(
+        la.measured_round_trip_ticks() * 2 <= la.round_trip_ticks() * 3,
+        "{} は見込み {} の 3/2 倍より長い",
+        la.measured_round_trip_ticks(),
+        la.round_trip_ticks()
+    );
+}
+
+/// ほかの路線が通り抜ける駅を終点にする街（[`through_town`]）で、本数の組ごとに、走る本数、A と B の 1 周（測った値と
+/// 見込み）、2 日目からの 3 日の 1 日あたりの乗った人（乗り換えを 1 人に数える）、いちばん重い 1 tick の時間を出す（#377）。
+/// `cargo test -p chizu-core --release measure_through -- --ignored --nocapture` で回す。
+#[test]
+#[ignore]
+fn measure_through() {
+    for (a, b) in [(1, 1), (2, 1), (3, 1), (4, 2), (5, 2), (7, 3), (16, 16)] {
+        let (mut w, lines) = through_town(a, b);
+        for _ in 0..crate::TICKS_PER_DAY {
+            w.step();
+        }
+        let before = w.rail().ride_tally().clone();
+        let mut worst = std::time::Duration::ZERO;
+        for _ in 0..3 * crate::TICKS_PER_DAY {
+            let t0 = std::time::Instant::now();
+            w.step();
+            worst = worst.max(t0.elapsed());
+        }
+        let t = w.rail().ride_tally();
+        let shown: Vec<String> = lines
+            .iter()
+            .map(|id| {
+                let l = w.rail().line(*id).unwrap();
+                let n = w.rail().trains().filter(|(_, x)| x.line == *id).count();
+                format!(
+                    "{n}/{}/{}/{} rt {}/{}",
+                    l.allowed(),
+                    l.cap(),
+                    l.turn_cap(),
+                    l.measured_round_trip_ticks(),
+                    l.round_trip_ticks()
+                )
+            })
+            .collect();
+        println!(
+            "RESULT {a}/{b} running(n/allowed/cap/turn) {} riders_per_day {} worst_tick_us {} deadlock {}",
+            shown.join(" "),
+            ((t.boarded - before.boarded) - (t.transfers - before.transfers)) / 3,
+            worst.as_micros(),
+            w.rail().tally().deadlock,
+        );
+    }
+}

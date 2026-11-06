@@ -186,6 +186,10 @@ fn ring_fuzz(
     let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let chord = r.below(2) == 0;
     let (mut w, st) = ring_world(chord, crossing);
+    // 終点で折り返せる本数で抑える形（ふだんの形）でも確かめる。抑えると、区画の分も折り返せる本数で分け直す（#377）。
+    if std::env::var("RING_TURN_CAPS").is_ok() {
+        w.lift_turn_caps(false);
+    }
     let mut ids = Vec::new();
     for _ in 0..2 + r.below(4) {
         let mut pool = st.clone();
@@ -309,7 +313,8 @@ fn a_claimed_quota_does_not_wait_on_the_asking_train() {
 /// 環状の線路のファズを `RING_FROM` から `RING_N` 種回し、閉塞の重なりか panic、備え、`RING_LIMIT` tick 駅を
 /// 出ないか `RING_WAITED`（既定は `RING_LIMIT`）tick 続けて先を待つ列車か、上限が 1 以上なのに `RING_LIMIT` tick
 /// 列車がいない路線があった種と、続けて待った長さが 1,000 tick 以上になった種の数、駅を出た数の和を出す。
-/// `RING_CROSSING` があれば踏切を置き、`RING_ZERO` があれば始めに置く路線の 3 分の 1 を本数 0 にする。手で回す。
+/// `RING_CROSSING` があれば踏切を置き、`RING_ZERO` があれば始めに置く路線の 3 分の 1 を本数 0 にする。
+/// `RING_TURN_CAPS` があれば、終点で折り返せる本数で走らせる本数を抑える（ふだんの形）。手で回す。
 #[test]
 #[ignore = "長いファズは手で回す"]
 fn ring_fuzz_many() {

@@ -1637,12 +1637,14 @@ fn removing_a_line_restores_the_cap_of_a_starved_line() {
 }
 
 /// 路線と線路のコマンドをどう打っても、路線の上限は、書き出して読み戻して求め直した上限と同じになる
-/// （求め直し忘れがない）。
+/// （求め直し忘れがない）。区画の分は終点で折り返せる本数で変わる（#377）ので、折り返せる本数で抑える形で確かめる
+/// （抑えを外す印は書き出さない）。
 #[test]
 fn line_caps_always_match_a_fresh_plan() {
     for seed in 0..60u64 {
         let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let (mut w, st) = two_line_world();
+        w.lift_turn_caps(false);
         let mut ids: Vec<LineId> = Vec::new();
         for step in 0..30 {
             let cmd = match r.below(7) {

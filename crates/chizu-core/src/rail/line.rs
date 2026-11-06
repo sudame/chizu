@@ -529,27 +529,46 @@ fn zone_ticks(p: &[Step], zone: &[Option<u16>]) -> (u64, BTreeMap<u16, u64>) {
 }
 
 /// 区画の枠 `room` を、区画を使う路線 `users`（（自分だけの待てる所を持つか、路線）の順）で等しく分けたときの、
-/// `user` の分。余りは並びの順に 1 つずつ配る。
+/// `user` の分。並びの順に 1 つずつ配り、余りは並びの先の路線に行く。
 ///
 /// 余りを自分だけの待てる所を持たない路線（区間運転など）から先に配るのは、これらの路線の上限は分そのもので、
 /// 余りの 1 つが列車 1 本になるためである。自分だけの区間を持つ路線は、分が 1 でも区間の数まで列車を置ける。
-fn split_zone(room: u32, users: &[(bool, LineId)], user: (bool, LineId)) -> u32 {
-    let n = u32::try_from(users.len()).expect("路線が多すぎる");
-    let i = u32::try_from(
-        users
-            .iter()
-            .position(|u| *u == user)
-            .expect("区画を使う路線にない"),
-    )
-    .expect("路線が多すぎる");
-    room / n + u32::from(i < room % n)
+///
+/// 路線の分は `limit`（終点のホームで折り返せる本数、`turn_caps`）を超えない。路線は、これより多くの列車を
+/// 走らせないので、超える分は使われずに残る。残る分は、ほかの路線に配る（#377）。
+fn split_zone(
+    room: u32,
+    users: &[(bool, LineId)],
+    user: (bool, LineId),
+    limit: impl Fn(LineId) -> u32,
+) -> u32 {
+    let mut got = vec![0_u32; users.len()];
+    let mut left = room;
+    while left > 0 {
+        let mut dealt = false;
+        for (i, u) in users.iter().enumerate() {
+            if left > 0 && got[i] < limit(u.1) {
+                got[i] += 1;
+                left -= 1;
+                dealt = true;
+            }
+        }
+        if !dealt {
+            break;
+        }
+    }
+    got[users
+        .iter()
+        .position(|u| *u == user)
+        .expect("区画を使う路線にない")]
 }
 
 /// 路線ごとの待てる所の区分けと本数の上限（`LinePlan`）を求める。
 ///
 /// 共有の区画の枠（押さえた範囲の終わりを区画に置ける列車の数）は、区画の中の待てる所だけを通る輪のうち、
 /// いちばん短いものの長さ − 1 である。区画の中に輪がなければ上限はない（`u32::MAX`）。走らない路線は、共有の数えに入れない。
-fn make_plans(lines: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
+/// `limits` は、路線ごとの区画の分の上限（終点のホームで折り返せる本数）で、ない路線は上限なしである（`split_zone`）。
+fn make_plans(lines: &[PlanLine], limits: &BTreeMap<LineId, u8>) -> BTreeMap<LineId, LinePlan> {
     let running = || lines.iter().filter(|l| runnable(l.path, l.stopped));
     let mut uses = BTreeMap::<Vertex, u32>::new();
     let mut waits = BTreeSet::<Vertex>::new();
@@ -745,9 +764,11 @@ fn make_plans(lines: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
         );
     }
     let trains: BTreeMap<LineId, u8> = lines.iter().map(|l| (l.id, l.trains)).collect();
+    let limit = |k: LineId| limits.get(&k).map_or(u32::MAX, |n| u32::from(*n).max(1));
     // 区画の枠を、区画を使う路線のうち本数が 1 以上の路線で等しく分ける（`split_zone`）。路線の列車は、自分の
     // 路線の分の枠だけを使う。本数 0 の路線（使っていない路線）の分は 0 である。上限は、その路線の本数を 1 以上に
     // したとしたら配られる分（見込みの分）から決める。本数 1 以上の路線では、いまの分と同じである。
+    // 路線の分は `limits` を超えず、超える分はほかの路線に配る。
     let mut potential = BTreeMap::<(LineId, u16), u32>::new();
     for (z, zone_cap) in zone_caps.iter().enumerate() {
         let z16 = u16::try_from(z).expect("共有の区画が多すぎる");
@@ -767,13 +788,13 @@ fn make_plans(lines: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
             let (share, seen) = if *zone_cap == u32::MAX {
                 (u32::MAX, u32::MAX)
             } else if trains[&k] > 0 {
-                let share = split_zone(*zone_cap, &active, *user);
+                let share = split_zone(*zone_cap, &active, *user, limit);
                 (share, share)
             } else {
                 let mut with = active.clone();
                 with.push(*user);
                 with.sort();
-                (0, split_zone(*zone_cap, &with, *user))
+                (0, split_zone(*zone_cap, &with, *user, limit))
             };
             plans
                 .get_mut(&k)
@@ -836,34 +857,54 @@ fn isqrt_ceil(v: i64) -> u64 {
 /// 終点の駅の使い方の割合を表す、1 の大きさ。
 pub(crate) const TURN_FULL: u64 = 1_000_000;
 
-/// 路線ごとの、終点の駅で折り返せる本数（[`LinePlan::turn_cap`]）。
+/// ほかの路線が折り返すホームを、通り抜ける列車 1 本が押さえる時間の見込み（tick）。止まる駅なら、入って止まる
+/// 時間、止まる時間、尾が抜ける時間の和（[`turn_ticks`] から折り返す時間を除いたもの）、止まらずに通るなら、
+/// 最高の速さで先頭が入ってから尾が抜けるまでの時間である。
+fn through_ticks(s: &Step) -> u64 {
+    if s.is_stop() {
+        turn_ticks(s.len) - u64::from(TURNBACK_TICKS)
+    } else {
+        u64::try_from(round::div_ceil(s.len + TRAIN_BLOCK_LEN_MM, TRAIN_MAX_SPEED))
+            .expect("線路の長さが負")
+    }
+}
+
+/// 路線ごとの、終点の着くホームを使う割合と、ホームごとの使える割合の和（`platform_use`）。
+type PlatformUse = (
+    BTreeMap<LineId, BTreeMap<Vertex, u64>>,
+    BTreeMap<Vertex, u64>,
+);
+
+/// 終点の着くホームを使う割合。路線ごとの、ホームと、列車 1 本がそのホームの時間を使う割合（[`TURN_FULL`] を 1 とする）
+/// と、ホームごとの使える割合の和（ホームの数 × 1）である。上限（`cap`）が 0 の路線は数えない。
 ///
 /// 往復する路線の列車は、1 周に終点ごとに 1 度、着いたホームを [`turn_ticks`] のあいだ押さえる。1 周の見込みの
-/// 時間を `t` とすると、列車 1 本はそのホームの時間の `turn_ticks ÷ t` を使う。同じホームに着いて折り返す路線は、
-/// この時間を分け合う。もう 1 つのホームを使える終点（`LinePlan::alt`）は、ホーム 2 つ分の時間がある。使う割合の
-/// 和がホームの数を超えると、列車は終点の手前の線路に並び、1 周が延びるだけで運べる量は増えない（#369）。
-///
-/// そこで、本数が 1 以上の路線に、ID の順に 1 本ずつ配り、どの終点も使う割合の和がホームの数を超えない所まで配る。
-/// どの路線も 1 本は走らせる。本数 0 の路線は、本数を 1 以上にしたとしたら配られる本数にする（区画の枠の
-/// 見込みの分と同じ考え）。配るのは、ほかの上限（`cap`）までである。終点のない環状の路線は、ほかの上限のままになる。
-fn turn_caps(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> BTreeMap<LineId, u8> {
-    // 路線ごとの、終点の着くホームと、列車 1 本が使う割合。
+/// 時間を `t` とすると、列車 1 本はそのホームの時間の `turn_ticks ÷ t` を使う。ほかの路線が折り返すホームを
+/// 通り抜ける路線（そこに止まる路線と、止まらずに通る路線）も、列車 1 本が [`through_ticks`] ÷ `t` を使う（#377）。
+/// 折り返す列車がホームにいるあいだ、通り抜ける列車はそのホームに入れず、通り抜ける列車がいるあいだは、折り返す
+/// 列車が入れないためである。
+fn platform_use(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> PlatformUse {
     let mut uses = BTreeMap::<LineId, BTreeMap<Vertex, u64>>::new();
-    // 終点の着くホームごとの、使える割合の和（ホームの数 × 1）。
     let mut room = BTreeMap::<Vertex, u64>::new();
+    let total = |l: &PlanLine| -> u64 {
+        l.path
+            .iter()
+            .map(|s| s.run_ticks() + s.stop_ticks())
+            .sum::<u64>()
+            .max(1)
+    };
     for l in lines {
         let plan = &plans[&l.id];
         if plan.cap == 0 {
             continue;
         }
-        let total: u64 = l.path.iter().map(|s| s.run_ticks() + s.stop_ticks()).sum();
+        let t = total(l);
         let mut u = BTreeMap::new();
         for (i, s) in l.path.iter().enumerate() {
             if s.kind != StepKind::Terminal {
                 continue;
             }
-            *u.entry(vertex(s)).or_default() +=
-                (turn_ticks(s.len) * TURN_FULL).div_ceil(total.max(1));
+            *u.entry(vertex(s)).or_default() += (turn_ticks(s.len) * TURN_FULL).div_ceil(t);
             let r = (1 + u64::from(plan.alt[i])) * TURN_FULL;
             room.entry(vertex(s))
                 .and_modify(|x| *x = (*x).min(r))
@@ -871,6 +912,32 @@ fn turn_caps(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> BTreeMap
         }
         uses.insert(l.id, u);
     }
+    // 終点の要素（折り返す前と、折り返して入る要素）でない要素が、どれかの路線の終点の着くホームを通るなら、
+    // 通り抜ける分を足す。
+    for l in lines {
+        let Some(u) = uses.get_mut(&l.id) else {
+            continue;
+        };
+        let t = total(l);
+        for (i, s) in l.path.iter().enumerate() {
+            if pocket_term(l.path, i).is_some() || !room.contains_key(&vertex(s)) {
+                continue;
+            }
+            *u.entry(vertex(s)).or_default() += (through_ticks(s) * TURN_FULL).div_ceil(t);
+        }
+    }
+    (uses, room)
+}
+
+/// 路線ごとの、終点の駅で折り返せる本数（[`LinePlan::turn_cap`]）。
+///
+/// 終点の着くホームを使う割合（`platform_use`）の和がホームの数を超えると、列車は終点の手前の線路に並び、1 周が
+/// 延びるだけで運べる量は増えない（#369）。そこで、本数が 1 以上の路線に、ID の順に 1 本ずつ配り、どの終点も
+/// 使う割合の和がホームの数を超えない所まで配る。どの路線も 1 本は走らせる。本数 0 の路線は、本数を 1 以上に
+/// したとしたら配られる本数にする（区画の枠の見込みの分と同じ考え）。配るのは、ほかの上限（`cap`）までである。
+/// 終点がなく、ほかの路線の終点のホームも通らない路線は、ほかの上限のままになる。
+fn turn_caps(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> BTreeMap<LineId, u8> {
+    let (uses, room) = platform_use(lines, plans);
     let deal = |active: &[LineId]| -> BTreeMap<LineId, u8> {
         let mut n = BTreeMap::<LineId, u8>::new();
         let mut load = BTreeMap::<Vertex, u64>::new();
@@ -948,7 +1015,8 @@ pub struct TurnLimit {
     pub station: StationId,
     /// 列車が折り返せるホームの数（1 か 2）。駅の線路をほかの路線も通る終点は 1 である。
     pub platforms: u8,
-    /// 同じホームに着いて折り返す、本数 1 以上のほかの路線（ID の順）。このホームの時間を分け合う。
+    /// 同じホームを使う、本数 1 以上のほかの路線（ID の順）。このホームの時間を分け合う。同じホームに着いて折り返す
+    /// 路線と、そのホームを通り抜ける路線（#377）である。
     pub shared_with: Vec<LineId>,
 }
 
@@ -998,42 +1066,51 @@ impl Rail {
     }
 
     /// 路線 `id` の終点の駅で折り返せる本数（[`RailLine::turn_cap`]）が上限より小さいとき、その本数を決めている終点。
-    /// 列車をもう 1 本走らせると、ホームを使う割合の和がホームの数を超える終点のうち、進路で先に出てくるものである
-    /// （`turn_caps` と同じ数え方）。
+    /// 列車をもう 1 本走らせると、ホームを使う割合の和がホームの数を超える終点のホームのうち、進路で先に出てくる
+    /// ものである（`turn_caps` と同じ数え方）。ほかの路線が折り返すホームを通り抜ける路線では、そのホームの駅になる。
     fn turn_limit(&self, id: LineId) -> Option<TurnLimit> {
         let line = self.lines.get(id)?;
         if line.cap() == 0 || line.turn_cap() >= line.cap() {
             return None;
         }
-        // 路線ごとの、列車 1 本が終点の着くホームを使う割合。
-        let share = |l: &RailLine, s: &Step| {
-            (turn_ticks(s.len) * TURN_FULL).div_ceil(l.round_trip_ticks().max(1))
-        };
+        let input: Vec<PlanLine> = self
+            .lines
+            .iter()
+            .map(|(id, l)| PlanLine {
+                id,
+                path: &l.path,
+                stopped: l.stopped,
+                trains: l.trains,
+            })
+            .collect();
+        let plans: BTreeMap<LineId, LinePlan> = self
+            .lines
+            .iter()
+            .map(|(k, l)| (k, l.plan.clone()))
+            .collect();
+        let (uses, room) = platform_use(&input, &plans);
+        let mine = uses.get(&id)?;
         line.path.iter().enumerate().find_map(|(i, s)| {
-            if s.kind != StepKind::Terminal {
+            let v = vertex(s);
+            let x = mine.get(&v)?;
+            // 終点の折り返して入る要素は、折り返す前の要素と同じホームなので、そちらで見る。
+            if pocket_term(&line.path, i).is_some_and(|k| k != i) {
                 return None;
             }
-            let v = vertex(s);
-            let platforms = 1 + u8::from(line.alt_ok(u32::try_from(i).ok()?));
-            let mut load = share(line, s) * (u64::from(line.turn_cap()) + 1);
+            let mut load = x * (u64::from(line.turn_cap()) + 1);
             let mut shared_with = Vec::new();
             for (other, l) in self.lines.iter() {
-                if other == id || l.trains == 0 || l.cap() == 0 {
+                if other == id || l.trains == 0 {
                     continue;
                 }
-                let mut uses = false;
-                for t in l.path.iter().filter(|t| t.kind == StepKind::Terminal) {
-                    if vertex(t) == v {
-                        load += share(l, t) * u64::from(l.turn_cap());
-                        uses = true;
-                    }
-                }
-                if uses {
+                if let Some(y) = uses.get(&other).and_then(|u| u.get(&v)) {
+                    load += y * u64::from(l.turn_cap());
                     shared_with.push(other);
                 }
             }
-            let station = s.station?;
-            (load > u64::from(platforms) * TURN_FULL).then_some(TurnLimit {
+            let platforms = u8::try_from(room[&v] / TURN_FULL).expect("ホームは 2 つまで");
+            let station = self.tracks.get(v.0)?.station?;
+            (load > room[&v]).then_some(TurnLimit {
                 station,
                 platforms,
                 shared_with,
@@ -1166,7 +1243,7 @@ impl Rail {
                 trains: change.trains,
             }])
             .collect();
-        make_plans(&input)
+        self.plans_for(&input)
     }
 
     /// 区分けを `plans` にしたとき、上限が 0 でなかったのに 0 になる、路線 `id` のほかの路線のうち、ID のいちばん
@@ -1237,13 +1314,30 @@ impl Rail {
                 trains: l.trains,
             })
             .collect();
-        let mut plans = make_plans(&input);
+        self.plans_for(&input)
+    }
+
+    /// 路線 `input` の区分け。終点で折り返せる本数（`turn_caps`）も入れ、区画の分をその本数までにする。
+    ///
+    /// 区画の分は、まず折り返せる本数を見ずに分け、そこから折り返せる本数を求め、その本数を分の上限にして分け直す
+    /// （`split_zone`）。分け直すと、上限で余った分がほかの路線に回り、その路線の上限（`cap`）が上がることがある。
+    /// 分が折り返せる本数まで下がった路線の `cap` は、分け直す前の値のままにする。`cap` は行き詰まりを防ぐ上限で、
+    /// 走らせる本数（[`RailLine::allowed`]）は折り返せる本数でも抑えるので、分を超える列車は走らない。`cap` まで
+    /// 下げると、折り返せる本数で抑えている理由（[`LineCapacity::turn_limit`]）が見えなくなる。
+    /// 折り返せる本数は、分け直したあとの `cap` から求め直す。
+    fn plans_for(&self, input: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
+        let mut plans = make_plans(input, &BTreeMap::new());
         #[cfg(test)]
         let lifted = self.lift_turn_caps;
         #[cfg(not(test))]
         let lifted = false;
         if !lifted {
-            for (id, n) in turn_caps(&input, &plans) {
+            let first = plans;
+            plans = make_plans(input, &turn_caps(input, &first));
+            for (id, p) in &mut plans {
+                p.cap = p.cap.max(first[id].cap);
+            }
+            for (id, n) in turn_caps(input, &plans) {
                 plans.get_mut(&id).expect("路線がない").turn_cap = n;
             }
         }
