@@ -1297,6 +1297,68 @@ fn settle_does_not_remove_more_trains_than_needed() {
 
 mod ring;
 
+/// 共有の区画の枠を分けきれず上限が 0 になっていた路線は、ほかの路線を消せば、上限が戻る。
+#[test]
+fn removing_a_line_restores_the_cap_of_a_starved_line() {
+    let (mut w, [west, mid, _, _]) = two_line_world();
+    let ids: Vec<LineId> = (0..4).map(|_| line_through(&mut w, &[west, mid])).collect();
+    assert_eq!(w.rail().line(ids[3]).unwrap().cap(), 0);
+    ok(&mut w, Command::RemoveLine { line: ids[0] });
+    assert!(w.rail().line(ids[3]).unwrap().cap() > 0);
+    assert!(w.rail().line_capacity(ids[3]).unwrap().cap > 0);
+}
+
+/// 路線と線路のコマンドをどう打っても、路線の上限は、書き出して読み戻して求め直した上限と同じになる
+/// （求め直し忘れがない）。
+#[test]
+fn line_caps_always_match_a_fresh_plan() {
+    for seed in 0..60u64 {
+        let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let (mut w, st) = two_line_world();
+        let mut ids: Vec<LineId> = Vec::new();
+        for step in 0..30 {
+            let cmd = match r.below(7) {
+                0 | 1 => Command::CreateLine {
+                    from: st[r.below(4) as usize],
+                    to: st[r.below(4) as usize],
+                },
+                2 if !ids.is_empty() => Command::ExtendLine {
+                    line: ids[r.below(ids.len() as u64) as usize],
+                    station: st[r.below(4) as usize],
+                },
+                5 if !ids.is_empty() => Command::InsertLineStation {
+                    line: ids[r.below(ids.len() as u64) as usize],
+                    after_index: r.below(4) as u8,
+                    station: st[r.below(4) as usize],
+                },
+                6 if !ids.is_empty() => Command::SetLineTrains {
+                    line: ids[r.below(ids.len() as u64) as usize],
+                    trains: r.below(17) as u8,
+                },
+                3 if !ids.is_empty() => Command::RemoveLine {
+                    line: ids[r.below(ids.len() as u64) as usize],
+                },
+                _ => Command::Bulldoze {
+                    area: TileRect::from_corners(
+                        at(r.below(80) as i64, 8),
+                        at(r.below(80) as i64, 8),
+                    ),
+                },
+            };
+            let _ = w.apply(&cmd);
+            ids = w.rail().lines().map(|(i, _)| i).collect();
+            let c = World::from_snapshot(&w.to_snapshot()).unwrap();
+            for (id, l) in w.rail().lines() {
+                assert_eq!(
+                    l.cap(),
+                    c.rail().line(id).unwrap().cap(),
+                    "seed {seed} step {step} {cmd:?}"
+                );
+            }
+        }
+    }
+}
+
 /// 路線の途中に駅を挿せる。a–c の路線に b を挿すと a、b、c の並びになる。
 #[test]
 fn inserting_a_station_puts_it_in_the_middle_of_the_line() {
