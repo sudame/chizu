@@ -14,6 +14,7 @@ use crate::world::{ApplyOutcome, World};
 /// `crossing` なら、y -7 の横の道路で、環状の線路の西と東の縦の区間に踏切を 1 つずつ置く。
 fn ring_world(chord: bool, crossing: bool) -> (World, Vec<StationId>) {
     let mut w = World::new_with_money(6, Money(1_000_000_000_000)).with_unlimited_land();
+    w.lift_turn_caps(true);
     for cx in -2..=4 {
         for cy in -2..=1 {
             let _ = w.apply(&Command::BuyChunk {

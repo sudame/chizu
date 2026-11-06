@@ -299,13 +299,17 @@ observe の rail（線路と駅）:
   trains 遊ぶ人が決めた本数（SetLineTrains の値。cap が下がって列車が消えても変わらない）、cap 行き詰まりを防ぐ本数の上限
     （共有の区画を通る路線は、区画の枠のうち自分の分で運べる本数までにする。それより多く走らせても、区画の手前で待つだけである。
     区画の枠は本数 1 以上の路線で分ける。本数 0 の路線の cap は、本数を 1 以上にしたら配られる分から決めた値である）、
+  turnCap 終点の駅で折り返せる本数。終点の駅では、折り返す列車が両方のホームを押さえ、1 本ずつしか入れないので、
+    1 周の見込みの時間のうちに通せる本数には限りがある。同じ駅を終点にする路線どうしは、これを本数 1 以上の路線で分ける。
+    これより多く走らせても、終点の手前に並んで 1 周が延びるだけなので、走らせる本数はこれまでに抑える。
+    環状の路線は 16。乗り換えの駅を終点にせず、通して走る路線にすると増える。
   capReason cap が 0 のときの理由（0 でなければ null）。waitPlaces 待てる所の数（2 つ未満だと cap は 0）、
     sharedWith 進路の線路を同じ向きに使うほかの路線の id（共有の区画の枠を、これらの路線と分けている）。
     shortSpans 進路にある、待てる所になれない短い線路（from と to が線路の両端のノードのマス、lengthMm が長さ）。
     列車の押さえる長さ minWaitLengthMm（72m）より短い線路は待てる所にならない。線路を分岐で割ると、割れた短い線路がここに出る
     （先頭の 16 本まで。shortSpanCount が全部の数）。
-  running いま走っている列車の本数。走らせるのは trains と cap の小さいほうまでである。
-  toStart 走らせる本数（trains と cap の小さいほう）に running が足りない分。本数を増やしたときや、路線を消すなどで
+  running いま走っている列車の本数。走らせるのは trains と cap と turnCap のいちばん小さいものまでである。
+  toStart 走らせる本数（trains と cap と turnCap のいちばん小さいもの）に running が足りない分。本数を増やしたときや、路線を消すなどで
     cap が戻ったときに出る。足りない分は、最初の駅のホームが空きしだい、1 tick に 1 本ずつ現れる（ふつうは数十〜百数十 tick で戻る）。
   roundTripTicks 1 周の見込みの時間（tick）、headwayTicks 運転間隔の見込み（tick、列車がなければ null）、
   stopped 線路が変わって進路を選べず止まっているか（止まった路線の列車は消え、新しい列車も現れない）。
@@ -2359,6 +2363,7 @@ fn lines(world: &World) -> Value {
                 "looped": l.looped,
                 "trains": l.trains,
                 "cap": l.cap(),
+                "turnCap": l.turn_cap(),
                 "capReason": cap_reason(rail, id),
                 "running": running,
                 "toStart": usize::from(l.allowed()).saturating_sub(running),

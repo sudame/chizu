@@ -4,6 +4,7 @@
 import { type LineRef, removeLineCommand, setLineTrainsCommand } from "./map/line-tool.ts";
 import {
   lineColorCode,
+  lineLimit,
   lineName,
   MAX_LINE_TRAINS,
   moveMinutes,
@@ -49,18 +50,19 @@ export function lineRow(line: RailLineInfo, nameOf: (station: Tile) => string): 
   } else if (line.cap === 0) {
     warning = `列車を走らせられない（本数の上限が 0）。${capZeroReason(line)}`;
   } else if (line.trains > line.allowed) {
-    warning = `決めた本数 ${line.trains} のうち、走らせるのは ${line.allowed} 本`;
+    const why = line.turnCap < line.cap ? "（終点の駅で折り返せる本数まで）" : "";
+    warning = `決めた本数 ${line.trains} のうち、走らせるのは ${line.allowed} 本${why}`;
   }
   return {
     name: lineName(line.index),
     stops: stationChain(line, nameOf),
-    trains: `本数 ${line.trains} / 上限 ${line.cap}`,
+    trains: `本数 ${line.trains} / 上限 ${lineLimit(line)}`,
     headway:
       line.stopped || line.allowed === 0 || line.headway === 0
         ? ""
         : `運転間隔 ${moveMinutes(line.headway)}・1 周 ${moveMinutes(line.roundTrip)}`,
     warning,
-    canAdd: line.trains < Math.min(line.cap, MAX_LINE_TRAINS),
+    canAdd: line.trains < Math.min(lineLimit(line), MAX_LINE_TRAINS),
     canSubtract: line.trains > 0,
   };
 }

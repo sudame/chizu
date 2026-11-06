@@ -189,6 +189,7 @@ describe("メッシュ", () => {
     trains: 2,
     cap: 4,
     allowed: 2,
+    turnCap: 16,
     stopped: false,
     headway: 300,
     roundTrip: 600,

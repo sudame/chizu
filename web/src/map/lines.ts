@@ -28,7 +28,7 @@ export const LINE_COLOR_NAMES: readonly string[] = [
 ];
 
 /** chizu-wasm の rail_lines の、路線ごとの見出しの数の個数。 */
-export const LINE_HEADER = 13;
+export const LINE_HEADER = 14;
 /** 本数の上限。chizu-core の MAX_LINE_TRAINS と同じ。 */
 export const MAX_LINE_TRAINS = 16;
 
@@ -58,8 +58,10 @@ export type RailLineInfo = {
   trains: number;
   /** 行き詰まりを防ぐ本数の上限。 */
   cap: number;
-  /** 走らせる本数（決めた本数を上限に抑えたもの）。 */
+  /** 走らせる本数（決めた本数を、上限と終点で折り返せる本数に抑えたもの）。 */
   allowed: number;
+  /** 終点の駅で折り返せる本数。これより多く決めても、走らせる本数は増えない。 */
+  turnCap: number;
   /** 線路が変わって進路を選べなくなった。 */
   stopped: boolean;
   /** 運転間隔（tick）。列車がなければ 0。 */
@@ -77,6 +79,11 @@ export type RailLineInfo = {
 };
 
 type LineRef = { index: number; generation: number };
+
+/** 決めても走らせられる本数の上限。行き詰まりを防ぐ上限と、終点で折り返せる本数の小さいほう。 */
+export function lineLimit(line: RailLineInfo): number {
+  return Math.min(line.cap, line.turnCap);
+}
 
 /** chizu-wasm の rail_lines の数の並びを読む。壊れていたら、読めたところまでにする。 */
 export function parseLines(data: ArrayLike<number>): RailLineInfo[] {
@@ -119,6 +126,7 @@ export function parseLines(data: ArrayLike<number>): RailLineInfo[] {
       trains: at(3),
       cap: at(4),
       allowed: at(5),
+      turnCap: at(13),
       stopped: at(6) === 1,
       headway: at(7),
       roundTrip: at(8),

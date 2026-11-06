@@ -32,10 +32,12 @@ function encode(
     cap?: number;
     shared?: number[][];
     waitPlaces?: number;
+    turnCap?: number;
   } = {},
 ) {
   const trains = opts.trains ?? 2;
   const cap = opts.cap ?? 3;
+  const turnCap = opts.turnCap ?? 16;
   return [
     ...[
       index,
@@ -43,7 +45,7 @@ function encode(
       0,
       trains,
       cap,
-      Math.min(trains, cap),
+      Math.min(trains, cap, turnCap),
       opts.stopped ?? 0,
       100,
       600,
@@ -51,6 +53,7 @@ function encode(
       1,
       opts.waitPlaces ?? 4,
       opts.shared?.length ?? 0,
+      turnCap,
     ],
     ...[0, 0, 30, 0],
     ...[3, 5, 25, 5],
@@ -139,6 +142,19 @@ describe("路線の一覧", () => {
     expect(lineRow(stopped, name).warning).toContain("止まっている");
     expect(lineRow(zero, name).warning).toContain("上限が 0");
     expect(lineRow(zero, name).canAdd).toBe(false);
+  });
+
+  test("終点で折り返せる本数が上限より少なければ、上限と＋ボタンはその本数に合わせる", () => {
+    const [turned] = parseLines(encode(0, { trains: 2, cap: 3, turnCap: 2 }));
+    const [over] = parseLines(encode(0, { trains: 3, cap: 3, turnCap: 2 }));
+    if (!turned || !over) throw new Error("読めない");
+    expect(turned.turnCap).toBe(2);
+    expect(lineRow(turned, () => "")).toMatchObject({
+      trains: "本数 2 / 上限 2",
+      canAdd: false,
+      warning: "",
+    });
+    expect(lineRow(over, () => "").warning).toContain("終点の駅で折り返せる本数まで");
   });
 
   test("上限が 0 の路線と 0 でない路線が混ざった並びを続けて読む", () => {

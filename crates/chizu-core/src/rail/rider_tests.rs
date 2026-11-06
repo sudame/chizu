@@ -720,7 +720,9 @@ pub(crate) fn transfer_town(trains: u8) -> (World, [LineId; 2], [StationId; 3]) 
 #[test]
 fn setting_trains_above_the_cap_keeps_the_table() {
     let (mut w, [line, _], _) = transfer_town(3);
-    let cap = w.rail().line(line).unwrap().cap();
+    // 上限と、終点の駅で折り返せる本数の小さいほうまで走る。
+    let l = w.rail().line(line).unwrap();
+    let cap = l.cap().min(l.turn_cap());
     assert!(cap >= 2, "上限が小さすぎる: {cap}");
     ok(w.apply(&Command::SetLineTrains { line, trains: cap }));
     assert!(w.rail_planner().is_some());
@@ -998,4 +1000,68 @@ fn the_fare_weighs_less_on_richer_households() {
     assert_eq!(money_seconds(5, Money(0)), 80);
     assert_eq!(money_seconds(5, Money(full)), 20);
     assert_eq!(money_seconds(0, Money(0)), 0);
+}
+
+/// 路線 `line` の列車 1 本が、終点の駅 1 つの時間のうち使う割合（`turn_caps` と同じ求め方）。
+fn turn_share(line: &RailLine) -> u64 {
+    let s = line
+        .path
+        .iter()
+        .find(|s| s.kind == StepKind::Terminal)
+        .expect("終点がない");
+    (crate::rail::line::turn_ticks(s.len) * crate::rail::line::TURN_FULL)
+        .div_ceil(line.round_trip_ticks())
+}
+
+/// 乗り換えの駅を終点にする 2 路線は、その駅で折り返せる本数を分け合う（#369）。本数を上限より多く決めても、
+/// 走らせる本数は折り返せる本数までである。
+#[test]
+fn lines_ending_at_the_same_station_share_its_turns() {
+    let (mut w, [first, second], _) = transfer_town(6);
+    let rail = w.rail();
+    let (a, b) = (rail.line(first).unwrap(), rail.line(second).unwrap());
+    // 真ん中の駅を、2 路線の列車がそれぞれ 1 周に 1 度ずつ使う。割合の和は 1 を超えず、1 本足すと超える。
+    let used = u64::from(a.turn_cap()) * turn_share(a) + u64::from(b.turn_cap()) * turn_share(b);
+    assert!(used <= crate::rail::line::TURN_FULL, "{used}");
+    assert!(used + turn_share(a).min(turn_share(b)) > crate::rail::line::TURN_FULL);
+    // ID の順に 1 本ずつ配るので、余りは先の路線に行く。
+    assert_eq!((a.turn_cap(), b.turn_cap()), (2, 1));
+    assert!(a.cap() > a.turn_cap() && b.cap() > b.turn_cap());
+    assert_eq!((a.allowed(), b.allowed()), (2, 1));
+    assert_eq!(rail.line_capacity(first).unwrap().turn_cap, 2);
+    // 本数 0 の路線は駅の時間を使わないので、もう一方の路線は 3 本まで折り返せる。本数 0 の路線には、
+    // 走らせたとしたら配られる本数を見せる。
+    ok(w.apply(&Command::SetLineTrains {
+        line: second,
+        trains: 0,
+    }));
+    let rail = w.rail();
+    assert_eq!(rail.line(first).unwrap().turn_cap(), 3);
+    assert_eq!(rail.line(second).unwrap().turn_cap(), 1);
+    // 走らせ直すと、もう一方の路線の折り返せる本数は戻る。
+    ok(w.apply(&Command::SetLineTrains {
+        line: second,
+        trains: 6,
+    }));
+    let rail = w.rail();
+    assert_eq!(rail.line(first).unwrap().turn_cap(), 2);
+    assert_eq!(rail.line(second).unwrap().turn_cap(), 1);
+}
+
+/// 本数を多く決めても、列車は終点の手前に並ばず、1 周は見込みの時間で回る（#369）。前は、真ん中の駅で
+/// 折り返す列車が 1 本ずつしか入れず、1 周が見込みの 2〜6 倍に延びていた。
+#[test]
+fn many_trains_do_not_queue_before_a_shared_terminal() {
+    let (mut w, lines, _) = transfer_town(6);
+    run(&mut w, crate::TICKS_PER_DAY);
+    assert_eq!(w.rail().train_count(), 3);
+    for id in lines {
+        let l = w.rail().line(id).unwrap();
+        assert!(
+            l.measured_round_trip_ticks() <= l.round_trip_ticks(),
+            "{id:?}: {} > {}",
+            l.measured_round_trip_ticks(),
+            l.round_trip_ticks()
+        );
+    }
 }
