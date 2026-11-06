@@ -804,6 +804,17 @@ mod tests {
         }
     }
 
+    /// ベンチマークと同じ手順（列車が出そろう、ならし運転のあとも消えない、行き詰まらない）が、実際に
+    /// 回して通る。`rail_trains_running` の中のアサーションがそれを確かめる。
+    #[test]
+    fn rail_bench_trains_all_appear_and_keep_running() {
+        let rail = rail_trains_running(1, RAIL_BENCH_LINES);
+        assert_eq!(
+            rail.train_count(),
+            RAIL_BENCH_LINES * usize::from(RAIL_BENCH_TRAINS)
+        );
+    }
+
     #[test]
     fn golden_hash() {
         assert_eq!(
