@@ -13,7 +13,7 @@ import {
 describe("凡例", () => {
   test("区画・建物・印・施設・道路・移動体の順に並ぶ。交通は主題図の凡例に出す", () => {
     const sections = legendSections();
-    expect(sections.map((s) => s.items.length)).toEqual([5, 5, 2, 4, 4, 2]);
+    expect(sections.map((s) => s.items.length)).toEqual([5, 5, 2, 5, 4, 1, 2]);
     expect(sections[0]?.items.map((i) => i.label)).toEqual([
       "住宅（低密度）",
       "住宅（高密度）",
@@ -26,6 +26,7 @@ describe("凡例", () => {
       "浄水場",
       "平面の駐車場",
       "駐車場ビル",
+      "駅",
     ]);
     expect(sections[4]?.items.map((i) => i.label)).toEqual([
       "小さい道路",
@@ -41,7 +42,7 @@ describe("凡例", () => {
     expect(roads[0]?.border).toBe(cssColor(roadStyle(1).edge));
     // 高速道路の縁は小の道路と違う色
     expect(roads[3]?.border).not.toBe(roads[0]?.border);
-    expect(legendSections()[5]?.items[1]?.color).toBe(cssColor(WALKER_COLOR));
+    expect(legendSections()[6]?.items[1]?.color).toBe(cssColor(WALKER_COLOR));
   });
 
   test("印の色は描画の定数と同じで、形を持つ", () => {
@@ -53,8 +54,20 @@ describe("凡例", () => {
 
   test("施設は丸い記号で、丸の色と絵が描画の定数と同じである", () => {
     const facilities = legendSections()[3]?.items ?? [];
-    expect(facilities.map((i) => i.symbol?.glyph)).toEqual(["bolt", "drop", "parking", "parking"]);
-    expect(facilities.map((i) => i.color)).toEqual(["#e8710a", "#12a4af", "#5f6b7a", "#5f6b7a"]);
+    expect(facilities.map((i) => i.symbol?.glyph)).toEqual([
+      "bolt",
+      "drop",
+      "parking",
+      "parking",
+      "train",
+    ]);
+    expect(facilities.map((i) => i.color)).toEqual([
+      "#e8710a",
+      "#12a4af",
+      "#5f6b7a",
+      "#5f6b7a",
+      "#5f6b7a",
+    ]);
   });
 
   test("建物は区画と同じ順で、建物の色を縁の色で囲んで示す", () => {

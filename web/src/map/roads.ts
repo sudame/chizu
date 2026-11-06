@@ -45,7 +45,8 @@ export const THIN_PX = 0.5;
 
 // 半分の太さは、世界の単位の a_half を画面に直した値と、画面のピクセルの下限 a_min の大きいほうに、
 // 画面のピクセルの a_extra を足した値にする。a_dash が正なら、a_along（世界の距離）に沿って、
-// 画面で a_dash ピクセルの周期の破線にする。
+// 画面で a_dash ピクセルの周期の破線にする。a_dash が負なら、a_along（世界の距離）に沿って、
+// 世界で -a_dash マスの周期の破線にする（拡大しても間隔が変わらない枕木に使う）。
 // u_alpha は、拡大したときだけ描く路面の線を、縮尺に合わせて薄くするのに使う。
 // u_fade は、色を地面の色から本来の色へ寄せる割合で、引いたときの小の道路を薄く描くのに使う。
 // 不透明のまま色を薄めるので、帯とノードの四角が重なる所だけ濃くなることがない
@@ -73,7 +74,7 @@ void main() {
   vec2 p = (a_pos * u_zoom + u_offset + a_normal * half_px) / (u_viewport * 0.5);
   gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
   v_color = vec4(mix(${glslVec3(GROUND_COLOR)}, a_color.rgb, u_fade), a_color.a * u_alpha);
-  v_distance = a_along * u_zoom;
+  v_distance = a_dash < 0.0 ? a_along : a_along * u_zoom;
   v_dash = a_dash;
 }`;
 
@@ -85,7 +86,8 @@ flat in float v_dash;
 out vec4 color;
 void main() {
   // 破線は、discard せずに不透明度で抜く（実線は v_dash が 0）
-  float on = v_dash > 0.0 ? step(mod(v_distance, v_dash), v_dash * 0.5) : 1.0;
+  float period = abs(v_dash);
+  float on = period > 0.0 ? step(mod(v_distance, period), period * 0.5) : 1.0;
   color = vec4(v_color.rgb, v_color.a * on);
 }`;
 
@@ -1325,6 +1327,13 @@ const MESH_NAMES = [
   "parkedFine",
   "roofs",
   "marks",
+  "railFar",
+  "railMid",
+  "railBed",
+  "railRails",
+  "railSleepers",
+  "railStation",
+  "railStationFine",
   "minor",
   "major",
   "lanes",
@@ -1366,6 +1375,14 @@ export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
     // 細部の段では、寄りの描き方に描き足す（detail.ts）
     ["roofs", w.fine],
     ["marks", w.marks],
+    // 線路は引き、標準、寄り、細部で描き方を替える（rail.ts）。駅のホームと駅舎は寄りから、白線は細部から
+    ["railFar", w.blocks],
+    ["railMid", w.clusters],
+    ["railBed", w.detail],
+    ["railRails", w.detail],
+    ["railSleepers", w.fine],
+    ["railStation", w.detail],
+    ["railStationFine", w.fine],
     ["minor", lines],
     ["major", lines],
     ["lanes", w.detail],
@@ -1472,6 +1489,25 @@ export class RoadLayer {
     this.#upload("major", meshes.major);
     this.#upload("lanes", meshes.lanes);
     this.#upload("markings", meshes.markings);
+  }
+
+  /** 線路と駅（rail.ts）。 */
+  setRail(meshes: {
+    far: MeshSource;
+    mid: MeshSource;
+    bed: MeshSource;
+    rails: MeshSource;
+    sleepers: MeshSource;
+    station: MeshSource;
+    stationFine: MeshSource;
+  }): void {
+    this.#upload("railFar", meshes.far);
+    this.#upload("railMid", meshes.mid);
+    this.#upload("railBed", meshes.bed);
+    this.#upload("railRails", meshes.rails);
+    this.#upload("railSleepers", meshes.sleepers);
+    this.#upload("railStation", meshes.station);
+    this.#upload("railStationFine", meshes.stationFine);
   }
 
   setSignals(geometry: Geometry): void {

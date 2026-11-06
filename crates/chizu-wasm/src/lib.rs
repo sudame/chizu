@@ -59,12 +59,13 @@ pub fn road_cost_table() -> Vec<f64> {
         .collect()
 }
 
-/// 施設の表。施設の種類（`ServiceKind::ALL` の順に、発電所、浄水場、平面の駐車場、駐車場ビル）ごとに
+/// 施設の表。施設の種類（`ServiceKind::ALL` の順に、発電所、浄水場、平面の駐車場、駐車場ビル、続けて駅）ごとに
 /// `[費用, 間口, 奥行き, 台数]` を並べる。台数は共同の駐車場の台数で、ほかの施設は 0 である。
 #[wasm_bindgen]
 pub fn service_table() -> Vec<f64> {
     ServiceKind::ALL
         .into_iter()
+        .chain([ServiceKind::Station])
         .flat_map(|k| {
             let (w, d) = k.size();
             [
@@ -209,6 +210,40 @@ impl Simulation {
         self.0.inspect_target(kind, a, b)
     }
 
+    /// 線路と駅の版。変わったときだけ線路と駅の形を読み直す。
+    pub fn rail_revision(&self) -> f64 {
+        self.0.rail_revision() as f64
+    }
+
+    /// 線路ごとに `[a の x, a の y, b の x, b の y, 駅の線路か（0 か 1）]`。
+    pub fn rail_tracks(&self) -> Vec<f64> {
+        self.0.rail_tracks()
+    }
+
+    /// 駅ごとに `[min の x, min の y, max の x, max の y, 道路へ向かう 1 歩の x, y]`。
+    pub fn rail_stations(&self) -> Vec<f64> {
+        self.0.rail_stations()
+    }
+
+    /// 線路を (x0, y0) から (x1, y1) に引けるかと建設費を、`[理由の文か null, 建設費]` で返す。
+    pub fn rail_probe(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Result<js_sys::Array, JsError> {
+        let coord = |v: f64| {
+            (v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0)
+                .then_some(v as i64)
+                .ok_or_else(|| JsError::new("マスの座標が整数でない"))
+        };
+        let (reason, cost) = self.0.rail_probe(
+            TilePos::new(coord(x0)?, coord(y0)?),
+            TilePos::new(coord(x1)?, coord(y1)?),
+        );
+        Ok([
+            reason.map_or(JsValue::NULL, JsValue::from_str),
+            JsValue::from_f64(cost as f64),
+        ]
+        .into_iter()
+        .collect())
+    }
+
     /// 長方形 (x0, y0)-(x1, y1) を取り壊したときに消えるもの。並びは `sim::Sim::bulldoze_preview` にある。
     pub fn bulldoze_preview(
         &self,
@@ -274,7 +309,7 @@ impl Simulation {
         self.0.lot_shortage()
     }
 
-    /// 収支の見込みの 13 個の数。並びは `sim::Sim::finance` にある。
+    /// 収支の見込みの 17 個の数。並びは `sim::Sim::finance` にある。
     pub fn finance(&self) -> Vec<f64> {
         self.0.finance()
     }

@@ -13,6 +13,8 @@ pub struct BulldozePreview {
     pub segments: Vec<Line>,
     /// 消える道路のマスの数。ほかの区間が残って通るマスは数えない。
     pub road_tiles: u64,
+    /// 消える道路のマスの一覧（`road_tiles` と同じ数で、x、y の順に並ぶ）。
+    pub removed_road_tiles: Vec<TilePos>,
     /// 消える施設の敷地。
     pub facilities: Vec<TileRect>,
     /// 消える建物の敷地。長方形にかかる建物と、面した道路をなくす建物である。
@@ -23,6 +25,8 @@ pub struct BulldozePreview {
     pub tracks: Vec<Line>,
     /// 消える線路のマスの数。駅の中を含み、ほかの線路が残って通るマスは数えない。
     pub rail_tiles: u64,
+    /// 消える線路のマスの一覧（`rail_tiles` と同じ数で、x、y の順に並ぶ）。
+    pub removed_rail_tiles: Vec<TilePos>,
     /// 消える駅の敷地。
     pub stations: Vec<TileRect>,
 }
@@ -116,11 +120,13 @@ impl World {
         BulldozePreview {
             segments,
             road_tiles: tiles.len() as u64,
+            removed_road_tiles: tiles.iter().copied().collect(),
             facilities,
             buildings,
             displaced_households,
             tracks,
             rail_tiles: rail_tiles.len() as u64,
+            removed_rail_tiles: rail_tiles.iter().copied().collect(),
             stations,
         }
     }

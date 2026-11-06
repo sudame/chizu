@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
 import { Camera } from "./camera.ts";
 import {
+  buildRailCommand,
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
@@ -246,17 +247,40 @@ describe("施設", () => {
 
   test("施設の表を読み、置くコマンドを組み立てる", () => {
     const table = parseServiceTable([
-      60000, 4, 4, 0, 25000, 2, 2, 0, 3000, 2, 2, 12, 72000, 4, 4, 240,
+      60000, 4, 4, 0, 25000, 2, 2, 0, 3000, 2, 2, 12, 72000, 4, 4, 240, 40000, 10, 3, 0,
     ]);
     expect(table.WaterPump).toEqual({ cost: 25000, width: 2, depth: 2, spaces: 0 });
     expect(table.ParkingLot).toEqual({ cost: 3000, width: 2, depth: 2, spaces: 12 });
     expect(table.ParkingGarage).toEqual({ cost: 72000, width: 4, depth: 4, spaces: 240 });
+    expect(table.Station).toEqual({ cost: 40000, width: 10, depth: 3, spaces: 0 });
     expect(() => parseServiceTable([1, 2])).toThrow();
     expect(placeServiceCommand("PowerPlant", { x: -3, y: 4 }, 2)).toEqual({
       kind: "PlaceBuilding",
       service: "PowerPlant",
       atX: -3,
       atY: 4,
+      rotation: 2,
+    });
+  });
+});
+
+describe("線路の道具", () => {
+  test("線路を引くコマンドは、道路と同じく両端のマスを指す", () => {
+    expect(buildRailCommand({ x: 3, y: 4 }, { x: 9, y: 10 })).toEqual({
+      kind: "BuildRail",
+      fromX: 3,
+      fromY: 4,
+      toX: 9,
+      toY: 10,
+    });
+  });
+
+  test("駅は施設と同じコマンドで置く", () => {
+    expect(placeServiceCommand("Station", { x: 12, y: 9 }, 2)).toEqual({
+      kind: "PlaceBuilding",
+      service: "Station",
+      atX: 12,
+      atY: 9,
       rotation: 2,
     });
   });

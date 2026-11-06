@@ -34,6 +34,7 @@ import {
   type BulldozePreview,
   bulldozeSummary,
   parseBulldozePreview,
+  removedRailTiles,
   removedRoadTiles,
 } from "./map/bulldoze-preview.ts";
 import {
@@ -65,6 +66,13 @@ import {
   PREVIEW_ROAD_FILL_ALPHA,
 } from "./map/palette.ts";
 import { ParkedCache, parseIndoorParked, parseParked } from "./map/parked.ts";
+import {
+  parseStations,
+  parseTracks,
+  RAIL_MID_COLOR,
+  type RailMeshes,
+  railMeshes,
+} from "./map/rail.ts";
 import { MapRenderer } from "./map/renderer.ts";
 import {
   type BuildingMeshes,
@@ -106,6 +114,7 @@ import {
   themeStorage,
 } from "./map/themes.ts";
 import {
+  buildRailCommand,
   buildRoadCommand,
   bulldozeCommand,
   buyChunkCommand,
@@ -124,9 +133,11 @@ import {
   type ServiceInfo,
   type ServiceProbe,
   SHARED_LOT_RADIUS,
+  STATION_WALK_RADIUS,
   screenToTile,
   serviceFootprint,
   signalCommand,
+  snapToEightDirections,
   type Tile,
   type Tool,
   upgradePlan,
@@ -291,6 +302,8 @@ const labels = new LabelLayer(element<HTMLCanvasElement>("#labels"));
 let roads: RoadMeshes | null = null;
 let buildings: BuildingMeshes | null = null;
 let signals: Geometry | null = null;
+// 最後に届いた線路と駅
+let rail: RailMeshes | null = null;
 // 細部の段で描き足すもの。細部の段に入っているときだけ、見えている範囲のぶんを作る
 const detail = new DetailCache();
 // 駐車場に停まっている車の頂点（寄りの段から、見えている範囲のぶんだけ作る）
@@ -322,6 +335,8 @@ trackHeight(element<HTMLElement>("#toolstack"), "--toolbar-h");
 trackHeight(element<HTMLElement>("#toolbar"), "--bar-h");
 trackHeight(element<HTMLElement>("#hudbar"), "--hudbar-h");
 trackHeight(element<HTMLElement>("#map-meta"), "--meta-h");
+// 知らせの高さ。狭い画面で、左上の欄を積む列の高さを、知らせの上までに収めるのに使う
+trackHeight(element<HTMLElement>("#notices"), "--notices-h");
 const updateScale = setupScaleBar(element<HTMLElement>("#scale"));
 const popovers = createPopovers();
 for (const toggle of document.querySelectorAll<HTMLButtonElement>("button[data-menu]")) {
@@ -415,6 +430,9 @@ mapCanvas.addEventListener("webglcontextrestored", () => {
   }
   if (signals !== null) {
     renderer?.roads.setSignals(signals);
+  }
+  if (rail !== null) {
+    renderer?.roads.setRail(rail);
   }
   detail.invalidate();
   parkedCars.invalidate();
@@ -609,6 +627,8 @@ const AREA_EDGE_PX = 1.5;
 // 共同の駐車場の届く範囲の円の塗りの濃さ
 const PARKING_RANGE_FILL_ALPHA = 0.12;
 const BUY_EDGE_PX = 2;
+// 線路を引く仮の表示の塗り。標準の段の線路の色の 70% にする
+const RAIL_PREVIEW_COLOR: Color = [RAIL_MID_COLOR[0], RAIL_MID_COLOR[1], RAIL_MID_COLOR[2], 0.7];
 const DASH_PX = 8;
 
 const ROAD_CODE: Record<RoadKindName, number> = { Small: 1, Medium: 2, Large: 3 };
@@ -651,6 +671,9 @@ let probeSent = "";
 let bulldozeShown: { key: string; preview: BulldozePreview | null } | null = null;
 let bulldozeSent = "";
 let bulldozeWaiting = false;
+// 線路を引けるかと建設費の、中核の答え。引く直線が変わるたびに Worker に問い合わせる
+let railShown: { key: string; reason: string | null; cost: number } | null = null;
+let railSent = "";
 // 最後に問い合わせた tick。カーソルが動かなくても、街の数字が届いたときに共同の駐車場の円の中の数を問い合わせ直す
 let probeAskedTick = 0;
 let money = 0;
@@ -723,6 +746,38 @@ function updatePreview(): void {
       mapCanvas.dataset.previewCost = String(plan.cost);
     }
     geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK_COLOR, MIN_PX);
+  } else if (tool.kind === "rail" && cursor !== null) {
+    const from = roadStart ?? cursor;
+    const to = roadStart === null ? cursor : snapToEightDirections(roadStart, cursor);
+    geometry = new Geometry(from);
+    if (roadStart === null) {
+      info = "線路の始点のマスを押す。縦横と 45 度に引ける";
+    } else if (to.x !== from.x || to.y !== from.y) {
+      const key = requestRailProbe(from, to);
+      const answer = railShown?.key === key ? railShown : null;
+      // 答えが届くまでは、引けるものとして示す
+      const ok = answer === null || answer.reason === null;
+      const length = Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y));
+      roadFootprint(geometry, from, to, ok ? RAIL_PREVIEW_COLOR : PREVIEW_BAD_COLOR, 0);
+      footprintOutline(
+        geometry,
+        from,
+        to,
+        ok ? PREVIEW_OK_EDGE_COLOR : PREVIEW_BAD_EDGE_COLOR,
+        AREA_EDGE_PX,
+        ok ? 0 : DASH_PX,
+      );
+      const cost =
+        answer === null || answer.cost === 0 ? "" : `・費用 ${answer.cost.toLocaleString("ja-JP")}`;
+      info =
+        answer?.reason == null
+          ? `長さ ${length} マス${cost}`
+          : `引けない：${answer.reason}・長さ ${length} マス${cost}`;
+      // test:wasm が読む
+      mapCanvas.dataset.railPlaceable = String(ok);
+      mapCanvas.dataset.previewCost = String(answer?.cost ?? 0);
+    }
+    geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK_COLOR, MIN_PX);
   } else if (tool.kind === "road" && cursor !== null) {
     const { from, to } = roadEndpoints(roadIndex, roadStart, cursor, noSnap);
     shownRoad = { start: roadStart, cursor, noSnap, from, to };
@@ -754,7 +809,10 @@ function updatePreview(): void {
         for (const t of removedRoadTiles(preview)) {
           geometry.square(t, ROAD_VISUAL_HALF, BULLDOZE_REACH_FILL_COLOR, MIN_PX);
         }
-        for (const b of [...preview.buildings, ...preview.facilities]) {
+        for (const t of removedRailTiles(preview)) {
+          geometry.square(t, ROAD_VISUAL_HALF, BULLDOZE_REACH_FILL_COLOR, MIN_PX);
+        }
+        for (const b of [...preview.buildings, ...preview.facilities, ...preview.stations]) {
           geometry.rect(b.min, b.max, BULLDOZE_REACH_FILL_COLOR);
           geometry.outline(
             b.min.x,
@@ -775,8 +833,18 @@ function updatePreview(): void {
         mapCanvas.dataset.bulldozeFacilities = String(preview.facilities.length);
         mapCanvas.dataset.bulldozeHouseholds = String(preview.displacedHouseholds);
         mapCanvas.dataset.bulldozeSegments = String(preview.segments.length);
+        mapCanvas.dataset.bulldozeRailTiles = String(preview.railTiles);
+        mapCanvas.dataset.bulldozeStations = String(preview.stations.length);
       } else {
-        for (const k of ["RoadTiles", "Buildings", "Facilities", "Households", "Segments"]) {
+        for (const k of [
+          "RoadTiles",
+          "Buildings",
+          "Facilities",
+          "Households",
+          "Segments",
+          "RailTiles",
+          "Stations",
+        ]) {
           delete mapCanvas.dataset[`bulldoze${k}`];
         }
       }
@@ -810,8 +878,22 @@ function updatePreview(): void {
         AREA_EDGE_PX,
       );
     }
+    if (tool.service === "Station") {
+      // 乗る駅を探す範囲を、施設の丸の色の円で見せる。敷地の真ん中から測る
+      geometry.circle(
+        (min.x + max.x + 1) / 2,
+        (min.y + max.y + 1) / 2,
+        STATION_WALK_RADIUS,
+        [base[0], base[1], base[2], PARKING_RANGE_FILL_ALPHA],
+        [base[0], base[1], base[2], 1],
+        AREA_EDGE_PX,
+      );
+    }
     geometry.rect(min, max, color);
     let cost = `費用 ${info.cost.toLocaleString("ja-JP")}・R で回す`;
+    if (tool.service === "Station") {
+      cost = `徒歩圏 ${STATION_WALK_RADIUS} マス・${cost}`;
+    }
     if (parking) {
       const fresh = probe?.service === tool.service && probe.x === cursor.x && probe.y === cursor.y;
       const carless = fresh && probe !== null ? probe.carless : null;
@@ -894,6 +976,7 @@ function roadAt(at: Tile): { from: Tile; to: Tile } {
 const PROBE_REFRESH_TICKS = 60;
 let latestProbeTick = 0;
 let bulldozeAskedTick = 0;
+let railAskedTick = 0;
 
 /** 街の数字が届いたとき、共同の駐車場の道具が同じマスに出していた円の中の数を、間隔を空けて問い合わせ直す。 */
 function refreshProbe(tick: number): void {
@@ -906,6 +989,12 @@ function refreshProbe(tick: number): void {
   ) {
     bulldozeAskedTick = tick;
     bulldozeSent = "";
+    updatePreview();
+  }
+  // 線路の見積もりは、所持金が動くと「お金が足りない」かどうかが変わるので、同じ直線でも間隔を空けて問い直す
+  if (tool.kind === "rail" && tick - railAskedTick >= PROBE_REFRESH_TICKS) {
+    railAskedTick = tick;
+    railSent = "";
     updatePreview();
   }
   if (tool.kind === "service" && isParking(tool.service) && cursor !== null) {
@@ -923,6 +1012,16 @@ function requestBulldozePreview(min: Tile, max: Tile): string {
     bulldozeSent = key;
     bulldozeWaiting = true;
     send({ kind: "bulldoze-preview", x0: min.x, y0: min.y, x1: max.x, y1: max.y });
+  }
+  return key;
+}
+
+/** 線路を引けるかを問い合わせる。直線の印を返す。同じ直線は問い合わせ直さない。 */
+function requestRailProbe(from: Tile, to: Tile): string {
+  const key = `${from.x},${from.y},${to.x},${to.y}`;
+  if (key !== railSent) {
+    railSent = key;
+    send({ kind: "probe-rail", x0: from.x, y0: from.y, x1: to.x, y1: to.y });
   }
   return key;
 }
@@ -999,6 +1098,17 @@ function clickTile(at: Tile): void {
         const make = tool.kind === "road" ? buildRoadCommand : upgradeRoadCommand;
         sendCommand(make(tool.road, roadStart, end));
         // CS2 と同じく、引いた終点から続けて引ける
+        roadStart = end;
+      }
+    }
+  } else if (tool.kind === "rail") {
+    if (roadStart === null) {
+      roadStart = at;
+    } else {
+      const end = snapToEightDirections(roadStart, at);
+      if (end.x !== roadStart.x || end.y !== roadStart.y) {
+        sendCommand(buildRailCommand(roadStart, end));
+        // 道路と同じく、引いた終点から続けて引ける
         roadStart = end;
       }
     }
@@ -1220,7 +1330,7 @@ for (const button of toolButtons) {
                 ? { kind: "signal", on: name === "signal-on" }
                 : name === "crosswalk-on" || name === "crosswalk-off"
                   ? { kind: "crosswalk", on: name === "crosswalk-on" }
-                  : name === "bulldoze" || name === "buy"
+                  : name === "bulldoze" || name === "buy" || name === "rail"
                     ? { kind: name }
                     : { kind: "none" };
     selectTool(next, button);
@@ -1229,6 +1339,7 @@ for (const button of toolButtons) {
 
 const DONE: Record<CommandMessage["kind"], string> = {
   BuildRoad: "道路を引いた",
+  BuildRail: "線路を引いた",
   UpgradeRoad: "道路の種類を変えた",
   Bulldoze: "取り壊した",
   BuyChunk: "土地を買った",
@@ -1312,6 +1423,23 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     // test:wasm が読む
     mapCanvas.dataset.roadRevision = String(message.revision);
     mapCanvas.dataset.roadSegments = String(message.segments.length / SEGMENT_STRIDE);
+    return;
+  }
+  if (message.kind === "rail") {
+    const tracks = parseTracks(message.tracks);
+    const stations = parseStations(message.stations);
+    rail = railMeshes(tracks, stations);
+    renderer?.roads.setRail(rail);
+    // test:wasm が読む
+    mapCanvas.dataset.railTracks = String(tracks.length);
+    mapCanvas.dataset.railStations = String(stations.length);
+    mapCanvas.dataset.railRevision = String(message.revision);
+    return;
+  }
+  if (message.kind === "rail-probe") {
+    const { x0, y0, x1, y1, reason, cost } = message;
+    railShown = { key: `${x0},${y0},${x1},${y1}`, reason, cost };
+    updatePreview();
     return;
   }
   if (message.kind === "mover-paths") {
@@ -1408,7 +1536,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     // 取り壊しで消えるものも、街が変わったので古い見積もりを捨てて問い合わせ直す
     bulldozeSent = "";
     bulldozeShown = null;
-    if (tool.kind === "service" || tool.kind === "bulldoze") {
+    // 引けるかも、街が変わったので古い答えを捨てて問い合わせ直す
+    railSent = "";
+    railShown = null;
+    if (tool.kind === "service" || tool.kind === "bulldoze" || tool.kind === "rail") {
       updatePreview();
     }
     if (

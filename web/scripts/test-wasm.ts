@@ -170,6 +170,10 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
       (await page.locator("#finance .finance-net").isVisible()),
     "お金を押すと収支の欄が開く",
   );
+  check(
+    await page.getByText("鉄道の維持費").isVisible(),
+    "鉄道がなくても、収支の欄に鉄道の維持費の行が出ている（欄の縦の余裕は、重なりの確かめが見る）",
+  );
   await financeToggle.click();
   check(!(await finance.isVisible()), "お金をもう一度押すと収支の欄が閉じる");
   await financeToggle.click();
@@ -401,6 +405,108 @@ async function checkLabels(page: Page, at: string): Promise<void> {
     shield > 20,
     `高速道路の名前が緑の盾で描かれる（${await labels.getAttribute("data-labels")}、緑の画素 ${shield}）`,
   );
+  await page.close();
+}
+
+// 駅と線路を道具で置き、線路が道床の色で描かれること、引く前の見積もり、取り壊しで赤く塗られるものの数を確かめる。
+// 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その北側に駅を置いて、駅の線路から東へ線路を引く
+async function checkRail(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  const map = page.locator("#map");
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  await page.locator("#hud").and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  const waitMap = (key: string, expected: string, op: "eq" | "gt") =>
+    page.waitForFunction(
+      ([k, v, o]) => {
+        const d = document.querySelector<HTMLElement>("#map")?.dataset[k] ?? "";
+        return o === "eq" ? d === v : Number(d) > Number(v);
+      },
+      [key, expected, op] as const,
+      { timeout: TIMEOUT_MS },
+    );
+  await waitMap("roadSegments", "0", "gt");
+  await page.locator("#pause").click();
+  await zoomInTo(page, 16);
+  const size = page.viewportSize() ?? { width: 1280, height: 720 };
+  const d0 = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  const zoom = Number(d0.zoom);
+  const tileCenter = (x: number, y: number) => ({
+    x: size.width / 2 + (x + 0.5 - Number(d0.cameraX)) * zoom,
+    y: size.height / 2 + (y + 0.5 - Number(d0.cameraY)) * zoom,
+  });
+  const pixel = (p: { x: number; y: number }) =>
+    map.evaluate((el, q) => {
+      const canvas = el as HTMLCanvasElement;
+      const gl = canvas.getContext("webgl2");
+      const out = new Uint8Array(4);
+      const dpr = window.devicePixelRatio;
+      const [x, y] = [Math.floor(q.x * dpr), canvas.height - 1 - Math.floor(q.y * dpr)];
+      gl?.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, out);
+      return [...out];
+    }, p);
+  const clickTile = async (x: number, y: number) => {
+    const p = tileCenter(x, y);
+    await page.mouse.click(p.x, p.y);
+  };
+  const moveTile = async (x: number, y: number) => {
+    const p = tileCenter(x, y);
+    await page.mouse.move(p.x, p.y, { steps: 3 });
+  };
+  const roads = d0.roadSegments ?? "0";
+  await pickTool(page, "road-Small");
+  await clickTile(12, 32);
+  await clickTile(52, 32);
+  await page.keyboard.press("Escape");
+  await waitMap("roadSegments", roads, "gt");
+
+  // 駅。道路の北側（敷地は x 21〜30、y 29〜31）に置けるという答えが届いてから押す
+  await pickTool(page, "service-Station");
+  await moveTile(30, 31);
+  await waitMap("servicePlaceable", "true", "eq");
+  check(true, "駅の仮の表示は、道路に面した所で置けると示す");
+  await clickTile(30, 31);
+  await waitMap("railStations", "0", "gt");
+  check((await map.getAttribute("data-rail-stations")) === "1", "駅を置くと、駅が 1 つ描画に届く");
+  await page.keyboard.press("Escape");
+
+  // 線路。駅の線路の東の端（30, 30）から東へ 10 マス引く。道路と同じく、始点を押して終点まで動かすと見積もりが出る
+  await pickTool(page, "rail");
+  await clickTile(30, 30);
+  await moveTile(40, 30);
+  await waitMap("railPlaceable", "true", "eq");
+  const cost = Number(await map.getAttribute("data-preview-cost"));
+  check(cost > 0, `線路を引く前に建設費の見積もりが出る（${cost}）`);
+  const tracks = Number((await map.getAttribute("data-rail-tracks")) ?? "0");
+  await clickTile(40, 30);
+  await waitMap("railTracks", String(tracks), "gt");
+  await page.keyboard.press("Escape");
+
+  // 道路のマスを横切る線路は、引けないものとして示す
+  await clickTile(45, 28);
+  await moveTile(45, 36);
+  await waitMap("railPlaceable", "false", "eq");
+  check(true, "道路を横切る線路は、引けないものとして示す");
+  await page.keyboard.press("Escape");
+
+  // 線路のマスの真ん中（上りと下りの線路の中心線）は、寄りの段では道床の色（#d8d3c7）で描かれる
+  await pickTool(page, "none");
+  await page.waitForTimeout(300);
+  const bed = await pixel(tileCenter(35, 30));
+  const near = (a: number[], b: number[]) => b.every((v, i) => Math.abs((a[i] ?? 0) - v) <= 6);
+  check(near(bed, [0xd8, 0xd3, 0xc7]), `寄りの段で線路は道床の色で描かれる（${bed.join(", ")}）`);
+
+  // 取り壊しは、消える線路と駅を数える
+  await pickTool(page, "bulldoze");
+  const [a, b] = [tileCenter(20, 28), tileCenter(36, 31)];
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await page.mouse.move(b.x, b.y, { steps: 4 });
+  await waitMap("bulldozeStations", "0", "gt");
+  const railTiles = Number(await map.getAttribute("data-bulldoze-rail-tiles"));
+  check(railTiles > 0, `取り壊しの見積もりに、消える線路のマスが入る（${railTiles} マス）`);
+  await page.mouse.up();
+  await waitMap("railStations", "0", "eq");
+  check(true, "取り壊すと、駅が描画から消える");
   await page.close();
 }
 
@@ -2112,11 +2218,11 @@ try {
   );
   check(true, "税率を下げると 11% に戻る");
 
-  // 道具の帯は 7 つのボタンで、道路などの種類は押すと開く 2 段目で選ぶ
+  // 道具の帯は 8 つのボタンで、道路などの種類は押すと開く 2 段目で選ぶ
   const toolLabels = await page.locator("#toolbar .tool").allTextContents();
   check(
-    toolLabels.join(",") === "見る,道路,区画,施設,信号,土地,取り壊す",
-    `道具の帯は 7 つのボタンが並ぶ（${toolLabels.join(",")}）`,
+    toolLabels.join(",") === "見る,道路,区画,施設,鉄道,信号,土地,取り壊す",
+    `道具の帯は 8 つのボタンが並ぶ（${toolLabels.join(",")}）`,
   );
   const roadMenu = page.locator("#menu-road");
   check(!(await roadMenu.isVisible()), "道路の 2 段目は閉じて始まる");
@@ -2226,6 +2332,7 @@ try {
   await page.close();
   await checkHudPanel(await browser.newPage(), url);
   await checkDevWalks(await browser.newPage(), url);
+  await checkRail(await browser.newPage(), url);
   await checkLabels(await browser.newPage(), url);
 } finally {
   await browser.close();

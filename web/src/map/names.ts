@@ -100,6 +100,7 @@ const FACILITY_NAMES: Record<number, string> = {
   2: "浄水場",
   3: "駐車場",
   4: "駐車場ビル",
+  5: "駅",
 };
 const FACILITY_FALLBACK = "施設";
 

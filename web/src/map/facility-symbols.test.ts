@@ -53,7 +53,8 @@ describe("施設の記号の見た目", () => {
     for (const kind of [3, 4]) {
       expect(FACILITY_STYLES[kind]).toMatchObject({ circle: "#5f6b7a", glyph: "parking" });
     }
-    expect(Object.keys(GLYPH_PATHS).sort()).toEqual(["bolt", "drop", "parking"]);
+    expect(FACILITY_STYLES[5]).toMatchObject({ circle: "#5f6b7a", glyph: "train" });
+    expect(Object.keys(GLYPH_PATHS).sort()).toEqual(["bolt", "drop", "parking", "train"]);
   });
 });
 
