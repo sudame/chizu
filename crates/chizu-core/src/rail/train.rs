@@ -16,23 +16,34 @@
 //! 4. 路線の本数に足りなければ、最初の駅のホームが空いているときに列車を 1 本出す。
 //! 5. 押さえられずに止まった列車が互いを待つ輪を見つけたら、輪の中で ID のいちばん大きい列車を消す。
 //!
-//! 行き詰まりは次の 3 つの決まりで防ぐ。
-//! 1. 本数の上限（[`RailLine::cap`]）。待てる所（[`Step::wait`]）の数 − 1 までにする。
+//! 行き詰まりは次の 4 つの決まりで防ぐ。
+//! 1. 本数の上限（[`RailLine::cap`]）。
 //! 2. 終点の駅には、両方のホーム（着く側と、折り返して出る側）をまとめて押さえられるときだけ入る。
 //!    終点は待てる所にしないので、3 の押さえ方で、折り返した先まで続けて押さえる。
-//! 3. 列車は、待てる所から次の待てる所までをまとめて押さえて進む。待てる所は、列車がまるごと入り、
-//!    ほかの路線が使わない要素である。分岐のすぐ先の短い線路や、ほかの路線と共有する駅と線路では待たずに、
-//!    抜けた先の自分の路線だけの待てる所まで押さえてから入る。途中の駅に止まるのと間を空けて待つのは
-//!    時間で終わるので、待てる所の外で押さえたまま待つ列車は、いずれ進んで閉塞を返す。
+//! 3. 列車は、待てる所から次の待てる所までをまとめて押さえて進む。待てる所は、列車がまるごと入り、終点の
+//!    折り返す前でない要素で、ほかの路線と共有する要素も入る。分岐のすぐ先の短い線路では待たずに、抜けた先の
+//!    待てる所まで押さえてから入る。途中の駅に止まるのと間を空けて待つのは時間で終わるので、待てる所の外で
+//!    押さえたまま待つ列車は、いずれ進んで閉塞を返す。
+//! 4. 押さえた範囲の終わりを共有の区画（`LinePlan`）に置くのは、区画の枠のうち自分の路線の分が空いている
+//!    ときだけにする。区画の枠は、区画の中の待てる所だけを通る輪のいちばん短いものより小さいので、区画の中で
+//!    止まって待つ列車どうしは輪にならない。また、区画の先で入る自分だけの区間の枠も、区画に入る前に取る。
+//!    区間の中の列車と、その区間へ向かう列車の数は区間の待てる所の数を超えないので、区画の中の列車が区間の
+//!    入口で待っても、区間の中の列車がいずれ進んで入口を空ける。枠は状態から数え直せる（`Quota`）。
+//!
+//! 飢え（要る閉塞の組が同時に空く瞬間が来ず、ある列車がいつまでも押さえられないこと）は、閉塞を譲る決まりで
+//! 防ぐ。同じ tick の中で先に押さえにいった列車が閉塞を押さえられなかったら、その列車が要る閉塞のうち空いている
+//! ものを、その tick の後の列車に押さえさせない（`Claims`）。ただし、後の列車が先に進まないと先の列車が進めない
+//! ときは譲らない（`depends_on`）。譲ると待ち合いの輪になるためである。区画と区間の枠を待つ列車と、踏切の先まで
+//! 押さえ足す走っている列車は、閉塞を止めない。
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::line::{RailLine, Step, StepKind};
+use super::line::{LinePlan, RailLine, Step, StepKind};
 use super::{LineId, Rail, RailNodeId, TrackId, TrainId};
-use crate::network::Dir;
+use crate::network::{Arena, Dir};
 use crate::state_hash::{StateHash, StateHasher};
 use crate::tile::TilePos;
 use crate::units::{Money, Tick};
@@ -119,6 +130,192 @@ pub struct RailTally {
 fn isqrt(v: i64) -> i64 {
     let r = u64::try_from(v).expect("負の数の平方根").isqrt();
     i64::try_from(r).expect("平方根があふれた")
+}
+
+/// 共有の区画と自分だけの区間の枠を、いまいくつ使っているか（行き詰まりを防ぐ決まりの 4）。
+///
+/// 列車が押さえた範囲の終わりは、いつも待てる所にある。終わりが共有の区画にある列車は、その区画のうち自分の路線の
+/// 分の枠（[`LinePlan::quota`]）を 1 つ使う。また、終わりから先で最初に入る自分だけの区間（[`LinePlan::bin`]）の
+/// 枠を 1 つ使う。いまの列車からいつでも数え直せるので、状態には持たない。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Quota {
+    zones: BTreeMap<(u16, LineId), u32>,
+    bins: BTreeMap<(LineId, u16), u32>,
+    /// この tick に、枠を待った列車がいる区画と区間。待った列車より後に押さえる列車には、この tick のうちは
+    /// 新しく枠を渡さない。空いた枠を、待った長さの長い列車から使えるようにするためである。
+    claimed_zones: BTreeSet<(u16, LineId)>,
+    claimed_bins: BTreeSet<(LineId, u16)>,
+}
+
+/// 押さえた範囲の終わりを移すときに、新しく要る区画と区間の枠。
+struct Needs {
+    zone: Option<(u16, LineId)>,
+    bin: Option<(LineId, u16)>,
+}
+
+fn needs(id: LineId, plan: &LinePlan, from: Option<u32>, to: u32) -> Needs {
+    let zone = plan.zone[to as usize]
+        .filter(|z| from.and_then(|f| plan.zone[f as usize]) != Some(*z))
+        .map(|z| (z, id));
+    let bin = plan.bin[to as usize]
+        .filter(|b| from.and_then(|f| plan.bin[f as usize]) != Some(*b))
+        .map(|b| (id, b));
+    Needs { zone, bin }
+}
+
+impl Quota {
+    fn zone_full(&self, plan: &LinePlan, key: (u16, LineId)) -> bool {
+        self.zones.get(&key).copied().unwrap_or(0) >= plan.quota[&key.0]
+    }
+
+    fn bin_full(&self, plan: &LinePlan, key: (LineId, u16)) -> bool {
+        self.bins.get(&key).copied().unwrap_or(0) >= plan.runs[usize::from(key.1)]
+    }
+
+    /// 路線 `id` の列車が、押さえた範囲の終わりを要素 `from`（新しく現れる列車は `None`）から `to` へ移せるか。
+    /// 入る区画か区間が変わるなら、その枠が空いていなければならない。
+    fn admits(&self, id: LineId, line: &RailLine, from: Option<u32>, to: u32) -> bool {
+        let n = needs(id, &line.plan, from, to);
+        !n.zone.is_some_and(|k| self.zone_full(&line.plan, k))
+            && !n.bin.is_some_and(|k| self.bin_full(&line.plan, k))
+    }
+
+    /// [`Quota::admits`] と同じだが、ほかの列車が待っている区画と区間の枠も使えないものとする。
+    fn free_for(&self, id: LineId, line: &RailLine, from: Option<u32>, to: u32) -> bool {
+        let n = needs(id, &line.plan, from, to);
+        !n.zone
+            .is_some_and(|k| self.zone_full(&line.plan, k) || self.claimed_zones.contains(&k))
+            && !n
+                .bin
+                .is_some_and(|k| self.bin_full(&line.plan, k) || self.claimed_bins.contains(&k))
+    }
+
+    /// [`Quota::admits`] と同じだが、ほかの列車が待っている区画と区間の枠は使わない。`place_free` は、押さえる
+    /// 閉塞が空いているかである。移せれば数え直して `true` を返す。
+    ///
+    /// 移せなければ、新しく要る区画と区間のうち、枠が足りないものと、閉塞を待つあいだに要るもの（枠に上限の
+    /// ない区画を除く）を、この列車が待っているものとして覚える。閉塞が空いて枠が空くまでのあいだに、後の列車が
+    /// 枠を取り続けて、この列車がいつまでも入れなくなるのを防ぐためである。
+    fn take(
+        &mut self,
+        id: LineId,
+        line: &RailLine,
+        from: Option<u32>,
+        to: u32,
+        place_free: bool,
+    ) -> bool {
+        let plan = &line.plan;
+        let n = needs(id, plan, from, to);
+        let zone_full = n.zone.is_some_and(|k| self.zone_full(plan, k));
+        let bin_full = n.bin.is_some_and(|k| self.bin_full(plan, k));
+        let zone_waits = zone_full || n.zone.is_some_and(|k| self.claimed_zones.contains(&k));
+        let bin_waits = bin_full || n.bin.is_some_and(|k| self.claimed_bins.contains(&k));
+        if place_free && !zone_waits && !bin_waits {
+            self.shift(id, line, from, to);
+            return true;
+        }
+        // 区画と区間の両方を待つ列車は、どちらも覚えない。片方を覚えると、もう片方の枠を持つ列車が先へ進むのに
+        // 要る枠を、この列車が止めてしまうことがあるためである。
+        if let Some(k) = n
+            .zone
+            .filter(|k| !bin_waits && (zone_full || (!place_free && plan.quota[&k.0] != u32::MAX)))
+        {
+            self.claimed_zones.insert(k);
+        }
+        if let Some(k) = n.bin.filter(|_| !zone_waits && (bin_full || !place_free)) {
+            self.claimed_bins.insert(k);
+        }
+        false
+    }
+
+    /// 新しい tick のために数え直した枠に、この tick に待った区画と区間を引き継ぐ。
+    pub(crate) fn keep_claims(&mut self, from: Quota) {
+        self.claimed_zones = from.claimed_zones;
+        self.claimed_bins = from.claimed_bins;
+    }
+
+    /// 押さえた範囲の終わりを `from` から `to` へ移した分を数え直す。
+    fn shift(&mut self, id: LineId, line: &RailLine, from: Option<u32>, to: u32) {
+        let plan = &line.plan;
+        if let Some(f) = from {
+            if let Some(z) = plan.zone[f as usize] {
+                *self.zones.get_mut(&(z, id)).expect("区画の数がない") -= 1;
+            }
+            if let Some(b) = plan.bin[f as usize] {
+                *self.bins.get_mut(&(id, b)).expect("区間の数がない") -= 1;
+            }
+        }
+        if let Some(z) = plan.zone[to as usize] {
+            *self.zones.entry((z, id)).or_default() += 1;
+        }
+        if let Some(b) = plan.bin[to as usize] {
+            *self.bins.entry((id, b)).or_default() += 1;
+        }
+    }
+}
+
+/// この tick に、先に待った列車が要る閉塞（閉塞を譲る決まり）。tick ごとに作り直し、状態には持たない。
+#[derive(Debug, Default)]
+struct Claims {
+    /// 空いている閉塞と、それを要って押さえられなかった列車のうち、先に押さえにいった列車。
+    blocks: BTreeMap<Block, TrainId>,
+    /// 先に待った列車に閉塞を譲った列車と、譲った相手。
+    yields: BTreeMap<TrainId, BTreeSet<TrainId>>,
+}
+
+/// 列車 `from` が先へ進むのに、列車 `target` が先に進む必要があるか。`from` から待つ相手をたどり、`target` に
+/// 着けば真である。列車の待つ相手は、次に押さえる範囲（押さえた範囲の終わりから次の待てる所まで）の閉塞を
+/// 押さえている列車と、その範囲へ移る区画か区間の枠が足りなければ同じ路線のほかの列車（枠は路線ごとなので、
+/// 空けるのは同じ路線の列車である）と、この tick に閉塞を譲った相手である。
+fn depends_on(
+    lines: &Arena<LineId, RailLine>,
+    trains: &Arena<TrainId, Train>,
+    held: &BTreeMap<Block, TrainId>,
+    quota: &Quota,
+    claims: &Claims,
+    from: TrainId,
+    target: TrainId,
+) -> bool {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![from];
+    while let Some(u) = stack.pop() {
+        if u == target {
+            return true;
+        }
+        if !seen.insert(u) {
+            continue;
+        }
+        let Some(t) = trains.get(u) else {
+            continue;
+        };
+        let Some(line) = lines.get(t.line) else {
+            continue;
+        };
+        let k_from = t.ahead + 1;
+        let k_to = line.run_ahead(t.pos, k_from).min(line.len() - 1);
+        for k in k_from..=k_to {
+            for b in line.step((t.pos + k) % line.len()).blocks() {
+                if let Some(h) = held.get(&b)
+                    && *h != u
+                {
+                    stack.push(*h);
+                }
+            }
+        }
+        let end = Rail::reserved_end(line, t);
+        if k_from <= k_to && !quota.free_for(t.line, line, Some(end), (t.pos + k_to) % line.len()) {
+            stack.extend(
+                trains
+                    .iter()
+                    .filter(|(o, ot)| *o != u && ot.line == t.line)
+                    .map(|(o, _)| o),
+            );
+        }
+        if let Some(ys) = claims.yields.get(&u) {
+            stack.extend(ys.iter().copied());
+        }
+    }
+    false
 }
 
 /// 先の閉塞を押さえようとした結果。
@@ -240,6 +437,22 @@ impl Rail {
         out
     }
 
+    /// 列車が押さえた範囲の終わりの要素の番号。
+    pub(crate) fn reserved_end(line: &RailLine, t: &Train) -> u32 {
+        (t.pos + t.ahead) % line.len()
+    }
+
+    /// いまの列車から、区画と区間の枠を数える。
+    pub(crate) fn quota(&self) -> Quota {
+        let mut q = Quota::default();
+        for (_, t) in self.trains.iter() {
+            if let Some(line) = self.lines.get(t.line) {
+                q.shift(t.line, line, None, Rail::reserved_end(line, t));
+            }
+        }
+        q
+    }
+
     /// 列車が押さえている閉塞と、押さえている列車。
     pub fn occupancy(&self) -> BTreeMap<Block, TrainId> {
         let mut held = BTreeMap::new();
@@ -356,6 +569,8 @@ impl Rail {
     /// 待てる所の外で先を待つ列車を残すと、ほかの列車と待ち合う輪ができるためである。
     /// 押さえ直せない列車が複数いるときは、ID の最も大きい 1 本だけを消して最初からやり直す。ID の小さい列車が
     /// 押さえ直せないのは、まだ判定していない大きい列車の閉塞のせいかもしれず、その列車が消えれば通るためである。
+    /// 共有の区画と自分だけの区間の枠（決まりの 4）も、ID の小さい列車から数え、枠を超える列車は押さえ直せない
+    /// 列車と同じに扱う。待てる所の区分けが変わると、区画と区間の枠が小さくなることがあるためである。
     ///
     /// その前に、次の 2 つを消す。
     /// - 上限（[`RailLine::cap`]）を超えた本数。ID の大きい列車から消す。上限を超えた列車を次の駅まで残すと、
@@ -405,24 +620,35 @@ impl Rail {
             let mut held = base.clone();
             let mut ahead = Vec::new();
             let mut failed = None;
+            // 区画と区間の枠は、ID の小さい列車から順に数え、枠を超える列車は押さえ直せない列車と同じに扱う。
+            let mut quota = Quota::default();
             for id in &alive {
                 let t = self.trains.get(*id).expect("列車がない");
                 let line = self.lines.get(t.line).expect("列車の路線がない");
-                let end = (t.pos + t.ahead) % line.len();
+                let end = Rail::reserved_end(line, t);
                 if line.step(end).wait {
+                    if quota.admits(t.line, line, None, end) {
+                        quota.shift(t.line, line, None, end);
+                    } else {
+                        held.retain(|_, h| h != id);
+                        failed = Some(*id);
+                    }
                     continue;
                 }
                 let from = t.ahead + 1;
                 let to = line.run_ahead(t.pos, from);
+                let new_end = (t.pos + to) % line.len();
                 let steps: Vec<u32> = (from..=to).map(|k| (t.pos + k) % line.len()).collect();
                 let free = from <= to
-                    && line.step((t.pos + to) % line.len()).wait
+                    && line.step(new_end).wait
+                    && quota.admits(t.line, line, None, new_end)
                     && steps.iter().all(|i| {
                         let s = line.step(*i);
                         self.tracks.get(s.track).is_some()
                             && s.blocks().all(|b| held.get(&b).is_none_or(|h| h == id))
                     });
                 if free {
+                    quota.shift(t.line, line, None, new_end);
                     for i in &steps {
                         for b in line.step(*i).blocks() {
                             held.insert(b, *id);
@@ -486,18 +712,22 @@ impl Rail {
         }
         self.count_down();
         let mut held = self.occupancy();
-        let blocked = self.reserve(tick.0, &mut held);
+        let mut quota = self.quota();
+        let mut claims = Claims::default();
+        let blocked = self.reserve(tick.0, &mut held, &mut quota, &mut claims);
         let stops = self.crossing_stops(tick.0, occupied);
         self.run(&stops);
         // 新しい列車は、走っている列車が閉塞を押さえ終えてから出す。行き詰まりの輪から列車を消したとき、
         // 空いたホームを待っていた列車が、出直す列車より先に入れるようにするためである。
         let mut held = self.occupancy();
-        self.spawn_trains(&mut held);
+        let mut fresh = self.quota();
+        fresh.keep_claims(quota);
+        self.spawn_trains(&mut held, &mut fresh);
         self.break_deadlocks(&blocked);
     }
 
-    /// 本数に足りない路線の最初の駅に、ホームが空いていれば列車を 1 本出す。
-    fn spawn_trains(&mut self, held: &mut BTreeMap<Block, TrainId>) {
+    /// 本数に足りない路線の最初の駅に、ホームが空いていて、区画と区間の枠があれば列車を 1 本出す。
+    fn spawn_trains(&mut self, held: &mut BTreeMap<Block, TrainId>, quota: &mut Quota) {
         let mut counts = BTreeMap::<LineId, u8>::new();
         for (_, t) in self.trains.iter() {
             *counts.entry(t.line).or_default() += 1;
@@ -528,7 +758,11 @@ impl Rail {
             };
             let blocks = line.held_blocks(&t);
             let tracks_ok = (0..=ahead).all(|k| self_tracks.get(line.step(k).track).is_some());
-            if tracks_ok && blocks.iter().all(|b| !held.contains_key(b)) {
+            let end = Rail::reserved_end(line, &t);
+            if tracks_ok
+                && blocks.iter().all(|b| !held.contains_key(b))
+                && quota.take(id, line, None, end, true)
+            {
                 let tid = trains.insert(t);
                 for b in blocks {
                     held.insert(b, tid);
@@ -577,11 +811,14 @@ impl Rail {
         }
     }
 
-    /// 先の閉塞を押さえる。押さえられなかった列車と、その閉塞を押さえている列車を返す。
+    /// 先の閉塞を押さえる。押さえられなかった列車と、その閉塞を押さえている列車（閉塞を譲ったときは譲った相手）を
+    /// 返す。`claims` には、この tick に待った列車が要る閉塞を残す（閉塞を譲る決まり）。
     fn reserve(
         &mut self,
         now: u64,
         held: &mut BTreeMap<Block, TrainId>,
+        quota: &mut Quota,
+        claims: &mut Claims,
     ) -> BTreeMap<TrainId, Option<TrainId>> {
         let mut order: Vec<(Reverse<u32>, TrainId)> = self
             .trains
@@ -599,27 +836,75 @@ impl Rail {
             ..
         } = self;
         for (_, id) in order {
-            let t = trains.get_mut(id).expect("列車がない");
+            let mut t = *trains.get(id).expect("列車がない");
             let line = lines.get(t.line).expect("列車の路線がない");
-            let mut grant = |t: &mut Train, k_from: u32, k_to: u32| -> Reserve {
-                // 先頭から k_from 個先から k_to 個先までの要素を、まとめて押さえる。
+            // 先頭から k_from 個先から k_to 個先までの要素を、まとめて押さえる。`must` でないとき（踏切の先まで
+            // 押さえ足すとき）は、押さえられなくても待ったことにせず、要る閉塞と枠も覚えない。
+            let mut grant = |t: &mut Train, k_from: u32, k_to: u32, must: bool| -> Reserve {
                 let k_to = k_to.min(line.len() - 1);
                 if k_from > k_to {
                     return Reserve::Done;
                 }
                 let steps: Vec<u32> = (k_from..=k_to).map(|k| (t.pos + k) % line.len()).collect();
+                let from = Rail::reserved_end(line, t);
+                let to = (t.pos + k_to) % line.len();
+                let mut by = None;
+                let mut yield_to = None;
+                let mut ignored = Vec::new();
                 for i in &steps {
                     let s = line.step(*i);
                     if tracks.get(s.track).is_none() {
                         return Reserve::Blocked(None);
                     }
                     for b in s.blocks() {
-                        if let Some(h) = held.get(&b)
-                            && *h != id
-                        {
-                            return Reserve::Blocked(Some(*h));
+                        match held.get(&b) {
+                            Some(h) if *h != id => {
+                                by.get_or_insert(*h);
+                            }
+                            Some(_) => {}
+                            None => {
+                                // 閉塞を譲る決まり：先に待った列車が要る閉塞は押さえない。ただし、その列車が進むのに
+                                // この列車が先に進む必要があるなら、譲らない（譲ると待ち合う輪になる）。
+                                let Some(c) = claims.blocks.get(&b).copied() else {
+                                    continue;
+                                };
+                                if yield_to.is_some() || ignored.contains(&c) {
+                                    continue;
+                                }
+                                if depends_on(lines, trains, held, quota, claims, c, id) {
+                                    ignored.push(c);
+                                } else {
+                                    yield_to = Some(c);
+                                }
+                            }
                         }
                     }
+                }
+                let place_free = by.is_none() && yield_to.is_none();
+                if must {
+                    let quota_free = quota.free_for(t.line, line, Some(from), to);
+                    // 決まりの 4：押さえた範囲の終わりが入る区画と区間に、枠が空いているときだけ押さえる。
+                    // 閉塞を待つときも、要る枠をこの列車が待っているものとして覚える。
+                    if !quota.take(t.line, line, Some(from), to, place_free) {
+                        // 枠は足りて閉塞だけが足りないときは、要る閉塞のうち空いているものを覚える。
+                        if quota_free {
+                            for i in &steps {
+                                for b in line.step(*i).blocks() {
+                                    if !held.contains_key(&b) {
+                                        claims.blocks.entry(b).or_insert(id);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(c) = yield_to {
+                            claims.yields.entry(id).or_default().insert(c);
+                        }
+                        return Reserve::Blocked(by.or(yield_to));
+                    }
+                } else if place_free && quota.free_for(t.line, line, Some(from), to) {
+                    quota.shift(t.line, line, Some(from), to);
+                } else {
+                    return Reserve::Blocked(by.or(yield_to));
                 }
                 for i in &steps {
                     for b in line.step(*i).blocks() {
@@ -641,7 +926,8 @@ impl Rail {
                         // 決まりの 3：次の待てる所までをまとめて押さえて出る。待てる所でない駅には、
                         // 先まで押さえて着いているので、押さえ足さない。
                         let r = if t.ahead == 0 {
-                            grant(t, 1, line.run_ahead(t.pos, 1))
+                            let to = line.run_ahead(t.pos, 1);
+                            grant(&mut t, 1, to, true)
                         } else {
                             Reserve::Done
                         };
@@ -655,13 +941,14 @@ impl Rail {
                 TrainState::Dwell { .. } | TrainState::Turnback { .. } => {
                     // 決まりの 2 の両方のホームを押さえ直す（線路が変わって先に押さえた要素を返したとき）。
                     if line.step(t.pos).kind == StepKind::Terminal && t.ahead < 1 {
-                        Some(grant(t, 1, line.run_ahead(t.pos, 1)))
+                        let to = line.run_ahead(t.pos, 1);
+                        Some(grant(&mut t, 1, to, true))
                     } else {
                         None
                     }
                 }
                 TrainState::Running => {
-                    let s = line.upcoming_stop(t);
+                    let s = line.upcoming_stop(&t);
                     let ds = line.distance(t.pos, s);
                     let mut r = None;
                     loop {
@@ -670,18 +957,24 @@ impl Rail {
                         if t.ahead >= ds {
                             break;
                         }
-                        let room = line.distance_to_end(t, t.ahead);
+                        let room = line.distance_to_end(&t, t.ahead);
                         let need =
                             t.speed * t.speed / (2 * TRAIN_DECEL) + 2 * (t.speed + TRAIN_ACCEL);
                         // 踏切は、閉じる見込みに入る前に、抜けきる先まで押さえておく。
                         let crossing = crossings
                             .as_ref()
-                            .is_some_and(|c| Rail::wants_crossing_ahead(c, line, t));
+                            .is_some_and(|c| Rail::wants_crossing_ahead(c, line, &t));
                         if room >= need && !crossing {
                             break;
                         }
                         let next = t.ahead + 1;
-                        let got = grant(t, next, line.run_ahead(t.pos, next));
+                        let must = room < need;
+                        let to = line.run_ahead(t.pos, next);
+                        let got = grant(&mut t, next, to, must);
+                        // 踏切の先までの押さえ足しが通らなくても、止まらずに走れるので、待ったことにしない。
+                        if !must && got != Reserve::Done {
+                            break;
+                        }
                         r = Some(got);
                         if got != Reserve::Done || t.ahead < next {
                             break;
@@ -698,6 +991,7 @@ impl Rail {
                 Some(Reserve::Done) => t.waited = 0,
                 None => {}
             }
+            *trains.get_mut(id).expect("列車がない") = t;
         }
         for (line, pos) in departed {
             if let Some(l) = self.lines.get_mut(line) {

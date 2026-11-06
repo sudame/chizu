@@ -1071,7 +1071,7 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
         DenyReason::LineLimit => "路線の数か、路線の駅の数が上限に届いている",
         DenyReason::StationInLine => "その駅はもう路線に入っている",
         DenyReason::LineStarvesOther => {
-            "ほかの路線の待てる所がなくなり、その路線の列車が走れなくなる"
+            "ほかの路線と分ける待てる所の枠が足りず、その路線の列車が走れなくなる"
         }
         DenyReason::HighwayCrossing => "高速道路には踏切を置けない",
         DenyReason::CrossingNearJunction => "踏切は交差点と曲がり角から道路に沿って 3 マス以上離す",

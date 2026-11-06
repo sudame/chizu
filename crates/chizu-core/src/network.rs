@@ -116,6 +116,17 @@ impl<I: ArenaId, T> Arena<I, T> {
         I::from_parts(index, 0)
     }
 
+    /// 次の [`Arena::insert`] が返す ID。
+    pub(crate) fn next_id(&self) -> I {
+        match self.free.last() {
+            Some(index) => I::from_parts(*index, self.slots[*index as usize].0),
+            None => I::from_parts(
+                u32::try_from(self.slots.len()).expect("ID の添え字が u32 に収まらない"),
+                0,
+            ),
+        }
+    }
+
     pub(crate) fn get(&self, id: I) -> Option<&T> {
         let (index, generation) = id.parts();
         match self.slots.get(index as usize) {

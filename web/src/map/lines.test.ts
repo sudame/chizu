@@ -26,7 +26,13 @@ import {
 /** 駅 (0,0) と (30,0) を結ぶ路線の rail_lines の並び。 */
 function encode(
   index: number,
-  opts: { stopped?: number; trains?: number; cap?: number; shared?: number[][] } = {},
+  opts: {
+    stopped?: number;
+    trains?: number;
+    cap?: number;
+    shared?: number[][];
+    waitPlaces?: number;
+  } = {},
 ) {
   const trains = opts.trains ?? 2;
   const cap = opts.cap ?? 3;
@@ -43,7 +49,7 @@ function encode(
       600,
       2,
       1,
-      4,
+      opts.waitPlaces ?? 4,
       opts.shared?.length ?? 0,
     ],
     ...[0, 0, 30, 0],
@@ -164,13 +170,14 @@ describe("路線の一覧", () => {
         ],
       }),
     );
-    const [few] = parseLines(encode(2, { cap: 0 }));
+    const [few] = parseLines(encode(2, { cap: 0, waitPlaces: 1 }));
     if (!shared || !few) throw new Error("読めない");
     expect(shared.sharedWith).toEqual([
       { index: 0, generation: 0 },
       { index: 9, generation: 0 },
     ]);
     expect(capZeroReason(shared)).toContain("青線、緑線（2）と進路を共有");
+    expect(capZeroReason(shared)).toContain("枠が回ってこない");
     expect(lineRow(shared, () => "").warning).toContain("青線");
     expect(capZeroReason(few)).toContain("待てる所が足りない");
   });
