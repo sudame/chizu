@@ -335,6 +335,8 @@ trackHeight(element<HTMLElement>("#toolstack"), "--toolbar-h");
 trackHeight(element<HTMLElement>("#toolbar"), "--bar-h");
 trackHeight(element<HTMLElement>("#hudbar"), "--hudbar-h");
 trackHeight(element<HTMLElement>("#map-meta"), "--meta-h");
+// 知らせの高さ。狭い画面で、左上の欄を積む列の高さを、知らせの上までに収めるのに使う
+trackHeight(element<HTMLElement>("#notices"), "--notices-h");
 const updateScale = setupScaleBar(element<HTMLElement>("#scale"));
 const popovers = createPopovers();
 for (const toggle of document.querySelectorAll<HTMLButtonElement>("button[data-menu]")) {
@@ -974,6 +976,7 @@ function roadAt(at: Tile): { from: Tile; to: Tile } {
 const PROBE_REFRESH_TICKS = 60;
 let latestProbeTick = 0;
 let bulldozeAskedTick = 0;
+let railAskedTick = 0;
 
 /** 街の数字が届いたとき、共同の駐車場の道具が同じマスに出していた円の中の数を、間隔を空けて問い合わせ直す。 */
 function refreshProbe(tick: number): void {
@@ -986,6 +989,12 @@ function refreshProbe(tick: number): void {
   ) {
     bulldozeAskedTick = tick;
     bulldozeSent = "";
+    updatePreview();
+  }
+  // 線路の見積もりは、所持金が動くと「お金が足りない」かどうかが変わるので、同じ直線でも間隔を空けて問い直す
+  if (tool.kind === "rail" && tick - railAskedTick >= PROBE_REFRESH_TICKS) {
+    railAskedTick = tick;
+    railSent = "";
     updatePreview();
   }
   if (tool.kind === "service" && isParking(tool.service) && cursor !== null) {

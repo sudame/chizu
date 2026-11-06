@@ -170,6 +170,10 @@ async function checkHudPanel(page: Page, at: string): Promise<void> {
       (await page.locator("#finance .finance-net").isVisible()),
     "お金を押すと収支の欄が開く",
   );
+  check(
+    await page.getByText("鉄道の維持費").isVisible(),
+    "鉄道がなくても、収支の欄に鉄道の維持費の行が出ている（欄の縦の余裕は、重なりの確かめが見る）",
+  );
   await financeToggle.click();
   check(!(await finance.isVisible()), "お金をもう一度押すと収支の欄が閉じる");
   await financeToggle.click();

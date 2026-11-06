@@ -23,8 +23,6 @@ export const FEE_STEP = 1;
 
 /** 維持費の行の数。道路、発電所、浄水場、駐車場、鉄道。 */
 const EXPENSE_ROWS = 5;
-/** 維持費の行のうち、鉄道の行の位置。 */
-const RAIL_ROW = 4;
 
 /** chizu-wasm の finance を読んだもの。金額はどれも 1 日あたり。 */
 export type Finance = {
@@ -288,7 +286,6 @@ export function setupFinance(
   const rateLabels: HTMLElement[] = [];
   const amounts: HTMLElement[] = [];
   const expenseValues: HTMLElement[] = [];
-  const expenseRows: HTMLElement[] = [];
 
   TAX_ZONES.forEach(({ zone, label }, i) => {
     const row = make("div", "", "finance-row");
@@ -356,7 +353,6 @@ export function setupFinance(
     row.append(label, value);
     expenseList.append(row);
     expenseValues.push(value);
-    expenseRows.push(row);
   }
   body.append(
     make("h3", "収入（税率と駐車場の料金）"),
@@ -402,11 +398,6 @@ export function setupFinance(
         value.textContent = r.value;
       }
     });
-    // 鉄道の維持費の行は、鉄道がないあいだは出さない（欄が縦に伸びて、狭い画面で下の欄に重なるため）
-    const rail = expenseRows[RAIL_ROW];
-    if (rail !== undefined) {
-      rail.style.display = finance.railUpkeep === 0 ? "none" : "";
-    }
     netLabel.textContent = rows.net.label;
     netValue.textContent = rows.net.value;
   };

@@ -130,7 +130,12 @@
         align-items: flex-start;
         gap: var(--gap);
         max-width: calc(100vw - 68px);
+        max-height: calc(100vh - 2 * var(--edge));
         box-sizing: border-box;
+      }
+      /* 欄が縦に積まれて足りなくなるときは、収支の欄だけが縮んでスクロールする */
+      #overlay > * {
+        flex-shrink: 0;
       }
       #hudbar {
         display: flex;
@@ -263,8 +268,11 @@
       #finance {
         width: 280px;
         max-width: 100%;
-        max-height: calc(100vh - var(--hudbar-h, 40px) - 40px);
+        min-height: 6em;
         overflow-y: auto;
+      }
+      #overlay > #finance {
+        flex-shrink: 1;
       }
       #hud-extra {
         display: flex;
@@ -1028,6 +1036,13 @@
 
       /* 幅 900px 以下では、下の道具の帯が左下と右下の部品に届くので、部品を帯の上へ上げる */
       @media (max-width: 900px) {
+        /* 下の部品（左下の隅の部品と道具の帯）の上までに収める */
+        #overlay {
+          max-height: calc(
+            100vh - 2 * var(--edge) - var(--toolbar-h, 64px) - var(--meta-h, 66px) - var(--notices-h, 0px) -
+              4 * var(--gap)
+          );
+        }
         #map-controls,
         #map-meta {
           bottom: calc(var(--bar-h, 64px) + var(--edge) + var(--gap));

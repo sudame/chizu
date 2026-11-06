@@ -548,7 +548,8 @@ impl Sim {
     /// 先頭から、消える道路のマスの数、施設の数、建物の数、家をなくす世帯の数、道路の区間の数、
     /// 線路のマスの数、駅の数、線路の数が続き、区間ごとに `[始点の x, 始点の y, 終点の x, 終点の y]`、
     /// 施設ごとに `[min の x, min の y, max の x, max の y]`、建物ごとと駅ごとに同じ 4 つ、
-    /// 線路ごとに区間と同じ 4 つが、この順に並ぶ。
+    /// 線路ごとに区間と同じ 4 つが、この順に並ぶ。その後ろに、消える道路のマスごとの `[x, y]` と、
+    /// 消える線路のマスごとの `[x, y]` が続く（ほかの区間や線路が残って通るマスは入らない）。
     pub fn bulldoze_preview(&self, a: TilePos, b: TilePos) -> Vec<f64> {
         let area = chizu_core::TileRect::from_corners(a, b);
         if !area.in_world() {
@@ -575,6 +576,9 @@ impl Sim {
         for l in &p.tracks {
             let (s, e) = (l.start, l.end());
             out.extend([s.x, s.y, e.x, e.y].map(|v| v as f64));
+        }
+        for t in p.removed_road_tiles.iter().chain(&p.removed_rail_tiles) {
+            out.extend([t.x, t.y].map(|v| v as f64));
         }
         out
     }
@@ -1470,7 +1474,9 @@ mod tests {
         // 道路のマス、施設、建物、家をなくす世帯、区間、線路のマス、駅、線路の数の順で、区間は両端のマスで指す
         assert_eq!(&p[..8], &[21.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
         assert_eq!(&p[8..12], &[10.0, 10.0, 30.0, 10.0]);
-        assert_eq!(p.len(), 12);
+        // 区間のあとに、消える道路のマスが 21 個 [x, y] で続く
+        assert_eq!(p.len(), 12 + 2 * 21);
+        assert_eq!(&p[12..16], &[10.0, 10.0, 11.0, 10.0]);
         // 見積もりでは街は変わらず、世界の外は空を返す
         assert_eq!(sim.world().network().road_tile_count(), before);
         let far = TilePos::new(1 << 40, 0);
@@ -1498,7 +1504,8 @@ mod tests {
         // 駅と、範囲にかかる駅の線路と外の線路が消える。線路のマスは x 3〜20 の 18 マス
         assert_eq!(&p[..8], &[0.0, 0.0, 0.0, 0.0, 0.0, 18.0, 1.0, 2.0]);
         assert_eq!(&p[8..12], &[3.0, 7.0, 12.0, 9.0]);
-        assert_eq!(p.len(), 8 + 4 * 3);
+        // 線路のマスの一覧が、数と同じ 18 個 [x, y] で続く
+        assert_eq!(p.len(), 8 + 4 * 3 + 2 * 18);
     }
 
     #[test]

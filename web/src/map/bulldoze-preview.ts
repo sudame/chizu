@@ -20,6 +20,10 @@ export type BulldozePreview = {
   stations: TileBox[];
   /** 消える線路（ノードからノードまで）の両端のマス。 */
   tracks: { from: Tile; to: Tile }[];
+  /** 消える道路のマス。ほかの区間が残って通るマスは入らず、個数は `roadTiles` と同じ。 */
+  roadTileList: Tile[];
+  /** 消える線路のマス。ほかの線路が残って通るマスは入らず、個数は `railTiles` と同じ。 */
+  railTileList: Tile[];
 };
 
 /** 先頭の個数の欄の数。chizu-wasm の `Sim::bulldoze_preview` と同じ。 */
@@ -39,7 +43,12 @@ export function parseBulldozePreview(info: ArrayLike<number>): BulldozePreview |
     at0(4),
   ] as const;
   const [railTiles, stations, tracks] = [at0(5), at0(6), at0(7)] as const;
-  if (info.length !== HEADER + 4 * (segments + facilities + buildings + stations + tracks)) {
+  if (
+    info.length !==
+    HEADER +
+      4 * (segments + facilities + buildings + stations + tracks) +
+      2 * (roadTiles + railTiles)
+  ) {
     return null;
   }
   let at = HEADER;
@@ -62,6 +71,16 @@ export function parseBulldozePreview(info: ArrayLike<number>): BulldozePreview |
   const facilityBoxes = boxes(facilities);
   const buildingBoxes = boxes(buildings);
   const stationBoxes = boxes(stations);
+  const trackLines = lines(tracks);
+  const tileList = (n: number): Tile[] =>
+    Array.from({ length: n }, () => {
+      const x = at0(at);
+      const y = at0(at + 1);
+      at += 2;
+      return { x, y };
+    });
+  const roadTileList = tileList(roadTiles);
+  const railTileList = tileList(railTiles);
   return {
     roadTiles,
     railTiles,
@@ -70,24 +89,15 @@ export function parseBulldozePreview(info: ArrayLike<number>): BulldozePreview |
     facilities: facilityBoxes,
     buildings: buildingBoxes,
     stations: stationBoxes,
-    tracks: lines(tracks),
+    tracks: trackLines,
+    roadTileList,
+    railTileList,
   };
 }
 
-/** 消える線路が通るマス。線路の端のノードは隣の線路と重なるので、1 度だけ挙げる。 */
+/** 消える線路のマス。中核が数えたマスと同じで、ほかの線路が残って通るマスは入らない。 */
 export function removedRailTiles(p: BulldozePreview): Tile[] {
-  const seen = new Set<string>();
-  const out: Tile[] = [];
-  for (const { from, to } of p.tracks) {
-    for (const t of tilesOnSegment(from, to)) {
-      const key = `${t.x},${t.y}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push(t);
-      }
-    }
-  }
-  return out;
+  return p.railTileList;
 }
 
 /** 消えるものがあるか。 */
@@ -125,26 +135,7 @@ export function bulldozeSummary(p: BulldozePreview): string {
   return parts.length === 0 ? "" : `消える：${parts.join("・")}`;
 }
 
-/** 区間の直線 a〜b が通るマス（縦横と 45 度）。 */
-function tilesOnSegment(a: Tile, b: Tile): Tile[] {
-  const sx = Math.sign(b.x - a.x);
-  const sy = Math.sign(b.y - a.y);
-  const len = Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y));
-  return Array.from({ length: len + 1 }, (_, k) => ({ x: a.x + sx * k, y: a.y + sy * k }));
-}
-
-/** 消える区間が通るマス。交差点のマスは 1 度だけ数える。 */
+/** 消える道路のマス。中核が数えたマスと同じで、ほかの区間が残って通るマスは入らない。 */
 export function removedRoadTiles(p: BulldozePreview): Tile[] {
-  const seen = new Set<string>();
-  const out: Tile[] = [];
-  for (const s of p.segments) {
-    for (const t of tilesOnSegment(s.from, s.to)) {
-      const key = `${t.x},${t.y}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        out.push(t);
-      }
-    }
-  }
-  return out;
+  return p.roadTileList;
 }
