@@ -6,7 +6,12 @@
 // - 細部：枕木
 // 駅の敷地の面は施設の描き方（roads.ts の facilities）が引きから描く。ここでは寄りの段で、ホームの面と駅舎を描き足す。
 
-import { RAIL_STATION_STRIDE, RAIL_TRACK_STRIDE } from "../protocol/messages.ts";
+import {
+  RAIL_CROSSING_STRIDE,
+  RAIL_STATION_STRIDE,
+  RAIL_TRACK_STRIDE,
+} from "../protocol/messages.ts";
+import { carriagewayHalfWidth, roadHalfWidth, SIDEWALK_WIDTH } from "./lanes.ts";
 import { hex } from "./palette.ts";
 import { Geometry, type Tile } from "./roads.ts";
 
@@ -448,4 +453,249 @@ export function railMeshes(
     }
   }
   return meshes;
+}
+
+// 踏切の描き方（docs/map-style.md の「踏切」）。踏切のマスは道路の区間の途中にあり、線路が横切る。
+// 寄りから、道路の上に踏板を敷いてレールを通し、車道の両端に黄と黒の縞を引き、遮断機の台と警報灯を置く。
+// 閉じているあいだは、遮断機の棒を下ろして警報灯を交互に点ける。閉じているかは毎 tick 変わるので、
+// 形の決まっている踏切（messages の rail）と、閉じている踏切の一覧（三重バッファの枠）を分けて受け取る。
+
+export const CROSSING_PANEL_COLOR = hex("#cbc6ba");
+export const CROSSING_YELLOW = hex("#fbbc04");
+export const CROSSING_BLACK = hex("#202124");
+export const CROSSING_POST_COLOR = hex("#3c4043");
+export const CROSSING_LAMP_OFF_COLOR = hex("#7d5b58");
+export const CROSSING_RED = hex("#ea4335");
+export const CROSSING_ARM_WHITE = hex("#ffffff");
+const CROSSING_GLOW_COLOR: readonly [number, number, number, number] = [
+  CROSSING_RED[0],
+  CROSSING_RED[1],
+  CROSSING_RED[2],
+  0.4,
+];
+
+/** 縞の厚み（道路に沿う向き、マス）と、縞 1 本の長さ（道路に直角の向き、マス）。 */
+const STRIPE_THICK = 0.06;
+const STRIPE_LEN = 0.08;
+/** 遮断機の台を、踏切のマスの端から内側へ置く幅（マス）。端の縞に棒が重ならないようにする。 */
+const POST_INSET = 0.12;
+/** 警報灯 2 つの間隔の半分（マス）と、台の半分の太さ、灯火の半径、光の輪の半径。 */
+const LAMP_GAP = 0.05;
+const POST_HALF = 0.045;
+const LAMP_RADIUS = 0.04;
+const GLOW_RADIUS = 0.14;
+/** 灯火の画面での半径の下限（ピクセル）。 */
+const LAMP_MIN_PX = 1.5;
+/** 遮断機の棒の半分の太さ（マス）と下限（ピクセル）。 */
+const ARM_HALF = 0.03;
+const ARM_MIN_PX = 1.25;
+/** 棒の白い印の長さ（マス）。 */
+const ARM_MARK = 0.05;
+/** 棒の先を、道路の中心線から離しておく幅（マス）。 */
+const ARM_END_GAP = 0.02;
+
+export type RailCrossing = {
+  /** 踏切のマス。 */
+  at: Tile;
+  /** 道路の 1 歩（向きの正負は決まっていない）。 */
+  road: Tile;
+  /** 線路の 1 歩。 */
+  rail: Tile;
+  /** 道路の種類の番号。 */
+  kind: number;
+};
+
+/** chizu-wasm の rail_crossings の数の並びを読む。 */
+export function parseCrossings(data: ArrayLike<number>): RailCrossing[] {
+  const out: RailCrossing[] = [];
+  for (let i = 0; i + RAIL_CROSSING_STRIDE <= data.length; i += RAIL_CROSSING_STRIDE) {
+    out.push({
+      at: { x: data[i] ?? 0, y: data[i + 1] ?? 0 },
+      road: { x: data[i + 2] ?? 0, y: data[i + 3] ?? 0 },
+      rail: { x: data[i + 4] ?? 0, y: data[i + 5] ?? 0 },
+      kind: data[i + 6] ?? 1,
+    });
+  }
+  return out;
+}
+
+/** 踏切のマスの座標系。`u` は道路に沿う向き、`n` は道路に直角の向き、`h` は道路に沿うマスの半分の長さである。 */
+function crossingFrame(c: RailCrossing) {
+  const len = Math.hypot(c.road.x, c.road.y) || 1;
+  const [ux, uy] = [c.road.x / len, c.road.y / len];
+  const rl = Math.hypot(c.rail.x, c.rail.y) || 1;
+  return {
+    cx: c.at.x + 0.5,
+    cy: c.at.y + 0.5,
+    ux,
+    uy,
+    nx: -uy,
+    ny: ux,
+    rx: c.rail.x / rl,
+    ry: c.rail.y / rl,
+    h: len / 2,
+    roadHalf: roadHalfWidth(c.kind),
+    carriage: carriagewayHalfWidth(c.kind),
+  };
+}
+
+type CrossingFrame = ReturnType<typeof crossingFrame>;
+
+/** 道路に沿って `s`、直角に `t` だけ踏切の中心から離れた点。 */
+function frameAt(f: CrossingFrame, s: number, t: number): [number, number] {
+  return [f.cx + f.ux * s + f.nx * t, f.cy + f.uy * s + f.ny * t];
+}
+
+/** 道路に沿って `s0`〜`s1`、直角に `t0`〜`t1` の長方形（踏切の中心から測る）を塗る。 */
+function frameBox(
+  g: Geometry,
+  f: CrossingFrame,
+  s0: number,
+  s1: number,
+  t0: number,
+  t1: number,
+  color: readonly [number, number, number, number],
+): void {
+  g.polygon(
+    [frameAt(f, s0, t0), frameAt(f, s1, t0), frameAt(f, s1, t1), frameAt(f, s0, t1)],
+    color,
+  );
+}
+
+/**
+ * 遮断機の台の位置と、棒を下ろす向き。左側通行なので、踏切に入ってくる車線は、入ってくる向きの左にある。
+ * 道路に沿う向き `u` に進む車は、`-u` の端から入り、左の `-n` の側を通る。
+ */
+function posts(f: CrossingFrame): { s: number; side: number; at: [number, number] }[] {
+  const lateral = f.roadHalf - SIDEWALK_WIDTH / 2;
+  return [
+    { s: -(f.h - POST_INSET), side: -1 },
+    { s: f.h - POST_INSET, side: 1 },
+  ].map((p) => ({ ...p, at: frameAt(f, p.s, p.side * lateral) }));
+}
+
+/** 台の上の 2 つの警報灯の位置。 */
+function lamps(
+  f: CrossingFrame,
+  at: readonly [number, number],
+): [[number, number], [number, number]] {
+  return [
+    [at[0] + f.ux * LAMP_GAP, at[1] + f.uy * LAMP_GAP],
+    [at[0] - f.ux * LAMP_GAP, at[1] - f.uy * LAMP_GAP],
+  ];
+}
+
+export type CrossingMeshes = {
+  /** 寄りから。踏板、レール、縞、遮断機の台と消えている警報灯。 */
+  base: Geometry;
+};
+
+/** 形の決まっている踏切の頂点。踏切がなければ空である。 */
+export function crossingMeshes(crossings: readonly RailCrossing[]): CrossingMeshes {
+  const first = crossings[0];
+  const g = new Geometry(first?.at ?? { x: 0, y: 0 });
+  for (const c of crossings) {
+    const f = crossingFrame(c);
+    frameBox(g, f, -f.h, f.h, -f.roadHalf, f.roadHalf, CROSSING_PANEL_COLOR);
+    // レールは、踏板の上を道路に直角に通す。線路が道路と斜めに交わるときは、踏板の端まで延ばす
+    const across = Math.max(Math.abs(f.rx * f.nx + f.ry * f.ny), 0.5);
+    const reach = f.roadHalf / across;
+    const [mx, my] = [-f.ry, f.rx];
+    for (const lane of [-TRACK_OFFSET, TRACK_OFFSET]) {
+      for (const rail of [-RAIL_OFFSET, RAIL_OFFSET]) {
+        const o = lane + rail;
+        g.line(
+          f.cx + mx * o - f.rx * reach,
+          f.cy + my * o - f.ry * reach,
+          f.cx + mx * o + f.rx * reach,
+          f.cy + my * o + f.ry * reach,
+          0,
+          RAIL_RAIL_COLOR,
+          RAIL_MIN_PX,
+        );
+      }
+    }
+    // 車道の両端の縞。黒の帯に、黄の印を 1 つおきに重ねる
+    const pairs = Math.max(1, Math.round(f.carriage / STRIPE_LEN));
+    const step = (2 * f.carriage) / (2 * pairs);
+    for (const s of [-(f.h - STRIPE_THICK / 2), f.h - STRIPE_THICK / 2]) {
+      frameBox(
+        g,
+        f,
+        s - STRIPE_THICK / 2,
+        s + STRIPE_THICK / 2,
+        -f.carriage,
+        f.carriage,
+        CROSSING_BLACK,
+      );
+      for (let k = 0; k < 2 * pairs; k += 2) {
+        const t0 = -f.carriage + k * step;
+        frameBox(g, f, s - STRIPE_THICK / 2, s + STRIPE_THICK / 2, t0, t0 + step, CROSSING_YELLOW);
+      }
+    }
+    for (const post of posts(f)) {
+      const [a, b] = lamps(f, post.at);
+      g.line(a[0], a[1], b[0], b[1], POST_HALF, CROSSING_POST_COLOR, LAMP_MIN_PX);
+      for (const p of [a, b]) {
+        g.disc(p[0], p[1], LAMP_RADIUS, CROSSING_LAMP_OFF_COLOR, LAMP_MIN_PX);
+      }
+    }
+  }
+  return { base: g };
+}
+
+export type ClosedCrossingMeshes = {
+  /** 下ろした遮断機の棒。 */
+  arms: Geometry;
+  /** 点いている警報灯。交互に点くので、一方の灯火だけを集めた 2 組にする。 */
+  lampsA: Geometry;
+  lampsB: Geometry;
+};
+
+/** 閉じている踏切 `closed`（マスの x, y の組の並び）の、棒と警報灯の頂点。形が分かっていない踏切は飛ばす。 */
+export function closedCrossingMeshes(
+  crossings: ReadonlyMap<string, RailCrossing>,
+  closed: ArrayLike<number>,
+): ClosedCrossingMeshes {
+  const first = crossings.get(`${closed[0] ?? 0},${closed[1] ?? 0}`);
+  const origin = first?.at ?? { x: 0, y: 0 };
+  const out = {
+    arms: new Geometry(origin),
+    lampsA: new Geometry(origin),
+    lampsB: new Geometry(origin),
+  };
+  for (let i = 0; i + 2 <= closed.length; i += 2) {
+    const c = crossings.get(`${closed[i]},${closed[i + 1]}`);
+    if (c === undefined) {
+      continue;
+    }
+    const f = crossingFrame(c);
+    for (const post of posts(f)) {
+      // 棒は、台から道路の中心線の手前まで、入ってくる車線の上に下ろす
+      const end = frameAt(f, post.s, post.side * ARM_END_GAP);
+      out.arms.line(post.at[0], post.at[1], end[0], end[1], ARM_HALF, CROSSING_RED, ARM_MIN_PX);
+      const length = Math.hypot(end[0] - post.at[0], end[1] - post.at[1]);
+      const marks = Math.max(1, Math.floor(length / (ARM_MARK * 2)));
+      for (let k = 1; k < marks; k += 2) {
+        const t0 = k / marks;
+        const t1 = (k + 1) / marks;
+        out.arms.line(
+          post.at[0] + (end[0] - post.at[0]) * t0,
+          post.at[1] + (end[1] - post.at[1]) * t0,
+          post.at[0] + (end[0] - post.at[0]) * t1,
+          post.at[1] + (end[1] - post.at[1]) * t1,
+          ARM_HALF,
+          CROSSING_ARM_WHITE,
+          ARM_MIN_PX,
+        );
+      }
+      const [a, b] = lamps(f, post.at);
+      [a, b].forEach((p, k) => {
+        const g = k === 0 ? out.lampsA : out.lampsB;
+        g.disc(p[0], p[1], GLOW_RADIUS, CROSSING_GLOW_COLOR, LAMP_MIN_PX * 2.5);
+        g.disc(p[0], p[1], LAMP_RADIUS, CROSSING_RED, LAMP_MIN_PX);
+      });
+    }
+  }
+  return out;
 }

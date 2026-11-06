@@ -661,6 +661,227 @@ async function checkTrains(page: Page, at: string): Promise<void> {
   await page.close();
 }
 
+// 線路を道路が横切って踏切ができ、列車が近づくと閉じて、遮断機の棒と警報灯の赤が描かれ、通り過ぎると開いて赤が消えることを確かめる。
+// 閉じている踏切は列車と同じ三重バッファの枠で届くので、描かれる赤は列車の位置と同じ tick のものである。
+// CHIZU_SHOT_DIR を指すと、開いているときと閉じているときの、寄りと細部の画像をそこへ書く。
+async function checkCrossings(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  const map = page.locator("#map");
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  await page.locator("#hud").and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  const waitMap = (key: string, expected: string, op: "eq" | "gt") =>
+    page.waitForFunction(
+      ([k, v, o]) => {
+        const d = document.querySelector<HTMLElement>("#map")?.dataset[k] ?? "";
+        return o === "eq" ? d === v : Number(d) > Number(v);
+      },
+      [key, expected, op] as const,
+      { timeout: TIMEOUT_MS },
+    );
+  await waitMap("roadSegments", "0", "gt");
+  await page.locator("#pause").click();
+  await zoomInTo(page, 16);
+  const size = page.viewportSize() ?? { width: 1280, height: 720 };
+  const d0 = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  const tileCenter = (x: number, y: number) => ({
+    x: size.width / 2 + (x + 0.5 - Number(d0.cameraX)) * Number(d0.zoom),
+    y: size.height / 2 + (y + 0.5 - Number(d0.cameraY)) * Number(d0.zoom),
+  });
+  const clickTile = async (x: number, y: number) => {
+    const p = tileCenter(x, y);
+    await page.mouse.click(p.x, p.y);
+  };
+  const moveTile = async (x: number, y: number) => {
+    const p = tileCenter(x, y);
+    await page.mouse.move(p.x, p.y, { steps: 3 });
+  };
+  const shot = async (name: string) => {
+    const dir = process.env.CHIZU_SHOT_DIR;
+    if (dir !== undefined) {
+      await page.screenshot({ path: `${dir}/${name}.png` });
+    }
+  };
+  // 駅 2 つ（敷地は x 21〜30 と x 41〜50、駅の線路は y = 30）の道路は、x 31〜39 を空けて 2 本に分ける
+  const roads = d0.roadSegments ?? "0";
+  for (const [x0, x1] of [
+    [8, 31],
+    [40, 56],
+  ] as const) {
+    await pickTool(page, "road-Small");
+    await clickTile(x0, 32);
+    await clickTile(x1, 32);
+    await page.keyboard.press("Escape");
+  }
+  await waitMap("roadSegments", roads, "gt");
+  for (const x of [30, 50]) {
+    await pickTool(page, "service-Station");
+    await moveTile(x, 31);
+    await waitMap("servicePlaceable", "true", "eq");
+    const before = Number((await map.getAttribute("data-rail-stations")) ?? "0");
+    await clickTile(x, 31);
+    await waitMap("railStations", String(before), "gt");
+    await page.keyboard.press("Escape");
+  }
+  await pickTool(page, "rail");
+  await clickTile(30, 30);
+  await moveTile(41, 30);
+  await waitMap("railPlaceable", "true", "eq");
+  const tracks = Number((await map.getAttribute("data-rail-tracks")) ?? "0");
+  await clickTile(41, 30);
+  await waitMap("railTracks", String(tracks), "gt");
+  await page.keyboard.press("Escape");
+  // 路線を引いて列車を 1 本走らせる
+  await pickTool(page, "line");
+  await clickTile(25, 30);
+  await moveTile(45, 30);
+  await clickTile(45, 30);
+  await waitMap("railLines", "0", "gt");
+  await page.keyboard.press("Escape");
+  await page.locator('#line-list button[aria-label$="の本数を増やす"]').first().click();
+  await page.waitForFunction(
+    () => document.querySelector("#line-list li")?.getAttribute("data-trains") === "1",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  // 縦の道路で線路を横切る。踏切は、道路のノードから 2 マス以上離す
+  const before = Number((await map.getAttribute("data-rail-crossings")) ?? "0");
+  check(before === 0, "踏切はまだない");
+  await pickTool(page, "road-Small");
+  await clickTile(36, 26);
+  await clickTile(36, 36);
+  await page.keyboard.press("Escape");
+  await waitMap("railCrossings", "0", "gt");
+  check(
+    (await map.getAttribute("data-rail-crossings")) === "1",
+    "道路で線路を横切ると、踏切が 1 つ描画に届く",
+  );
+  await pickTool(page, "none");
+
+  // 描画の重さ。倍率ごとに、地図全体を描く JS の時間（ms、均した値）を読む。CHIZU_DRAW_COST を立てたときだけ出す。
+  // map-style.md の決まりどおり、引き、標準、寄り、細部の上限（128）の 4 つの段を測る
+  if (process.env.CHIZU_DRAW_COST !== undefined) {
+    for (const target of [MAX_ZOOM, 2, 6, 20]) {
+      if (target === MAX_ZOOM) {
+        await zoomInTo(page, MAX_ZOOM);
+      } else {
+        while (Math.abs(Number(await map.getAttribute("data-zoom")) - target) > target * 0.3) {
+          const now = Number(await map.getAttribute("data-zoom"));
+          await page.locator(now > target ? "#zoom-out" : "#zoom-in").click();
+          await page.waitForTimeout(150);
+        }
+      }
+      await page.waitForTimeout(2500);
+      const d = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+      console.log(`描画の重さ 踏切 倍率 ${Number(d.zoom).toFixed(1)}：地図 ${d.mapDrawMs} ms`);
+    }
+    await zoomInTo(page, 16);
+  }
+
+  // 踏切の遮断機の棒の真ん中あたり（小の道路: 縦の道路の西側の車線）。棒と警報灯の赤（#ea4335）の画素を数える
+  const redAround = (cx: number, cy: number, zoom: number) =>
+    map.evaluate(
+      (el, q) => {
+        const canvas = el as HTMLCanvasElement;
+        const gl = canvas.getContext("webgl2");
+        const dpr = window.devicePixelRatio;
+        const w = Math.ceil(q.r * 2 * dpr);
+        const [x, y] = [
+          Math.floor((q.cx - q.r) * dpr),
+          canvas.height - Math.floor((q.cy + q.r) * dpr) - 1,
+        ];
+        const out = new Uint8Array(w * w * 4);
+        gl?.readPixels(x, y, w, w, gl.RGBA, gl.UNSIGNED_BYTE, out);
+        let n = 0;
+        for (let i = 0; i < out.length; i += 4) {
+          if (
+            Math.abs((out[i] ?? 0) - 0xea) <= 24 &&
+            Math.abs((out[i + 1] ?? 0) - 0x43) <= 24 &&
+            Math.abs((out[i + 2] ?? 0) - 0x35) <= 24
+          ) {
+            n++;
+          }
+        }
+        return n;
+      },
+      { cx, cy, r: Math.max(8, 0.35 * zoom) },
+    );
+  // 踏切のマス (36, 30) の中心から、道路に沿って 1 マスの半分、直角に 1 マスの 3 割ほどのあたり
+  const around = async () => {
+    const d = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+    const z = Number(d.zoom);
+    return {
+      z,
+      x: size.width / 2 + (36.5 - Number(d.cameraX)) * z,
+      y: size.height / 2 + (30.5 - Number(d.cameraY)) * z,
+    };
+  };
+
+  // 開いているあいだは赤がない。列車は止まっているので、閉じる前の画像を撮る
+  check(
+    (await map.getAttribute("data-closed-crossings")) === "0",
+    "列車が来ていないあいだ、踏切は開いている",
+  );
+  let p = await around();
+  check(
+    (await redAround(p.x, p.y, p.z)) === 0,
+    "開いている踏切に、遮断機と警報灯の赤はない（寄り）",
+  );
+  await shot("crossing-open-standard-near");
+  await zoomInTo(page, 26);
+  await shot("crossing-open-close");
+  await zoomInTo(page, 64);
+  p = await around();
+  check(
+    (await redAround(p.x, p.y, p.z)) === 0,
+    "開いている踏切に、遮断機と警報灯の赤はない（細部）",
+  );
+  await shot("crossing-open-fine");
+  await zoomInTo(page, 16);
+  while (Number(await map.getAttribute("data-zoom")) > 20) {
+    await page.locator("#zoom-out").click();
+    await page.waitForTimeout(150);
+  }
+  p = await around();
+
+  // 時間を進めると、列車が近づく前に踏切が閉じ、赤が描かれる。閉じたらすぐ止めて画像を撮る
+  await page.locator("#pause").click();
+  await pickSpeed(page, 6);
+  await page.waitForFunction(
+    ([x, y, r]) => {
+      const el = document.querySelector<HTMLCanvasElement>("#map");
+      if (el === null || el.dataset.closedCrossings !== "1") return false;
+      const gl = el.getContext("webgl2");
+      const dpr = window.devicePixelRatio;
+      const w = Math.ceil(r * 2 * dpr);
+      const out = new Uint8Array(w * w * 4);
+      gl?.readPixels(
+        Math.floor((x - r) * dpr),
+        el.height - Math.floor((y + r) * dpr) - 1,
+        w,
+        w,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        out,
+      );
+      for (let i = 0; i < out.length; i += 4) {
+        if (Math.abs((out[i] ?? 0) - 0xea) <= 24 && (out[i + 1] ?? 0) < 0x70) return true;
+      }
+      return false;
+    },
+    [p.x, p.y, Math.max(8, 0.35 * p.z)] as const,
+    { timeout: TIMEOUT_MS },
+  );
+  await page.locator("#pause").click();
+  check(true, "列車が近づくと踏切が閉じ、遮断機の棒と警報灯の赤が描かれる");
+  await shot("crossing-closed-standard-near");
+  await zoomInTo(page, 26);
+  await shot("crossing-closed-close");
+  await zoomInTo(page, 64);
+  await page.waitForTimeout(300);
+  await shot("crossing-closed-fine");
+  await page.close();
+}
+
 // 開発用の道具で歩く人を出し、描かれること、時間を進めると動くこと、着くと消えることを確かめる。
 // 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その左寄りと右寄りのマスのあいだに出す
 async function checkDevWalks(page: Page, at: string): Promise<void> {
@@ -2485,6 +2706,7 @@ try {
   await checkDevWalks(await browser.newPage(), url);
   await checkRail(await browser.newPage(), url);
   await checkTrains(await browser.newPage(), url);
+  await checkCrossings(await browser.newPage(), url);
   await checkLabels(await browser.newPage(), url);
 } finally {
   await browser.close();

@@ -1360,6 +1360,10 @@ const MESH_NAMES = [
   "major",
   "lanes",
   "markings",
+  "crossings",
+  "crossingArms",
+  "crossingLampsA",
+  "crossingLampsB",
   "streets",
   "signals",
   "lamps",
@@ -1371,11 +1375,14 @@ const MESH_NAMES = [
 ] as const;
 export type MeshName = (typeof MESH_NAMES)[number];
 
+/** 踏切の警報灯が交互に点く間隔（ミリ秒）。日本の踏切は毎分 40〜50 回ほど点滅する。 */
+export const CROSSING_BLINK_MS = 600;
+
 /**
  * 倍率 zoom で、下から順に描くメッシュと、その不透明度と、地面の色から本来の色へ寄せる割合。
  * 不透明度が 0 のメッシュは描かない。段の境目の幅（stages.ts）のあいだだけ、前の段と次の段の両方を描く。
  */
-export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
+export function roadDrawOrder(zoom: number, blink: 0 | 1 = 0): [MeshName, number, number][] {
   const w = stageWeights(zoom);
   // 線で描く道路は、寄りの描き方がそろうまでその下に残す。車線ごとの描き方は、
   // 歩道と植え込みでマスいっぱいを覆うので、上に重ねて濃くしていけば線が見えなくなる
@@ -1412,6 +1419,11 @@ export function roadDrawOrder(zoom: number): [MeshName, number, number][] {
     ["major", lines],
     ["lanes", w.detail],
     ["markings", w.detail],
+    // 踏切は道路の上に踏板を敷き、閉じているあいだは棒を下ろして警報灯を交互に点ける（rail.ts）。細部の段でも描き方は同じ
+    ["crossings", w.detail],
+    ["crossingArms", w.detail],
+    ["crossingLampsA", blink === 0 ? w.detail : 0],
+    ["crossingLampsB", blink === 1 ? w.detail : 0],
     ["streets", w.fine],
     // 信号の灯火は、細部の段で 1 つから 3 つの並びに替わる
     ["signals", w.detail * (1 - w.fine)],
@@ -1541,6 +1553,18 @@ export class RoadLayer {
     this.#upload("railLinesNear", meshes.near);
   }
 
+  /** 形の決まっている踏切（rail.ts）。 */
+  setCrossings(meshes: { base: MeshSource }): void {
+    this.#upload("crossings", meshes.base);
+  }
+
+  /** 閉じている踏切の棒と警報灯（rail.ts）。 */
+  setClosedCrossings(meshes: { arms: MeshSource; lampsA: MeshSource; lampsB: MeshSource }): void {
+    this.#upload("crossingArms", meshes.arms);
+    this.#upload("crossingLampsA", meshes.lampsA);
+    this.#upload("crossingLampsB", meshes.lampsB);
+  }
+
   setSignals(geometry: Geometry): void {
     this.#upload("signals", geometry);
   }
@@ -1587,7 +1611,9 @@ export class RoadLayer {
     gl.enable(gl.BLEND);
     // 色だけを重ね、フレームバッファのアルファは 1 のまま保つ（キャンバスがページの背景と混ざって白く飛ばないように）
     gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ZERO, gl.ONE);
-    for (const [name, alpha, fade] of roadDrawOrder(camera.zoom)) {
+    // 踏切の警報灯は、実時間で交互に点く。止めていても点滅する
+    const blink = Math.floor(performance.now() / CROSSING_BLINK_MS) % 2 === 0 ? 0 : 1;
+    for (const [name, alpha, fade] of roadDrawOrder(camera.zoom, blink)) {
       if ((name === "preview") !== (part === "preview")) {
         continue;
       }

@@ -642,6 +642,36 @@ impl Sim {
         out
     }
 
+    /// 踏切を、1 つにつき
+    /// `[x, y, 道路の 1 歩の x, y, 線路の 1 歩の x, y, 道路の種類の番号]` の 7 つの数で返す。マスの順に並べる。
+    /// 道路の 1 歩と線路の 1 歩は、通る向きを 8 方向のどれかで表す（向きの正負は決まっていない）。
+    /// 閉じているかは毎 tick 変わるので、ここには入れず、三重バッファの枠に書く。
+    pub fn rail_crossings(&self) -> Vec<f64> {
+        let rail = self.world.rail();
+        let net = self.world.network();
+        let mut out = Vec::new();
+        for t in rail.crossings() {
+            let Some(id) = net.segments_through(t).first().copied() else {
+                continue;
+            };
+            let (Some(line), Some(segment), Some(step)) =
+                (net.segment_line(id), net.segment(id), rail.rail_step_at(t))
+            else {
+                continue;
+            };
+            out.extend([
+                t.x as f64,
+                t.y as f64,
+                line.step.0 as f64,
+                line.step.1 as f64,
+                step.0 as f64,
+                step.1 as f64,
+                f64::from(segment_kind_code(segment.kind)),
+            ]);
+        }
+        out
+    }
+
     /// 路線を、1 路線につき
     /// `[添え字, 世代, 環状か, 決めた本数, 本数の上限, 走らせる本数, 止まっているか, 運転間隔(tick。なければ 0), 1 周の見込み(tick),
     /// 駅の数, 線路の数, 待てる所の数, 理由に挙げる路線の数]` の 13 個の数に、駅ごとの `[敷地の min の x, y]` と、
@@ -994,7 +1024,9 @@ impl Sim {
             train_base_cx: self.cars_base.cx,
             train_base_cy: self.cars_base.cy,
         };
-        self.snapshot.publish(&header, &self.movers, &self.cars);
+        let closed = crate::trains::closed_crossings(&self.world);
+        self.snapshot
+            .publish(&header, &self.movers, &self.cars, &closed);
     }
 }
 

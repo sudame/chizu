@@ -1,6 +1,9 @@
 import { describe, expect, test } from "vitest";
 import { hex } from "./palette.ts";
 import {
+  closedCrossingMeshes,
+  crossingMeshes,
+  parseCrossings,
   parseStations,
   parseTracks,
   RAIL_BED_COLOR,
@@ -193,5 +196,62 @@ describe("曲がり角のつなぎ目", () => {
   test("まっすぐにつながる 2 本には、角も丸も足さない", () => {
     const straight = parseTracks([0, 0, 5, 0, 0, 5, 0, 9, 0, 0]);
     expect(points(railMeshes(straight, []).bed).length).toBe(2 * 6);
+  });
+});
+
+describe("踏切", () => {
+  // (30, 8) を縦の小さな道路が横切り、線路は横に通る
+  const crossings = parseCrossings([30, 8, 0, 1, 1, 0, 1]);
+  const info = new Map(crossings.map((c) => [`${c.at.x},${c.at.y}`, c]));
+
+  test("踏切はマスと、道路と線路の向きと、道路の種類を読む", () => {
+    expect(crossings).toEqual([
+      { at: { x: 30, y: 8 }, road: { x: 0, y: 1 }, rail: { x: 1, y: 0 }, kind: 1 },
+    ]);
+    expect(parseCrossings([])).toEqual([]);
+  });
+
+  test("踏切がなければ何も描かない", () => {
+    expect(crossingMeshes([]).base.vertexCount).toBe(0);
+    expect(closedCrossingMeshes(new Map(), []).arms.vertexCount).toBe(0);
+  });
+
+  test("踏切は踏板、レール、縞、台を描き、踏切の数に比例して頂点が増える", () => {
+    const one = crossingMeshes(crossings).base.vertexCount;
+    expect(one).toBeGreaterThan(0);
+    const two = crossingMeshes(parseCrossings([30, 8, 0, 1, 1, 0, 1, 40, 8, 0, 1, 1, 0, 1]));
+    expect(two.base.vertexCount).toBe(2 * one);
+  });
+
+  test("閉じている踏切だけに、棒と点いた警報灯が出る", () => {
+    const open = closedCrossingMeshes(info, []);
+    expect([open.arms, open.lampsA, open.lampsB].map((g) => g.vertexCount)).toEqual([0, 0, 0]);
+    const closed = closedCrossingMeshes(info, [30, 8]);
+    expect(closed.arms.vertexCount).toBeGreaterThan(0);
+    // 警報灯は台ごとに 2 つで、交互に点く 2 組は同じ数になる
+    expect(closed.lampsA.vertexCount).toBeGreaterThan(0);
+    expect(closed.lampsA.vertexCount).toBe(closed.lampsB.vertexCount);
+    // 形を知らない踏切は飛ばす
+    expect(closedCrossingMeshes(info, [99, 99]).arms.vertexCount).toBe(0);
+  });
+
+  test("棒は入ってくる車線の側に下りる（左側通行）", () => {
+    const g = closedCrossingMeshes(info, [30, 8]).arms;
+    const xs = Array.from(g.build())
+      .filter((_, i) => i % 13 === 0)
+      .map((x) => x + g.origin.x);
+    // 縦の道路（北から南へ進む車は西側を通る）なので、棒は中心 30.5 の両側にある
+    expect(Math.min(...xs)).toBeLessThan(30.5);
+    expect(Math.max(...xs)).toBeGreaterThan(30.5);
+  });
+
+  test("踏切は寄りから描き、引きと標準では描かない。警報灯は交互に点く", () => {
+    const alphaOf = (zoom: number, name: string, blink: 0 | 1 = 0) =>
+      roadDrawOrder(zoom, blink).find(([n]) => n === name)?.[1] ?? Number.NaN;
+    expect([alphaOf(2, "crossings"), alphaOf(8, "crossings")]).toEqual([0, 0]);
+    expect(alphaOf(20, "crossings")).toBe(1);
+    expect(alphaOf(64, "crossingArms")).toBe(1);
+    expect([alphaOf(20, "crossingLampsA", 0), alphaOf(20, "crossingLampsB", 0)]).toEqual([1, 0]);
+    expect([alphaOf(20, "crossingLampsA", 1), alphaOf(20, "crossingLampsB", 1)]).toEqual([0, 1]);
   });
 });

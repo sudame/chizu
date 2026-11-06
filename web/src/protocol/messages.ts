@@ -94,6 +94,8 @@ export type Outcome = "Applied" | "AppliedPartly" | "Denied" | "Rejected" | "Not
 export const SEGMENT_STRIDE = 5;
 /** 線路 1 本の数の個数。chizu-wasm の rail_tracks と同じ。 */
 export const RAIL_TRACK_STRIDE = 5;
+/** 踏切 1 つの数の個数。chizu-wasm の rail_crossings と同じ。 */
+export const RAIL_CROSSING_STRIDE = 7;
 /** 駅 1 つの数の個数。chizu-wasm の rail_stations と同じ。 */
 export const RAIL_STATION_STRIDE = 6;
 /** 建物 1 つの数の個数。chizu-wasm の buildings と同じ。 */
@@ -282,8 +284,9 @@ export type WorkerToMain =
     }
   /**
    * 線路と駅の形。線路や駅が変わったときだけ、全体を送り直す。配列は移譲して送る。
-   * tracks は chizu-wasm の rail_tracks、stations は rail_stations、lines は rail_lines である。
-   * 路線のコマンドも版を上げるので、路線の一覧も同じメッセージで送る。
+   * tracks は chizu-wasm の rail_tracks、stations は rail_stations、lines は rail_lines、crossings は rail_crossings である。
+   * 路線のコマンドも版を上げるので、路線の一覧も同じメッセージで送る。踏切の一覧は道路を引いても変わるので、
+   * 道路網の版が変わって踏切の一覧が前と違うときも送り直す。踏切が閉じているかは、三重バッファの枠で送る。
    */
   | {
       kind: "rail";
@@ -291,6 +294,7 @@ export type WorkerToMain =
       tracks: Float64Array;
       stations: Float64Array;
       lines: Float64Array;
+      crossings: Float64Array;
     }
   /** inspect の答え。query は問い合わせの写しで、info は chizu-wasm の inspect の数。何もなければ空。 */
   | { kind: "inspect"; query: InspectQuery; info: number[] }
@@ -517,7 +521,9 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         v.tracks.length % RAIL_TRACK_STRIDE === 0 &&
         v.stations instanceof Float64Array &&
         v.stations.length % RAIL_STATION_STRIDE === 0 &&
-        v.lines instanceof Float64Array
+        v.lines instanceof Float64Array &&
+        v.crossings instanceof Float64Array &&
+        v.crossings.length % RAIL_CROSSING_STRIDE === 0
       );
     case "rail-probe":
       return (

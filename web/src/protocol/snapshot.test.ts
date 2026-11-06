@@ -70,6 +70,7 @@ describe("三重バッファ", () => {
       trainCarCount: 0,
       trainBaseCx: 2,
       trainBaseCy: -7,
+      closedCrossingCount: 0,
     });
   });
 
@@ -93,6 +94,30 @@ describe("三重バッファ", () => {
     // 移動体の欄とは重ならない
     expect(layout.carsStart).toBe(layout.slotHeaderWords + layout.maxMovers * layout.moverWords);
     expect(reader.cars(10 ** 6).length).toBe(layout.maxTrainCars * layout.moverWords);
+  });
+
+  test("閉じている踏切のマスは車両のあとに、x と y の組で置かれる", () => {
+    const buffer = allocateSnapshotBuffer();
+    const writer = new TestWriter(buffer);
+    const reader = new SnapshotReader(buffer, 0);
+    writer.publish((words, base) => {
+      words[base + layout.header.closedCrossingCount] = 2;
+      const at = base + layout.crossingsStart;
+      words[at] = 30;
+      words[at + 1] = (-8 >>> 0) as number;
+      words[at + layout.crossingWords] = 5;
+      words[at + layout.crossingWords + 1] = 6;
+    });
+    const header = reader.acquire();
+    expect(header?.closedCrossingCount).toBe(2);
+    expect(Array.from(reader.closedCrossings(header?.closedCrossingCount ?? 0))).toEqual([
+      30, -8, 5, 6,
+    ]);
+    // 車両の欄とは重ならない
+    expect(layout.crossingsStart).toBe(layout.carsStart + layout.maxTrainCars * layout.moverWords);
+    expect(reader.closedCrossings(10 ** 6).length).toBe(
+      layout.maxClosedCrossings * layout.crossingWords,
+    );
   });
 
   test("読み手は最新の枠を読み、書き手の枠とは重ならない", () => {
