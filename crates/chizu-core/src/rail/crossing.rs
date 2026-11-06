@@ -224,7 +224,8 @@ impl Rail {
         Self::crossings_within(by_track, line, t, 0)
     }
 
-    /// [`Rail::crossings_near`] に、押さえた範囲の先で、先頭から `beyond` までに始まる要素の踏切を足す。
+    /// [`Rail::crossings_near`] に、押さえた範囲の先で、先頭から `beyond` より手前で始まる要素の踏切を足す。
+    /// `beyond` が 0 なら、押さえた範囲だけを見る。
     fn crossings_within(
         by_track: &BTreeMap<super::TrackId, SmallVec<[OnTrack; 2]>>,
         line: &RailLine,
@@ -241,7 +242,7 @@ impl Rail {
         }
         let held = line.distance(tail, t.pos) + t.ahead;
         for k in 0..line.len() {
-            if k > held && d > beyond {
+            if k > held && d >= beyond {
                 break;
             }
             let s = line.step(i);
