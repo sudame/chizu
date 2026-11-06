@@ -4,8 +4,8 @@
 //! 中核にコマンドの種類や欄を足したとき、ここがコンパイルで止まって直し忘れに気づけるようにするためである。
 
 use chizu_core::{
-    ChunkCoord, Command, Heading, NodeId, RoadKind, ServiceKind, SimSpeed, TilePos, TileRect, Zone,
-    ZoneKind,
+    ChunkCoord, Command, Heading, MAX_PARKING_FEE, MAX_TAX_PERMILLE, NodeId, RoadKind, ServiceKind,
+    SimSpeed, TilePos, TileRect, Zone, ZoneKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -325,9 +325,54 @@ impl CommandJson {
 /// JSON の値 1 つをコマンドに読む。形が違うか、値が範囲の外なら理由を返す。
 /// 範囲の検査は [`Command::validate`] でも行うので、ここでは中核の型に収まらない値だけを断る。
 pub fn parse(value: &serde_json::Value) -> Result<Command, String> {
+    if let Some(message) = explain_out_of_range(value) {
+        return Err(message);
+    }
     CommandJson::deserialize(value)
         .map_err(|e| e.to_string())?
         .into_command()
+}
+
+/// serde の生の文が出る前に、範囲の外の整数と、選べない区画の名前を日本語の文で断る。
+/// 中核の [`Command::validate`] の文（上限を超えた値）と同じ形にそろえる。
+fn explain_out_of_range(value: &Value) -> Option<String> {
+    let kind = value.get("type")?.as_str()?;
+    let int_field = |field: &str, label: &str, min: i128, max: i128| -> Option<String> {
+        let v = value.get(field)?;
+        let n = v
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| v.as_u64().map(i128::from))?;
+        (n < min || n > max).then(|| format!("{label} {n} は {min} から {max} の外にある"))
+    };
+    match kind {
+        "SetTaxRate" => {
+            let zone = value.get("zone").and_then(Value::as_str);
+            if zone == Some("ResidentialLow") {
+                return Some(
+                    "税率の区画に ResidentialLow は選べない。住宅の税率は低密度と高密度で 1 つで、Residential で決める"
+                        .into(),
+                );
+            }
+            if let Some(zone) = zone
+                && !["Residential", "Commercial", "Industrial", "Office"].contains(&zone)
+            {
+                return Some(format!(
+                    "税率の区画 {zone} は選べない。Residential、Commercial、Industrial、Office のどれかを書く"
+                ));
+            }
+            int_field("permille", "税率", 0, MAX_TAX_PERMILLE.into())
+        }
+        "SetParkingFee" => int_field("fee", "駐車場の料金", 0, MAX_PARKING_FEE.into()),
+        "SetSimSpeed" => int_field(
+            "speed",
+            "速度",
+            SimSpeed::NORMAL.multiplier().into(),
+            SimSpeed::MAX.multiplier().into(),
+        ),
+        "PlaceBuilding" => int_field("rotation", "建物の向き", 0, 3),
+        _ => None,
+    }
 }
 
 /// コマンドを [`parse`] で読める JSON にする。
@@ -513,6 +558,42 @@ mod tests {
         }
     }
 
+    /// 範囲の外の値は、serde の生の文ではなく、日本語の分かる文で断る。
+    #[test]
+    fn explains_out_of_range_values() {
+        let cases = [
+            (
+                json!({"type":"SetParkingFee","fee":-1}),
+                "駐車場の料金 -1 は 0 から 50 の外にある",
+            ),
+            (
+                json!({"type":"SetParkingFee","fee":70000}),
+                "駐車場の料金 70000 は 0 から 50 の外にある",
+            ),
+            (
+                json!({"type":"SetTaxRate","zone":"Office","permille":-5}),
+                "税率 -5 は 0 から 300 の外にある",
+            ),
+            (
+                json!({"type":"SetSimSpeed","speed":-1}),
+                "速度 -1 は 1 から 288 の外にある",
+            ),
+            (
+                json!({"type":"PlaceBuilding","kind":"ParkingLot","at":[0,0],"rotation":-1}),
+                "建物の向き -1 は 0 から 3 の外にある",
+            ),
+        ];
+        for (c, expected) in &cases {
+            assert_eq!(parse(c).unwrap_err(), *expected, "{c}");
+        }
+        let low = parse(&json!({"type":"SetTaxRate","zone":"ResidentialLow","permille":100}))
+            .unwrap_err();
+        assert!(low.contains("ResidentialLow は選べない"), "{low}");
+        assert!(!low.contains("unknown variant"), "{low}");
+        let other = parse(&json!({"type":"SetTaxRate","zone":"Park","permille":100})).unwrap_err();
+        assert!(other.contains("Park は選べない"), "{other}");
+    }
+
     #[test]
     fn rejects_bad_shapes() {
         let cases = [
@@ -524,6 +605,7 @@ mod tests {
             json!({"type":"SetTaxRate","zone":"Commercial","permille":-1}),
             json!({"type":"SetTaxRate","zone":"ResidentialLow","permille":100}),
             json!({"type":"SetParkingFee","fee":-1}),
+            json!({"type":"SetParkingFee","fee":51}),
             json!({"type":"SetParkingFee"}),
             json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"Up","on":false}),
             json!({"type":"BuildRail","from":[0,1]}),

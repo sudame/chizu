@@ -33,8 +33,8 @@ pub use citizens::{
 };
 pub use clock::{GameTime, TICKS_PER_DAY};
 pub use command::{
-    Command, Density, Heading, LOW_DENSITY_MAX_LEVEL, NodeId, RoadKind, ServiceKind, SimSpeed,
-    Zone, ZoneKind,
+    Command, Density, Heading, LOW_DENSITY_MAX_LEVEL, MAX_PARKING_FEE, MAX_TAX_PERMILLE, NodeId,
+    RoadKind, ServiceKind, SimSpeed, Zone, ZoneKind,
 };
 pub use id::{BuildingId, CitizenId, HouseholdId, TripId};
 pub use movement::{
