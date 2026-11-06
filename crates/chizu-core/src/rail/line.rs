@@ -944,10 +944,11 @@ impl Rail {
         if same {
             return;
         }
+        let old = line.clone();
         line.path = path;
         line.departed.clear();
         line.seg_ticks = super::rider::estimate_segments(line);
-        self.relocate_trains(id);
+        self.relocate_trains(id, &old);
     }
 
     /// 線路を引くか取り壊したあとに、路線の駅と進路を選び直す。消えた駅は路線から外し、駅が 2 つ未満に

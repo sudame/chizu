@@ -774,4 +774,4 @@ mod train_tests;
 mod crossing_tests;
 
 #[cfg(test)]
-mod rider_tests;
+pub(crate) mod rider_tests;

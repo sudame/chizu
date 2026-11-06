@@ -39,8 +39,9 @@ pub const INITIAL_FARE: u16 = 5;
 /// 運賃の上限。
 pub const MAX_FARE: u16 = 20;
 
-/// 運賃 1 円を、手段を選ぶ費用の秒に直す重み。
-pub const FARE_SECONDS: u64 = 20;
+/// 運賃 1 円を、手段を選ぶ費用の秒に直す重み。運賃 5 で 25 秒になる。chizu の街は数百 m の大きさなので、
+/// 駅の近くどうしなら 500m 前後から鉄道が車に勝つ重さにした（設計 3.10 の「作る順の 6 で決めた細部」）。
+pub const FARE_SECONDS: u64 = 5;
 
 /// 乗り換え（作る順の 7 で使う）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,8 +374,15 @@ impl Rail {
         });
     }
 
-    /// 列車を消す。乗っていた人は、列車が次に止まる駅（なければ列車のいる線路にいちばん近い駅）で降りたことにする。
+    /// 列車を消す。乗っていた人は、列車が止まっている駅か次に止まる駅（なければ列車のいる線路にいちばん近い駅）で
+    /// 降りたことにする。
     pub(crate) fn drop_train(&mut self, id: TrainId) {
+        self.drop_train_on(id, None);
+    }
+
+    /// [`Rail::drop_train`] と同じだが、`old` があれば、乗っていた人の降りる駅をその路線の進路で探す。進路を替えた
+    /// 直後に新しい進路に置けずに消える列車は、位置が前の進路の番号のままなので、前の進路を渡す。
+    pub(crate) fn drop_train_on(&mut self, id: TrainId, old: Option<&RailLine>) {
         let Some(t) = self.trains.get(id).copied() else {
             return;
         };
@@ -382,7 +390,7 @@ impl Rail {
         let riders = self.aboard.remove(&id).unwrap_or_default();
         if !riders.is_empty() {
             let from = self
-                .drop_station(&t)
+                .drop_station(&t, old)
                 .map_or(ExitFrom::Nowhere, ExitFrom::Station);
             for r in riders {
                 self.ride_tally.evicted += 1;
@@ -393,25 +401,22 @@ impl Rail {
     }
 
     /// 消える列車の乗客が降りる駅。いま止まっている駅、次に止まる駅、列車のいる線路にいちばん近い駅の順に探す。
-    fn drop_station(&self, t: &Train) -> Option<StationId> {
-        if let Some(line) = self.lines.get(t.line)
+    /// 進路は `old` があればそれを、なければ列車の路線のいまの進路を使う。
+    fn drop_station(&self, t: &Train, old: Option<&RailLine>) -> Option<StationId> {
+        if let Some(line) = old.or_else(|| self.lines.get(t.line))
             && (t.pos as usize) < line.path.len()
         {
             let here = line.step(t.pos);
             let alive = |s: Option<StationId>| s.filter(|s| self.stations.get(*s).is_some());
-            if here.is_stop()
-                && t.offset >= here.len
+            // 要素の先の端にいて駅があれば、その駅に止まっている。終点で折り返したあとの要素（`depart` の
+            // `Pass`）も駅を持つ。
+            if t.offset >= here.len
                 && let Some(s) = alive(here.station)
             {
                 return Some(s);
             }
-            let mut i = t.pos;
-            for _ in 0..line.len() {
-                i = line.next(i);
-                let s = line.step(i);
-                if s.is_stop()
-                    && let Some(s) = alive(s.station)
-                {
+            for i in stops_ahead(line, t) {
+                if let Some(s) = alive(line.step(i).station) {
                     return Some(s);
                 }
             }
@@ -556,7 +561,8 @@ impl Rail {
 
     /// 路線か線路が変わったあとに、乗れなくなった人を歩きに戻す。待っている人は、駅か路線がなくなったか、
     /// 路線が止まったか、乗る駅と降りる駅を同じ向きで結ばなくなったら、待っていた駅の出入口から歩く。
-    /// 乗っている人は、降りる駅が路線になくなったら、列車が次に止まる駅で降りたことにする。
+    /// 乗っている人は、乗っている列車が降りる駅に着かなくなったら（降りる駅が路線になくなったか、終点より先になった）、
+    /// 列車が止まっている駅か次に止まる駅で降りたことにする。
     pub(crate) fn settle_riders(&mut self) {
         let keys: Vec<QueueKey> = self.queues.keys().copied().collect();
         for key in keys {
@@ -597,11 +603,11 @@ impl Rail {
             let list = self.aboard.remove(&id).unwrap_or_default();
             let (stay, out): (Vec<RiderId>, Vec<RiderId>) = list.into_iter().partition(|r| {
                 let alight = self.riders.get(*r).expect("乗る人がいない").plan.alight;
-                line.stations.contains(&alight)
+                reaches(line, &t, alight)
             });
             if !out.is_empty() {
                 let from = self
-                    .drop_station(&t)
+                    .drop_station(&t, None)
                     .map_or(ExitFrom::Nowhere, ExitFrom::Station);
                 for r in out {
                     self.ride_tally.evicted += 1;
@@ -617,6 +623,37 @@ impl Rail {
         let trains = &self.trains;
         self.last_stop.retain(|t, _| trains.get(*t).is_some());
     }
+}
+
+/// 列車 `t` がこの先に止まる要素の番号を、進路の順に 1 周まで返す。止まっている要素は含めず、走っていて
+/// まだ先の端に着いていない要素は含める。
+fn stops_ahead<'a>(line: &'a RailLine, t: &Train) -> impl Iterator<Item = u32> + 'a {
+    let n = line.len();
+    let start = if t.offset < line.step(t.pos).len {
+        t.pos
+    } else {
+        line.next(t.pos)
+    };
+    (0..n)
+        .map(move |k| (start + k) % n)
+        .filter(move |i| line.step(*i).is_stop())
+}
+
+/// 列車 `t` に乗ったまま、駅 `to` で降りられるか。終点ではみな降りるので、終点の先の駅には着かない。
+fn reaches(line: &RailLine, t: &Train, to: StationId) -> bool {
+    if (t.pos as usize) >= line.path.len() {
+        return false;
+    }
+    for i in stops_ahead(line, t) {
+        let s = line.step(i);
+        if s.station == Some(to) {
+            return true;
+        }
+        if s.kind == StepKind::Terminal {
+            return false;
+        }
+    }
+    false
 }
 
 /// 前の値 `old` に、測った値 `new` を 1/4 の重みで混ぜる。端数は四捨五入する。

@@ -512,7 +512,8 @@ impl Rail {
     /// 置ける要素がなければ列車を消す。先に押さえた要素は、新しい進路では別の要素を指すので、どの列車も返す。
     /// 新しい進路で続けられない状態は直す。駅でない所で止まっている列車は走る状態に戻し、折り返している
     /// 列車は、折り返す先のホームを押さえ直してから折り返すよう、止まって待つ状態に戻す。
-    pub(crate) fn relocate_trains(&mut self, line_id: LineId) {
+    /// 置けずに消える列車の乗客は、前の進路 `old` で次に止まる駅で降りる。
+    pub(crate) fn relocate_trains(&mut self, line_id: LineId, old: &RailLine) {
         let Some(line) = self.lines.get(line_id) else {
             return;
         };
@@ -558,7 +559,7 @@ impl Rail {
             };
         }
         for id in gone {
-            self.drop_train(id);
+            self.drop_train_on(id, Some(old));
         }
     }
 

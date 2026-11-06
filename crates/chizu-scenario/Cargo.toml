@@ -44,6 +44,10 @@ name = "rail_choice"
 harness = false
 
 [[bench]]
+name = "rail_riders"
+harness = false
+
+[[bench]]
 name = "perf"
 harness = false
 

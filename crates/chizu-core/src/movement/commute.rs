@@ -223,8 +223,9 @@ impl Trips {
     /// [`Trips::start_commutes`] と同じだが、`rides` があれば鉄道の候補と費用で比べる（設計 3.10 の 4）。
     ///
     /// 歩きと車は今の距離の決まりで選び、そのうえで鉄道の費用が小さければ鉄道にする。車を選んだ移動は車の費用と、
-    /// 歩きを選んだ移動は歩きの費用と比べる。費用が同じなら今の手段を残す。車を持つ世帯の
-    /// [`OWNER_DRIVE_MIN_MM`] より近い移動と、停めた車を取りに帰る移動は、鉄道と比べない。
+    /// 歩きを選んだ移動は歩きの費用と比べる。費用が同じなら今の手段を残す。[`OWNER_DRIVE_MIN_MM`] より近い移動は、
+    /// 車を持つかによらず鉄道と比べない。家の枠でない駐車場に停めた車で出る移動（停めた車を取りに帰る移動を含む）も、
+    /// 車を残さないよう鉄道と比べない。車を使えず鉄道を選んだ移動は、車がない移動（`no_car`）に数えない。
     /// 鉄道を選んだ移動は、乗る駅の出入口まで歩く移動として作り、着いたら駅の待ち行列に入る。
     pub fn start_commutes_with_rides(
         &mut self,
@@ -289,6 +290,12 @@ impl Trips {
                         Some(lot)
                     }
                     Some(car) => {
+                        let pick = walk();
+                        // 鉄道を選んだ移動は、車がなくて困った移動に数えない。鉄道で通う人の車は家の枠に残るので、
+                        // 帰りはいつもここに来る。
+                        if matches!(pick, Pick::Ride(_)) {
+                            return pick;
+                        }
                         let tally = &mut self.parking_tally;
                         tally.no_car = tally.no_car.saturating_add(1);
                         // `no_car` の内訳。どれか 1 つだけを増やし、和が `no_car` に等しくなるようにする。
@@ -303,11 +310,13 @@ impl Trips {
                             HouseholdCar::Parked { .. } => &mut tally.no_car_parked_away,
                         };
                         *reason = reason.saturating_add(1);
-                        return walk();
+                        return pick;
                     }
                 };
-                // 停めた車を取りに帰る移動は、車を残さないよう鉄道と比べない。
-                if !fetch && let Some(o) = ride(car_seconds) {
+                // 家の枠でない駐車場に停めた車で出る移動は、車をそこに残さないよう鉄道と比べない。停めた車を
+                // 取りに帰る移動（`fetch`）も、職場から店へ向かう移動もここに入る。
+                let leaves_car = take.is_some_and(|lot| Some(lot) != r.own_lot());
+                if !leaves_car && let Some(o) = ride(car_seconds) {
                     return Pick::Ride(o);
                 }
                 let Some(id) = self.spawn_drive_taking(

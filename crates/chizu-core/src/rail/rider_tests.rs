@@ -16,7 +16,7 @@ fn ok(outcome: ApplyOutcome) {
 
 /// 東西に約 2km 離れた住宅（西）と工場（東）を、y = 0 の通りで結んだ街。通りの南に駅を 2 つ置き、
 /// 駅のあいだを y = 2 の線路で結んで、本数 `trains` の路線を走らせる。
-pub(super) fn rail_town(seed: u64, trains: u8) -> (World, LineId, StationId, StationId) {
+pub(crate) fn rail_town(seed: u64, trains: u8) -> (World, LineId, StationId, StationId) {
     // 高速道路が北から入る種を選ぶ。南から入ると、入口から通りまでの道路が線路を横切る。
     let seed = (seed..)
         .find(|s| crate::world::highway_line(*s).start.y < 0)
@@ -339,4 +339,234 @@ fn measure_riders() {
             );
         }
     }
+}
+
+/// [`rail_town`] の東の駅の先（x 200〜209）に 3 つ目の駅を置き、東の駅から線路でつないだ街。
+/// `extend` なら路線をその駅まで延ばす。
+fn far_town(trains: u8, extend: bool) -> (World, LineId, [StationId; 3]) {
+    let (mut w, line, west, east) = rail_town(5, trains);
+    let c = w.apply(&Command::BuildRoad {
+        from: at(160, 0),
+        to: at(220, 0),
+        kind: RoadKind::Medium,
+    });
+    assert!(matches!(
+        c,
+        ApplyOutcome::Applied | ApplyOutcome::AppliedPartly(_)
+    ));
+    ok(w.apply(&Command::PlaceBuilding {
+        kind: ServiceKind::Station,
+        at: at(200, 1),
+        rotation: 0,
+    }));
+    let far = w.rail().station_at(at(200, 2)).expect("3 つ目の駅がない");
+    ok(w.apply(&Command::BuildRail {
+        from: at(134, 2),
+        to: at(200, 2),
+    }));
+    if extend {
+        ok(w.apply(&Command::ExtendLine { line, station: far }));
+    }
+    (w, line, [west, east, far])
+}
+
+/// 駅 `s` の出入口。
+fn station_door(w: &World, s: StationId) -> crate::movement::SidewalkPos {
+    let site = w.rail().station(s).expect("駅がない").site();
+    crate::movement::facility_spot(w.network(), &site).expect("駅の出入口がない")
+}
+
+/// `rail` の列車 `train` に、駅 `board` から向き `dir` で乗って駅 `alight` で降りる人を 1 人乗せ、その移動の ID を返す。
+/// 移動は作らず、鉄道の中だけで確かめる。
+fn put_aboard(
+    rail: &mut Rail,
+    train: TrainId,
+    (board, line, dir, alight): (StationId, LineId, u8, StationId),
+    door: crate::movement::SidewalkPos,
+) -> crate::id::TripId {
+    let trip = crate::id::TripId {
+        index: 1_000_000 + u32::try_from(rail.rider_count()).unwrap(),
+        generation: 0,
+    };
+    let id = rail.riders.insert(Rider {
+        trip,
+        started: crate::units::Tick::ZERO,
+        plan: RidePlan {
+            board,
+            line,
+            dir,
+            alight,
+            transfer: None,
+            to: door,
+        },
+        leg: 0,
+        door,
+        since: 0,
+        train: Some(train),
+    });
+    rail.by_trip.insert(trip, id);
+    rail.aboard.entry(train).or_default().push(id);
+    trip
+}
+
+/// 移動 `trip` の人が鉄道を離れたときの [`Exit`]。離れていなければ `None`。
+fn exit_of(rail: &mut Rail, trip: crate::id::TripId) -> Option<Exit> {
+    rail.take_exits().into_iter().find(|e| e.trip == trip)
+}
+
+/// 最初の駅で出るのを待つ列車（終点で折り返したあとの要素 0 にいる）が路線ごと消えると、乗っていた人は
+/// その駅で降りる。反対の終点まで運ばれない。
+#[test]
+fn riders_of_a_train_ready_at_the_first_station_get_off_there() {
+    let (mut w, line, west, east) = rail_town(5, 16);
+    let train = (0..2_000)
+        .find_map(|_| {
+            w.step();
+            w.rail()
+                .trains()
+                .find(|(_, t)| t.pos == 0 && t.state == TrainState::Ready)
+                .map(|(id, _)| id)
+        })
+        .expect("最初の駅で待つ列車がない");
+    let mut rail = w.rail().clone();
+    let door = station_door(&w, west);
+    let trip = put_aboard(&mut rail, train, (west, line, 0, east), door);
+    rail.remove_line(line).unwrap();
+    let e = exit_of(&mut rail, trip).expect("降りていない");
+    assert_eq!(e.from, ExitFrom::Station(west));
+    assert!(e.rode);
+}
+
+/// 終点の駅を取り壊して路線が縮み、新しい進路に置けずに消える列車の乗客は、前の進路で次に止まる駅で降りる。
+#[test]
+fn riders_of_a_train_cut_off_by_a_shorter_line_get_off_at_its_next_stop() {
+    let (mut w, line, [west, east, far]) = far_town(3, true);
+    // 帰り（向き 1）に、3 つ目の駅から東の駅へ向かって、駅のあいだの東の駅に近い線路（x 134〜167）を走る列車。
+    // 3 つ目の駅に接する線路（x 167〜200）は駅と一緒に取り壊され、そこに体のかかる列車は進路を選び直す前に
+    // 消えるので、尾がその線路を抜けた列車を選ぶ。
+    let near_east = |w: &World, t: &Train| {
+        let rail = w.rail();
+        let l = rail.line(t.line).unwrap();
+        let tr = rail.track_line(t.track).unwrap();
+        rail.track(t.track).unwrap().station.is_none()
+            && l.half(t.pos) == 1
+            && t.state == TrainState::Running
+            && t.offset > 2 * TRAIN_BLOCK_LEN_MM
+            && rail
+                .reserved_steps(l, t)
+                .iter()
+                .all(|i| rail.track_line(l.step(*i).track).unwrap().end().x <= 167)
+            && [tr.start, tr.end()]
+                .iter()
+                .all(|p| (134..=170).contains(&p.x))
+    };
+    let train = (0..3 * crate::TICKS_PER_DAY)
+        .find_map(|_| {
+            w.step();
+            w.rail()
+                .trains()
+                .find(|(_, t)| near_east(&w, t))
+                .map(|(id, _)| id)
+        })
+        .expect("東の駅へ向かう列車がない");
+    let mut rail = w.rail().clone();
+    let door = station_door(&w, far);
+    let trip = put_aboard(&mut rail, train, (far, line, 1, west), door);
+    let area = rail.station(far).unwrap().area;
+    rail.bulldoze(area);
+    assert!(rail.train(train).is_none(), "列車が残った");
+    let e = exit_of(&mut rail, trip).expect("降りていない");
+    assert_eq!(e.from, ExitFrom::Station(east));
+    assert!(e.rode);
+}
+
+/// 終点に止まる列車に、折り返して戻る向きの人が乗っているときに路線を延ばすと、列車は新しい終点へ進むので、
+/// その人はいま止まっている駅で降りる。逆の向きへ運ばれない。
+#[test]
+fn riders_heading_back_get_off_when_the_line_is_extended_past_their_terminal() {
+    let (mut w, line, [west, east, far]) = far_town(3, false);
+    let train = (0..3 * crate::TICKS_PER_DAY)
+        .find_map(|_| {
+            w.step();
+            let rail = w.rail();
+            rail.trains()
+                .find(|(_, t)| {
+                    let s = rail.line(t.line).unwrap().step(t.pos);
+                    s.kind == StepKind::Terminal
+                        && s.station == Some(east)
+                        && matches!(t.state, TrainState::Dwell { .. })
+                })
+                .map(|(id, _)| id)
+        })
+        .expect("東の終点に止まる列車がない");
+    let mut rail = w.rail().clone();
+    let door = station_door(&w, east);
+    let back = put_aboard(&mut rail, train, (east, line, 1, west), door);
+    rail.extend_line(line, far).unwrap();
+    assert!(rail.train(train).is_some(), "列車が消えた");
+    let e = exit_of(&mut rail, back).expect("降りていない");
+    assert_eq!(e.from, ExitFrom::Station(east));
+    assert!(e.rode);
+}
+
+/// 列車が駅を出るときに乗りきれずに人が残ると、その駅と向きを覚え、鉄道の候補の待ちに運転間隔を 1 つ足す。
+/// 次に出た列車のあとに人が残らなければ外す。
+#[test]
+fn riders_left_behind_add_a_headway_to_the_wait() {
+    let (mut w, line, west, east) = rail_town(5, 3);
+    let train = (0..3 * crate::TICKS_PER_DAY)
+        .find_map(|_| {
+            w.step();
+            let rail = w.rail();
+            rail.trains()
+                .find(|(_, t)| {
+                    let l = rail.line(t.line).unwrap();
+                    l.step(t.pos).station == Some(west)
+                        && l.half(t.pos) == 0
+                        && t.state == TrainState::Ready
+                })
+                .map(|(id, _)| id)
+        })
+        .expect("西の駅を出る列車がない");
+    let planner = w.rail_planner().unwrap().clone();
+    let (from, to) = (station_door(&w, west).tile, station_door(&w, east).tile);
+    let before = choice::RideChoice::new(&planner, w.rail())
+        .offer(from, to)
+        .unwrap();
+    let mut rail = w.rail().clone();
+    let now = w.tick().0;
+    let door = station_door(&w, west);
+    let key = (west, line, 0);
+    let waiting = rail.queues.get(&key).map_or(0, |q| q.len());
+    let room = TRAIN_CAPACITY - rail.aboard(train).len();
+    for k in 0..room + 100 {
+        let trip = crate::id::TripId {
+            index: 1_000_000 + u32::try_from(k).unwrap(),
+            generation: 0,
+        };
+        let plan = RidePlan {
+            board: west,
+            line,
+            dir: 0,
+            alight: east,
+            transfer: None,
+            to: door,
+        };
+        rail.add_rider(trip, crate::units::Tick(now), plan, door, now);
+    }
+    rail.serve_departure(train, now);
+    assert_eq!(rail.aboard(train).len(), TRAIN_CAPACITY);
+    assert_eq!(rail.queues.get(&key).map_or(0, |q| q.len()), waiting + 100);
+    assert!(rail.left_behind().contains(&key));
+    let after = choice::RideChoice::new(&planner, &rail)
+        .offer(from, to)
+        .unwrap();
+    let l = rail.line(line).unwrap();
+    let running = rail.trains().filter(|(_, t)| t.line == line).count() as u64;
+    let headway = l.segment_ticks().iter().map(|s| u64::from(*s)).sum::<u64>() / running;
+    assert_eq!(after.cost, before.cost + headway);
+    // 残った人がいなくなってから列車が出れば、外す。
+    rail.queues.remove(&key);
+    rail.serve_departure(train, now);
+    assert!(!rail.left_behind().contains(&key));
 }

@@ -128,3 +128,51 @@ impl World {
         self.end_commutes(ended);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::rail::rider_tests::rail_town;
+
+    /// 住民の移動を取りやめると（予定を立て直す、世帯が街を出る）、駅で待つ人と列車に乗る人も鉄道から消える。
+    #[test]
+    fn cancelling_a_trip_removes_its_rider() {
+        let (mut w, _, _, _) = rail_town(5, 3);
+        // 待つ人（0）と乗る人（1）を、それぞれ 1 回ずつ取りやめる。
+        let mut seen = [false, false];
+        for _ in 0..3 * crate::TICKS_PER_DAY {
+            w.step();
+            if seen.iter().all(|s| *s) {
+                break;
+            }
+            let pick = w.rail().riders().find_map(|(_, r)| {
+                let k = usize::from(r.train.is_some());
+                (!seen[k]).then_some((k, r.trip))
+            });
+            let Some((k, trip)) = pick else {
+                continue;
+            };
+            let riders = w.rail().rider_count();
+            w.cancel_trip(trip);
+            let rail = w.rail();
+            assert_eq!(
+                rail.rider_of(trip),
+                None,
+                "取りやめた移動の人が鉄道に残った"
+            );
+            assert_eq!(rail.rider_count(), riders - 1);
+            let listed = rail.queues().map(|(_, q)| q.len()).sum::<usize>()
+                + rail
+                    .trains()
+                    .map(|(t, _)| rail.aboard(t).len())
+                    .sum::<usize>();
+            assert_eq!(
+                listed,
+                rail.rider_count(),
+                "待ち行列か列車の並びに消えた人が残った"
+            );
+            assert!(!w.trips().is_suspended(trip));
+            seen[k] = true;
+        }
+        assert!(seen.iter().all(|s| *s), "待つ人か乗る人がいない: {seen:?}");
+    }
+}

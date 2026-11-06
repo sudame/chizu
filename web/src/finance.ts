@@ -1,5 +1,5 @@
-// 収支のパネル。区画の種類ごとの税収、共同の駐車場の料金の収入、道路と施設と鉄道の維持費、1 日あたりの差し引きを出し、
-// 税率と駐車場の料金を上げ下げできる。
+// 収支のパネル。区画の種類ごとの税収、共同の駐車場の料金の収入、鉄道の運賃の収入、道路と施設と鉄道の維持費、
+// 1 日あたりの差し引きを出し、税率と駐車場の料金と運賃を上げ下げできる。
 // DOM に触るのは setupFinance だけで、数の読み方と文言は Vitest で確かめられる。
 
 import { FINANCE_LENGTH, type ZoneName } from "./protocol/messages.ts";
@@ -45,6 +45,12 @@ export type Finance = {
   maxParkingFee: number;
   /** 料金の収入。 */
   parkingFees: number;
+  /** 鉄道の運賃（1 回の乗車の額）。 */
+  fare: number;
+  /** 運賃の上限。 */
+  maxFare: number;
+  /** 前の日の運賃の収入。 */
+  fares: number;
   income: number;
   expenses: number;
   /** 収入から支出を引いた額。負なら赤字。 */
@@ -57,7 +63,7 @@ export function parseFinance(values: ArrayLike<number>): Finance | null {
   }
   const at = (i: number) => values[i] ?? 0;
   const taxes = [at(5), at(6), at(7), at(8)];
-  const income = taxes.reduce((a, b) => a + b, 0) + at(15);
+  const income = taxes.reduce((a, b) => a + b, 0) + at(15) + at(19);
   const expenses = at(9) + at(10) + at(11) + at(12) + at(16);
   return {
     maxPermille: at(0),
@@ -71,6 +77,9 @@ export function parseFinance(values: ArrayLike<number>): Finance | null {
     parkingFee: at(13),
     maxParkingFee: at(14),
     parkingFees: at(15),
+    fare: at(17),
+    maxFare: at(18),
+    fares: at(19),
     income,
     expenses,
     net: income - expenses,
@@ -138,6 +147,15 @@ export function parkingFeeCommand(fee: number): { kind: "SetParkingFee"; fee: nu
   return { kind: "SetParkingFee", fee };
 }
 
+/** 運賃を出す文。 */
+export function formatFare(fare: number): string {
+  return `${fare} / 回`;
+}
+
+export function fareCommand(fare: number): { kind: "SetFare"; fare: number } {
+  return { kind: "SetFare", fare };
+}
+
 export function taxCommand(
   zone: TaxZone,
   permille: number,
@@ -147,10 +165,11 @@ export function taxCommand(
 
 export type FinanceRow = { label: string; value: string };
 
-/** 税収、駐車場の料金の収入、維持費、差し引きの行。税率と料金の欄は含めない。 */
+/** 税収、駐車場の料金の収入、運賃の収入、維持費、差し引きの行。税率と料金と運賃の欄は含めない。 */
 export function financeRows(finance: Finance): {
   taxes: FinanceRow[];
   parkingFees: FinanceRow;
+  fares: FinanceRow;
   expenses: FinanceRow[];
   net: FinanceRow;
 } {
@@ -160,6 +179,7 @@ export function financeRows(finance: Finance): {
       value: formatSigned(finance.taxes[i] ?? 0),
     })),
     parkingFees: { label: "駐車場の料金", value: formatSigned(finance.parkingFees) },
+    fares: { label: "鉄道の運賃", value: formatSigned(finance.fares) },
     expenses: [
       { label: "道路の維持費", value: formatSigned(-finance.roadUpkeep) },
       { label: "発電所の維持費", value: formatSigned(-finance.powerUpkeep) },
@@ -209,7 +229,7 @@ export class PendingRates {
   }
 }
 
-/** 押した先の駐車場の料金を、中核が反映するまで覚えておく。考え方は PendingRates と同じ。 */
+/** 押した先の駐車場の料金か運賃を、中核が反映するまで覚えておく。考え方は PendingRates と同じ。 */
 export class PendingFee {
   private wanted: number | null = null;
 
@@ -239,11 +259,14 @@ export class PendingFee {
   }
 }
 
-export type FinanceCommand = ReturnType<typeof taxCommand> | ReturnType<typeof parkingFeeCommand>;
+export type FinanceCommand =
+  | ReturnType<typeof taxCommand>
+  | ReturnType<typeof parkingFeeCommand>
+  | ReturnType<typeof fareCommand>;
 
 export type FinancePanel = {
   update(finance: Finance): void;
-  /** SetTaxRate か SetParkingFee が断られたときに呼ぶ。 */
+  /** SetTaxRate、SetParkingFee、SetFare が断られたときに呼ぶ。 */
   rejected(): void;
 };
 
@@ -261,7 +284,8 @@ function make<K extends keyof HTMLElementTagNameMap>(
 }
 
 /**
- * 開け閉めするパネルを組む。税率のボタンは SetTaxRate を、駐車場の料金のボタンは SetParkingFee を send に渡す。
+ * 開け閉めするパネルを組む。税率のボタンは SetTaxRate を、駐車場の料金のボタンは SetParkingFee を、運賃のボタンは
+ * SetFare を send に渡す。
  * 返事が届くまでに続けて押しても 1 つ飛ばさないよう、押した先の値を覚えておき、次の finance が届いたら捨てる。
  */
 export function setupFinance(
@@ -276,6 +300,7 @@ export function setupFinance(
   let latest: Finance | null = null;
   const pending = new PendingRates();
   const pendingFee = new PendingFee();
+  const pendingFare = new PendingFee();
 
   const taxList = make("div", "", "finance-list");
   const expenseList = make("div", "", "finance-list");
@@ -345,6 +370,34 @@ export function setupFinance(
   feePlus.addEventListener("click", () => changeFee(1));
   feeRow.append(make("span", "駐車場"), feeMinus, feeLabel, feePlus, feeAmount);
   taxList.append(feeRow);
+  // 運賃も駐車場の料金と同じ形の行にする
+  const fareRow = make("div", "", "finance-row");
+  fareRow.dataset.fare = "";
+  fareRow.title =
+    "鉄道の 1 回の乗車の運賃。乗ったときに所持金に入る。住民は運賃 1 につき 5 秒の遠回りと同じに見て、歩きや車と比べて鉄道を選ぶので、高いほど乗る人が減る。";
+  const fareMinus = make("button", "−");
+  const farePlus = make("button", "＋");
+  fareMinus.type = "button";
+  farePlus.type = "button";
+  fareMinus.setAttribute("aria-label", "運賃を下げる");
+  farePlus.setAttribute("aria-label", "運賃を上げる");
+  const fareLabel = make("span", "", "finance-rate");
+  const fareAmount = make("span", "", "finance-amount");
+  const changeFare = (direction: 1 | -1) => {
+    if (latest === null) {
+      return;
+    }
+    const next = pendingFare.press(direction, latest.fare, latest.maxFare);
+    if (next === null) {
+      return;
+    }
+    fareLabel.textContent = formatFare(next);
+    send(fareCommand(next));
+  };
+  fareMinus.addEventListener("click", () => changeFare(-1));
+  farePlus.addEventListener("click", () => changeFare(1));
+  fareRow.append(make("span", "鉄道"), fareMinus, fareLabel, farePlus, fareAmount);
+  taxList.append(fareRow);
 
   for (let i = 0; i < EXPENSE_ROWS; i++) {
     const row = make("div", "", "finance-row");
@@ -355,12 +408,16 @@ export function setupFinance(
     expenseValues.push(value);
   }
   body.append(
-    make("h3", "収入（税率と駐車場の料金）"),
+    make("h3", "収入（税率と駐車場の料金と運賃）"),
     taxList,
     make("h3", "維持費"),
     expenseList,
     netRow,
-    make("p", "金額は 1 日あたりの見込み。駐車場の料金は 1 台 1 日の額。", "finance-note"),
+    make(
+      "p",
+      "金額は 1 日あたりの見込み。駐車場の料金は 1 台 1 日の額。運賃は 1 回の乗車の額で、収入は前の日の分。",
+      "finance-note",
+    ),
   );
 
   const render = (finance: Finance) => {
@@ -390,6 +447,10 @@ export function setupFinance(
     feeAmount.textContent = rows.parkingFees.value;
     feeRow.dataset.parkingFee = String(finance.parkingFee);
     feeRow.dataset.income = String(finance.parkingFees);
+    fareLabel.textContent = formatFare(pendingFare.shown(finance.fare));
+    fareAmount.textContent = rows.fares.value;
+    fareRow.dataset.fare = String(finance.fare);
+    fareRow.dataset.income = String(finance.fares);
     rows.expenses.forEach((r, i) => {
       const value = expenseValues[i];
       const label = value?.previousElementSibling;
@@ -407,11 +468,13 @@ export function setupFinance(
       latest = finance;
       pending.receive(finance.permille);
       pendingFee.receive(finance.parkingFee);
+      pendingFare.receive(finance.fare);
       render(finance);
     },
     rejected() {
       pending.reject();
       pendingFee.reject();
+      pendingFare.reject();
       if (latest !== null) {
         render(latest);
       }
