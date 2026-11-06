@@ -877,13 +877,20 @@ type PlatformUse = (
 
 /// 終点の着くホームを使う割合。路線ごとの、ホームと、列車 1 本がそのホームの時間を使う割合（[`TURN_FULL`] を 1 とする）
 /// と、ホームごとの使える割合の和（ホームの数 × 1）である。上限（`cap`）が 0 の路線は数えない。
+/// 折り返すホームに数えるのは、`turning` の路線（本数 1 以上の路線と、本数を 1 以上にしたとしたらを見る路線）の
+/// 終点だけである。本数 0 の路線の終点には折り返す列車がいないので、そこを通り抜ける路線を抑えない（区画の枠を
+/// 本数 1 以上の路線で分けるのと同じ考え）。`turning` でない路線の終点は、自分の使う割合にも入れない。
 ///
 /// 往復する路線の列車は、1 周に終点ごとに 1 度、着いたホームを [`turn_ticks`] のあいだ押さえる。1 周の見込みの
 /// 時間を `t` とすると、列車 1 本はそのホームの時間の `turn_ticks ÷ t` を使う。ほかの路線が折り返すホームを
 /// 通り抜ける路線（そこに止まる路線と、止まらずに通る路線）も、列車 1 本が [`through_ticks`] ÷ `t` を使う（#377）。
 /// 折り返す列車がホームにいるあいだ、通り抜ける列車はそのホームに入れず、通り抜ける列車がいるあいだは、折り返す
 /// 列車が入れないためである。
-fn platform_use(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> PlatformUse {
+fn platform_use(
+    lines: &[PlanLine],
+    plans: &BTreeMap<LineId, LinePlan>,
+    turning: impl Fn(LineId) -> bool,
+) -> PlatformUse {
     let mut uses = BTreeMap::<LineId, BTreeMap<Vertex, u64>>::new();
     let mut room = BTreeMap::<Vertex, u64>::new();
     let total = |l: &PlanLine| -> u64 {
@@ -901,7 +908,7 @@ fn platform_use(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> Platf
         let t = total(l);
         let mut u = BTreeMap::new();
         for (i, s) in l.path.iter().enumerate() {
-            if s.kind != StepKind::Terminal {
+            if s.kind != StepKind::Terminal || !turning(l.id) {
                 continue;
             }
             *u.entry(vertex(s)).or_default() += (turn_ticks(s.len) * TURN_FULL).div_ceil(t);
@@ -937,8 +944,8 @@ fn platform_use(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> Platf
 /// したとしたら配られる本数にする（区画の枠の見込みの分と同じ考え）。配るのは、ほかの上限（`cap`）までである。
 /// 終点がなく、ほかの路線の終点のホームも通らない路線は、ほかの上限のままになる。
 fn turn_caps(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> BTreeMap<LineId, u8> {
-    let (uses, room) = platform_use(lines, plans);
-    let deal = |active: &[LineId]| -> BTreeMap<LineId, u8> {
+    let trains: BTreeMap<LineId, u8> = lines.iter().map(|l| (l.id, l.trains)).collect();
+    let deal = |(uses, room): &PlatformUse, active: &[LineId]| -> BTreeMap<LineId, u8> {
         let mut n = BTreeMap::<LineId, u8>::new();
         let mut load = BTreeMap::<Vertex, u64>::new();
         loop {
@@ -966,23 +973,29 @@ fn turn_caps(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> BTreeMap
             }
         }
     };
+    let base = platform_use(lines, plans, |k| trains[&k] > 0);
     let mut active: Vec<LineId> = lines
         .iter()
-        .filter(|l| l.trains > 0 && uses.contains_key(&l.id))
+        .filter(|l| l.trains > 0 && base.0.contains_key(&l.id))
         .map(|l| l.id)
         .collect();
     active.sort();
-    let mut out = deal(&active);
+    let mut out = deal(&base, &active);
+    out.retain(|id, _| !base.0[id].is_empty());
     for l in lines {
-        if l.trains > 0 || !uses.contains_key(&l.id) {
+        if l.trains > 0 || !base.0.contains_key(&l.id) {
+            continue;
+        }
+        // 本数を 1 以上にしたとしたら、この路線の終点も折り返すホームに入る。
+        let with_use = platform_use(lines, plans, |k| trains[&k] > 0 || k == l.id);
+        if with_use.0[&l.id].is_empty() {
             continue;
         }
         let mut with = active.clone();
         with.push(l.id);
         with.sort();
-        out.insert(l.id, deal(&with)[&l.id]);
+        out.insert(l.id, deal(&with_use, &with)[&l.id]);
     }
-    out.retain(|id, _| !uses[id].is_empty());
     out
 }
 
@@ -1088,7 +1101,10 @@ impl Rail {
             .iter()
             .map(|(k, l)| (k, l.plan.clone()))
             .collect();
-        let (uses, room) = platform_use(&input, &plans);
+        // 本数 0 の路線の終点は数えない。`id` が本数 0 なら、本数を 1 以上にしたとしたらを見る（`turn_caps`）。
+        let (uses, room) = platform_use(&input, &plans, |k| {
+            k == id || self.lines.get(k).is_some_and(|l| l.trains > 0)
+        });
         let mine = uses.get(&id)?;
         line.path.iter().enumerate().find_map(|(i, s)| {
             let v = vertex(s);
@@ -1324,7 +1340,10 @@ impl Rail {
     /// 分が折り返せる本数まで下がった路線の `cap` は、分け直す前の値のままにする。`cap` は行き詰まりを防ぐ上限で、
     /// 走らせる本数（[`RailLine::allowed`]）は折り返せる本数でも抑えるので、分を超える列車は走らない。`cap` まで
     /// 下げると、折り返せる本数で抑えている理由（[`LineCapacity::turn_limit`]）が見えなくなる。
-    /// 折り返せる本数は、分け直したあとの `cap` から求め直す。
+    /// 折り返せる本数は、分け直したあとの `cap` から求め直す。上がった `cap` で求め直すと、ほかの路線の本数が
+    /// 増えたぶん別の路線が減り、さらに別の路線が増える形（3 路線以上の数珠つなぎ）で、1 回目より多くなることがある。
+    /// 区画の分は 1 回目の本数までに抑えたので、そのままでは分を超える列車が走りうる。そこで、`cap` を分け直す前の
+    /// 値に戻した路線は、折り返せる本数を、分け直した分で運べる本数（分け直したあとの `cap`）までにする。
     fn plans_for(&self, input: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
         let mut plans = make_plans(input, &BTreeMap::new());
         #[cfg(test)]
@@ -1334,11 +1353,20 @@ impl Rail {
         if !lifted {
             let first = plans;
             plans = make_plans(input, &turn_caps(input, &first));
+            // 分け直した区画の分で運べる本数。
+            let split: BTreeMap<LineId, u8> = plans.iter().map(|(id, p)| (*id, p.cap)).collect();
             for (id, p) in &mut plans {
                 p.cap = p.cap.max(first[id].cap);
             }
             for (id, n) in turn_caps(input, &plans) {
                 plans.get_mut(&id).expect("路線がない").turn_cap = n;
+            }
+            // `cap` を分け直す前の値に戻した路線は、走らせる本数が区画の分で運べる本数を超えないよう、折り返せる
+            // 本数をそこまでにする。
+            for (id, p) in &mut plans {
+                if p.cap > split[id] {
+                    p.turn_cap = p.turn_cap.min(split[id]);
+                }
             }
         }
         plans

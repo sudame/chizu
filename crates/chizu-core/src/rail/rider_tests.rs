@@ -1280,3 +1280,29 @@ fn measure_through() {
         );
     }
 }
+
+/// 本数 0 の路線の終点のホームは、折り返す列車がいないので、そこを通り抜ける路線の折り返せる本数（`turn_cap`）を
+/// 下げない。本数を 1 にすると、折り返す列車とホームを分け合うので下がり、0 に戻すと元に戻る。
+#[test]
+fn an_idle_terminal_does_not_lower_the_turn_cap_of_a_through_line() {
+    let (mut w, [a, b]) = through_town(16, 0);
+    let idle = w.rail().line(a).unwrap().turn_cap();
+    let cap = w.rail().line(a).unwrap().cap();
+    ok(w.apply(&Command::RemoveLine { line: b }));
+    let alone = w.rail().line(a).unwrap().turn_cap();
+    // B をなくすと区画の枠が変わり、A の cap は上がる。比べるのは、A の終点で決まる turn_cap だけである。
+    assert!(alone < cap);
+    assert_eq!(idle, alone, "本数 0 の B の終点で A の turn_cap が下がった");
+
+    let (mut w, [a, b]) = through_town(16, 0);
+    ok(w.apply(&Command::SetLineTrains { line: b, trains: 1 }));
+    let busy = w.rail().line(a).unwrap().turn_cap();
+    assert!(
+        busy < idle,
+        "B を走らせても A の turn_cap {busy} が {idle} から下がらない"
+    );
+    let limit = w.rail().line_capacity(a).unwrap().turn_limit.unwrap();
+    assert_eq!(limit.shared_with, vec![b]);
+    ok(w.apply(&Command::SetLineTrains { line: b, trains: 0 }));
+    assert_eq!(w.rail().line(a).unwrap().turn_cap(), idle);
+}
