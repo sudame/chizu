@@ -298,6 +298,14 @@ fn trains_on_a_ring_with_unused_lines_keep_departing() {
     }
 }
 
+/// 枠を待つ列車がこちらを待っているなら、その枠は止めない（区画と区間の枠を譲る決まり）。種 689 では、ある路線の
+/// 終点の着くホームを、ほかの路線が通り過ぎる待てる所として使う。この決まりがないと、区画の枠を待つ列車、その枠を
+/// 止めた列車、閉塞を押さえた列車、閉塞を譲った相手が輪になり、約 3,000 tick 止まった。
+#[test]
+fn a_claimed_quota_does_not_wait_on_the_asking_train() {
+    ring_fuzz(689, false, true, 3_000, 1_000, &mut Watch::default()).unwrap();
+}
+
 /// 環状の線路のファズを `RING_FROM` から `RING_N` 種回し、閉塞の重なりか panic、備え、`RING_LIMIT` tick 駅を
 /// 出ないか `RING_WAITED`（既定は `RING_LIMIT`）tick 続けて先を待つ列車か、上限が 1 以上なのに `RING_LIMIT` tick
 /// 列車がいない路線があった種と、続けて待った長さが 1,000 tick 以上になった種の数、駅を出た数の和を出す。

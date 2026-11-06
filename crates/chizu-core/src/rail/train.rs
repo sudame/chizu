@@ -315,8 +315,9 @@ struct Claims {
 
 /// 列車 `from` が先へ進むのに、列車 `target` が先に進む必要があるか。`from` から待つ相手をたどり、`target` に
 /// 着けば真である。列車の待つ相手は、次に押さえる範囲（押さえた範囲の終わりから次の待てる所まで）の閉塞を
-/// 押さえている列車と、その範囲へ移る区画か区間の枠が足りなければ同じ路線のほかの列車（枠は路線ごとなので、
-/// 空けるのは同じ路線の列車である）と、この tick に閉塞を譲った相手である。
+/// 押さえている列車と、その範囲へ移る区画か区間の枠が足りないか、ほかの列車が待っていれば同じ路線のほかの列車
+/// （枠は路線ごとなので、空けるのは同じ路線の列車である）と、この tick に閉塞を譲った相手である。その列車自身が
+/// 待った枠は、足りないものに数えない。
 fn depends_on(
     lines: &Arena<LineId, RailLine>,
     trains: &Arena<TrainId, Train>,
@@ -352,6 +353,7 @@ fn depends_on(
                 }
             }
         }
+        // 枠が空いているかは、`u` 自身が待った印を除いて見る。自分の印で自分が止まることはないためである。
         let end = Rail::reserved_end(line, t);
         if k_from <= k_to
             && !quota.free_for(
@@ -359,7 +361,7 @@ fn depends_on(
                 line,
                 Some(end),
                 (t.pos + k_to) % line.len(),
-                &BTreeSet::new(),
+                &BTreeSet::from([u]),
             )
         {
             stack.extend(
