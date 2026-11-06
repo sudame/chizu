@@ -510,6 +510,151 @@ async function checkRail(page: Page, at: string): Promise<void> {
   await page.close();
 }
 
+// 駅 2 つを線路で結び、路線の道具で路線を引いて本数を決め、列車が描かれて走ることを確かめる。
+// CHIZU_SHOT_DIR を指すと、引き、標準、寄りの画像と、路線の道具の画像をそこへ書く。
+async function checkTrains(page: Page, at: string): Promise<void> {
+  await page.goto(at);
+  const map = page.locator("#map");
+  await page.locator("#status[data-state=running]").waitFor({ timeout: TIMEOUT_MS });
+  await page.locator("#hud").and(page.locator("[data-tick]")).waitFor({ timeout: TIMEOUT_MS });
+  const waitMap = (key: string, expected: string, op: "eq" | "gt") =>
+    page.waitForFunction(
+      ([k, v, o]) => {
+        const d = document.querySelector<HTMLElement>("#map")?.dataset[k] ?? "";
+        return o === "eq" ? d === v : Number(d) > Number(v);
+      },
+      [key, expected, op] as const,
+      { timeout: TIMEOUT_MS },
+    );
+  await waitMap("roadSegments", "0", "gt");
+  await page.locator("#pause").click();
+  await zoomInTo(page, 16);
+  const size = page.viewportSize() ?? { width: 1280, height: 720 };
+  const d0 = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+  const zoom = Number(d0.zoom);
+  const tileCenter = (x: number, y: number) => ({
+    x: size.width / 2 + (x + 0.5 - Number(d0.cameraX)) * zoom,
+    y: size.height / 2 + (y + 0.5 - Number(d0.cameraY)) * zoom,
+  });
+  const clickTile = async (x: number, y: number) => {
+    const p = tileCenter(x, y);
+    await page.mouse.click(p.x, p.y);
+  };
+  const moveTile = async (x: number, y: number) => {
+    const p = tileCenter(x, y);
+    await page.mouse.move(p.x, p.y, { steps: 3 });
+  };
+  const shot = async (name: string) => {
+    const dir = process.env.CHIZU_SHOT_DIR;
+    if (dir !== undefined) {
+      await page.screenshot({ path: `${dir}/${name}.png` });
+    }
+  };
+  const roads = d0.roadSegments ?? "0";
+  await pickTool(page, "road-Small");
+  await clickTile(8, 32);
+  await clickTile(56, 32);
+  await page.keyboard.press("Escape");
+  await waitMap("roadSegments", roads, "gt");
+  // 駅 2 つ（敷地は x 21〜30 と x 41〜50、駅の線路は y = 30）と、そのあいだの線路
+  for (const x of [30, 50]) {
+    await pickTool(page, "service-Station");
+    await moveTile(x, 31);
+    await waitMap("servicePlaceable", "true", "eq");
+    const before = Number((await map.getAttribute("data-rail-stations")) ?? "0");
+    await clickTile(x, 31);
+    await waitMap("railStations", String(before), "gt");
+    await page.keyboard.press("Escape");
+  }
+  await pickTool(page, "rail");
+  await clickTile(30, 30);
+  await moveTile(41, 30);
+  await waitMap("railPlaceable", "true", "eq");
+  const tracks = Number((await map.getAttribute("data-rail-tracks")) ?? "0");
+  await clickTile(41, 30);
+  await waitMap("railTracks", String(tracks), "gt");
+  await page.keyboard.press("Escape");
+
+  // 描画の重さ。倍率ごとに、地図全体と列車を描く JS の時間（ms、均した値）を読む。CHIZU_DRAW_COST を立てたときだけ出す
+  const measureCost = async (label: string) => {
+    if (process.env.CHIZU_DRAW_COST === undefined) return;
+    for (const target of [2, 6, 16, 40]) {
+      while (Math.abs(Number(await map.getAttribute("data-zoom")) - target) > target * 0.3) {
+        const now = Number(await map.getAttribute("data-zoom"));
+        await page.locator(now > target ? "#zoom-out" : "#zoom-in").click();
+        await page.waitForTimeout(150);
+      }
+      await page.waitForTimeout(2500);
+      const d = await map.evaluate((el) => ({ ...(el as HTMLElement).dataset }));
+      console.log(
+        `描画の重さ ${label} 倍率 ${Number(d.zoom).toFixed(1)}：地図 ${d.mapDrawMs} ms、列車 ${d.trainDrawMs} ms（${d.drawnTrainCars} 両）`,
+      );
+    }
+    await zoomInTo(page, 16);
+  };
+
+  await measureCost("路線なし");
+  await zoomInTo(page, 16);
+  // 路線の道具。駅を 2 つ押すと路線ができ、一覧に出る。まだ本数は 0 なので列車はいない
+  await pickTool(page, "line");
+  await clickTile(25, 30);
+  await moveTile(45, 30);
+  await shot("line-tool");
+  await clickTile(45, 30);
+  await waitMap("railLines", "0", "gt");
+  check((await map.getAttribute("data-rail-lines")) === "1", "駅を 2 つ押すと路線が 1 本できる");
+  check((await map.getAttribute("data-drawn-train-cars")) === "0", "本数が 0 の路線に列車はいない");
+  const row = page.locator("#line-list li");
+  await row.first().waitFor({ timeout: TIMEOUT_MS });
+  check(
+    (await row.first().getAttribute("data-trains")) === "0",
+    "一覧に、できた路線と本数 0 が出る",
+  );
+  await page.keyboard.press("Escape");
+
+  await measureCost("列車なし");
+  await zoomInTo(page, 16);
+  // 本数を 1 つ上げ、時間を進めると、4 両の列車が描かれて動く
+  await page.locator('#line-list button[aria-label$="の本数を増やす"]').first().click();
+  await page.waitForFunction(
+    () => document.querySelector("#line-list li")?.getAttribute("data-trains") === "1",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, "＋を押すと本数が 1 になる");
+  await page.locator("#pause").click();
+  await pickSpeed(page, 6);
+  await waitMap("drawnTrainCars", "0", "gt");
+  check((await map.getAttribute("data-drawn-train-cars")) === "4", "列車は 4 両で描かれる");
+  const first = await map.getAttribute("data-first-train-car");
+  await page.waitForFunction(
+    (p) => document.querySelector<HTMLElement>("#map")?.dataset.firstTrainCar !== p,
+    first,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, "列車の位置が時間とともに変わる");
+  await measureCost("列車 1 本");
+  await zoomInTo(page, 16);
+  await page.locator("#pause").click();
+  await page.keyboard.press("Escape");
+  await shot("train-close");
+  for (const [name, target] of [
+    ["train-standard", 6],
+    ["train-far", 2],
+  ] as const) {
+    while (Number(await map.getAttribute("data-zoom")) > target) {
+      const before = Number(await map.getAttribute("data-zoom"));
+      await page.locator("#zoom-out").click();
+      await page.waitForFunction(
+        (z) => Number(document.querySelector<HTMLElement>("#map")?.dataset.zoom) < z,
+        before,
+      );
+    }
+    await shot(name);
+  }
+  await page.close();
+}
+
 // 開発用の道具で歩く人を出し、描かれること、時間を進めると動くこと、着くと消えることを確かめる。
 // 起動したばかりのページで、開始地点の真ん中の行に道路を引き、その左寄りと右寄りのマスのあいだに出す
 async function checkDevWalks(page: Page, at: string): Promise<void> {
@@ -2333,6 +2478,7 @@ try {
   await checkHudPanel(await browser.newPage(), url);
   await checkDevWalks(await browser.newPage(), url);
   await checkRail(await browser.newPage(), url);
+  await checkTrains(await browser.newPage(), url);
   await checkLabels(await browser.newPage(), url);
 } finally {
   await browser.close();

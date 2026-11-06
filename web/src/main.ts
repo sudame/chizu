@@ -496,7 +496,10 @@ function sendView(range: ChunkRange): void {
   });
 }
 
+let trainDrawMs = 0;
+let mapDrawMs = 0;
 function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
+  const drawStart = performance.now();
   const vp = viewport();
   const range = camera.visibleChunks(vp);
   sendView(range);
@@ -517,6 +520,7 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
           performance.now(),
           moverPaths,
         ) ?? 0);
+  const trainStart = performance.now();
   const trains =
     header === null
       ? 0
@@ -527,7 +531,11 @@ function drawMap(reader: SnapshotReader, header: SnapshotHeader | null): void {
           reader.cars(header.trainCarCount),
           performance.now(),
         ) ?? 0);
-  // test:wasm が読む
+  // test:wasm が読む。列車を描くのにかかった時間（ミリ秒）と、地図を描くのにかかった時間を、指数移動平均で均す
+  trainDrawMs += (performance.now() - trainStart - trainDrawMs) * 0.1;
+  mapDrawMs += (performance.now() - drawStart - mapDrawMs) * 0.1;
+  mapCanvas.dataset.trainDrawMs = trainDrawMs.toFixed(3);
+  mapCanvas.dataset.mapDrawMs = mapDrawMs.toFixed(3);
   mapCanvas.dataset.drawnTrainCars = String(trains);
   const firstTrain = renderer?.trains.first;
   mapCanvas.dataset.firstTrainCar = firstTrain ? `${firstTrain.x},${firstTrain.y}` : "";
@@ -1128,6 +1136,12 @@ function requestInspect(): void {
 setInterval(requestInspect, INSPECT_INTERVAL_MS);
 
 const lineList = element<HTMLElement>("#line-list");
+const linesPanel = element<HTMLElement>("#lines-panel");
+const railMenu = element<HTMLElement>("#menu-rail");
+/** 路線の一覧は、路線の道具を使っているか、鉄道の帯を開いているあいだ、路線があれば出す。 */
+function updateLinesPanel(): void {
+  linesPanel.hidden = railLines.length === 0 || !(tool.kind === "line" || !railMenu.hidden);
+}
 let lineListShown = "";
 /** 駅の名前。地図に出している施設の名前を引き、まだ名前がないあいだは「駅」とする。 */
 function stationLabel(min: Tile): string {
@@ -1136,6 +1150,7 @@ function stationLabel(min: Tile): string {
 }
 /** 路線の一覧を書き直す。中身が変わっていないときは、押している途中のボタンを作り直さない。 */
 function showLines(): void {
+  updateLinesPanel();
   const key = JSON.stringify([
     railLines,
     railLines.flatMap((l) => l.stations.map(stationLabel)),
@@ -1184,6 +1199,7 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
     toggle.setAttribute("aria-pressed", String(menu.contains(button)));
   }
   mapCanvas.dataset.tool = button.dataset.tool;
+  updateLinesPanel();
   manualRotation = null;
   if (renderer !== null) {
     renderer.showZonable = next.kind === "zone";

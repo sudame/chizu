@@ -763,9 +763,6 @@
         overflow-y: auto;
         list-style: none;
       }
-      .lines:empty {
-        display: none;
-      }
       .lines li {
         display: flex;
         flex-wrap: wrap;
@@ -1294,6 +1291,8 @@
           <button type="button" class="chip" data-tool="rail" aria-pressed="false">線路を引く</button>
           <button type="button" class="chip" data-tool="line" aria-pressed="false">路線を引く</button>
         </div>
+      </div>
+      <div id="lines-panel" class="tool-menu panel" hidden>
         <ul id="line-list" class="lines" aria-label="路線の一覧"></ul>
       </div>
       <div id="menu-signal" class="tool-menu panel" hidden>
