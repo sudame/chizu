@@ -2237,3 +2237,85 @@ fn act_sets_the_parking_fee() {
         20
     );
 }
+
+/// 3 つの駅と線路を置いた街で、路線 c–a（index 0）を作る。second なら a–b（index 1）も作る。
+fn lines_town(name: &str, second: bool) -> (std::path::PathBuf, String) {
+    let dir = session(name);
+    let d = dir.to_str().unwrap().to_string();
+    cli(&["agent", "new", &d, "0"]);
+    let st = |i: u32| format!(r#"{{"index":{i},"generation":0}}"#);
+    let cmds = write(
+        &dir.join("r.json"),
+        &format!(
+            r#"[{{"type":"BuildRoad","from":[0,10],"to":[100,10],"kind":"Small"}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[12,9],"rotation":2}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[62,9],"rotation":2}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[92,9],"rotation":2}},
+            {{"type":"BuildRail","from":[12,8],"to":[53,8]}},
+            {{"type":"BuildRail","from":[62,8],"to":[83,8]}},
+            {{"type":"CreateLine","from":{c},"to":{a}}},
+            {{"type":"SetLineTrains","line":{l0},"trains":2}}{second}]"#,
+            a = st(0),
+            c = st(2),
+            l0 = st(0),
+            second = if second {
+                format!(
+                    r#",{{"type":"CreateLine","from":{a},"to":{b}}},
+                    {{"type":"SetLineTrains","line":{l1},"trains":2}}"#,
+                    a = st(0),
+                    b = st(1),
+                    l1 = st(1),
+                )
+            } else {
+                String::new()
+            },
+        ),
+    );
+    let acted = json(&cli(&["agent", "act", &d, &cmds]));
+    for r in acted["results"].as_array().unwrap() {
+        assert_eq!(r["outcome"], "Applied", "{acted}");
+    }
+    (dir, d)
+}
+
+/// 路線を作って上限が下がると、超えた分の列車がすぐに消え、act の結果の removedTrains に出る。
+#[test]
+fn act_reports_trains_removed_when_a_new_line_lowers_the_cap() {
+    let (dir, d) = lines_town("agent-rail-cap-lowered", false);
+    let set = write(
+        &dir.join("t.json"),
+        r#"{"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":16}"#,
+    );
+    json(&cli(&["agent", "act", &d, &set]));
+    cli(&["agent", "advance", &d, "3000"]);
+    let cmd = write(
+        &dir.join("c.json"),
+        r#"{"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":1,"generation":0}}"#,
+    );
+    let acted = json(&cli(&["agent", "act", &d, &cmd]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "Applied", "{acted}");
+    assert!(r["removedTrains"].as_u64().unwrap() > 0, "{acted}");
+    assert!(r.get("haltedLines").is_none(), "{acted}");
+}
+
+/// 駅を取り壊して路線がなくなると、act の結果の removedLines に出る。
+#[test]
+fn act_reports_lines_removed_by_demolishing_a_station() {
+    let (dir, d) = lines_town("agent-rail-line-removed", true);
+    cli(&["agent", "advance", &d, "300"]);
+    let gone = write(
+        &dir.join("g.json"),
+        r#"{"type":"Bulldoze","area":[[62,9],[62,9]]}"#,
+    );
+    let acted = json(&cli(&["agent", "act", &d, &gone]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "Applied", "{acted}");
+    assert!(
+        r["removedLines"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({"index":1,"generation":0})),
+        "{acted}"
+    );
+}

@@ -352,6 +352,8 @@ impl Rail {
     /// この形が崩れる。そこで、押さえた範囲の終わりが待てる所でない列車は、ID の順に、次の待てる所までを
     /// まとめて押さえ直す。ほかの列車が押さえていて押さえ直せなければ、その列車を消す。
     /// 待てる所の外で先を待つ列車を残すと、ほかの列車と待ち合う輪ができるためである。
+    /// 押さえ直せない列車が複数いるときは、ID の最も大きい 1 本だけを消して最初からやり直す。ID の小さい列車が
+    /// 押さえ直せないのは、まだ判定していない大きい列車の閉塞のせいかもしれず、その列車が消えれば通るためである。
     ///
     /// その前に、次の 2 つを消す。
     /// - 上限（[`RailLine::cap`]）を超えた本数。ID の大きい列車から消す。上限を超えた列車を次の駅まで残すと、
@@ -390,40 +392,83 @@ impl Rail {
         for id in gone {
             self.trains.remove(id);
         }
-        let ids: Vec<TrainId> = self.trains.iter().map(|(id, _)| id).collect();
-        let mut gone = Vec::new();
-        for id in ids {
-            let t = self.trains.get(id).expect("列車がない");
-            let line = self.lines.get(t.line).expect("列車の路線がない");
-            let end = (t.pos + t.ahead) % line.len();
-            if line.step(end).wait {
-                continue;
+        // 押さえ直しは、消す列車がなくなるまで繰り返す。1 回の走査で、ID の小さい列車が、まだ判定していない
+        // ID の大きい列車の閉塞に阻まれて消えても、その大きい列車があとで消えれば阻まれなかったことになる。
+        // そこで、押さえ直せない列車のうち ID の最も大きい 1 本だけを消し、最初からやり直す。
+        let mut base = held;
+        let mut alive: Vec<TrainId> = self.trains.iter().map(|(id, _)| id).collect();
+        #[cfg(test)]
+        let mut removed = Vec::new();
+        loop {
+            let mut held = base.clone();
+            let mut ahead = Vec::new();
+            let mut failed = None;
+            for id in &alive {
+                let t = self.trains.get(*id).expect("列車がない");
+                let line = self.lines.get(t.line).expect("列車の路線がない");
+                let end = (t.pos + t.ahead) % line.len();
+                if line.step(end).wait {
+                    continue;
+                }
+                let from = t.ahead + 1;
+                let to = line.run_ahead(t.pos, from);
+                let steps: Vec<u32> = (from..=to).map(|k| (t.pos + k) % line.len()).collect();
+                let free = from <= to
+                    && line.step((t.pos + to) % line.len()).wait
+                    && steps.iter().all(|i| {
+                        let s = line.step(*i);
+                        self.tracks.get(s.track).is_some()
+                            && s.blocks().all(|b| held.get(&b).is_none_or(|h| h == id))
+                    });
+                if free {
+                    for i in &steps {
+                        for b in line.step(*i).blocks() {
+                            held.insert(b, *id);
+                        }
+                    }
+                    ahead.push((*id, to));
+                } else {
+                    held.retain(|_, h| h != id);
+                    failed = Some(*id);
+                }
             }
-            let from = t.ahead + 1;
-            let to = line.run_ahead(t.pos, from);
-            let steps: Vec<u32> = (from..=to).map(|k| (t.pos + k) % line.len()).collect();
-            let free = from <= to
-                && line.step((t.pos + to) % line.len()).wait
-                && steps.iter().all(|i| {
-                    let s = line.step(*i);
-                    self.tracks.get(s.track).is_some()
-                        && s.blocks().all(|b| held.get(&b).is_none_or(|h| *h == id))
-                });
-            if free {
-                for i in &steps {
-                    for b in line.step(*i).blocks() {
-                        held.insert(b, id);
+            let Some(id) = failed else {
+                for (id, to) in ahead {
+                    self.trains.get_mut(id).expect("列車がない").ahead = to;
+                }
+                #[cfg(test)]
+                for t in &removed {
+                    if self.could_hold_after_settle(t, &held) {
+                        OVERDELETED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
-                self.trains.get_mut(id).expect("列車がない").ahead = to;
-            } else {
-                held.retain(|_, h| *h != id);
-                gone.push(id);
-            }
-        }
-        for id in gone {
+                break;
+            };
+            base.retain(|_, h| *h != id);
+            alive.retain(|a| *a != id);
+            #[cfg(test)]
+            removed.push(*self.trains.get(id).expect("列車がない"));
             self.trains.remove(id);
         }
+    }
+
+    /// テスト用。消した列車の押さえ直す先と体の閉塞が、最後の `held` ですべて空いていたかを返す。
+    #[cfg(test)]
+    fn could_hold_after_settle(&self, t: &Train, held: &BTreeMap<Block, TrainId>) -> bool {
+        let line = self.lines.get(t.line).expect("列車の路線がない");
+        let end = (t.pos + t.ahead) % line.len();
+        if line.step(end).wait {
+            return false;
+        }
+        let from = t.ahead + 1;
+        let to = line.run_ahead(t.pos, from);
+        from <= to
+            && line.step((t.pos + to) % line.len()).wait
+            && (from..=to).all(|k| {
+                let s = line.step((t.pos + k) % line.len());
+                self.tracks.get(s.track).is_some() && s.blocks().all(|b| !held.contains_key(&b))
+            })
+            && line.held_blocks(t).iter().all(|b| !held.contains_key(b))
     }
 
     /// 列車を 1 tick 進める。
@@ -675,8 +720,9 @@ impl Rail {
         }
     }
 
-    /// 駅に着いた列車が、路線の本数を超えた分なら消す。決めた本数を減らした分は終点（環状なら次の駅）で、
-    /// 行き詰まりを防ぐ上限を超えた分は次の駅で消す。
+    /// 駅に着いた列車が、路線の本数を超えた分なら消す。決めた本数を減らした分は終点（環状なら次の駅）で消す。
+    /// 行き詰まりを防ぐ上限を超えた分は、線路や路線を変えた直後に [`Rail::settle_trains`] がその場で消す。
+    /// ここでの上限の判定は、走っているうちに本数が上限を超えた場合の備えである。
     fn retire_if_extra(&mut self, id: TrainId) {
         let t = *self.trains.get(id).expect("列車がない");
         let line = self.lines.get(t.line).expect("列車の路線がない");
@@ -816,3 +862,7 @@ impl StateHash for Train {
         h.write(&self.waited);
     }
 }
+
+#[cfg(test)]
+pub(super) static OVERDELETED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);

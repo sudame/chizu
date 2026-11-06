@@ -1145,3 +1145,16 @@ fn rebuilding_while_trains_run_does_not_deadlock() {
         rebuilt_while_running(seed);
     }
 }
+
+/// 押さえ直せない列車を消すとき、ID の小さい列車が、あとで消える大きい列車の閉塞のせいで巻き込まれて
+/// 消えない。消した列車の押さえ直す先と体の閉塞が、最後の held ですべて空いていたことは一度もない。
+/// 種 6028 では、直す前に ID の小さい列車が余計に消えた。
+#[test]
+fn settle_does_not_remove_more_trains_than_needed() {
+    use super::train::OVERDELETED;
+    use std::sync::atomic::Ordering;
+    for seed in [6028, 4151, 4287, 5611, 5753, 7277] {
+        rebuilt_while_running(seed);
+    }
+    assert_eq!(OVERDELETED.load(Ordering::Relaxed), 0);
+}
