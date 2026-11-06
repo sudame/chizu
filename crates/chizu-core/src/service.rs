@@ -76,7 +76,7 @@ impl ServiceKind {
             ServiceKind::PowerPlant => Money(1_200),
             ServiceKind::WaterPump => Money(600),
             ServiceKind::ParkingLot => Money(96),
-            ServiceKind::ParkingGarage => Money(2_880),
+            ServiceKind::ParkingGarage => Money(2_400),
             ServiceKind::Station => Money(800),
         }
     }
