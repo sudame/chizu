@@ -793,31 +793,33 @@ fn act_creates_a_line_and_observe_shows_the_trains() {
     assert_eq!(lines.len(), 1, "{rail}");
     assert_eq!(lines[0]["trains"], 4, "{rail}");
     assert_eq!(lines[0]["cap"], 3, "{rail}");
-    assert_eq!(lines[0]["running"], 3, "{rail}");
+    // 短い往復なので、終点の駅で折り返せる 2 本までしか走らせない。
+    assert_eq!(lines[0]["turnCap"], 2, "{rail}");
+    assert_eq!(lines[0]["running"], 2, "{rail}");
     assert_eq!(lines[0]["stopped"], false, "{rail}");
     assert_eq!(
         lines[0]["stations"],
         serde_json::json!([{"index":0,"generation":0},{"index":1,"generation":0}])
     );
     let trains = rail["trains"].as_array().unwrap();
-    assert_eq!(trains.len(), 3, "{rail}");
+    assert_eq!(trains.len(), 2, "{rail}");
     for t in trains {
         let y = t["at"][1].as_i64().unwrap();
         assert_eq!(y, 8, "{t}");
         assert!(["E", "W"].contains(&t["heading"].as_str().unwrap()), "{t}");
         assert!(t["nextStation"].is_object(), "{t}");
     }
-    assert_eq!(rail["trainCount"], 3);
+    assert_eq!(rail["trainCount"], 2);
     assert_eq!(rail["deadlock"], 0);
-    // 列車 3 本の 1 日の維持費 900 が足される。
+    // 列車 2 本の 1 日の維持費 600 が足される。
     assert_eq!(
         o["financesPerDay"]["railUpkeep"].as_i64().unwrap()
             - before["financesPerDay"]["railUpkeep"].as_i64().unwrap(),
-        900
+        600
     );
     assert_eq!(
         o["sinceLastObserve"]["changes"]["rail.trainCount"]["delta"],
-        3
+        2
     );
 }
 
@@ -949,7 +951,8 @@ fn act_reports_lines_that_cannot_run() {
 }
 
 /// 走れない路線でほかの路線の cap を下げるなら、LineStarvesSelf で断り、下がるはずだった路線を loweredLines に出す。
-/// cap が戻って列車が足りない路線は、observe の toStart に足りない本数が出て、時間がたつと 0 に戻る（#356）。
+/// 走らせる本数が上がって列車が足りない路線は、observe の toStart に足りない本数が出て、時間がたつと 0 に戻る
+/// （#356）。
 #[test]
 fn act_and_observe_show_lowered_caps_and_trains_to_start() {
     let st = |i: u32| format!(r#"{{"index":{i},"generation":0}}"#);
@@ -1005,41 +1008,44 @@ fn act_and_observe_show_lowered_caps_and_trains_to_start() {
         assert_eq!(l["cap"], 3, "{acted}");
         assert_eq!(l["capAfter"], 1, "{acted}");
     }
-    // a–e は e–f を巻き込まないので受け付け、a–m と m–e の cap が 1 に下がる。消すと cap は 3 に戻る。
+    // 短い往復の 3 本は、m と e を終点として分け合うので、終点の駅で折り返せる本数（turnCap）で 1 本ずつになる。
+    // m–e を本数 0 にすると、a–m と e–f は m と e を 1 本で使えるので 2 本まで走る。足りない分が toStart に出る。
+    let o = json(&cli(&["agent", "observe", d]));
+    for l in o["rail"]["lines"].as_array().unwrap() {
+        assert_eq!(l["cap"], 3, "{o}");
+        assert_eq!(l["turnCap"], 1, "{o}");
+        assert_eq!(l["running"], 1, "{o}");
+    }
     let cmds = write(
-        &dir.join("ae.json"),
+        &dir.join("me.json"),
         &format!(
-            r#"[{{"type":"CreateLine","from":{a},"to":{e}}},
-            {{"type":"RemoveLine","line":{l3}}}]"#,
-            a = st(0),
-            e = st(2),
-            l3 = st(3)
+            r#"[{{"type":"SetLineTrains","line":{l1},"trains":0}}]"#,
+            l1 = st(1)
         ),
     );
     let acted = json(&cli(&["agent", "act", d, &cmds]));
     assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
-    assert!(
-        acted["results"][0]["removedTrains"].as_u64().unwrap() > 0,
-        "{acted}"
-    );
-    assert_eq!(acted["results"][1]["outcome"], "Applied", "{acted}");
+    let ends = |o: &serde_json::Value| -> Vec<serde_json::Value> {
+        o["rail"]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|l| l["id"] != serde_json::json!({"index":1,"generation":0}))
+            .cloned()
+            .collect()
+    };
     let o = json(&cli(&["agent", "observe", d]));
-    let lines = o["rail"]["lines"].as_array().unwrap();
-    assert_eq!(lines.len(), 3, "{o}");
-    let to_start: u64 = lines.iter().map(|l| l["toStart"].as_u64().unwrap()).sum();
-    assert!(to_start > 0, "{o}");
-    for l in lines {
-        assert_eq!(l["cap"], 3, "{o}");
-        assert_eq!(
-            l["toStart"].as_u64().unwrap() + l["running"].as_u64().unwrap(),
-            3,
-            "{o}"
-        );
+    let lines = ends(&o);
+    assert_eq!(lines.len(), 2, "{o}");
+    for l in &lines {
+        assert_eq!(l["turnCap"], 2, "{o}");
+        assert_eq!(l["toStart"], 1, "{o}");
+        assert_eq!(l["running"], 1, "{o}");
     }
     cli(&["agent", "advance", d, "600"]);
     let o = json(&cli(&["agent", "observe", d]));
-    for l in o["rail"]["lines"].as_array().unwrap() {
-        assert_eq!(l["running"], 3, "{o}");
+    for l in ends(&o) {
+        assert_eq!(l["running"], 2, "{o}");
         assert_eq!(l["toStart"], 0, "{o}");
     }
 }
@@ -2506,7 +2512,8 @@ fn lines_town(name: &str, second: bool) -> (std::path::PathBuf, String) {
     (dir, d)
 }
 
-/// 路線を作って上限が下がると、超えた分の列車がすぐに消え、act の結果の removedTrains に出る。
+/// 路線を作って上限が下がると、超えた分の列車がすぐに消え、act の結果の removedTrains に出る。終点の駅を
+/// 分け合う路線を走らせて、終点の駅で折り返せる本数（turnCap）が下がったときも同じである。
 #[test]
 fn act_reports_trains_removed_when_a_new_line_lowers_the_cap() {
     let (dir, d) = lines_town("agent-rail-cap-lowered", false);
@@ -2518,10 +2525,12 @@ fn act_reports_trains_removed_when_a_new_line_lowers_the_cap() {
     cli(&["agent", "advance", &d, "3000"]);
     let cmd = write(
         &dir.join("c.json"),
-        r#"{"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":1,"generation":0}}"#,
+        r#"[{"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":1,"generation":0}},
+        {"type":"SetLineTrains","line":{"index":1,"generation":0},"trains":2}]"#,
     );
     let acted = json(&cli(&["agent", "act", &d, &cmd]));
-    let r = &acted["results"][0];
+    assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
+    let r = &acted["results"][1];
     assert_eq!(r["outcome"], "Applied", "{acted}");
     assert!(r["removedTrains"].as_u64().unwrap() > 0, "{acted}");
     // 消えた列車は路線ごとに数える。

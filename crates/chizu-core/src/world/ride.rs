@@ -106,6 +106,14 @@ impl World {
         self.planner.forget();
     }
 
+    /// 終点の駅で折り返せる本数で、走らせる本数を抑えないようにする。行き詰まりを防ぐ上限まで列車を走らせる
+    /// テストで使う。路線を作る前に呼ぶ。`on` が偽なら、ふだんどおり抑える。この印は書き出さないので、書き出して
+    /// 読み戻すテストでは偽にしておく。
+    #[cfg(test)]
+    pub(crate) fn lift_turn_caps(&mut self, on: bool) {
+        self.rail.lift_turn_caps = on;
+    }
+
     /// 駅まで歩く表を作った回数。
     #[cfg(test)]
     pub(crate) fn walk_table_builds(&self) -> u32 {

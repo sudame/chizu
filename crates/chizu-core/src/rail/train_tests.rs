@@ -62,8 +62,11 @@ fn set_trains(w: &mut World, line: LineId, trains: u8) {
     ok(w, Command::SetLineTrains { line, trains });
 }
 
+/// 行き詰まりを防ぐ上限まで列車を走らせて確かめるので、終点の駅で折り返せる本数では抑えない。
 fn rich_world() -> World {
-    World::new_with_money(0, Money(1_000_000_000)).with_unlimited_land()
+    let mut w = World::new_with_money(0, Money(1_000_000_000)).with_unlimited_land();
+    w.lift_turn_caps(true);
+    w
 }
 
 /// y = 10 の道路に面した駅 2 つ（駅の線路は y = 8 の x 3〜12 と x 53〜62）を、
@@ -434,6 +437,7 @@ fn a_ring_line_runs_up_to_the_cap_without_deadlock() {
 fn a_long_shuttle_with_sixteen_trains_turns_back_without_deadlock() {
     // 種 0 の街は y = 10 の x 0〜410 に水辺があるので、陸の続く種 6 を使う。
     let mut w = World::new_with_money(6, Money(1_000_000_000)).with_unlimited_land();
+    w.lift_turn_caps(true);
     for cx in 2..=6 {
         ok(
             &mut w,
@@ -661,7 +665,9 @@ fn trains_cost_upkeep() {
 #[test]
 fn lines_replay_and_round_trip_through_the_snapshot() {
     let (w0, a, b) = {
-        let (w, a, b) = shuttle_world();
+        let (mut w, a, b) = shuttle_world();
+        // 印は書き出さないので、読み戻した街と比べられるよう、ふだんどおりにする。
+        w.lift_turn_caps(false);
         (w, a, b)
     };
     let line = LineId {
@@ -1366,6 +1372,7 @@ impl Xorshift {
 fn rebuilt_while_running(seed: u64) {
     let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let mut w = World::new_with_money(6, Money(1_000_000_000_000)).with_unlimited_land();
+    w.lift_turn_caps(true);
     for cx in -1..=6 {
         for cy in -1..=1 {
             let _ = w.apply(&Command::BuyChunk {

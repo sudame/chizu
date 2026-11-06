@@ -227,6 +227,11 @@ pub struct Rail {
     exits: Vec<Exit>,
     /// 乗る人の読み取り用の数。状態ハッシュには入れない。
     ride_tally: RideTally,
+    /// テスト用。終点の駅で折り返せる本数（[`RailLine::turn_cap`]）で走らせる本数を抑えない。行き詰まりを防ぐ
+    /// 上限まで列車を走らせて、行き詰まらないことを確かめるのに使う。
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(crate) lift_turn_caps: bool,
 }
 
 impl Default for Rail {
@@ -313,6 +318,8 @@ impl Rail {
             fare_due: 0,
             exits: Vec::new(),
             ride_tally: RideTally::default(),
+            #[cfg(test)]
+            lift_turn_caps: false,
         }
     }
 

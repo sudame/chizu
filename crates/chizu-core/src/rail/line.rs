@@ -150,6 +150,9 @@ pub(crate) struct LinePlan {
     /// 通る共有の区画ごとの、この路線の列車が押さえた範囲の終わりを置ける数（区画の枠のうち、この路線の分）。
     /// 本数 0 の路線は、枠に上限のある区画では 0 である。
     pub(crate) quota: BTreeMap<u16, u32>,
+    /// 終点の駅で折り返せる本数（`turn_caps`）。走らせる本数（[`RailLine::allowed`]）をこれまでに抑える。
+    /// 終点のない路線は [`MAX_LINE_TRAINS`] である。
+    pub(crate) turn_cap: u8,
 }
 
 impl RailLine {
@@ -183,9 +186,16 @@ impl RailLine {
         self.stopped || self.cap() == 0 || self.plan.quota.values().any(|q| *q == 0)
     }
 
-    /// 走らせる本数。遊ぶ人が決めた本数を、行き詰まりを防ぐ上限に抑えたものである。
+    /// 走らせる本数。遊ぶ人が決めた本数を、行き詰まりを防ぐ上限と、終点の駅で折り返せる本数
+    /// （[`RailLine::turn_cap`]）に抑えたものである。
     pub fn allowed(&self) -> u8 {
-        self.trains.min(self.cap())
+        self.trains.min(self.cap()).min(self.turn_cap())
+    }
+
+    /// 終点の駅で折り返せる本数（`turn_caps`）。これより多く走らせても、列車は終点の手前に並ぶだけで、運べる量は
+    /// 増えず、1 周が延びて乗る人の時間が延びる（#369）。終点のない環状の路線は [`MAX_LINE_TRAINS`] である。
+    pub fn turn_cap(&self) -> u8 {
+        self.plan.turn_cap
     }
 
     /// 1 周の見込みの時間（tick）。進路を最高の速さで走る時間に、止まる駅ごとの止まる時間と減速と加速の遅れ、
@@ -523,6 +533,7 @@ fn make_plans(lines: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
                     bin: vec![None; n],
                     runs: Vec::new(),
                     quota: BTreeMap::new(),
+                    turn_cap: MAX_LINE_TRAINS,
                 },
             );
             continue;
@@ -547,6 +558,7 @@ fn make_plans(lines: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
                     bin: vec![None; n],
                     runs: Vec::new(),
                     quota: BTreeMap::new(),
+                    turn_cap: MAX_LINE_TRAINS,
                 },
             );
             continue;
@@ -600,6 +612,7 @@ fn make_plans(lines: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
                 bin,
                 runs,
                 quota: BTreeMap::new(),
+                turn_cap: MAX_LINE_TRAINS,
             },
         );
     }
@@ -675,6 +688,99 @@ fn make_plans(lines: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
     plans
 }
 
+/// 終点の駅で、列車 1 本が駅の線路（両方のホーム）を押さえる時間の見込み（tick）。止まっている状態から駅の線路
+/// （長さ `len`）へ入って止まる時間、止まる時間、折り返す時間、出た列車の尾が駅の線路を抜ける時間の和である。
+/// 折り返すあいだは両方のホームを押さえ（行き詰まりを防ぐ決まりの 2）、次の列車は前の列車が出るまで入れないので、
+/// 終点の駅が列車を通せるのは、この時間に 1 本までである。
+pub(crate) fn turn_ticks(len: i64) -> u64 {
+    let enter = isqrt_ceil(round::div_ceil(2 * len, TRAIN_DECEL));
+    let clear = isqrt_ceil(round::div_ceil(2 * TRAIN_BLOCK_LEN_MM, TRAIN_ACCEL));
+    enter + u64::from(DWELL_TICKS) + u64::from(TURNBACK_TICKS) + clear
+}
+
+/// `v` の平方根を切り上げる。
+fn isqrt_ceil(v: i64) -> u64 {
+    let v = u64::try_from(v).expect("負の数の平方根");
+    let r = v.isqrt();
+    if r * r == v { r } else { r + 1 }
+}
+
+/// 終点の駅の使い方の割合を表す、1 の大きさ。
+pub(crate) const TURN_FULL: u64 = 1_000_000;
+
+/// 路線ごとの、終点の駅で折り返せる本数（[`LinePlan::turn_cap`]）。
+///
+/// 往復する路線の列車は、1 周に終点ごとに 1 度、駅の線路を [`turn_ticks`] のあいだ押さえる。1 周の見込みの時間を
+/// `t` とすると、列車 1 本はその駅の時間の `turn_ticks ÷ t` を使う。同じ駅で折り返す路線（乗り換えの駅を終点に
+/// する 2 路線など）は、この時間を分け合う。使う割合の和が 1 を超えると、列車は終点の手前の線路に並び、1 周が
+/// 延びるだけで運べる量は増えない（#369）。
+///
+/// そこで、本数が 1 以上の路線に、ID の順に 1 本ずつ配り、どの終点の駅も使う割合の和が 1 を超えない所まで配る。
+/// どの路線も 1 本は走らせる。本数 0 の路線は、本数を 1 以上にしたとしたら配られる本数にする（区画の枠の
+/// 見込みの分と同じ考え）。配るのは、ほかの上限（`cap`）までである。終点のない環状の路線は、ほかの上限のままになる。
+fn turn_caps(lines: &[PlanLine], plans: &BTreeMap<LineId, LinePlan>) -> BTreeMap<LineId, u8> {
+    // 路線ごとの、終点の駅の線路と、列車 1 本が使う割合。
+    let mut uses = BTreeMap::<LineId, BTreeMap<TrackId, u64>>::new();
+    for l in lines {
+        if plans[&l.id].cap == 0 {
+            continue;
+        }
+        let total: u64 = l.path.iter().map(|s| s.run_ticks() + s.stop_ticks()).sum();
+        let mut u = BTreeMap::new();
+        for s in l.path.iter().filter(|s| s.kind == StepKind::Terminal) {
+            *u.entry(s.track).or_default() +=
+                (turn_ticks(s.len) * TURN_FULL).div_ceil(total.max(1));
+        }
+        uses.insert(l.id, u);
+    }
+    let deal = |active: &[LineId]| -> BTreeMap<LineId, u8> {
+        let mut n = BTreeMap::<LineId, u8>::new();
+        let mut load = BTreeMap::<TrackId, u64>::new();
+        loop {
+            let mut dealt = false;
+            for id in active {
+                let have = n.get(id).copied().unwrap_or(0);
+                if have >= plans[id].cap {
+                    continue;
+                }
+                let u = &uses[id];
+                let fits = u
+                    .iter()
+                    .all(|(k, x)| load.get(k).copied().unwrap_or(0) + x <= TURN_FULL);
+                if have > 0 && !fits {
+                    continue;
+                }
+                for (k, x) in u {
+                    *load.entry(*k).or_default() += x;
+                }
+                n.insert(*id, have + 1);
+                dealt = true;
+            }
+            if !dealt {
+                return n;
+            }
+        }
+    };
+    let mut active: Vec<LineId> = lines
+        .iter()
+        .filter(|l| l.trains > 0 && uses.contains_key(&l.id))
+        .map(|l| l.id)
+        .collect();
+    active.sort();
+    let mut out = deal(&active);
+    for l in lines {
+        if l.trains > 0 || !uses.contains_key(&l.id) {
+            continue;
+        }
+        let mut with = active.clone();
+        with.push(l.id);
+        with.sort();
+        out.insert(l.id, deal(&with)[&l.id]);
+    }
+    out.retain(|id, _| !uses[id].is_empty());
+    out
+}
+
 /// 路線の本数の上限と、その内訳。読み取り用で、状態には持たない。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineCapacity {
@@ -690,6 +796,8 @@ pub struct LineCapacity {
     /// 進路の中で、待てる所になれない短い線路（長さが [`TRAIN_BLOCK_LEN_MM`] 未満で、終点の要素でないもの）。
     /// 線路を分岐で割ると、割れた短い線路がここに出る。進路に出てくる順で、同じ線路は 1 つにまとめる。
     pub short_spans: Vec<ShortSpan>,
+    /// 終点の駅で折り返せる本数（[`RailLine::turn_cap`]）。走らせる本数はこれまでに抑える。
+    pub turn_cap: u8,
 }
 
 /// 待てる所になれない短い線路 1 本。端のマスは線路のノードのマスである。
@@ -728,6 +836,7 @@ impl Rail {
             wait_places: wait_places(line.path.iter().filter(|s| s.wait)).len(),
             shared_with,
             short_spans: self.short_spans(line),
+            turn_cap: line.turn_cap(),
         })
     }
 
@@ -919,7 +1028,17 @@ impl Rail {
                 trains: l.trains,
             })
             .collect();
-        for (id, plan) in make_plans(&input) {
+        let mut plans = make_plans(&input);
+        #[cfg(test)]
+        let lifted = self.lift_turn_caps;
+        #[cfg(not(test))]
+        let lifted = false;
+        if !lifted {
+            for (id, n) in turn_caps(&input, &plans) {
+                plans.get_mut(&id).expect("路線がない").turn_cap = n;
+            }
+        }
+        for (id, plan) in plans {
             self.lines.get_mut(id).expect("路線がない").plan = plan;
         }
     }

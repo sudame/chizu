@@ -576,15 +576,20 @@ impl Rail {
     /// 列車と同じに扱う。待てる所の区分けが変わると、区画と区間の枠が小さくなることがあるためである。
     ///
     /// その前に、次の 2 つを消す。
-    /// - 上限（[`RailLine::cap`]）を超えた本数。ID の大きい列車から消す。上限を超えた列車を次の駅まで残すと、
-    ///   駅に着く前に路線の中で待ち合う輪ができることがあるためである。
+    /// - 上限（[`RailLine::cap`]）と、終点の駅で折り返せる本数（[`RailLine::turn_cap`]）の小さいほうを超えた本数。
+    ///   ID の大きい列車から消す。上限を超えた列車を次の駅まで残すと、駅に着く前に路線の中で待ち合う輪ができることが
+    ///   あるためである。
     /// - ほかの列車と同じ閉塞を押さえる列車。ID の小さい列車から残す。上りと下りにすれ違う 2 本の下で
     ///   線路を分けると、分けた所の分岐（上りと下りで 1 つの閉塞）に 2 本がかかるためである。
     pub(crate) fn settle_trains(&mut self) {
         let mut counts = BTreeMap::<LineId, u8>::new();
         let mut gone = Vec::new();
         for (id, t) in self.trains.iter() {
-            let cap = self.lines.get(t.line).map_or(0, RailLine::cap);
+            // 遊ぶ人が本数を減らした分は、ここでは消さず、終点まで走ってから消える（`retire_if_extra`）。
+            let cap = self
+                .lines
+                .get(t.line)
+                .map_or(0, |l| l.cap().min(l.turn_cap()));
             let n = counts.entry(t.line).or_default();
             if *n >= cap {
                 gone.push(id);
