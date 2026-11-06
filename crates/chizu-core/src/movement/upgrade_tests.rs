@@ -260,7 +260,7 @@ fn cars_pushed_off_a_narrowed_road_count_as_stopped_on_the_road() {
     let before = CarSample::of(&c.trips);
     assert_eq!(before.waiting_at_curb(), 0);
     assert!(before.stopped_on_road_since(&before) >= off.len());
-    // 止まっている車として、道路の遅れにも数える。
+    // 止まっている車として、道路の遅れにも数える。まだどの車もリンクを抜けていないので、時間帯に 1 台抜けたものとして数える。
     let link = off[0].link();
     let on_link = c
         .trips
@@ -269,7 +269,7 @@ fn cars_pushed_off_a_narrowed_road_count_as_stopped_on_the_road() {
         .count() as u64;
     assert_eq!(
         c.trips.queue_delays(&c.net).get(link),
-        on_link * congestion::QUEUE_MS_PER_CAR / c.net.link_lanes(link).count() as u64
+        on_link * crate::routing::BAND_TICKS * congestion::MS_PER_TICK
     );
     c.run_until_empty(600);
 }

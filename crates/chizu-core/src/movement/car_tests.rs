@@ -958,3 +958,32 @@ fn short_segments_jam_when_filled() {
     let seg = c.net.segments_through(TilePos::new(1, 0))[0];
     assert_eq!(levels.get(&seg), Some(&Congestion::Jammed));
 }
+
+#[test]
+fn links_count_the_cars_that_left_them_until_delays_are_estimated() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0), RoadKind::Small);
+    road(&mut n, (10, 0), (20, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let id = c.drive(at(2, 0, (1, 0), 0), at(15, 0, (1, 0), 0));
+    let first = c.trips.get(id).unwrap().link();
+    let mut last = first;
+    let mut arrived = false;
+    for _ in 0..200 {
+        if c.step().contains(&id) {
+            arrived = true;
+            break;
+        }
+        last = c.trips.get(id).unwrap().link();
+    }
+    assert!(arrived);
+    assert_ne!(first, last);
+    // 次のリンクへ移った車は、いたリンクを抜けた車に数える。行き先に着いた車は、リンクの終わりを抜けないので数えない。
+    assert_eq!(
+        c.trips.exits,
+        BTreeMap::from([(first, 1)]),
+        "抜けた台数がずれた"
+    );
+    c.trips.queue_delays(&c.net);
+    assert!(c.trips.exits.is_empty());
+}

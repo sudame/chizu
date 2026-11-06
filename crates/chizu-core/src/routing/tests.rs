@@ -794,6 +794,26 @@ fn delays_steer_cars_to_the_parallel_road_and_survive_a_rebuild() {
     assert_eq!(router.route_batch(&[req])[0], free[0]);
 }
 
+#[test]
+fn delays_never_raise_a_link_cost_past_the_cap() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    let straight = link(&n, (0, 0), (20, 0), LaneMode::Car);
+    let mut router = AstarRouter::new(&n);
+    let free = router.graph(LaneMode::Car).link_cost(straight).unwrap();
+    // 上限より短い遅れはそのまま足し、長い遅れは自由に走れたときの所要時間の上限の倍までに収める。
+    router.set_delays(&Delays::from_sorted([(straight, free)]));
+    assert_eq!(
+        router.graph(LaneMode::Car).link_cost(straight),
+        Some(2 * free)
+    );
+    router.set_delays(&Delays::from_sorted([(straight, 100 * free)]));
+    assert_eq!(
+        router.graph(LaneMode::Car).link_cost(straight),
+        Some(graph::DELAY_CAP_TIMES * free)
+    );
+}
+
 /// 覚えている結果の大きさが、残っている結果から数え直した値と同じであることを確かめる。
 fn check_cached_size(router: &AstarRouter) {
     let want: usize = router.cache.values().map(size_of_entry).sum();

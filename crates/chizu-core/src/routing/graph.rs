@@ -25,6 +25,9 @@ pub fn speed_limit(kind: SegmentKind) -> MmPerTick {
     }
 }
 
+/// 遅れを足したリンクの費用の上限が、自由に走れたときの所要時間の何倍か。
+pub const DELAY_CAP_TIMES: u64 = 10;
+
 /// 長さ `mm` を速さ `speed` で進む時間（ms）。端数は切り上げる。あふれたら `None` を返す。
 fn travel_ms(mm: u64, speed: MmPerTick) -> Option<u64> {
     let speed = u64::try_from(speed.0).ok().filter(|s| *s > 0)?;
@@ -317,13 +320,15 @@ impl Graph {
     }
 
     /// リンクの費用を、自由に走れたときの所要時間に `delays` の遅れを足したものにする。
+    /// 費用は自由に走れたときの所要時間の [`DELAY_CAP_TIMES`] 倍までに収める（設計 3.4）。
     /// グラフにないリンクの遅れは捨てる。費用は下がらないので、ヒューリスティックは下限のままである。
     pub(crate) fn set_delays(&mut self, delays: &Delays) {
         self.cost.clone_from(&self.free);
         for (link, ms) in delays.iter() {
             if let Some(v) = self.vertex(link) {
                 let v = v as usize;
-                self.cost[v] = self.free[v].saturating_add(ms);
+                let cap = self.free[v].saturating_mul(DELAY_CAP_TIMES - 1);
+                self.cost[v] = self.free[v].saturating_add(ms.min(cap));
             }
         }
     }

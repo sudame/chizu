@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use super::{CAR_LENGTH, MIN_GAP, Trips};
 use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId};
-use crate::routing::Delays;
+use crate::routing::{BAND_TICKS, Delays};
 
 /// 車 1 台が車線の上でふさぐ長さ（mm）。車の長さと、止まったときの最小の車間である。
 const SPACING_MM: u64 = (CAR_LENGTH + MIN_GAP) as u64;
@@ -84,15 +84,27 @@ pub(super) fn capacity_cars(net: &Network, link: LinkId) -> u64 {
 /// この速さ（mm/tick）より遅い車を、車線に並んでいる車とみなす。時速 7.2km である。
 pub(super) const QUEUED_BELOW: i32 = 2_000;
 
-/// 並んでいる車 1 台が、1 車線のリンクを抜けるまでに足す遅れ（ms）。
+/// 並んでいる車 1 台が、1 車線のリンクを抜けるまでに足す遅れ（ms）の下限。
 /// 交差する流れのある交差点や信号では、車線の先頭から 4 tick に 1 台ほど抜けるので、その見積もりにする。
 pub(super) const QUEUE_MS_PER_CAR: u64 = 4_000;
 
+/// 経路の費用で、1 tick にあたる時間（ms）。道路の最高速度（mm/tick）で進む時間を ms で数えるため、
+/// 1 tick を 1 秒とみなしている（`routing::graph`）。
+pub(super) const MS_PER_TICK: u64 = 1_000;
+
 impl Trips {
-    /// 車のリンクごとの、並んでいる車から見積もった遅れ。並んでいる台数 × [`QUEUE_MS_PER_CAR`] を、
-    /// リンクの車線の数で割る。建物の前から出発を待つ車はまだ車線にいないので数えないが、道路の種類が
-    /// 変わって車線に戻るのを待つ車は、区間の途中で止まっているので数える。
-    pub fn queue_delays(&self, net: &Network) -> Delays {
+    /// 車のリンクごとの、並んでいる車から見積もった遅れ。時間帯（[`BAND_TICKS`]）ごとに 1 回呼ぶ。
+    ///
+    /// 並んでいる車 1 台あたりの遅れは、前に見積もってから 1 台がリンクの終わりを抜けて次のリンクへ移るのに
+    /// かかった時間（時間帯の長さ ÷ 抜けた台数）にする。リンクの先の交差点で待たされるほど、抜ける台数が減り、
+    /// 遅れが長くなる。追い越しはしないので、行き先の手前で速さを落とした車も、後ろの車をふさぐ車として数える。
+    /// 抜けた車がいなければ 1 台抜けたものとし、[`QUEUE_MS_PER_CAR`] を車線の数で割った長さより短くはしない。
+    /// 抜けた台数は見積もるたびに 0 に戻す。遅れの上限は、経路の費用に入れるときに決める（`routing::Graph::set_delays`）。
+    ///
+    /// 建物の前から出発を待つ車はまだ車線にいないので数えないが、道路の種類が変わって車線に戻るのを
+    /// 待つ車は、区間の途中で止まっているので数える。
+    pub fn queue_delays(&mut self, net: &Network) -> Delays {
+        let exits = core::mem::take(&mut self.exits);
         let mut queued = BTreeMap::<LinkId, u64>::new();
         for t in self.rows.iter().flatten() {
             let parked = t.waiting && !t.rejoining;
@@ -111,7 +123,9 @@ impl Trips {
         }
         Delays::from_sorted(queued.into_iter().map(|(link, n)| {
             let lanes = net.link_lanes(link).count().max(1) as u64;
-            (link, n * QUEUE_MS_PER_CAR / lanes)
+            let left = u64::from(exits.get(&link).copied().unwrap_or(0)).max(1);
+            let measured = n * (BAND_TICKS * MS_PER_TICK / left);
+            (link, (n * QUEUE_MS_PER_CAR / lanes).max(measured))
         }))
     }
 
@@ -237,9 +251,22 @@ mod tests {
             .collect();
         let ids = trips.spawn_drives(&n, &mut router, &drives, Tick::ZERO);
         assert!(ids.iter().all(Option::is_some));
+        // 時間帯のうちに 1 秒に 1 台より速く抜けたリンクでは、遅れの下限の見積もりになる。
+        let many = u32::try_from(2 * BAND_TICKS).expect("台数が u32 に収まらない");
+        trips.exits.insert(small, many);
+        trips.exits.insert(medium, many);
         let d = trips.queue_delays(&n);
         assert_eq!(d.get(small), 3 * QUEUE_MS_PER_CAR);
         assert_eq!(d.get(medium), 4 * QUEUE_MS_PER_CAR / 2);
+        // 抜けた台数は見積もるたびに 0 に戻す。
+        assert!(trips.exits.is_empty());
+        // 抜けた車の少ないリンクでは、1 台が抜けるのにかかった時間を並んでいる車 1 台ごとに足す。
+        // 抜けた車がいなければ、時間帯に 1 台抜けたものとして数える。
+        trips.exits.insert(small, 5);
+        let d = trips.queue_delays(&n);
+        let band_ms = BAND_TICKS * MS_PER_TICK;
+        assert_eq!(d.get(small), 3 * (band_ms / 5));
+        assert_eq!(d.get(medium), 4 * band_ms);
         // 走っている車は並んでいるとみなさない。
         for t in trips.rows.iter_mut().flatten() {
             t.speed = MmPerTick(QUEUED_BELOW);
