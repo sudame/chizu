@@ -2572,3 +2572,56 @@ fn act_sets_the_fare() {
     assert_eq!(seen["rail"]["fare"], 12);
     assert_eq!(seen["sinceLastObserve"]["changes"]["rail.fare"]["delta"], 7);
 }
+
+/// 道路を引いて踏切が増え、線路が割れて路線の cap が下がると、その道路の結果の loweredLines に前と後の cap が出る。
+/// 駅の observe には、直近 3 日に乗った人の数が出る（3 日たつまでは null）。
+#[test]
+fn act_reports_a_lowered_cap_and_observe_shows_recent_riders() {
+    let dir = session("agent-rail-lowered");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "0"]);
+    let mut cmds = vec![
+        r#"{"type":"BuildRoad","from":[0,10],"to":[70,10],"kind":"Small"}"#.to_string(),
+        r#"{"type":"PlaceBuilding","kind":"Station","at":[12,9],"rotation":2}"#.to_string(),
+        r#"{"type":"PlaceBuilding","kind":"Station","at":[62,9],"rotation":2}"#.to_string(),
+        r#"{"type":"BuildRail","from":[12,8],"to":[53,8]}"#.to_string(),
+        r#"{"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":1,"generation":0}}"#
+            .to_string(),
+    ];
+    // 踏切をいくつか作っても、cap はまだ下がらない。46 の道路で 3 から 1 に下がる。
+    for x in (16..=46).step_by(3) {
+        cmds.push(format!(
+            r#"{{"type":"BuildRoad","from":[{x},0],"to":[{x},20],"kind":"Small"}}"#
+        ));
+    }
+    let file = write(&dir.join("r.json"), &format!("[{}]", cmds.join(",")));
+    let acted = json(&cli(&["agent", "act", d, &file]));
+    let results = acted["results"].as_array().unwrap();
+    assert!(results.iter().all(|r| r["outcome"] == "Applied"), "{acted}");
+    let lowered: Vec<_> = results
+        .iter()
+        .filter(|r| r.get("loweredLines").is_some())
+        .collect();
+    assert_eq!(lowered.len(), 1, "{acted}");
+    assert_eq!(lowered[0]["crossings"], serde_json::json!([[46, 8]]));
+    let line = &lowered[0]["loweredLines"][0];
+    assert_eq!(line["cap"], 3, "{line}");
+    assert_eq!(line["capAfter"], 1, "{line}");
+    assert!(line["shortSpanCount"].as_u64().unwrap() > 0, "{line}");
+    assert!(lowered[0].get("haltedLines").is_none());
+
+    // 3 日たつまでは、直近の乗る人は分からない
+    let early = json(&cli(&["agent", "observe", d]));
+    for st in early["rail"]["stations"].as_array().unwrap() {
+        assert!(st["recentBoarded"].is_null(), "{st}");
+        assert_eq!(st["recentDays"], 3);
+    }
+    cli(&["agent", "advance", d, "28800"]);
+    let o = json(&cli(&["agent", "observe", d]));
+    for st in o["rail"]["stations"].as_array().unwrap() {
+        // 家のない街なので、乗る人はいない
+        assert_eq!(st["recentBoarded"], 0, "{st}");
+        assert!(st["overlapPermille"].is_null(), "{st}");
+        assert_eq!(st["sharedHouseholds"], 0, "{st}");
+    }
+}

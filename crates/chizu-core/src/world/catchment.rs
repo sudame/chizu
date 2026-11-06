@@ -19,6 +19,8 @@ pub struct Catchment {
     pub households: u32,
     /// そのうち、車を置く枠のない（車を持てない）世帯の数。
     pub carless: u32,
+    /// そのうち、ほかの駅の徒歩圏にも入っている世帯の数。この駅がなくても、歩いて乗れる駅が残る世帯である。
+    pub shared: u32,
 }
 
 impl World {
@@ -58,14 +60,21 @@ impl World {
             };
             let carless = self.car_places.get(h).is_none();
             let (cx, cy) = cell(front);
+            let mut hits: Vec<usize> = Vec::new();
             for x in cx - 1..=cx + 1 {
                 for y in cy - 1..=cy + 1 {
                     for i in cells.get(&(x, y)).into_iter().flatten() {
                         if in_walk_range(front, doors[*i]) {
                             out[*i].households += 1;
                             out[*i].carless += u32::from(carless);
+                            hits.push(*i);
                         }
                     }
+                }
+            }
+            if hits.len() > 1 {
+                for i in hits {
+                    out[i].shared += 1;
                 }
             }
         }

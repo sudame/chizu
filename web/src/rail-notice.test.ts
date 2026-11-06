@@ -8,7 +8,10 @@ import {
   GAVE_UP_PER_DAY,
   GaveUpWindow,
   isCrowded,
+  OVERLAP_PERMILLE,
+  RecentRides,
   railNotices,
+  UNUSED_DAYS,
 } from "./rail-notice.ts";
 import { TICKS_PER_DAY } from "./utility-trend.ts";
 
@@ -54,6 +57,7 @@ const stationStat = (over: Partial<StationStat> = {}): StationStat => ({
   boarded: 0,
   alighted: 0,
   leftBehind: false,
+  shared: 0,
   ...over,
 });
 const stats = (lines: LineStat[], stations: StationStat[] = []): RailStats => ({
@@ -191,5 +195,103 @@ describe("1 日あたりの歩いた人の数", () => {
     expect(w.perDay()).toBeNull();
     w.update(1500 + GAVE_UP_MIN_SPAN, 500);
     expect(w.perDay()).toBeCloseTo(0);
+  });
+});
+
+describe("直近の乗った人の数と、使われない駅の知らせ", () => {
+  const at = (tick: number, stations: StationStat[]): RailStats => ({
+    ...stats([lineStat()], stations),
+    tick,
+  });
+  const DAYS = UNUSED_DAYS * TICKS_PER_DAY;
+
+  test("日数たつまでは判断せず、たったあとは窓の差を返す", () => {
+    const r = new RecentRides();
+    const s = (boarded: number) => stationStat({ boarded });
+    r.update(at(0, [s(10)]));
+    r.update(at(DAYS - 1, [s(10)]));
+    expect(r.boardedIn(s(0))).toBeNull();
+    r.update(at(DAYS, [s(10)]));
+    expect(r.boardedIn(s(0))).toBe(0);
+    r.update(at(DAYS + TICKS_PER_DAY, [s(25)]));
+    expect(r.boardedIn(s(0))).toBe(15);
+  });
+
+  test("あとから足された駅は、足されてから日数たつまで判断しない", () => {
+    const r = new RecentRides();
+    r.update(at(0, [stationStat({ index: 0 })]));
+    r.update(at(DAYS, [stationStat({ index: 0 }), stationStat({ index: 1 })]));
+    expect(r.boardedIn({ index: 0, generation: 0 })).toBe(0);
+    expect(r.boardedIn({ index: 1, generation: 0 })).toBeNull();
+  });
+
+  test("reset や tick の巻き戻しで捨てる", () => {
+    const r = new RecentRides();
+    r.update(at(0, [stationStat()]));
+    r.update(at(DAYS, [stationStat()]));
+    r.update(at(10, [stationStat()]));
+    expect(r.boardedIn({ index: 0, generation: 0 })).toBeNull();
+    r.update(at(DAYS + 10, [stationStat()]));
+    r.reset();
+    expect(r.boardedIn({ index: 0, generation: 0 })).toBeNull();
+  });
+
+  const stub = (rides: Record<number, number | null>) => ({
+    boardedIn: (s: { index: number }) => rides[s.index] ?? null,
+  });
+
+  test("乗る人が 0 の駅を知らせ、原因の手がかりを添える", () => {
+    const st = stats(
+      [lineStat()],
+      [
+        stationStat({ index: 0, min: { x: 10, y: 20 }, households: 700, shared: 690 }),
+        stationStat({ index: 1, min: { x: 50, y: 20 }, households: 700, shared: 690 }),
+        stationStat({ index: 2, min: { x: 90, y: 20 }, households: 0 }),
+      ],
+    );
+    const lines = [
+      line({
+        stations: [
+          { x: 10, y: 20 },
+          { x: 50, y: 20 },
+        ],
+      }),
+    ];
+    const [n] = railNotices(lines, st, null, name, stub({ 0: 40, 1: 0, 2: 0 }));
+    expect(n?.id).toBe("rail-unused");
+    expect(n?.details[0]).toContain("50 番の駅：直近 3 日、乗る人が 0 人");
+    expect(n?.details[0]).toContain("ほぼ重なり");
+    expect(n?.details[1]).toContain("どの路線にも入っていない");
+    expect(n?.jump?.targets).toEqual([
+      { x: 50, y: 20 },
+      { x: 90, y: 20 },
+    ]);
+    expect(railNotices(lines, st, null, name, stub({ 0: 40, 1: 5, 2: null }))).not.toContainEqual(
+      expect.objectContaining({ id: "rail-unused" }),
+    );
+  });
+
+  test("隣の駅と大きく重なる駅は、使われていないほうだけを知らせる", () => {
+    const heavy = Math.ceil((OVERLAP_PERMILLE * 700) / 1000);
+    const mk = (index: number, x: number, boarded: number) =>
+      stationStat({
+        index,
+        min: { x, y: 20 },
+        door: { x, y: 22 },
+        households: 700,
+        shared: heavy,
+        boarded,
+      });
+    const st = stats([lineStat()], [mk(0, 10, 500), mk(1, 60, 30)]);
+    const [n] = railNotices([line()], st, null, name, stub({}));
+    expect(n?.id).toBe("rail-overlap");
+    expect(n?.details).toHaveLength(1);
+    expect(n?.details[0]).toContain("60 番の駅");
+    expect(n?.details[0]).toContain("10 番の駅 と重なる");
+    // 遠くて徒歩圏が重ならない、重なりの割合が低い駅は出さない
+    const far = stats([lineStat()], [mk(0, 10, 500), { ...mk(1, 400, 30) }]);
+    expect(railNotices([line()], far, null, name, stub({}))).toEqual([]);
+    const low = stats([lineStat()], [mk(0, 10, 500), { ...mk(1, 60, 30), shared: 100 }]);
+    expect(railNotices([line()], low, null, name, stub({}))).toEqual([]);
   });
 });

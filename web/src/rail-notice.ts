@@ -1,11 +1,14 @@
 // 鉄道の知らせ。遊ぶ人が打つ手を知るためのもので、通知センター（notice-center.ts）に出す。
-// 出す知らせは、走れない路線、止まっている路線、混みすぎる路線、待ちきれずに歩いた人が多い駅の 4 つである。
-// つまみの値（混みすぎとみなす乗車率、歩いた人の数）は、docs/design.md の 3.10 の「作る順の 8 で決めた細部」にある。
+// 出す知らせは、走れない路線、止まっている路線、混みすぎる路線、待ちきれずに歩いた人が多い駅、
+// 乗る人のいない駅、徒歩圏が隣の駅と大きく重なる駅の 6 つである。
+// つまみの値（混みすぎとみなす乗車率、歩いた人の数、乗る人を見る日数、重なりの割合）は、
+// docs/design.md の 3.10 の「作る順の 8 で決めた細部」にある。
 
 import { capZeroReason } from "./line-panel.ts";
 import { lineName, type RailLineInfo } from "./map/lines.ts";
 import type { Tile } from "./map/roads.ts";
-import type { RailStats, StationStat } from "./map/transit.ts";
+import { STATION_WALK_RADIUS } from "./map/tools.ts";
+import { type RailStats, type StationStat, stationKey } from "./map/transit.ts";
 import type { Notice } from "./notice-center.ts";
 import { TICKS_PER_DAY } from "./utility-trend.ts";
 
@@ -62,6 +65,133 @@ export class GaveUpWindow {
   }
 }
 
+/** 「乗る人がいない」かを見る、直近の長さ（日）。画面を開いてからこの日数たつまでは判断しない。 */
+export const UNUSED_DAYS = 3;
+
+/** 「隣の駅と大きく重なる」とみなす、徒歩圏の世帯のうち、ほかの駅の徒歩圏にも入る世帯の割合（‰）。chizu-cli の overlapPermille と同じ物差しである。 */
+export const OVERLAP_PERMILLE = 800;
+
+/** 乗った人の標本を取る最短の間隔（tick）。 */
+export const RIDE_SAMPLE_GAP = TICKS_PER_DAY / 12;
+
+type RideSample = { tick: number; boarded: Map<string, number> };
+
+/**
+ * 駅ごとの直近の乗った人の数。中核が持つのは始まりからの積み上げだけなので、`UNUSED_DAYS` 日前の標本との差を取る。
+ * 駅が `UNUSED_DAYS` 日より前から見えていなければ、その駅は null（まだ判断できない）。
+ * 別の街になるときは `reset` で捨てる。tick や積み上げが戻ったときも捨てる。
+ */
+export class RecentRides {
+  #samples: RideSample[] = [];
+  #latest: RideSample | null = null;
+  #firstSeen = new Map<string, number>();
+
+  reset(): void {
+    this.#samples = [];
+    this.#latest = null;
+    this.#firstSeen = new Map();
+  }
+
+  update(stats: RailStats): void {
+    const boarded = new Map(stats.stations.map((st) => [stationKey(st), st.boarded]));
+    const last = this.#latest;
+    if (
+      last !== null &&
+      (stats.tick < last.tick || [...boarded].some(([k, v]) => v < (last.boarded.get(k) ?? 0)))
+    ) {
+      this.reset();
+    }
+    for (const k of [...this.#firstSeen.keys()]) {
+      if (!boarded.has(k)) {
+        this.#firstSeen.delete(k);
+      }
+    }
+    for (const k of boarded.keys()) {
+      if (!this.#firstSeen.has(k)) {
+        this.#firstSeen.set(k, stats.tick);
+      }
+    }
+    const sample = { tick: stats.tick, boarded };
+    this.#latest = sample;
+    const tail = this.#samples[this.#samples.length - 1];
+    if (tail === undefined || stats.tick - tail.tick >= RIDE_SAMPLE_GAP) {
+      this.#samples.push(sample);
+    }
+    // 窓より古い標本は、窓の端をまたぐ 1 つだけ残して捨てる
+    const window = UNUSED_DAYS * TICKS_PER_DAY;
+    while ((this.#samples[1]?.tick ?? Number.POSITIVE_INFINITY) <= stats.tick - window) {
+      this.#samples.shift();
+    }
+  }
+
+  /** 直近 `UNUSED_DAYS` 日に乗った人の数。まだ判断できなければ null。 */
+  boardedIn(station: { index: number; generation: number }): number | null {
+    const latest = this.#latest;
+    const base = this.#samples[0];
+    if (
+      latest === null ||
+      base === undefined ||
+      base.tick > latest.tick - UNUSED_DAYS * TICKS_PER_DAY
+    ) {
+      return null;
+    }
+    const key = stationKey(station);
+    const seen = this.#firstSeen.get(key);
+    const was = base.boarded.get(key);
+    const now = latest.boarded.get(key);
+    if (seen === undefined || seen > base.tick || was === undefined || now === undefined) {
+      return null;
+    }
+    return now - was;
+  }
+}
+
+/** 駅の徒歩圏のうち、ほかの駅の徒歩圏にも入る世帯の割合（‰）。世帯がいなければ 0。 */
+export function overlapPermille(s: StationStat): number {
+  return s.households === 0 ? 0 : Math.floor((s.shared * 1000) / s.households);
+}
+
+const near = (a: StationStat, b: StationStat) =>
+  (a.door.x - b.door.x) ** 2 + (a.door.y - b.door.y) ** 2 <= (2 * STATION_WALK_RADIUS) ** 2;
+
+/**
+ * 徒歩圏が隣の駅と大きく重なり、その隣の駅より使われていない駅と、そのときの隣の駅。
+ * 使われ方は、直近の乗った人が分かっていればそれ、分からなければ始まりからの積み上げで比べる。同じなら世帯の多いほう、ID の若いほうを残す。
+ */
+export function overlappedStations(
+  stats: RailStats,
+  recent: Pick<RecentRides, "boardedIn"> | null,
+): { station: StationStat; partner: StationStat }[] {
+  const use = (s: StationStat, byRecent: boolean) =>
+    byRecent ? (recent?.boardedIn(s) ?? 0) : s.boarded;
+  const out: { station: StationStat; partner: StationStat }[] = [];
+  for (const s of stats.stations) {
+    if (!s.hasDoor || s.households === 0 || overlapPermille(s) < OVERLAP_PERMILLE) {
+      continue;
+    }
+    let partner: StationStat | null = null;
+    for (const o of stats.stations) {
+      if (o === s || !o.hasDoor || !near(s, o)) {
+        continue;
+      }
+      const byRecent = recent?.boardedIn(s) != null && recent.boardedIn(o) != null;
+      const rank = (x: StationStat) => [use(x, byRecent), x.households, -x.index];
+      const [a, b] = [rank(o), rank(s)];
+      const better = a.findIndex((v, i) => v !== b[i]);
+      if (better >= 0 && (a[better] ?? 0) > (b[better] ?? 0)) {
+        const cur: StationStat | null = partner;
+        if (cur === null || o.households > cur.households) {
+          partner = o;
+        }
+      }
+    }
+    if (partner !== null) {
+      out.push({ station: s, partner });
+    }
+  }
+  return out;
+}
+
 const n = (v: number) => v.toLocaleString("ja-JP");
 const percent = (permille: number) => `${Math.round(permille / 10)}%`;
 
@@ -103,6 +233,7 @@ export function railNotices(
   stats: RailStats | null,
   gaveUpPerDay: number | null,
   nameOf: (station: Tile) => string,
+  recent: Pick<RecentRides, "boardedIn"> | null = null,
 ): Notice[] {
   const notices: Notice[] = [];
   const key = (list: readonly RailLineInfo[]) =>
@@ -165,6 +296,59 @@ export function railNotices(
           ? null
           : { label: "駅へ移る", targets: busy.map((s) => s.min), ordered: true },
     });
+  }
+  if (stats !== null && recent !== null) {
+    const unused = stats.stations.filter((st) => recent.boardedIn(st) === 0);
+    if (unused.length > 0) {
+      const onLine = (st: StationStat) =>
+        lines.some((l) => l.stations.some((t) => t.x === st.min.x && t.y === st.min.y));
+      const hint = (st: StationStat) => {
+        if (!onLine(st)) {
+          return "どの路線にも入っていない。路線に入れるか、取り壊して維持費を減らす";
+        }
+        if (!st.hasDoor) {
+          return "道路に面していないので、歩いて来られない。道路に面した所に置き直す";
+        }
+        if (st.households === 0) {
+          return "徒歩圏に家がない。家のある所へ置き直すか、取り壊して維持費を減らす";
+        }
+        if (overlapPermille(st) >= OVERLAP_PERMILLE) {
+          return "徒歩圏が隣の駅とほぼ重なり、そちらが使われている。取り壊して維持費を減らすか、離れた所へ置き直す";
+        }
+        return "家からの道が通じているか、列車が来ているかを確かめる";
+      };
+      notices.push({
+        id: "rail-unused",
+        key: unused.map(stationKey).join(","),
+        headline: `乗る人のいない駅がある（${unused.map((st) => nameOf(st.min)).join("、")}）`,
+        details: unused.map(
+          (st) => `${nameOf(st.min)}：直近 ${UNUSED_DAYS} 日、乗る人が 0 人。${hint(st)}`,
+        ),
+        jump: { label: "駅へ移る", targets: unused.map((st) => st.min), ordered: true },
+      });
+    }
+    const unusedKeys = new Set(unused.map(stationKey));
+    const overlapped = overlappedStations(stats, recent).filter(
+      (o) => !unusedKeys.has(stationKey(o.station)),
+    );
+    if (overlapped.length > 0) {
+      notices.push({
+        id: "rail-overlap",
+        key: overlapped.map((o) => stationKey(o.station)).join(","),
+        headline: `徒歩圏が隣の駅と大きく重なる駅がある（${overlapped
+          .map((o) => nameOf(o.station.min))
+          .join("、")}）`,
+        details: overlapped.map(
+          (o) =>
+            `${nameOf(o.station.min)}：徒歩圏の ${percent(overlapPermille(o.station))} が ${nameOf(o.partner.min)} と重なる。駅を足しても乗る人は増えにくい。離れた所へ置き直すか、取り壊して維持費を減らす`,
+        ),
+        jump: {
+          label: "駅へ移る",
+          targets: overlapped.map((o) => o.station.min),
+          ordered: true,
+        },
+      });
+    }
   }
   return notices.map((nt) =>
     nt.jump !== null && nt.jump.targets.length === 0 ? { ...nt, jump: null } : nt,

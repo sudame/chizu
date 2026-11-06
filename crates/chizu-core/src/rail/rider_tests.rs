@@ -165,6 +165,22 @@ fn catchment_counts_households_by_the_door_tile() {
     assert_eq!(got[0].carless as usize, all);
 }
 
+/// 重なる世帯は、ほかの駅の徒歩圏にも入る世帯である。同じ出入口を 2 つ並べると全員が重なり、遠い出入口は重ならない。
+#[test]
+fn catchment_counts_households_shared_with_other_doors() {
+    let (mut w, _, west, _) = rail_town(5, 1);
+    run(&mut w, 2 * crate::clock::TICKS_PER_DAY);
+    let door = w.station_door(west).expect("西の駅の出入口がない");
+    let far = at(door.x + 10_000, door.y);
+    let alone = w.catchments(&[door]);
+    let twin = w.catchments(&[door, door, far]);
+    assert!(alone[0].households > 0, "徒歩圏に世帯がいない");
+    assert_eq!(alone[0].shared, 0);
+    assert_eq!(twin[0].shared, twin[0].households);
+    assert_eq!(twin[1].shared, twin[1].households);
+    assert_eq!((twin[2].households, twin[2].shared), (0, 0));
+}
+
 /// 置く前の出入口は、置いたあとの出入口と同じマスになる。置けない所は `None`。
 #[test]
 fn station_door_before_placing_matches_the_placed_one() {

@@ -194,7 +194,8 @@ import {
   type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
-import { GaveUpWindow, railNotices } from "./rail-notice.ts";
+import { GaveUpWindow, RecentRides, railNotices } from "./rail-notice.ts";
+import { parseRoadProbe, RoadProbeGate, roadProbeText } from "./road-probe.ts";
 import { setupSaves } from "./save/main-side.ts";
 import { setupScaleBar } from "./scale-bar.ts";
 import { BAR_SPEEDS, describeSpeed, nearestSpeed } from "./speed.ts";
@@ -347,10 +348,12 @@ let lineMeshesLast: { far: Geometry; near: Geometry } | null = null;
 let railStats: RailStats | null = null;
 const rideDays = new RideDays();
 const gaveUpWindow = new GaveUpWindow();
+const recentRides = new RecentRides();
 // 別の街になるので、駅の乗り降りと歩いた人の控えは前の街のものを捨てる
 setupSaves(worker, element<HTMLElement>("#controls"), () => {
   rideDays.reset();
   gaveUpWindow.reset();
+  recentRides.reset();
   railStats = null;
 });
 // 路線の道具の途中の状態。路線を作るコマンドを送った時点で知っていた路線を覚え、できた路線を見分ける
@@ -464,7 +467,10 @@ function rebuildTransit(): void {
 }
 /** 鉄道の知らせを出し直す。 */
 function updateRailNotices(): void {
-  noticeCenter.set("rail", railNotices(railLines, railStats, gaveUpWindow.perDay(), stationLabel));
+  noticeCenter.set(
+    "rail",
+    railNotices(railLines, railStats, gaveUpWindow.perDay(), stationLabel, recentRides),
+  );
 }
 function updateDemandTheme(): void {
   if (renderer !== null) {
@@ -787,6 +793,9 @@ let bulldozeWaiting = false;
 // 線路を引けるかと建設費の、中核の答え。引く直線が変わるたびに Worker に問い合わせる
 let railShown: { key: string; reason: string | null; cost: number } | null = null;
 let railSent = "";
+// 道路を引いたときの踏切と路線の上限への響きの、中核の答え。道路の直線が変わるたびに Worker に問い合わせ、
+// 答えを待つあいだは次を送らない。街が変わったときと道具を変えたときは捨てる
+const roadProbe = new RoadProbeGate();
 // 最後に問い合わせた tick。カーソルが動かなくても、街の数字が届いたときに共同の駐車場の円の中の数を問い合わせ直す
 let probeAskedTick = 0;
 let money = 0;
@@ -857,6 +866,9 @@ function updatePreview(): void {
             ? "道路はもうその種類になっている"
             : `区間 ${plan.segments.length} 本・費用 ${plan.cost.toLocaleString("ja-JP")}`;
       mapCanvas.dataset.previewCost = String(plan.cost);
+      if (plan.segments.length > 0) {
+        info += roadProbeSuffix(upgradeRoadCommand(tool.road, from, to));
+      }
     }
     geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK_COLOR, MIN_PX);
   } else if (tool.kind === "rail" && cursor !== null) {
@@ -933,6 +945,7 @@ function updatePreview(): void {
       if (isDisconnected(roadIndex, from, to)) {
         info += `・${DISCONNECTED_NOTICE}`;
       }
+      info += roadProbeSuffix(buildRoadCommand(tool.road, from, to));
       mapCanvas.dataset.previewCost = String(cost);
     }
     geometry.square(from, ROAD_VISUAL_HALF, PREVIEW_OK_COLOR, MIN_PX);
@@ -1173,6 +1186,30 @@ function requestBulldozePreview(min: Tile, max: Tile): string {
   return key;
 }
 
+/**
+ * 道路のコマンドが踏切を作り、路線の本数の上限を下げるときの見積もりの文（先頭に「・」を付ける）。線路も路線もなければ空。
+ * 直線の端が変わるたびに、状態を変えずに Worker へ問い合わせる。答えが届くまでは出さない。
+ */
+function roadProbeSuffix(command: CommandMessage): string {
+  if (railLines.length === 0) {
+    delete mapCanvas.dataset.roadCrossings;
+    delete mapCanvas.dataset.roadLowered;
+    return "";
+  }
+  const key = roadProbe.keyOf(command);
+  if (roadProbe.shouldSend(key)) {
+    send({ kind: "probe-road", key, command });
+  }
+  const probe = roadProbe.answer(key);
+  // test:wasm が読む
+  mapCanvas.dataset.roadCrossings = String(probe?.crossings ?? 0);
+  mapCanvas.dataset.roadLowered = (probe?.lowered ?? [])
+    .map((l) => `${l.index}.${l.generation}:${l.before}>${l.after}`)
+    .join(",");
+  const text = roadProbeText(probe);
+  return text === "" ? "" : `・${text}`;
+}
+
 /** 線路を引けるかを問い合わせる。直線の印を返す。同じ直線は問い合わせ直さない。 */
 function requestRailProbe(from: Tile, to: Tile): string {
   const key = `${from.x},${from.y},${to.x},${to.y}`;
@@ -1295,6 +1332,7 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
   tool = next;
   bulldozeSent = "";
   bulldozeShown = null;
+  roadProbe.reset();
   for (const b of toolButtons) {
     b.setAttribute("aria-pressed", String(b === button));
   }
@@ -1738,6 +1776,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     railStats = parseRailStats(message.tick, message.stats);
     rideDays.update(railStats);
     gaveUpWindow.update(railStats.tick, railStats.gaveUp);
+    recentRides.update(railStats);
     rebuildTransit();
     updateRailNotices();
     // test:wasm が読む
@@ -1749,6 +1788,11 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
   if (message.kind === "rail-probe") {
     const { x0, y0, x1, y1, reason, cost } = message;
     railShown = { key: `${x0},${y0},${x1},${y1}`, reason, cost };
+    updatePreview();
+    return;
+  }
+  if (message.kind === "road-probe") {
+    roadProbe.receive(message.key, parseRoadProbe(message.info));
     updatePreview();
     return;
   }
@@ -1849,6 +1893,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     // 引けるかも、街が変わったので古い答えを捨てて問い合わせ直す
     railSent = "";
     railShown = null;
+    roadProbe.reset();
     if (tool.kind === "service" || tool.kind === "bulldoze" || tool.kind === "rail") {
       updatePreview();
     }

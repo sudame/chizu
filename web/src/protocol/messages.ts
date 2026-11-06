@@ -223,6 +223,8 @@ export type MainToWorker =
   | { kind: "inspect"; query: InspectQuery }
   /** 線路を (x0, y0) から (x1, y1) に引けるかと建設費を、状態を変えずに中核に問い合わせる。 */
   | { kind: "probe-rail"; x0: number; y0: number; x1: number; y1: number }
+  /** 道路のコマンドを適用したときの踏切と路線の上限への響きを、状態を変えずに中核に問い合わせる。key は答えの写しで返る。 */
+  | { kind: "probe-road"; key: string; command: CommandMessage }
   /** 長方形 (x0, y0)-(x1, y1) を取り壊したときに消えるものを、状態を変えずに中核に問い合わせる。 */
   | { kind: "bulldoze-preview"; x0: number; y0: number; x1: number; y1: number }
   /** フィードバックに添える状態と記録を求める。 */
@@ -308,6 +310,8 @@ export type WorkerToMain =
       reason: string | null;
       cost: number;
     }
+  /** probe-road の答え。key は問い合わせの写し、info は chizu-wasm の road_probe の数の並び（road-probe.ts が読む）。 */
+  | { kind: "road-probe"; key: string; info: number[] }
   /**
    * 線路と駅の形。線路や駅が変わったときだけ、全体を送り直す。配列は移譲して送る。
    * tracks は chizu-wasm の rail_tracks、stations は rail_stations、lines は rail_lines、crossings は rail_crossings である。
@@ -564,6 +568,12 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         Number.isInteger(v.y1) &&
         (v.reason === null || typeof v.reason === "string") &&
         typeof v.cost === "number"
+      );
+    case "road-probe":
+      return (
+        typeof v.key === "string" &&
+        Array.isArray(v.info) &&
+        v.info.every((n) => typeof n === "number")
       );
     case "bulldoze-preview":
       return (

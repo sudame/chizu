@@ -258,3 +258,42 @@ fn station_probe_gives_the_door_for_the_rotations_that_can_be_placed() {
     assert!((20.0..=40.0).contains(&x));
     assert_eq!((households, carless), (0.0, 0.0));
 }
+
+/// 道路を引く前の見積もりは、引いたあとの踏切の数と路線の上限の下がり方に一致し、街の状態を変えない。
+#[test]
+fn road_probe_matches_what_building_the_road_does() {
+    let mut sim = shuttle(0);
+    let road = Command::BuildRoad {
+        from: at(30, 0),
+        to: at(30, 20),
+        kind: RoadKind::Small,
+    };
+    let line = sim.world().rail().lines().next().unwrap().0;
+    let cap_before = sim.world().rail().line(line).unwrap().cap();
+    let hash = sim.world().state_hash();
+    let probed = sim.road_probe(&road);
+    assert_eq!(sim.world().state_hash(), hash, "状態が変わった");
+    assert_eq!(probed[0], 1.0, "踏切が 1 つできるはず: {probed:?}");
+    sim.submit(road).unwrap();
+    let cap_after = sim.world().rail().line(line).unwrap().cap();
+    let expected: Vec<f64> = if cap_after < cap_before {
+        vec![
+            1.0,
+            f64::from(line.index),
+            f64::from(line.generation),
+            f64::from(cap_before),
+            f64::from(cap_after),
+        ]
+    } else {
+        vec![1.0]
+    };
+    assert_eq!(probed, expected);
+    // 線路のない街と、道路のコマンド以外は空
+    assert!(
+        Sim::new(0)
+            .road_probe(&Command::SetSimSpeed {
+                speed: chizu_core::SimSpeed::NORMAL
+            })
+            .is_empty()
+    );
+}

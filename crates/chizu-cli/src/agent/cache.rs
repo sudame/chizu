@@ -34,6 +34,9 @@ use xxhash_rust::xxh3::xxh3_64;
 
 pub const CACHE_FILE: &str = "replay-cache.bin";
 
+/// 直近の乗る人を数えるために、数日前の街を置くキャッシュのファイル。形式は [`CACHE_FILE`] と同じである。
+pub const PAST_CACHE_FILE: &str = "replay-cache-past.bin";
+
 const MAGIC: &[u8; 8] = b"CHIZUCAC";
 const VERSION: u32 = 1;
 const HEADER_LEN: usize = 8 + 4 + 8 * 6;
@@ -71,6 +74,14 @@ impl Cache {
     pub fn new(dir: &Path, key: u64) -> Cache {
         Cache {
             path: dir.join(CACHE_FILE),
+            key,
+        }
+    }
+
+    /// 別のファイル名で置くキャッシュ。
+    pub fn named(dir: &Path, key: u64, file: &str) -> Cache {
+        Cache {
+            path: dir.join(file),
             key,
         }
     }

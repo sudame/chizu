@@ -690,6 +690,36 @@ async function checkTrains(page: Page, at: string): Promise<void> {
   );
   await shot("station-inspector");
   await page.keyboard.press("Escape");
+
+  // 道路の道具は、線路を横切る道路の見積もりに、踏切ができることを足す（y = 30 の線路と y = 32 の道路を横切る）
+  await pickTool(page, "road-Small");
+  await clickTile(35, 24);
+  await moveTile(35, 40);
+  await waitMap("roadCrossings", "0", "gt");
+  check(
+    (await map.getAttribute("data-road-crossings")) === "1",
+    "線路を横切る道路の見積もりに、踏切が 1 つできると出る",
+  );
+  // 直前の結果の札が見積もりに重ならないよう、消えるのを待つ
+  await page.waitForTimeout(6000);
+  await shot("road-crossing-estimate");
+  await page.keyboard.press("Escape");
+  await pickTool(page, "none");
+
+  // 家のない街なので、乗る人は 0 のまま。3 日たつと、乗る人のいない駅を通知センターが知らせる
+  await page.locator("#pause").click();
+  await pickSpeed(page, 288);
+  await page.waitForFunction(
+    () => document.querySelector('#notice-list li[data-notice="rail-unused"]') !== null,
+    undefined,
+    { timeout: 120_000 },
+  );
+  check(true, "3 日乗る人のいない駅を、通知センターが知らせる");
+  await page.locator("#notice-bell").click();
+  await page.waitForTimeout(300);
+  await shot("rail-unused-notice");
+  await page.keyboard.press("Escape");
+  await page.locator("#pause").click();
   await chooseLayer(page, "traffic");
   await page.keyboard.press("Escape");
   for (const [name, target] of [

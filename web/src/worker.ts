@@ -421,6 +421,11 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         reply({ kind: "rail-probe", x0, y0, x1, y1, reason, cost });
         break;
       }
+      case "probe-road": {
+        const info = Array.from(sim.road_probe(message.command));
+        reply({ kind: "road-probe", key: message.key, info });
+        break;
+      }
       case "inspect": {
         const { query } = message;
         const info =
