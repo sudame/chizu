@@ -606,7 +606,7 @@ fn act_builds_rail_and_a_station_and_observe_and_map_show_them() {
             {"type":"PlaceBuilding","kind":"Station","at":[12,9],"rotation":2},
             {"type":"BuildRail","from":[12,8],"to":[16,8]},
             {"type":"BuildRail","from":[16,8],"to":[16,0]},
-            {"type":"BuildRail","from":[20,0],"to":[20,20]}]"#,
+            {"type":"BuildRail","from":[20,10],"to":[30,10]}]"#,
     );
     let acted = json(&cli(&["agent", "act", d, &cmds]));
     let outcomes: Vec<(&str, Option<&str>)> = acted["results"]
@@ -658,6 +658,66 @@ fn act_builds_rail_and_a_station_and_observe_and_map_show_them() {
         o["sinceLastObserve"]["changes"]["rail.stations"]["delta"],
         -1
     );
+}
+
+/// 道路の区間の途中を横切る線路は踏切になり、act の結果、observe の rail.crossings、map の F に出る。
+/// 踏切にできない置き方は、理由をつけて断る。
+#[test]
+fn act_makes_a_crossing_and_observe_and_map_show_it() {
+    let dir = session("agent-rail-crossing");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "0"]);
+    let cmds = write(
+        &dir.join("r.json"),
+        r#"[{"type":"BuildRoad","from":[0,10],"to":[40,10],"kind":"Small"},
+            {"type":"BuildRoad","from":[40,10],"to":[40,20],"kind":"Small"},
+            {"type":"BuildRail","from":[20,0],"to":[20,20]},
+            {"type":"BuildRail","from":[21,0],"to":[21,20]},
+            {"type":"BuildRail","from":[38,0],"to":[38,20]},
+            {"type":"BuildRail","from":[10,10],"to":[10,20]}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let outcomes: Vec<(&str, Option<&str>)> = acted["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["outcome"].as_str().unwrap(), r["reason"].as_str()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("Applied", None),
+            ("Applied", None),
+            ("Applied", None),
+            ("Denied", Some("CrossingTooClose")),
+            ("Denied", Some("CrossingNearJunction")),
+            ("Denied", Some("NodeOnCrossing")),
+        ],
+        "{acted}"
+    );
+    assert_eq!(
+        acted["results"][2]["crossings"],
+        serde_json::json!([[20, 10]])
+    );
+    let o = json(&cli(&["agent", "observe", d]));
+    let c = &o["rail"]["crossings"];
+    assert_eq!(c["count"], 1, "{c}");
+    assert_eq!(c["list"][0]["at"], serde_json::json!([20, 10]), "{c}");
+    assert_eq!(c["list"][0]["closed"], false, "{c}");
+    assert_eq!(c["overrun"], 0, "{c}");
+    let map = cli(&["agent", "map", d, "18", "10", "22", "10"]);
+    assert_eq!(grid_rows(&map, 1, 5), ["11F11"], "{map}");
+    // 踏切のマスは、道路と線路のマスと同じく、塗れなかったマスに数えない。道路から 7 マス目の 2 マスだけが残る。
+    let paint = write(
+        &dir.join("paint.json"),
+        r#"[{"type":"PaintZone","area":[[19,9],[21,17]],"zone":"Residential"}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &paint]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "AppliedPartly", "{acted}");
+    assert_eq!(r["paint"]["unpainted"]["beyondDepth"], 2, "{acted}");
+    assert_eq!(r["paint"]["unpainted"]["notFronted"], 0, "{acted}");
+    assert_eq!(r["paint"]["unpainted"]["total"], 2, "{acted}");
 }
 
 /// 駅 2 つを結ぶ路線を作って列車を走らせると、observe の rail に路線と列車が出て、鉄道の維持費に列車の分が入る。

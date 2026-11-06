@@ -11,7 +11,8 @@
 //! 1 tick は次の順に進める。どれも列車か路線の ID の順で、結果は実行順に左右されない。
 //! 1. 駅に止まる時間と折り返しの時間を数える。
 //! 2. 先の閉塞を押さえる。同じ tick に押さえようとする列車は、待った長さの長い順、同じなら ID の順にする。
-//! 3. 押さえた範囲の中で速さを決めて進める。前の tick の状態と押さえた範囲だけを読む。
+//! 3. 押さえた範囲の中で速さを決めて進める。前の tick の状態と押さえた範囲だけを読む。中に車か人がいる踏切の
+//!    手前で止まりきれる列車は、その手前までしか進まない（[`super::crossing`]）。
 //! 4. 路線の本数に足りなければ、最初の駅のホームが空いているときに列車を 1 本出す。
 //! 5. 押さえられずに止まった列車が互いを待つ輪を見つけたら、輪の中で ID のいちばん大きい列車を消す。
 //!
@@ -38,6 +39,7 @@ use super::line::{LinePlan, RailLine, Step, StepKind};
 use super::{LineId, Rail, RailNodeId, TrackId, TrainId};
 use crate::network::Dir;
 use crate::state_hash::{StateHash, StateHasher};
+use crate::tile::TilePos;
 use crate::units::{Money, Tick};
 
 /// 編成の全長（mm）。1 両 20m の 4 両である。
@@ -278,7 +280,7 @@ impl RailLine {
     }
 
     /// 先頭から、`k` 個先の要素の先の端までの距離。
-    fn distance_to_end(&self, t: &Train, k: u32) -> i64 {
+    pub(super) fn distance_to_end(&self, t: &Train, k: u32) -> i64 {
         let mut d = self.step(t.pos).len - t.offset;
         let mut i = t.pos;
         for _ in 0..k {
@@ -304,7 +306,7 @@ impl RailLine {
     }
 
     /// 走っている列車が次に止まる要素。先頭が要素の先の端にいるなら、その要素は通り過ぎたものとする。
-    fn upcoming_stop(&self, t: &Train) -> u32 {
+    pub(super) fn upcoming_stop(&self, t: &Train) -> u32 {
         let from = if t.offset < self.step(t.pos).len {
             t.pos
         } else {
@@ -617,8 +619,14 @@ impl Rail {
             && line.held_blocks(t).iter().all(|b| !held.contains_key(b))
     }
 
-    /// 列車を 1 tick 進める。
+    /// 列車を 1 tick 進める。踏切のない街の列車を進めるのに使う。
     pub fn step(&mut self, tick: Tick) {
+        self.step_with(tick, &BTreeSet::new());
+    }
+
+    /// 列車を 1 tick 進める。`occupied` は、車か人が中にいる踏切である。止まりきれる列車はその手前で止まる。
+    /// 閉じてから [`super::CROSSING_WARN_TICKS`] tick たっていない踏切にも、列車は入らない。
+    pub fn step_with(&mut self, tick: Tick, occupied: &BTreeSet<TilePos>) {
         if self.lines.is_unused() {
             return;
         }
@@ -626,7 +634,8 @@ impl Rail {
         let mut held = self.occupancy();
         let mut quota = self.quota();
         let blocked = self.reserve(tick.0, &mut held, &mut quota);
-        self.run();
+        let stops = self.crossing_stops(tick.0, occupied);
+        self.run(&stops);
         // 新しい列車は、走っている列車が閉塞を押さえ終えてから出す。行き詰まりの輪から列車を消したとき、
         // 空いたホームを待っていた列車が、出直す列車より先に入れるようにするためである。
         let mut held = self.occupancy();
@@ -736,6 +745,7 @@ impl Rail {
         order.sort_unstable();
         let mut blocked = BTreeMap::new();
         let mut departed = Vec::new();
+        let crossings = self.crossing_map();
         let Rail {
             lines,
             trains,
@@ -824,13 +834,17 @@ impl Rail {
                         let room = line.distance_to_end(t, t.ahead);
                         let need =
                             t.speed * t.speed / (2 * TRAIN_DECEL) + 2 * (t.speed + TRAIN_ACCEL);
-                        if room >= need {
+                        // 踏切は、閉じる見込みに入る前に、抜けきる先まで押さえておく。
+                        let crossing = crossings
+                            .as_ref()
+                            .is_some_and(|c| Rail::wants_crossing_ahead(c, line, t));
+                        if room >= need && !crossing {
                             break;
                         }
                         let next = t.ahead + 1;
                         let got = grant(t, next, line.run_ahead(t.pos, next));
                         r = Some(got);
-                        if got != Reserve::Done {
+                        if got != Reserve::Done || t.ahead < next {
                             break;
                         }
                     }
@@ -855,7 +869,8 @@ impl Rail {
     }
 
     /// 走っている列車を、押さえた範囲の中で進める。次に止まる駅の先の端に着いた列車は止まる。
-    fn run(&mut self) {
+    /// `stops` の列車は、先頭からその距離より先へは進まない（中に車か人がいる踏切の手前）。
+    fn run(&mut self, stops: &BTreeMap<TrainId, i64>) {
         let ids: Vec<TrainId> = self
             .trains
             .iter()
@@ -868,7 +883,7 @@ impl Rail {
             for id in ids {
                 let t = trains.get_mut(id).expect("列車がない");
                 let line = lines.get(t.line).expect("列車の路線がない");
-                let moved = advance(line, t);
+                let moved = advance(line, t, stops.get(&id).copied());
                 if moved > 0 && t.offset == line.step(t.pos).len && line.step(t.pos).is_stop() {
                     t.state = TrainState::Dwell { left: DWELL_TICKS };
                     t.speed = 0;
@@ -941,8 +956,8 @@ impl Rail {
     }
 }
 
-/// 列車を押さえた範囲の中で 1 tick 進め、進んだ距離を返す。
-fn advance(line: &RailLine, t: &mut Train) -> i64 {
+/// 列車を押さえた範囲の中で 1 tick 進め、進んだ距離を返す。`stop` があれば、先頭からその距離より先へは進まない。
+fn advance(line: &RailLine, t: &mut Train, stop: Option<i64>) -> i64 {
     let tail = line.tail(t.pos, t.offset);
     // 体が曲がりか分岐にかかっていれば、遅い速さに抑える。
     let mut i = tail;
@@ -957,6 +972,7 @@ fn advance(line: &RailLine, t: &mut Train) -> i64 {
     let ds = line.distance(t.pos, s);
     let reach = t.ahead.min(ds);
     let limit = line.distance_to_end(t, reach);
+    let limit = stop.map_or(limit, |s| limit.min(s.max(0)));
     let mut v = (t.speed + TRAIN_ACCEL)
         .min(cap)
         .min(isqrt(2 * TRAIN_DECEL * limit));

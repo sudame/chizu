@@ -125,10 +125,19 @@ pub enum DenyReason {
     StationInLine = 26,
     /// 路線を作るか延ばすと、共有の区画の待てる所の枠をほかの路線に分けきれず、その路線の本数の上限が 0 になる（走れなくなる）。
     LineStarvesOther = 27,
+    /// 線路が高速道路を横切る。踏切は高速道路に置かない。
+    HighwayCrossing = 28,
+    /// 踏切が、道路に沿って 2 マス以内に交差点か曲がり角のノードを持つ。道路を引いて、既にある踏切の
+    /// 2 マス以内に交差点か曲がり角ができるときも、これで断る。
+    CrossingNearJunction = 29,
+    /// 踏切のマスに、道路のノードか、線路の端、分岐、曲がりのノードを置くことになる。
+    NodeOnCrossing = 30,
+    /// 踏切のまわりの 8 マスに、ほかの踏切がある。
+    CrossingTooClose = 31,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 28] = [
+    pub const ALL: [DenyReason; 32] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -157,6 +166,10 @@ impl DenyReason {
         DenyReason::LineLimit,
         DenyReason::StationInLine,
         DenyReason::LineStarvesOther,
+        DenyReason::HighwayCrossing,
+        DenyReason::CrossingNearJunction,
+        DenyReason::NodeOnCrossing,
+        DenyReason::CrossingTooClose,
     ];
 
     pub fn index(self) -> usize {
@@ -221,6 +234,7 @@ pub struct World {
 mod bulldoze;
 pub mod carless;
 mod commute;
+mod crossing;
 pub mod economy;
 mod errand;
 pub mod growth;
@@ -355,8 +369,13 @@ impl World {
     }
 
     /// マスの使い道を道路と線路の網に合わせて書き直し、変えたチャンクの版を上げる。メモリにないチャンクのマスは飛ばす。
-    /// 道路が通れば道路、駅の敷地なら駅、線路が通れば線路、どれでもなければ空きにする。
+    /// 道路と線路の両方が通れば踏切、道路だけなら道路、駅の敷地なら駅、線路だけなら線路、どれでもなければ空きにする。
+    /// 線路の網の踏切の一覧もそろえる。
     fn sync_road_tiles(&mut self, tiles: impl IntoIterator<Item = TilePos>) {
+        let tiles: Vec<TilePos> = tiles.into_iter().collect();
+        if !self.rail.is_unused() {
+            self.sync_crossings(&tiles);
+        }
         let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, TileUse)>>::new();
         for t in tiles {
             let Some(coord) = t.chunk().filter(|c| self.chunks.contains_key(c)) else {
@@ -364,7 +383,11 @@ impl World {
             };
             let (lx, ly) = t.local();
             let u = if self.network.is_road_tile(t) {
-                TileUse::Road
+                if !self.rail.is_unused() && self.rail.is_rail_tile(t) {
+                    TileUse::Crossing
+                } else {
+                    TileUse::Road
+                }
             } else if self.rail.is_unused() {
                 TileUse::Empty
             } else if self.rail.station_at(t).is_some() {
@@ -460,8 +483,8 @@ impl World {
                                 partly = true;
                                 blocked_by_building += 1;
                             }
-                            // 線路のマスも、道路のマスと同じく区画を載せる所ではない。
-                            TileUse::Road | TileUse::Rail => {}
+                            // 線路と踏切のマスも、道路のマスと同じく区画を載せる所ではない。
+                            TileUse::Road | TileUse::Rail | TileUse::Crossing => {}
                             TileUse::Empty => {
                                 partly = true;
                                 blocked_otherwise += 1;
@@ -574,6 +597,7 @@ impl World {
             if let Ok(longer) = Line::between(f, t)
                 && self.network.check_road(&longer).is_ok()
                 && !self.rail.crosses_corner(&longer)
+                && self.check_road_crossings(&longer).is_ok()
                 && road_cost(kind, &longer) <= self.money
             {
                 return (f, t);
@@ -590,16 +614,26 @@ impl World {
             return ApplyOutcome::Denied(reason);
         }
         if line.tiles().any(|t| {
-            self.tile_state(t).is_some_and(|(_, u)| {
-                matches!(u, TileUse::Facility | TileUse::Rail | TileUse::Station)
-            })
+            self.tile_state(t)
+                .is_some_and(|(_, u)| matches!(u, TileUse::Facility | TileUse::Station))
         }) {
             return ApplyOutcome::Denied(DenyReason::Occupied);
         }
-        // 踏切はまだないので、線路とマスの角で交わる道路も断る。
+        // 既にある踏切のマスを通ると、そこに道路のノードができる。
+        if line.tiles().any(|t| {
+            self.tile_state(t)
+                .is_some_and(|(_, u)| u == TileUse::Crossing)
+        }) {
+            return ApplyOutcome::Denied(DenyReason::NodeOnCrossing);
+        }
+        // 線路とマスの角で交わる道路は、踏切にできないので断る。
         if self.rail.crosses_corner(&line) {
             return ApplyOutcome::Denied(DenyReason::CornerCrossing);
         }
+        let crossings = match self.check_road_crossings(&line) {
+            Ok(c) => c,
+            Err(reason) => return ApplyOutcome::Denied(reason),
+        };
         let cost = road_cost(kind, &line);
         if self.money < cost {
             return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
@@ -608,6 +642,9 @@ impl World {
             return ApplyOutcome::Denied(reason);
         }
         self.money = self.money - cost;
+        for c in crossings {
+            self.rail.split_for_crossing(c);
+        }
         self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
         self.refresh_buildings();
         ApplyOutcome::Applied
@@ -623,7 +660,10 @@ impl World {
             Ok(cost) => cost,
             Err(reason) => return ApplyOutcome::Denied(reason),
         };
-        if let Err(reason) = self.rail.build_rail(&line) {
+        let extra = self
+            .check_rail_crossings(&line)
+            .expect("確かめた踏切が置けない");
+        if let Err(reason) = self.rail.build_rail(&line, &extra) {
             return ApplyOutcome::Denied(reason);
         }
         self.money = self.money - cost;
@@ -639,25 +679,34 @@ impl World {
         let blocked = (0..=line.len).any(|k| {
             let t = line.tile(k);
             match self.tile_state(t).map(|(_, u)| u) {
-                Some(TileUse::Road | TileUse::Facility) => true,
+                Some(TileUse::Facility) => true,
                 Some(TileUse::Station) => {
                     !((k == 0 || k == line.len) && self.rail.is_station_end(t))
                 }
-                Some(TileUse::Empty | TileUse::Building | TileUse::Rail) | None => false,
+                Some(
+                    TileUse::Empty
+                    | TileUse::Building
+                    | TileUse::Rail
+                    | TileUse::Road
+                    | TileUse::Crossing,
+                )
+                | None => false,
             }
         });
         if blocked {
             return Err(DenyReason::Occupied);
         }
-        // 踏切はまだないので、道路とマスの角で交わる線路も断る。
+        // 道路とマスの角で交わる線路は、踏切にできないので断る。
         if self.network.crosses_corner(line) {
             return Err(DenyReason::CornerCrossing);
         }
+        // 道路を横切るマスは、踏切の決まりを満たすときだけ通れる。
+        let extra = self.check_rail_crossings(line)?;
         let cost = rail_cost(line);
         if self.money < cost {
             return Err(DenyReason::NotEnoughMoney);
         }
-        self.rail.check_rail(line)?;
+        self.rail.check_rail(line, &extra)?;
         Ok(cost)
     }
 
@@ -983,11 +1032,14 @@ impl World {
             self.estimate_delays();
         }
         self.update_people();
-        let ended = self
-            .trips
-            .step(&self.network, &mut self.router.router, tick);
+        let crossings = self.crossings_at_tick_start();
+        let (net, router) = (&self.network, &mut self.router.router);
+        let ended = match &crossings {
+            None => self.trips.step(net, router, tick),
+            Some((_, rail)) => self.trips.step_with_rail(net, router, tick, rail),
+        };
         self.end_commutes(ended);
-        self.rail.step(tick);
+        self.step_trains(tick, crossings);
         self.grow_buildings();
         self.update_economy();
         self.tick = tick.next();
@@ -1100,10 +1152,14 @@ mod tests {
             | DenyReason::NoSuchLine
             | DenyReason::LineLimit
             | DenyReason::StationInLine
-            | DenyReason::LineStarvesOther => DenyReason::ALL.contains(&r),
+            | DenyReason::LineStarvesOther
+            | DenyReason::HighwayCrossing
+            | DenyReason::CrossingNearJunction
+            | DenyReason::NodeOnCrossing
+            | DenyReason::CrossingTooClose => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 28);
+        assert_eq!(DenyReason::ALL.len(), 32);
     }
     use crate::command::MAX_TAX_PERMILLE;
 
