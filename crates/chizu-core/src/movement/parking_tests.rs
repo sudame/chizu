@@ -1724,3 +1724,68 @@ fn a_household_car_heading_to_a_replaced_shared_lot_leaves_the_new_reservation()
     s.run(v2);
     assert_eq!(s.trips.shared_lot(c).visitors.parked, 1);
 }
+
+/// 借りた枠に停めた車は、停めた住民が職場から家に帰るときに取りに行かない。枠が職場の近くにあると、
+/// 枠まで歩いて 0m だけ乗り、家まで歩くことになる。家にいる世帯の誰かが出るときは、いつもどおり乗れる。
+#[test]
+fn a_car_in_the_rented_place_is_not_fetched_to_drive_home() {
+    let (mut s, ids) = Street::new(&[50, 28]);
+    let (home, work) = (ids[0], ids[1]);
+    let facilities = [shared_lot(&s, 40)];
+    let c = facilities[0].area.min;
+    s.trips
+        .set_rented(&std::collections::BTreeMap::from([(c, 1)]));
+    s.trips
+        .place_car(Household::ID, Household::citizen(0), LotId::Rented(c));
+    let h = Household { home };
+    let start = |s: &mut Street, index, ends, to| {
+        let r = h.request(index, ends);
+        let r = CommuteRequest {
+            who: Commuter { to, ..r.who },
+            place: Some(CarPlace::Shared(c)),
+            ..r
+        };
+        let (net, router) = (&s.net, &mut s.router);
+        let sites = (&s.buildings, facilities.as_slice());
+        s.trips.start_commutes(net, router, sites, &[r], Tick::ZERO)[0].expect("移動を作れない")
+    };
+    let home_bound = start(&mut s, 0, (work, home), crate::citizens::Activity::Home);
+    assert!(!Household::drives(&s, home_bound));
+    assert_eq!(s.trips.parking_tally().no_car_at_home, 1);
+    assert_eq!(s.trips.parking_tally().drives, 0);
+    s.trips.cancel(home_bound);
+    let from_home = start(&mut s, 1, (home, work), crate::citizens::Activity::Work);
+    assert!(Household::drives(&s, from_home));
+}
+
+/// 家からも職場からも離れた所に停めて置き去りになった車は、外す。近くにあれば残す。
+#[test]
+fn a_stranded_car_is_returned_only_when_out_of_reach() {
+    let (mut s, ids) = Street::new(&[0, 20, 58]);
+    let (home, work, shop) = (ids[0], ids[1], ids[2]);
+    let h = Household { home };
+    h.park(&mut s, 0, (home, shop));
+    let own = Some(LotId::Building(home));
+    let sites = (&s.buildings, &[][..]);
+    let c = Household::citizen(0);
+    // 停めた本人でなければ外さない。
+    assert!(!s.trips.return_stranded_car(
+        Household::ID,
+        Household::citizen(1),
+        own,
+        sites,
+        [Some(home), Some(work)]
+    ));
+    // 店のそばに職場があれば外さない。
+    assert!(
+        !s.trips
+            .return_stranded_car(Household::ID, c, own, sites, [Some(home), Some(shop)])
+    );
+    assert_eq!(lot(&s, shop), (1, 0));
+    assert!(
+        s.trips
+            .return_stranded_car(Household::ID, c, own, sites, [Some(home), Some(work)])
+    );
+    assert_eq!(s.trips.household_car(Household::ID), None);
+    assert_eq!(lot(&s, shop), (0, 0));
+}
