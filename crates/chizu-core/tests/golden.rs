@@ -1825,11 +1825,12 @@ fn upgrading_a_busy_street_keeps_buildings_and_moving_cars() {
             .collect()
     };
     // 通りを走る車の数は、朝のうちでも tick ごとに揺れる。決まった tick で上げると、育ち方の小さな違いで
-    // 車の少ない瞬間に当たるので、`UPGRADE_TICK` の前後で通りに 10 台以上いる最初の tick まで進めて上げる。
+    // 車の少ない瞬間に当たるので、`UPGRADE_TICK` の前後で通りに `BUSY` 台以上いる最初の tick まで進めて上げる。
+    const BUSY: usize = 7;
     let mut world = World::new(42);
     replay(&mut world, &commute(), UPGRADE_TICK - 300);
     for _ in 0..600 {
-        if on_street(&world).len() >= 10 {
+        if on_street(&world).len() >= BUSY {
             break;
         }
         replay(&mut world, &commute(), 1);
@@ -1849,7 +1850,7 @@ fn upgrading_a_busy_street_keeps_buildings_and_moving_cars() {
     };
     let zones_before = zones(&world);
     let cars = on_street(&world);
-    assert!(cars.len() >= 7, "通りを走る車が少ない {}", cars.len());
+    assert!(cars.len() >= BUSY, "通りを走る車が少ない {}", cars.len());
 
     let line = chizu_core::Line::between(TilePos::new(-40, 0), TilePos::new(100, 0)).unwrap();
     let cost = world
