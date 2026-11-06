@@ -619,7 +619,7 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
 }
 
 /// 再生のあいだに適用したコマンドの件数。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReplayStats {
     pub applied: u64,
     pub not_implemented: u64,
@@ -627,6 +627,19 @@ pub struct ReplayStats {
     pub denied: u64,
     /// 却下した件数の、理由ごとの内訳。添え字は [`DenyReason::index`] である。
     pub denied_by: [u64; DenyReason::ALL.len()],
+}
+
+// 配列の `Default` は 32 要素までしか導けないので、手で書く。
+impl Default for ReplayStats {
+    fn default() -> Self {
+        ReplayStats {
+            applied: 0,
+            not_implemented: 0,
+            rejected: 0,
+            denied: 0,
+            denied_by: [0; DenyReason::ALL.len()],
+        }
+    }
 }
 
 /// `world` を `ticks` だけ進める。

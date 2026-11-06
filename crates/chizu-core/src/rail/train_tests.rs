@@ -986,6 +986,76 @@ fn a_line_that_would_starve_another_is_denied() {
     run(&mut w, 3_000, 3_000);
 }
 
+/// 駅 A、M、E、F を一列に並べ（駅の線路は y = 8 の x 3〜12、33〜42、63〜72、93〜102）、隣り合う駅を
+/// 線路で結んだ街に、A–M、M–E、E–F の 3 本を本数 3 で走らせる（#356）。M と E のあいだだけは x 52 に
+/// ノードを置いて 2 本に分け、M–E の自分だけの区間（行きと帰り）の待てる所を 2 つずつにする。
+fn row_world() -> (World, [StationId; 4], [LineId; 3]) {
+    let mut w = rich_world();
+    ok(&mut w, road((0, 10), (110, 10)));
+    let st = [12, 42, 72, 102].map(|x| station(&mut w, (x, 8), 2));
+    for (from, to) in [(12, 33), (42, 52), (52, 63), (72, 93)] {
+        ok(&mut w, rail((from, 8), (to, 8)));
+    }
+    let [a, m, e, f] = st;
+    let lines = [[a, m], [m, e], [e, f]].map(|s| line_through(&mut w, &s));
+    for id in lines {
+        assert_eq!(w.rail().line(id).unwrap().cap(), 3);
+        set_trains(&mut w, id, 3);
+    }
+    run(&mut w, 1_000, 3_000);
+    (w, st, lines)
+}
+
+/// 区画の枠を分けるのは、辺をたどって互いに行き来できる共有の待てる所だけである（#356）。A–E を足すと、
+/// A–M、M–E、A–E の待てる所が輪のある区画（枠 3）になる。E–F が待つ E のホームは、区画から辺が入るだけで
+/// 区画へ戻る辺がないので区画に入らず、E–F は区画の枠を分けない。A–E は E–F を走れなくしないので断らない。
+#[test]
+fn a_line_ending_where_another_starts_does_not_starve_it() {
+    let (mut w, [a, _, e, _], [am, me, ef]) = row_world();
+    let ae = create(&mut w, a, e);
+    let rail = w.rail();
+    assert_eq!(rail.line(ef).unwrap().cap(), 3);
+    for id in [am, me, ae] {
+        assert_eq!(rail.line(id).unwrap().cap(), 1, "{id:?}");
+    }
+    run(&mut w, 3_000, 3_000);
+}
+
+/// 自分の上限が 0 になる路線で、ほかの路線の上限を下げるなら断る（#356）。A–F は A–M、M–E、E–F の待てる所を
+/// すべて通り、4 本で区画の枠 3 を分けると A–F の分け前が 0 になる。作っても A–F は走らず、ほかの 3 本の
+/// 上限が 3 から 1 に下がって列車が消えるだけなので、断って状態を変えない。
+#[test]
+fn a_line_that_cannot_run_and_lowers_others_is_denied() {
+    let (mut w, [a, _, _, f], lines) = row_world();
+    let before = w.state_hash();
+    assert_eq!(
+        w.apply(&Command::CreateLine { from: a, to: f }),
+        ApplyOutcome::Denied(DenyReason::LineStarvesSelf)
+    );
+    assert_eq!(w.state_hash(), before);
+    for id in lines {
+        assert_eq!(w.rail().line(id).unwrap().cap(), 3);
+    }
+}
+
+/// 路線を作って上限が下がり列車が消えた路線も、その路線を消して上限が戻れば、決めた本数まで最初の駅から
+/// 出直す（#356）。
+#[test]
+fn trains_come_back_when_the_cap_comes_back() {
+    let (mut w, [a, _, e, _], lines) = row_world();
+    let ae = create(&mut w, a, e);
+    let count = |w: &World, id: LineId| w.rail().trains().filter(|(_, t)| t.line == id).count();
+    assert_eq!(count(&w, lines[0]), 1);
+    ok(&mut w, Command::RemoveLine { line: ae });
+    for id in lines {
+        assert_eq!(w.rail().line(id).unwrap().cap(), 3);
+    }
+    run(&mut w, 1_000, 3_000);
+    for id in lines {
+        assert_eq!(count(&w, id), 3, "{id:?}");
+    }
+}
+
 /// 上限と、0 のときの理由を読める。共有の区画の枠を、区画を使う路線で分けきれないと、新しい路線の上限が 0 になる。
 /// W–M の区間運転を 4 本作ると、区画の枠 3 を前の 3 本が 1 つずつ使い、4 本目は 0 になる。
 #[test]

@@ -931,6 +931,102 @@ fn act_reports_lines_that_cannot_run() {
     assert!(r["removedTrains"].as_u64().unwrap() > 0, "{acted}");
 }
 
+/// 走れない路線でほかの路線の cap を下げるなら、LineStarvesSelf で断り、下がるはずだった路線を loweredLines に出す。
+/// cap が戻って列車が足りない路線は、observe の toStart に足りない本数が出て、時間がたつと 0 に戻る（#356）。
+#[test]
+fn act_and_observe_show_lowered_caps_and_trains_to_start() {
+    let st = |i: u32| format!(r#"{{"index":{i},"generation":0}}"#);
+    // 駅 a、m、e、f を一列に並べ、a–m、m–e、e–f を本数 3 で走らせる。
+    let dir = session("agent-rail-starves-self");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "0"]);
+    let cmds = write(
+        &dir.join("r.json"),
+        &format!(
+            r#"[{{"type":"BuildRoad","from":[0,10],"to":[110,10],"kind":"Small"}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[12,9],"rotation":2}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[42,9],"rotation":2}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[72,9],"rotation":2}},
+            {{"type":"PlaceBuilding","kind":"Station","at":[102,9],"rotation":2}},
+            {{"type":"BuildRail","from":[12,8],"to":[33,8]}},
+            {{"type":"BuildRail","from":[42,8],"to":[52,8]}},
+            {{"type":"BuildRail","from":[52,8],"to":[63,8]}},
+            {{"type":"BuildRail","from":[72,8],"to":[93,8]}},
+            {{"type":"CreateLine","from":{a},"to":{m}}},
+            {{"type":"CreateLine","from":{m},"to":{e}}},
+            {{"type":"CreateLine","from":{e},"to":{f}}},
+            {{"type":"SetLineTrains","line":{a},"trains":3}},
+            {{"type":"SetLineTrains","line":{m},"trains":3}},
+            {{"type":"SetLineTrains","line":{e},"trains":3}}]"#,
+            a = st(0),
+            m = st(1),
+            e = st(2),
+            f = st(3),
+        ),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    for r in acted["results"].as_array().unwrap() {
+        assert_eq!(r["outcome"], "Applied", "{acted}");
+    }
+    cli(&["agent", "advance", d, "600"]);
+    // a–f は 4 本で区画の枠を分けて自分の分け前が 0 になり、ほかの 3 本の cap を 3 から 1 に下げるので断る。
+    let cmds = write(
+        &dir.join("af.json"),
+        &format!(
+            r#"[{{"type":"CreateLine","from":{a},"to":{f}}}]"#,
+            a = st(0),
+            f = st(3)
+        ),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let r = &acted["results"][0];
+    assert_eq!(r["outcome"], "Denied", "{acted}");
+    assert_eq!(r["reason"], "LineStarvesSelf", "{acted}");
+    let lowered = r["loweredLines"].as_array().unwrap();
+    assert_eq!(lowered.len(), 3, "{acted}");
+    for l in lowered {
+        assert_eq!(l["cap"], 3, "{acted}");
+        assert_eq!(l["capAfter"], 1, "{acted}");
+    }
+    // a–e は e–f を巻き込まないので受け付け、a–m と m–e の cap が 1 に下がる。消すと cap は 3 に戻る。
+    let cmds = write(
+        &dir.join("ae.json"),
+        &format!(
+            r#"[{{"type":"CreateLine","from":{a},"to":{e}}},
+            {{"type":"RemoveLine","line":{l3}}}]"#,
+            a = st(0),
+            e = st(2),
+            l3 = st(3)
+        ),
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
+    assert!(
+        acted["results"][0]["removedTrains"].as_u64().unwrap() > 0,
+        "{acted}"
+    );
+    assert_eq!(acted["results"][1]["outcome"], "Applied", "{acted}");
+    let o = json(&cli(&["agent", "observe", d]));
+    let lines = o["rail"]["lines"].as_array().unwrap();
+    assert_eq!(lines.len(), 3, "{o}");
+    let to_start: u64 = lines.iter().map(|l| l["toStart"].as_u64().unwrap()).sum();
+    assert!(to_start > 0, "{o}");
+    for l in lines {
+        assert_eq!(l["cap"], 3, "{o}");
+        assert_eq!(
+            l["toStart"].as_u64().unwrap() + l["running"].as_u64().unwrap(),
+            3,
+            "{o}"
+        );
+    }
+    cli(&["agent", "advance", d, "600"]);
+    let o = json(&cli(&["agent", "observe", d]));
+    for l in o["rail"]["lines"].as_array().unwrap() {
+        assert_eq!(l["running"], 3, "{o}");
+        assert_eq!(l["toStart"], 0, "{o}");
+    }
+}
+
 /// 大きすぎる縮尺は、あふれずに断る。
 #[test]
 fn map_refuses_huge_scale() {

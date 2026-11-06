@@ -1211,6 +1211,9 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
             "踏切のマスでは、道路をつなぐ、分ける、曲げることも、線路の端や分岐を置くこともできない"
         }
         DenyReason::CrossingTooClose => "すぐ隣にほかの踏切がある",
+        DenyReason::LineStarvesSelf => {
+            "待てる所の枠が回ってこず、その路線は走れないうえに、ほかの路線の列車が減る"
+        }
     }
 }
 
