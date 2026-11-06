@@ -29,13 +29,16 @@ export type LineRow = {
   canSubtract: boolean;
 };
 
-/** 上限が 0 の理由の文。ほかの路線と進路を共有しているか、待てる所が足りないかを言う。 */
+/**
+ * 上限が 0 の理由の文。待てる所が 2 つ未満か、ほかの路線と共有する区画の枠の分け前がないかを言う。
+ */
 export function capZeroReason(line: RailLineInfo): string {
   const names = line.sharedWith.map((l) => lineName(l.index)).join("、");
-  if (names !== "") {
-    return `この路線は${names}と進路を共有していて、待てる所が足りないので走れない（待てる所 ${line.waitPlaces}、2 つ以上いる）`;
+  const shared = names !== "" ? `この路線は${names}と進路を共有していて、` : "";
+  if (line.waitPlaces < 2 || names === "") {
+    return `${shared}待てる所が足りないので走れない（待てる所 ${line.waitPlaces}、2 つ以上いる）`;
   }
-  return `待てる所が足りないので走れない（待てる所 ${line.waitPlaces}、2 つ以上いる）`;
+  return `${shared}共有する所に止まれる列車の枠が回ってこないので走れない（同じ所を使う路線を減らすと走れる）`;
 }
 
 /** 路線 1 本の一覧の行に出す文。 */
