@@ -2,6 +2,9 @@ import { describe, expect, test } from "vitest";
 import { roofGeometry } from "./detail.ts";
 import {
   carve,
+  GARAGE_DECK_COLOR,
+  GARAGE_DECK_EDGE_COLOR,
+  GARAGE_DECK_INSET,
   grow,
   LANE_EDGE_COLOR,
   LANE_FACE_COLOR,
@@ -313,5 +316,56 @@ describe("段ごとの駐車場", () => {
     for (const name of ["lots", "lotEdges", "lotLines"]) {
       expect(alpha(64, name)).toBe(1);
     }
+  });
+});
+
+describe("共同の駐車場の絵", () => {
+  // 平面の駐車場は 2×2 マス (10, 20)〜(11, 21)。枠の並びだけで、切り欠く長方形は 0 個
+  const PLANE = [10, 20, 11, 21, 3];
+  const planeStrips = [
+    ...[10.375, 20.0625, 11, 21.9375, -1, 0, 6],
+    ...[11, 20.0625, 11.625, 21.9375, 1, 0, 6],
+  ];
+  const planeLot = new Float64Array([...[10, 20, 12, 0, 0, 2, 0, 0], ...planeStrips]);
+  // 駐車場ビルは 4×4 マス (30, 20)〜(33, 23)。屋上の 48 枠を 4 本の並びで置く
+  const GARAGE = [30, 20, 33, 23, 4];
+  const garageLot = new Float64Array([
+    ...[30, 20, 48, 192, 0, 1, 0, 0],
+    ...[30.375, 20.125, 31, 23.875, -1, 0, 12],
+  ]);
+
+  test("枠の並びだけの駐車場は、枠の白線を引き、面と縁は切り欠かない", () => {
+    const m = buildingMeshes(new Float64Array(), new Float64Array([...PLANE]), planeLot);
+    expect(m.lots.vertexCount).toBe(0);
+    expect(m.lotEdges.vertexCount).toBe(0);
+    // 並び 1 本につき、枠を分ける線が 7 本と奥の線が 1 本
+    expect(m.lotLines.vertexCount).toBe(6 * 8 * 2);
+    expect(colorOf(m.lotLines, 0)).toEqual(f32(LOT_LINE_COLOR));
+  });
+
+  test("平面の駐車場に屋上の面は足さず、駐車場ビルだけに足す", () => {
+    const plane = buildingMeshes(new Float64Array(), new Float64Array(PLANE), planeLot);
+    const garage = buildingMeshes(new Float64Array(), new Float64Array(GARAGE), garageLot);
+    // 施設の面は 5 つ（縁の 4 本と面）。駐車場ビルは屋上の面が 1 つ足される
+    expect(plane.facilities.vertexCount).toBe(6 * 5);
+    expect(garage.facilities.vertexCount).toBe(6 * 6);
+    expect(plane.lotEdges.vertexCount).toBe(0);
+    expect(garage.lotEdges.vertexCount).toBe(6 * 4);
+    expect(colorOf(garage.lotEdges, 0)).toEqual(f32(GARAGE_DECK_EDGE_COLOR));
+    const deck = boxes(garage.facilities).at(-1) as Rect;
+    expect(deck.x0).toBeCloseTo(30 + GARAGE_DECK_INSET, 4);
+    expect(deck.y1).toBeCloseTo(24 - GARAGE_DECK_INSET, 4);
+    const verts = garage.facilities.vertexCount;
+    expect(colorOf(garage.facilities, verts - 1)).toEqual(f32(GARAGE_DECK_COLOR));
+  });
+
+  test("駐車場ビルの屋上の面は、敷地の壁の内側に収まる", () => {
+    const garage = buildingMeshes(new Float64Array(), new Float64Array(GARAGE), garageLot);
+    const deck = boxes(garage.facilities).at(-1) as Rect;
+    const site = { x0: 30, y0: 20, x1: 34, y1: 24 };
+    expect(deck.x0).toBeGreaterThan(site.x0);
+    expect(deck.x1).toBeLessThan(site.x1);
+    expect(deck.y0).toBeGreaterThan(site.y0);
+    expect(deck.y1).toBeLessThan(site.y1);
   });
 });

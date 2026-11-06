@@ -9,9 +9,11 @@
 use chizu_core::building::{
     Building, LANE_WIDTH_MM, ParkingCut, SLOT_DEPTH_MM, SLOT_WIDTH_MM, SLOTS_PER_TILE,
 };
-use chizu_core::movement::{LotEnd, lot_end};
+use chizu_core::movement::{LotEnd, SharedLot, facility_end, lot_end};
 use chizu_core::network::{Network, TILE_MM};
+use chizu_core::service::Facility;
 use chizu_core::world::World;
+use chizu_core::{ServiceKind, TilePos};
 
 /// 1 つの枠の奥行き（マス）。5m である。
 const SLOT_DEPTH: f64 = SLOT_DEPTH_MM as f64 / TILE_MM as f64;
@@ -44,6 +46,51 @@ pub struct LotShape {
     pub houses: Vec<Rect>,
 }
 
+/// 敷地の座標系。間口に沿う向きの座標 u は `front` の辺を 0、道路に直角な座標 v は道路に面した辺を 0 として、
+/// 建物（施設）の中へ増える。`far` なら u を折り返し、間口の `front` と反対の端を 0 とする。
+struct Frame {
+    front: (f64, f64),
+    toward: (i64, i64),
+    frontage: f64,
+    far: bool,
+}
+
+impl Frame {
+    fn new(front: TilePos, toward: (i64, i64), frontage: u64, far: bool) -> Self {
+        Self {
+            front: (front.x as f64 + 0.5, front.y as f64 + 0.5),
+            toward,
+            frontage: frontage as f64,
+            far,
+        }
+    }
+
+    fn world(&self, u: f64, v: f64) -> (f64, f64) {
+        let (tx, ty) = self.toward;
+        let (ax, ay) = (-ty, tx);
+        let u = if self.far { self.frontage - u } else { u } - 0.5;
+        let v = v - 0.5;
+        (
+            self.front.0 + ax as f64 * u - tx as f64 * v,
+            self.front.1 + ay as f64 * u - ty as f64 * v,
+        )
+    }
+
+    fn rect(&self, u0: f64, v0: f64, u1: f64, v1: f64) -> Rect {
+        let (x0, y0) = self.world(u0, v0);
+        let (x1, y1) = self.world(u1, v1);
+        [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]
+    }
+
+    /// 局所の向き (du, dv) をワールドの向きに直す。
+    fn direction(&self, du: i64, dv: i64) -> (i64, i64) {
+        let (tx, ty) = self.toward;
+        let (ax, ay) = (-ty, tx);
+        let du = if self.far { -du } else { du };
+        (ax * du - tx * dv, ay * du - ty * dv)
+    }
+}
+
 /// 建物の駐車場の切り欠いた形。切り欠かない建物（斜めの道路に面した建物と、自宅の駐車場を持たない家）は `None`。
 /// `seed` は街の種である。
 pub fn lot_shape(net: &Network, b: &Building, seed: u64) -> Option<LotShape> {
@@ -51,35 +98,19 @@ pub fn lot_shape(net: &Network, b: &Building, seed: u64) -> Option<LotShape> {
     if layout.cut == ParkingCut::None {
         return None;
     }
-    let (tx, ty) = b.toward_road;
-    let (ax, ay) = (-ty, tx);
+    let (tx, _) = b.toward_road;
     let w = b.area.max.x.abs_diff(b.area.min.x) + 1;
     let h = b.area.max.y.abs_diff(b.area.min.y) + 1;
     let (frontage, depth) = if tx == 0 { (w, h) } else { (h, w) };
-    let frontage = frontage as f64;
+    let frame = Frame::new(
+        b.front,
+        b.toward_road,
+        frontage,
+        lot_end(net, b, seed) == LotEnd::Far,
+    );
     let depth = depth as f64;
-    let far = lot_end(net, b, seed) == LotEnd::Far;
-    // 間口に沿う向きの座標 u は `front` の辺を 0、道路に直角な座標 v は道路に面した辺を 0 として、建物の中へ増える。
-    // 切り欠きは u の小さい端に置いて作り、`Far` ならそこで u を折り返す。
-    let (cx, cy) = (b.front.x as f64 + 0.5, b.front.y as f64 + 0.5);
-    let fold = |u: f64| if far { frontage - u } else { u };
-    let world = |u: f64, v: f64| {
-        let (u, v) = (fold(u) - 0.5, v - 0.5);
-        (
-            cx + ax as f64 * u - tx as f64 * v,
-            cy + ay as f64 * u - ty as f64 * v,
-        )
-    };
-    let rect = |u0: f64, v0: f64, u1: f64, v1: f64| -> Rect {
-        let (x0, y0) = world(u0, v0);
-        let (x1, y1) = world(u1, v1);
-        [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]
-    };
-    // 局所の向き (du, dv) をワールドの向きに直す
-    let direction = |du: i64, dv: i64| {
-        let du = if far { -du } else { du };
-        (ax * du - tx * dv, ay * du - ty * dv)
-    };
+    let rect = |u0, v0, u1, v1| frame.rect(u0, v0, u1, v1);
+    let direction = |du, dv| frame.direction(du, dv);
     let mut shape = LotShape {
         faces: Vec::new(),
         strips: Vec::new(),
@@ -201,11 +232,94 @@ pub fn encode<'a>(
     out
 }
 
+/// 共同の駐車場の枠の並び。平面の駐車場は敷地の全面に、駐車場ビルは屋上に置く。
+///
+/// 並べ方は建物の脇の駐車場と同じで、間口に沿って 1 マスずつの列を並べ、偶数の列は通路を端の側に、
+/// 奇数の列は通路を内の側に置く。枠の数は、敷地のマスの数 × 1 マスの枠の数（駐車場ビルは屋上の 1 層分）である。
+/// 枠の並びは敷地の奥行きの真ん中に寄せる。共同の駐車場でなければ `None`。
+pub fn facility_shape(net: &Network, f: &Facility) -> Option<LotShape> {
+    if !f.kind.is_parking() {
+        return None;
+    }
+    let (tx, _) = f.toward_road;
+    let w = f.area.max.x.abs_diff(f.area.min.x) + 1;
+    let h = f.area.max.y.abs_diff(f.area.min.y) + 1;
+    let (frontage, depth) = if tx == 0 { (w, h) } else { (h, w) };
+    let frame = Frame::new(
+        f.front,
+        f.toward_road,
+        frontage,
+        facility_end(net, f) == LotEnd::Far,
+    );
+    let per_column = depth * SLOTS_PER_TILE;
+    let margin = (depth as f64 - per_column as f64 * SLOT_WIDTH) / 2.0;
+    let mut shape = LotShape {
+        faces: Vec::new(),
+        strips: Vec::new(),
+        lanes: Vec::new(),
+        houses: Vec::new(),
+    };
+    for j in 0..frontage {
+        let col = j as f64;
+        let (u0, u1, open) = if j % 2 == 0 {
+            (col + AISLE, col + 1.0, frame.direction(-1, 0))
+        } else {
+            (col, col + SLOT_DEPTH, frame.direction(1, 0))
+        };
+        shape.strips.push(Strip {
+            rect: frame.rect(u0, margin, u1, margin + per_column as f64 * SLOT_WIDTH),
+            open,
+            count: per_column,
+        });
+    }
+    Some(shape)
+}
+
+/// 屋上に枠を置く台数。駐車場ビルは 5 層に積むので、屋上の枠は台数の 1/5 である。平面の駐車場は全部の枠が見える。
+fn visible_spaces(kind: ServiceKind) -> u32 {
+    let (w, d) = kind.size();
+    let surface = u32::try_from(w * d * SLOTS_PER_TILE).expect("枠の数が u32 に収まらない");
+    surface.min(kind.parking_spaces())
+}
+
+/// 共同の駐車場の形。[`encode`] と同じ並びで、共同の駐車場だけを続ける。建物のように切り欠かないので、
+/// 長方形は 0 個、平面の台数は見える枠の数、建物の中の台数は見えない台数（駐車場ビルの下の層）である。
+/// 鍵は施設の占めるマスの min の x と y で、建物とは重ならない。
+pub fn encode_facilities<'a>(
+    net: &Network,
+    facilities: impl Iterator<Item = &'a Facility>,
+) -> Vec<f64> {
+    let mut out = Vec::new();
+    for f in facilities {
+        let Some(shape) = facility_shape(net, f) else {
+            continue;
+        };
+        let visible = visible_spaces(f.kind);
+        out.extend([
+            f.area.min.x as f64,
+            f.area.min.y as f64,
+            f64::from(visible),
+            f64::from(f.kind.parking_spaces() - visible),
+            0.0,
+            shape.strips.len() as f64,
+            0.0,
+            0.0,
+        ]);
+        for s in &shape.strips {
+            out.extend(s.rect);
+            out.extend([s.open.0 as f64, s.open.1 as f64, s.count as f64]);
+        }
+    }
+    out
+}
+
 /// 停めてある台数。駐車場のある建物のうち、1 台以上停めてある建物だけを、次の並びで続ける。
 ///
-/// `[建物の min の x, min の y, 停めてある台数, そのうち建物の中に停めてある台数]`。建物の番号の順に並べる。
+/// `[建物の min の x, min の y, 停めてある台数, そのうち建物の中に停めてある台数]`。建物の番号の順に並べ、そのあとに共同の駐車場を続ける。
 /// 建物は `encode` と同じ鍵（min の x と y）で引く。台数は平面と建物の中の合計で、
 /// 平面の枠を先に埋めるものとして、平面の台数を超えた分を建物の中の台数にする。
+/// 共同の駐車場は、建物の中の台数を 0 とし、停まって見える台数（借りた世帯の停めた車と外来の停めた車。
+/// 駐車場ビルは屋上の枠に比べて縮めた台数）を送る。鍵は施設の占めるマスの min の x と y である。
 /// どの枠に置くかは画面が決める。状態は変えない。
 pub fn encode_parked(world: &World) -> Vec<f64> {
     let mut out = Vec::new();
@@ -228,7 +342,23 @@ pub fn encode_parked(world: &World) -> Vec<f64> {
             parked.saturating_sub(layout.surface).min(layout.indoor) as f64,
         ]);
     }
+    for f in world.facilities().iter().filter(|f| f.kind.is_parking()) {
+        let n = visible_cars(world.trips().shared_lot(f.area.min), f.kind);
+        if n == 0 {
+            continue;
+        }
+        out.extend([f.area.min.x as f64, f.area.min.y as f64, n as f64, 0.0]);
+    }
     out
+}
+
+/// 共同の駐車場に停まって見える車の台数。借りた世帯の停めた車と、借りていない車（外来）の停めた車の合計で、
+/// 台数を超えない。借りた世帯の車が出かけているあいだは、その枠は空いて見える。
+/// 駐車場ビルは屋上の枠が台数の 1/5 なので、見える台数も比べて縮める（端数は切り上げ、1 台でもあれば 1 台は見える）。
+fn visible_cars(lot: SharedLot, kind: ServiceKind) -> u64 {
+    let spaces = u64::from(kind.parking_spaces());
+    let n = lot.parked().min(spaces);
+    (n * u64::from(visible_spaces(kind))).div_ceil(spaces)
 }
 
 #[cfg(test)]
@@ -757,5 +887,83 @@ mod tests {
         }
         assert!(total >= 1.0);
         assert!(indoor_parked >= 1.0, "建物の中に停めた車が1台もない");
+    }
+
+    /// 共同の駐車場の枠は、敷地の中に重ならずに収まり、数が台数（駐車場ビルは屋上の 1 層分）と合う。
+    #[test]
+    fn shared_lot_slots_fit_inside_the_site() {
+        use chizu_core::ServiceKind;
+        let (mut sim, _guard) = crate::test_town::carless_town(1);
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingGarage, 30);
+        let world = sim.world();
+        let net = world.network();
+        let mut seen = 0;
+        for f in world.facilities().iter().filter(|f| f.kind.is_parking()) {
+            let shape = facility_shape(net, f).expect("駐車場の形がない");
+            let site = [
+                f.area.min.x as f64,
+                f.area.min.y as f64,
+                f.area.max.x as f64 + 1.0,
+                f.area.max.y as f64 + 1.0,
+            ];
+            let slots: u64 = shape.strips.iter().map(|s| s.count).sum();
+            assert_eq!(slots, u64::from(visible_spaces(f.kind)));
+            assert!(shape.faces.is_empty());
+            for s in &shape.strips {
+                assert!(inside(site, s.rect), "{:?} {site:?}", s.rect);
+                assert_eq!(s.open.0.abs() + s.open.1.abs(), 1);
+            }
+            for (i, a) in shape.strips.iter().enumerate() {
+                for b in &shape.strips[i + 1..] {
+                    assert!(!overlap(a.rect, b.rect), "{a:?} {b:?}");
+                }
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 2);
+        assert_eq!(visible_spaces(ServiceKind::ParkingLot), 12);
+        assert_eq!(visible_spaces(ServiceKind::ParkingGarage), 48);
+        // 敷地ごとに 1 件、枠の並びだけの記録が続く
+        let data = encode_facilities(net, world.facilities().iter());
+        assert_eq!(data.len(), (8 + 7 * 2) + (8 + 7 * 4));
+    }
+
+    /// 停まっていない共同の駐車場は記録に出ず、鍵は施設の角のマスと合う。
+    #[test]
+    fn idle_shared_lots_are_left_out_of_the_parked_records() {
+        use chizu_core::ServiceKind;
+        let (mut sim, _guard) = crate::test_town::carless_town(1);
+        crate::test_town::place_lot(&mut sim, ServiceKind::ParkingLot, 24);
+        sim.advance(chizu_core::TICKS_PER_DAY as u32);
+        let world = sim.world();
+        let lot = world.trips().shared_lot(TilePos::new(23, 8));
+        assert_eq!(lot.rented, 12, "枠がすべて借りられていない");
+        let rec = encode_parked(world)
+            .chunks(4)
+            .find(|r| r[0] == 23.0 && r[1] == 8.0)
+            .map(|r| (r[2], r[3]));
+        match visible_cars(lot, ServiceKind::ParkingLot) {
+            0 => assert_eq!(rec, None),
+            n => assert_eq!(rec, Some((n as f64, 0.0))),
+        }
+    }
+
+    /// 見える台数は、停まっている車の合計（台数で頭打ち）を、見える枠の数に比べて縮めたものである。
+    #[test]
+    fn visible_cars_count_parked_cars_and_shrink_for_garages() {
+        let lot = |rp, vp| SharedLot {
+            rented: 12,
+            rented_parked: rp,
+            visitors: chizu_core::movement::Lot {
+                parked: vp,
+                reserved: 0,
+            },
+        };
+        assert_eq!(visible_cars(lot(5, 3), ServiceKind::ParkingLot), 8);
+        assert_eq!(visible_cars(lot(1, 0), ServiceKind::ParkingGarage), 1);
+        assert_eq!(visible_cars(lot(5, 0), ServiceKind::ParkingGarage), 1);
+        assert_eq!(visible_cars(lot(6, 0), ServiceKind::ParkingGarage), 2);
+        assert_eq!(visible_cars(lot(200, 40), ServiceKind::ParkingGarage), 48);
     }
 }

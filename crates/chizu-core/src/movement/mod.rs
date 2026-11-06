@@ -50,8 +50,8 @@ pub use congestion::{Congestion, classify as classify_congestion};
 pub use junction::Rescues;
 pub use parking::{
     CurbWait, DailyLotMisses, Lot, LotEnd, LotId, LotMisses, PARK_RADIUS, ParkingTally,
-    SHORTAGE_LOTS_FULL, SharedLot, building_spot, facility_spot, lane_tiles, lot_end, lot_spot,
-    lot_tiles, shared_facility,
+    SHORTAGE_LOTS_FULL, SharedLot, building_spot, facility_end, facility_spot, lane_tiles, lot_end,
+    lot_spot, lot_tiles, shared_facility,
 };
 pub use pos::SidewalkPos;
 
@@ -200,7 +200,7 @@ impl Trip {
         let Some((lot, to)) = (match self.then {
             parking::Then::Arrive => None,
             parking::Then::Drive { lot, to, .. } | parking::Then::Walk { lot, to } => {
-                Some((lot, to))
+                lot.map(|lot| (lot, to))
             }
         }) else {
             return false;

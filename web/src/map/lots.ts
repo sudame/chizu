@@ -27,6 +27,14 @@ export const LOT_LINE_COLOR = hex("#ffffff");
 export const LANE_FACE_COLOR = hex("#fbfaf6");
 /** 私道の縁の色。寄りで 1px の線にする。 */
 export const LANE_EDGE_COLOR = hex("#d6d0c4");
+/** 駐車場ビルの施設の種類（ServiceKind の値）。 */
+export const SERVICE_PARKING_GARAGE = 4;
+/** 駐車場ビルの屋上の面の色（docs/map-style.md の「共同の駐車場」）。敷地の壁より明るい。 */
+export const GARAGE_DECK_COLOR = hex("#e9ecf0");
+/** 駐車場ビルの屋上の縁の色。寄りで 1px の線にする。 */
+export const GARAGE_DECK_EDGE_COLOR = hex("#8f98a5");
+/** 屋上の面を、敷地の外周から内へ縮める幅（マス）。外周の壁が帯として残る。 */
+export const GARAGE_DECK_INSET = 0.12;
 /** 縁と白線の太さの半分（画面のピクセル）。線の太さは 1px である。 */
 export const LOT_LINE_HALF_PX = 0.5;
 
@@ -324,4 +332,19 @@ function slotLines(g: Geometry, s: Strip): void {
     const back = s.openY > 0 ? s.y0 : s.y1;
     g.line(s.x0, back, s.x1, back, 0, LOT_LINE_COLOR, h);
   }
+}
+
+/**
+ * 駐車場ビルの屋上。敷地の壁（施設の面と縁）の内側に明るい面を重ね、寄りでは縁の線を引く。
+ * 屋上の面は施設の面と同じ頂点（`facilities`）に、縁は駐車場の縁（`lotEdges`）に置く。
+ * 枠の白線と停まっている車は、屋上の枠として中核が送る（1 層分）。
+ */
+export function addGarageDeck(meshes: LotMeshes & { facilities: Geometry }, site: Rect): void {
+  const d = grow(site, -GARAGE_DECK_INSET);
+  meshes.facilities.box(d.x0, d.y0, d.x1, d.y1, GARAGE_DECK_COLOR);
+  const h = LOT_LINE_HALF_PX;
+  meshes.lotEdges.line(d.x0, d.y0, d.x1, d.y0, 0, GARAGE_DECK_EDGE_COLOR, h);
+  meshes.lotEdges.line(d.x0, d.y1, d.x1, d.y1, 0, GARAGE_DECK_EDGE_COLOR, h);
+  meshes.lotEdges.line(d.x0, d.y0, d.x0, d.y1, 0, GARAGE_DECK_EDGE_COLOR, h);
+  meshes.lotEdges.line(d.x1, d.y0, d.x1, d.y1, 0, GARAGE_DECK_EDGE_COLOR, h);
 }
