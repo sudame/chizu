@@ -44,18 +44,21 @@ export function capZeroReason(line: RailLineInfo): string {
 
 /**
  * 終点の駅で折り返せる本数で走らせる本数を抑えている理由の文。どの終点で、ホームがいくつあり、ほかの路線と
- * 分け合っているかを言う。
+ * 分け合っているかを言う。抑えている駅が路線の終点でないときは、ほかの路線が折り返すホームを通り抜けている。
  */
 export function turnLimitReason(line: RailLineInfo, nameOf: (station: Tile) => string): string {
   const t = line.turnLimit;
   if (t === null) {
     return `終点の駅で折り返せるのは ${line.turnCap} 本まで`;
   }
-  const head = `終点の${nameOf(t.station)}で折り返せるのは ${line.turnCap} 本まで`;
   const shared =
-    t.sharedLines > 0
-      ? `。同じホームで折り返すほかの路線（${t.sharedLines} 本）と分け合っている`
-      : "";
+    t.sharedLines > 0 ? `。同じホームを使うほかの路線（${t.sharedLines} 本）と分け合っている` : "";
+  const ends = line.looped ? [] : [line.stations[0], line.stations[line.stations.length - 1]];
+  const terminal = ends.some((s) => s !== undefined && s.x === t.station.x && s.y === t.station.y);
+  if (!terminal) {
+    return `${nameOf(t.station)}でほかの路線が折り返すホームを通るので、走らせるのは ${line.turnCap} 本まで（増やしてもホームの手前に並ぶだけ）${shared}`;
+  }
+  const head = `終点の${nameOf(t.station)}で折り返せるのは ${line.turnCap} 本まで`;
   const platforms =
     t.platforms >= 2
       ? "（ホーム 2 つを交互に使っても足りない。増やしても終点の手前に並ぶだけ）"

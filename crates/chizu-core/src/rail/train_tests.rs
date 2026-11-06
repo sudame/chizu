@@ -1329,10 +1329,11 @@ fn line_capacity_shows_why_the_cap_is_zero() {
 
 /// 駅 W、M、E、N の街に、駅を 2〜3 つ選んだ路線を 2〜4 本と、本数 1〜16 を種で選んで 20,000 tick 回す。
 /// 区間運転、同じ駅を並べた路線、分岐の先の路線がまざる。閉塞が重ならず、備えが働かず、どの列車も
-/// 3,000 tick 以内に駅を出る。
-fn four_station_fuzz(seed: u64) {
+/// 3,000 tick 以内に駅を出る。`turn_caps` なら、終点で折り返せる本数で走らせる本数を抑える（ふだんの形）。
+fn four_station_fuzz(seed: u64, turn_caps: bool) {
     let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let (mut w, st) = two_line_world();
+    w.lift_turn_caps(!turn_caps);
     for _ in 0..2 + r.below(3) {
         let mut pool: Vec<StationId> = st.to_vec();
         let mut pick = Vec::new();
@@ -1364,7 +1365,17 @@ fn four_station_fuzz(seed: u64) {
 #[test]
 fn mixed_lines_on_four_stations_do_not_deadlock() {
     for seed in 0..40 {
-        four_station_fuzz(seed);
+        four_station_fuzz(seed, false);
+    }
+}
+
+/// 終点で折り返せる本数で抑える形でも、駅 W、M、E、N の街は行き詰まらない。種 175 と 631 は、区画の分を折り返せる
+/// 本数で分け直したあと、上がった `cap` で求め直した折り返せる本数が 1 回目より多くなる路線がある（3 路線の数珠
+/// つなぎ、#377）。
+#[test]
+fn mixed_lines_on_four_stations_with_turn_caps_do_not_deadlock() {
+    for seed in (0..20).chain([175, 631]) {
+        four_station_fuzz(seed, true);
     }
 }
 
@@ -1637,12 +1648,14 @@ fn removing_a_line_restores_the_cap_of_a_starved_line() {
 }
 
 /// 路線と線路のコマンドをどう打っても、路線の上限は、書き出して読み戻して求め直した上限と同じになる
-/// （求め直し忘れがない）。
+/// （求め直し忘れがない）。区画の分は終点で折り返せる本数で変わる（#377）ので、折り返せる本数で抑える形で確かめる
+/// （抑えを外す印は書き出さない）。
 #[test]
 fn line_caps_always_match_a_fresh_plan() {
     for seed in 0..60u64 {
         let mut r = Xorshift(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let (mut w, st) = two_line_world();
+        w.lift_turn_caps(false);
         let mut ids: Vec<LineId> = Vec::new();
         for step in 0..30 {
             let cmd = match r.below(7) {

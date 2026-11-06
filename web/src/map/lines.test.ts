@@ -180,6 +180,17 @@ describe("路線の一覧", () => {
     expect(w2).not.toContain("分け合って");
   });
 
+  test("ほかの路線が折り返すホームを通り抜けて抑えられているときは、終点と言わない", () => {
+    const [through] = parseLines(
+      encode(0, { trains: 7, cap: 9, turnCap: 4, turnLimit: [1, 15, 0, 1] }),
+    );
+    if (!through) throw new Error("読めない");
+    const w = lineRow(through, () => "中駅").warning;
+    expect(w).toContain("中駅でほかの路線が折り返すホームを通るので、走らせるのは 4 本まで");
+    expect(w).toContain("同じホームを使うほかの路線（1 本）と分け合っている");
+    expect(w).not.toContain("終点");
+  });
+
   test("上限が 0 の路線と 0 でない路線が混ざった並びを続けて読む", () => {
     const lines = parseLines([
       ...encode(0),
