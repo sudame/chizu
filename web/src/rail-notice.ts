@@ -5,7 +5,7 @@
 // docs/design.md の 3.10 の「作る順の 8 で決めた細部」にある。
 
 import { capZeroReason } from "./line-panel.ts";
-import { lineName, type RailLineInfo } from "./map/lines.ts";
+import { lineLimit, lineName, type RailLineInfo } from "./map/lines.ts";
 import type { Tile } from "./map/roads.ts";
 import { STATION_WALK_RADIUS } from "./map/tools.ts";
 import { type RailStats, type StationStat, stationKey } from "./map/transit.ts";
@@ -266,9 +266,11 @@ export function railNotices(
     const details = crowded.map((l) => {
       const s = lineStatOf(stats, l);
       const room =
-        l.trains < l.cap
+        l.trains < lineLimit(l)
           ? "本数を増やすと解ける"
-          : "本数の上限に達している。線路を足して待てる所を増やすか、路線を分ける";
+          : l.turnCap < l.cap
+            ? "終点の駅で折り返せる本数に達していて、本数を増やしても走る本数は増えない"
+            : "本数の上限に達している。線路を足して待てる所を増やすか、路線を分ける";
       return `${lineName(l.index)}：いちばん混んだ列車が ${percent(s?.loadPermille ?? 0)}。${room}`;
     });
     notices.push({

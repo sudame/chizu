@@ -22,6 +22,7 @@ const line = (over: Partial<RailLineInfo> = {}): RailLineInfo => ({
   trains: 2,
   cap: 4,
   allowed: 2,
+  turnCap: 16,
   stopped: false,
   headway: 300,
   roundTrip: 600,
@@ -111,6 +112,15 @@ describe("鉄道の知らせ", () => {
       name,
     )[0];
     expect(full?.details[0]).toContain("上限に達している");
+    // 終点で折り返せる本数で抑えているときは、本数を増やすよう勧めない
+    const turned = railNotices(
+      [line({ trains: 2, cap: 4, turnCap: 2 })],
+      stats([lineStat({ loadPermille: 990 })]),
+      null,
+      name,
+    )[0];
+    expect(turned?.details[0]).toContain("折り返せる本数に達して");
+    expect(turned?.details[0]).not.toContain("本数を増やすと解ける");
     const again = railNotices([line()], stats([lineStat({ loadPermille: 1000 })]), null, name)[0];
     expect(again?.key).toBe(room?.key);
   });

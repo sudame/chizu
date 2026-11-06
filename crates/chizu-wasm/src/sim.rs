@@ -680,7 +680,7 @@ impl Sim {
 
     /// 路線を、1 路線につき
     /// `[添え字, 世代, 環状か, 決めた本数, 本数の上限, 走らせる本数, 止まっているか, 運転間隔(tick。なければ 0), 1 周の見込み(tick),
-    /// 駅の数, 線路の数, 待てる所の数, 理由に挙げる路線の数]` の 13 個の数に、駅ごとの `[敷地の min の x, y]` と、
+    /// 駅の数, 線路の数, 待てる所の数, 理由に挙げる路線の数, 終点で折り返せる本数]` の 14 個の数に、駅ごとの `[敷地の min の x, y]` と、
     /// 線路ごとの `[a の x, y, b の x, y]` と、理由に挙げる路線ごとの `[添え字, 世代]` を続けて返す。
     /// 理由に挙げる路線は、上限が 0 の路線が進路を共有するほかの路線である。上限が 0 でなければ 0 本にする。
     /// 線路は進路に出てくるものを、重ならないよう最初に出てきた順に並べる。駅は路線の順である。
@@ -725,6 +725,7 @@ impl Sim {
                 tracks.len() as f64,
                 capacity.wait_places as f64,
                 shared.len() as f64,
+                f64::from(line.turn_cap()),
             ]);
             out.extend(stations.iter().flatten().map(|v| *v as f64));
             out.extend(tracks.iter().flatten().map(|v| *v as f64));
@@ -1913,11 +1914,12 @@ mod tests {
         };
         let c = sim.world().rail().line_capacity(id).unwrap();
         assert!(line > 0);
-        // 見出しの 12 番目が待てる所の数、13 番目が理由に挙げる路線の数
+        // 見出しの 12 番目が待てる所の数、13 番目が理由に挙げる路線の数、14 番目が終点で折り返せる本数
         assert_eq!(data[11], c.wait_places as f64);
         assert_eq!(data[12], 0.0);
-        // 見出し 13 個、駅 2 つ、線路 n 本のあとに理由の路線が続かない
-        assert_eq!(data.len(), 13 + 4 + data[10] as usize * 4);
+        assert_eq!(data[13], f64::from(c.turn_cap));
+        // 見出し 14 個、駅 2 つ、線路 n 本のあとに理由の路線が続かない
+        assert_eq!(data.len(), 14 + 4 + data[10] as usize * 4);
     }
 
     #[test]
