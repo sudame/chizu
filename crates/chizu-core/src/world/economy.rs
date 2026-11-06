@@ -1,7 +1,7 @@
 //! 財政と人口のマイルストーン。
 //!
 //! - 収支：住民の賃金と職場の利益に区画の種類ごとの税率をかけた税収と、共同の駐車場の料金から、
-//!   道路と施設の維持費を引く。
+//!   道路、施設、鉄道の維持費を引く。
 //!   1 日あたりの見込みを [`World::finances`] で出し、ゲーム内の 1 時間ごとにその 1/24 を所持金に足す。
 //!   24 で割り切れない端数は持ち越すので、何時間たっても 1 日あたりの見込みとずれない。
 //!   所持金は負になってもよい。
@@ -10,7 +10,7 @@
 use super::World;
 use crate::car_place::{CarPlace, fee_cap};
 use crate::clock::TICKS_PER_DAY;
-use crate::command::ZoneKind;
+use crate::command::{ServiceKind, ZoneKind};
 use crate::network::{SegmentKind, TILE_MM, road_cost_per_tile};
 use crate::round;
 use crate::units::Money;
@@ -104,6 +104,8 @@ pub struct Finances {
     pub facility_upkeep: [Money; 2],
     /// 共同の駐車場の維持費。
     pub parking_upkeep: Money,
+    /// 鉄道の維持費。駅の外の線路（建設費の [`ROAD_UPKEEP_PERMILLE_PER_DAY`]）と駅の分である。
+    pub rail_upkeep: Money,
 }
 
 impl Finances {
@@ -112,9 +114,10 @@ impl Finances {
     }
 
     pub fn expenses(&self) -> Money {
-        self.facility_upkeep
-            .iter()
-            .fold(self.road_upkeep + self.parking_upkeep, |a, b| a + *b)
+        self.facility_upkeep.iter().fold(
+            self.road_upkeep + self.parking_upkeep + self.rail_upkeep,
+            |a, b| a + *b,
+        )
     }
 
     /// 収入から支出を引いた額。負なら赤字である。
@@ -177,6 +180,14 @@ impl World {
         f.road_upkeep = Money(round::div_ceil(
             mul(road, ROAD_UPKEEP_PERMILLE_PER_DAY),
             mul(TILE_MM, 1_000),
+        ));
+        let stations = i64::try_from(self.rail.stations().count()).expect("駅の数があふれた");
+        f.rail_upkeep = Money(add(
+            round::div_ceil(
+                mul(self.rail.track_cost_mm(), ROAD_UPKEEP_PERMILLE_PER_DAY),
+                mul(TILE_MM, 1_000),
+            ),
+            mul(stations, ServiceKind::Station.upkeep_per_day().0),
         ));
         for facility in &self.facilities {
             let upkeep = facility.kind.upkeep_per_day();

@@ -22,6 +22,7 @@ use crate::command::ServiceKind;
 use crate::command::{Density, Zone, ZoneKind};
 use crate::id::BuildingId;
 use crate::network::{DIAGONAL_TILE_MM, Dir, LaneMode, LinkId, TILE_MM};
+use crate::rail::STATION_TRACK_ROW;
 use crate::rng::{RngPurpose, rng};
 use crate::round;
 use crate::service::{
@@ -698,13 +699,27 @@ impl World {
         let cost = kind.cost();
         self.money = self.money - cost;
         let far = *tiles.last().expect("敷地が空");
-        self.facilities.push(Facility {
+        let site = Facility {
             kind,
             area: TileRect::from_corners(at, far),
             front: at,
             toward_road,
             entrance: Some(entrance),
-        });
+        };
+        let used = if kind == ServiceKind::Station {
+            // 駅は施設の一覧に入れず、線路の網に持つ。駅の線路は、間口に沿う真ん中の列の両端を結ぶ。
+            let (w, _) = kind.size();
+            let row: Vec<TilePos> = lot_tiles(at, toward_road, w, STATION_TRACK_ROW + 1)
+                .filter(|(_, j, _)| *j == STATION_TRACK_ROW)
+                .map(|(_, _, t)| t)
+                .collect();
+            let ends = (row[0], *row.last().expect("駅の線路の列が空"));
+            self.rail.add_station(&site, ends);
+            TileUse::Station
+        } else {
+            self.facilities.push(site);
+            TileUse::Facility
+        };
         // CS2 と同じく、施設の下の区画は消し、区画の建物は取り壊す。
         let mut zones = BTreeMap::<ChunkCoord, Vec<(usize, Option<Zone>)>>::new();
         for t in &tiles {
@@ -716,7 +731,7 @@ impl World {
         }
         self.write_zones(zones);
         self.refresh_buildings();
-        self.write_occupancy(tiles.into_iter().map(|t| (t, TileUse::Facility)));
+        self.write_occupancy(tiles.into_iter().map(|t| (t, used)));
         ApplyOutcome::Applied
     }
 
@@ -729,6 +744,12 @@ impl World {
         for (f, entrance) in self.facilities.iter_mut().zip(facilities) {
             f.entrance = entrance;
         }
+        let stations: Vec<_> = self
+            .rail
+            .stations()
+            .map(|(id, s)| (id, self.frontage(s.front, s.toward_road).map(|(l, _)| l)))
+            .collect();
+        self.rail.set_entrances(&stations);
         let all: Vec<(BuildingId, Building)> =
             self.buildings.iter().map(|(id, b)| (id, *b)).collect();
         let mut removed = Vec::new();

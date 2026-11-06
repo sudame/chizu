@@ -60,7 +60,8 @@ observe の sinceLastObserve（前の observe からの増減）:
   agent new で作ったセッションでは、observe を打つたびに主な数をセッションの last-observe.json に残し、
   次の observe で fromTick（前に見た tick）と toTick のあいだに変わった数を changes に出す。
   changes は {"money": {"from": a, "to": b, "delta": b-a}, ...} の形で、変わっていない数は出さない。
-  見る数は、お金、収支、人口、就業、幸福度、車、転入、需要、建物の数、電気と水道の余裕、施設の数、買ったチャンクの数である。
+  見る数は、お金、収支、人口、就業、幸福度、車、転入、需要、建物の数、電気と水道の余裕、施設の数、買ったチャンクの数、
+  線路のマスの数、駅の数、鉄道の維持費である。
   new の直後の observe は、new が見た街との増減になる。前の observe がないとき（フィードバックのディレクトリなど）は null で、何も書かない。
 
 observe の buildings.lanes: 行き止まりの私道の脇に一軒家を並べた住宅。低密度の住宅の、間口 2 マスで奥行き 3 マス以上の敷地はすべてこれになる。
@@ -273,6 +274,12 @@ observe の signals:
   信号のある交差点ごとに、at マス、node ノードの ID、arms 腕ごとの toward（交差点から出ていく 1 歩の向き）と
   light（Green、Yellow、Red。直前の tick に効いた灯火）。
 
+observe の rail（線路と駅）:
+  tiles 駅の外の線路のマスの数、tracks 駅の外の線路の区間（ノードからノードまで）の数、
+  deadEnds 線路が 1 本だけつながるノード（線路の端。外へつないでいない駅の線路の端も入る）のマス、branches 分岐（3 本がつながる）のノードのマス、
+  stations 駅ごとの id、at（置いたときの at）、area 敷地の角、ends 駅の線路の両端のマス（ここから外へ線路を引く）、
+  facesRoad 面した道路があるか。financesPerDay.railUpkeep は線路と駅の 1 日の維持費である。
+
 observe の removedCrosswalks:
   横断歩道を外した腕のある交差点ごとに、at マス、node ノードの ID、arms 外した腕の向き（SetCrosswalk の arm と同じ名前）。
 
@@ -280,7 +287,7 @@ observe の removedCrosswalks:
   observe と同じく何も書かず、フィードバックのディレクトリにも打てる。角 (x0,y0)〜(x1,y1) は両端を含み、順番は問わない。
   1 文字が 1 マスで、先頭に凡例、上に x、行頭に y の目盛りが付く。座標は act のコマンドと同じである。
   --scale N を付けると、N×N マスを 1 文字にまとめる（既定は 1）。まとめた文字は、
-  公共施設、信号のある交差点（S s）、信号のない交差点（Z Y）、道路、駐車場（p）、建物、区画、水辺、買っていない土地、空きマスの順で、
+  公共施設、駅（E）、信号のある交差点（S s）、信号のない交差点（Z Y）、道路、線路（T）、駐車場（p）、建物、区画、水辺、買っていない土地、空きマスの順で、
   最初に当てはまるものにする。ただし --layer traffic では、道路の混み具合を交差点の文字より先に出す。
   建物は、電気か水が届いていないものが 1 つでもあれば * ^ % にする（まとめた文字では、セルの中の建物のうち 1 つでも届いていなければ印が付く）。
   どの網の電気や水が足りないかは observe の utilities の shortAt を見て、その at を map で眺める。
@@ -316,7 +323,9 @@ observe の removedCrosswalks:
       費用は区間ごとの建設費の差額で、上げるときだけかかり、下げても払い戻さない。高速道路は変えない。
       変える道路がなければ Denied（NoRoadToChange）、どれもすでに kind なら Denied（RoadKindUnchanged）。
   {"type":"Bulldoze","area":[[x,y],[x,y]]}
-      範囲の道路、施設、建物を取り壊す。道路は、範囲にかかった区間（交差点から交差点まで）ごと消える。
+      範囲の道路、線路、施設、駅、建物を取り壊す。道路は、範囲にかかった区間（交差点から交差点まで）ごと消える。
+      線路も、範囲にかかった区間（ノードからノードまで）ごと消える。駅は、範囲にかかれば駅の中の線路ごと消え、
+      駅の端につないだ外の線路は残る。
       範囲が 1 マスでも、その区間の全体が消え、沿道の建物（住んでいた世帯は家をなくす）も消える。
       施設と建物は、範囲にかかったものが消える。Applied のときの結果に、消えた数が bulldozed で付く（下の「act の結果」）。
   {"type":"PaintZone","area":[[x,y],[x,y]],"zone":"Residential"|"ResidentialLow"|"Commercial"|"Industrial"|"Office"|null}
@@ -332,7 +341,7 @@ observe の removedCrosswalks:
       そうでなければ NoZonableTile である。すでに同じ区画が載っているマスは、空きでも建物が建っていても、塗れたものとして数える。
       新しく塗れたマスがなく、塗れなかったマス（道路を除く）もないときは Denied（ZoneUnchanged）である。
       AppliedPartly と、この 2 つの理由と ZoneUnchanged の Denied には、結果に paint が付く（下の「act の結果」）。1 辺は 256 マスまで。
-  {"type":"PlaceBuilding","kind":"PowerPlant"|"WaterPump"|"ParkingLot"|"ParkingGarage","at":[x,y],"rotation":0..3}
+  {"type":"PlaceBuilding","kind":"PowerPlant"|"WaterPump"|"ParkingLot"|"ParkingGarage"|"Station","at":[x,y],"rotation":0..3}
       施設を置く。発電所は 4×4 で 60000、浄水場は 2×2 で 25000。
       ParkingLot は平面の共同の駐車場で 2×2、12 台、3000（維持費 1 日 96）。ParkingGarage は駐車場ビルで 4×4、240 台、
       72000（維持費 1 日 2880）。共同の駐車場は電気も水道も供給しない。自宅の枠のない世帯が枠を借り（月極）、
@@ -345,6 +354,10 @@ observe の removedCrosswalks:
             ##                                                ==
       敷地は、rotation 0 では at から x+ と y+ へ、1 では x- と y+ へ、2 では x- と y- へ、3 では x+ と y- へ延びる。
       発電所（4×4）も同じ向きで、間口が 4 マスになる。間口のすべてのマスの 1 歩先が道路でなければならない。
+      Station は鉄道の駅で、間口 10 × 奥行き 3、40000（維持費 1 日 800）。道路の側から、駅舎とホーム、複線の線路、
+      ホームの 3 列で、真ん中の列に駅の線路が道路と平行に通る。駅の線路の両端のマス（observe の rail.stations の ends）
+      から BuildRail で外へ線路を引いてつなぐ。線路の上には置けない（Occupied）ので、駅を先に置いてから線路をつなぐ。
+      駅は facilities には入らず、observe の rail.stations に出る。まだ列車は走らない。
   {"type":"SetSignal","at":[x,y],"on":true|false}
       マス at の交差点（3 本以上の道路が集まるノード）に信号を置くか、外す。費用はかからない。
       at の代わりに "node":{"index":n,"generation":g} でノードを指してもよい（記録に入るのはこの形）。
@@ -363,6 +376,16 @@ observe の removedCrosswalks:
       同じく車を止めて渡る。経路を選ぶときは、そうして越える腕 1 本ごとに 100m 歩くぶんの時間を足すので、ほかの交差点を
       回る遠回りがそれより短ければ、その交差点を避ける。外した腕は、区間を分けても種類を変えても外したまま残り、
       腕を取り壊すと印も消える。外した腕は observe の removedCrosswalks と、map の Y と s で分かる。
+  {"type":"BuildRail","from":[x,y],"to":[x,y]}
+      複線の線路を引く。直線の形と長さの上限（1024 マス）は道路と同じで、1 マスあたり 1500（斜めは長さに比例）、
+      維持費は 1 日に建設費の 1%。端が既存の線路のノードに当たればつなぎ、途中のマスで既存の線路に当たれば、
+      そこで分けて分岐にする。ノードで向きを変えられるのは 45 度までで、超えると Denied（RailTooSharp）。
+      1 つのノードに集まる線路は 3 本（分岐 1 つ）までで、超えると Denied（RailTooManyBranches）。十字に交わる線路も
+      これになる。分岐は、根元の線路から残りの 2 本のどちらへも 45 度までの曲がりで抜けられる形だけを置ける。
+      既存の線路に重ねると Denied（Overlap）、斜めの線路や道路とマスの角で交わると Denied（CornerCrossing）。
+      まだ踏切がないので、道路のマスは通れない（Denied（Occupied））。施設と駅のマスも通れない。ただし駅の線路の
+      両端のマスでは、線路を始めても終えてもよい。建物のマスを通ると、その建物は取り壊される。
+      ノードのあいだが 50 マス（斜めは 35 マス）を超える線路には、中核が等しい間隔で区切りのノードを置く。
   {"type":"BuyChunk","chunk":[cx,cy]}
       買った土地に辺を接するチャンクを買う。値段は observe の land.nextChunkPrice。
   {"type":"SetTaxRate","zone":"Residential"|"Commercial"|"Industrial"|"Office","permille":0..300}
@@ -390,7 +413,8 @@ act の結果:
       beyondDepth 道路から 6 マスを超えた奥（道路のない所を含む）、notFronted 道路から 6 マス以内だが、間口から続かない空き
       （道路の端の外、間口との間に塗れないマスを挟んだ、別の種類の区画の奥など）。
   Bulldoze の Applied には bulldozed が付く。
-    roadTiles 消えた道路のマスの数、facilities 消えた施設の数、buildings 消えた建物の数、
+    roadTiles 消えた道路のマスの数、railTiles 消えた線路のマスの数（駅の中を含む）、facilities 消えた施設の数、
+    stations 消えた駅の数、buildings 消えた建物の数、
     displacedHouseholds 住んでいた建物が消えて家をなくした世帯の数。
   reason が NotOwned のときは notOwned も付き、買っていない土地のマスを示す。
     count 買っていないマスの数、tiles そのマス（先頭の 16 個まで）、
@@ -790,6 +814,8 @@ fn act(world: &mut World, log: &mut CommandLog, commands: &[Value], verbose: boo
 /// Bulldoze の前の街の控え。適用のあとの街と比べて、何が消えたかを求める。
 struct BulldozeSnapshot {
     road_tiles: usize,
+    rail_tiles: usize,
+    stations: usize,
     facilities: usize,
     buildings: Vec<BuildingId>,
     /// 家のある世帯の、住んでいる建物。
@@ -801,6 +827,8 @@ impl BulldozeSnapshot {
         let p = world.population();
         Self {
             road_tiles: world.network().road_tile_count(),
+            rail_tiles: world.rail().rail_tile_count(),
+            stations: world.rail().stations().count(),
             facilities: world.facilities().len(),
             buildings: world.buildings().iter().map(|(id, _)| id).collect(),
             homes: p
@@ -810,11 +838,13 @@ impl BulldozeSnapshot {
         }
     }
 
-    /// 取り壊しで消えた道路のマス、施設、建物の数と、家をなくした世帯の数。
+    /// 取り壊しで消えた道路と線路のマス、施設、駅、建物の数と、家をなくした世帯の数。
     fn removed(&self, world: &World) -> Value {
         let gone = |id: &BuildingId| world.buildings().get(*id).is_none();
         json!({
             "roadTiles": self.road_tiles.saturating_sub(world.network().road_tile_count()),
+            "railTiles": self.rail_tiles.saturating_sub(world.rail().rail_tile_count()),
+            "stations": self.stations.saturating_sub(world.rail().stations().count()),
             "facilities": self.facilities.saturating_sub(world.facilities().len()),
             "buildings": self.buildings.iter().filter(|id| gone(id)).count(),
             "displacedHouseholds": self.homes.iter().filter(|id| gone(id)).count(),
@@ -918,15 +948,16 @@ fn facility_tiles(kind: ServiceKind, at: TilePos, rotation: u8) -> Vec<TilePos> 
 /// `NotOwned` で断られたコマンドが通ろうとした、買っていない土地のマス。
 /// 断られても土地の持ち主は変わらないので、断られたあとの街で調べてよい。
 fn not_owned(world: &World, command: &Command) -> Value {
-    let tiles: Vec<TilePos> = if let Command::BuildRoad { from, to, .. } = command {
-        Line::between(*from, *to)
-            .map(|line| line.tiles().collect())
-            .unwrap_or_default()
-    } else if let Command::PlaceBuilding { kind, at, rotation } = command {
-        facility_tiles(*kind, *at, *rotation)
-    } else {
-        Vec::new()
-    };
+    let tiles: Vec<TilePos> =
+        if let Command::BuildRoad { from, to, .. } | Command::BuildRail { from, to } = command {
+            Line::between(*from, *to)
+                .map(|line| line.tiles().collect())
+                .unwrap_or_default()
+        } else if let Command::PlaceBuilding { kind, at, rotation } = command {
+            facility_tiles(*kind, *at, *rotation)
+        } else {
+            Vec::new()
+        };
     let missing: Vec<TilePos> = tiles
         .into_iter()
         .filter(|t| t.chunk().is_none_or(|c| !world.is_owned(c)))
@@ -985,11 +1016,18 @@ fn paint_breakdown(world: &World, command: &Command) -> Option<Value> {
             .map(|l| l.occupancy[chizu_core::tile::local_index(lx, ly)]);
         if chunk.terrain().is_water(lx, ly) {
             water += 1;
-        } else if use_ == Some(chizu_core::TileUse::Road) {
-            // 道路のマスは区画を載せる所ではないので、塗れなかったマスに数えない。
         } else if matches!(
             use_,
-            Some(chizu_core::TileUse::Building | chizu_core::TileUse::Facility)
+            Some(chizu_core::TileUse::Road | chizu_core::TileUse::Rail)
+        ) {
+            // 道路と線路のマスは区画を載せる所ではないので、塗れなかったマスに数えない。
+        } else if matches!(
+            use_,
+            Some(
+                chizu_core::TileUse::Building
+                    | chizu_core::TileUse::Facility
+                    | chizu_core::TileUse::Station
+            )
         ) {
             building += 1;
         } else if !near[i] {
@@ -1748,6 +1786,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
         facility_upkeep,
         // 共同の駐車場の維持費は、facilityUpkeep の駐車場の種類ごとの額の和である。
         parking_upkeep: _,
+        rail_upkeep,
     } = finances;
     let upkeep_of = |k: ServiceKind| match k.utility_slot() {
         Some(slot) => facility_upkeep[slot].0,
@@ -1797,6 +1836,7 @@ fn observe(world: &World, before: &CarSample) -> Value {
             "parkingFees": parking_fees.0,
             "roadUpkeep": road_upkeep.0,
             "facilityUpkeep": by_service(upkeep_of),
+            "railUpkeep": rail_upkeep.0,
         },
         "taxPermille": by_zone(|z| world.tax_permille(z)),
         "population": {
@@ -1870,6 +1910,54 @@ fn observe(world: &World, before: &CarSample) -> Value {
         },
         "signals": signals(world),
         "removedCrosswalks": removed_crosswalks(world),
+        "rail": rail(world),
+    })
+}
+
+/// 線路と駅。
+fn rail(world: &World) -> Value {
+    let rail = world.rail();
+    let tile = |t: TilePos| json!([t.x, t.y]);
+    let mut dead_ends = Vec::new();
+    let mut branches = Vec::new();
+    for (_, n) in rail.nodes() {
+        match n.tracks.len() {
+            1 => dead_ends.push(tile(n.tile)),
+            3 => branches.push(tile(n.tile)),
+            _ => {}
+        }
+    }
+    let stations: Vec<Value> = rail
+        .stations()
+        .map(|(id, s)| {
+            let ends = rail.track_line(s.track).map(|l| {
+                let (a, b) = (l.start.min(l.end()), l.start.max(l.end()));
+                json!([tile(a), tile(b)])
+            });
+            json!({
+                "id": {"index": id.index, "generation": id.generation},
+                "at": tile(s.front),
+                "area": [tile(s.area.min), tile(s.area.max)],
+                "ends": ends,
+                "facesRoad": s.entrance.is_some(),
+            })
+        })
+        .collect();
+    // 駅の端のノードのマスは駅の中なので数えない。
+    let tiles = rail
+        .tracks()
+        .filter(|(_, tr)| tr.station.is_none())
+        .filter_map(|(id, _)| rail.track_line(id))
+        .flat_map(|l| l.tiles().collect::<Vec<_>>())
+        .filter(|t| rail.station_at(*t).is_none())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    json!({
+        "tiles": tiles,
+        "tracks": rail.tracks().filter(|(_, tr)| tr.station.is_none()).count(),
+        "deadEnds": dead_ends,
+        "branches": branches,
+        "stations": stations,
     })
 }
 
@@ -1975,6 +2063,8 @@ const WATCHED: &[&str] = &[
     "/utilities/water/others/headroom",
     "/utilities/water/shortNetworks",
     "/land/milestone",
+    "/financesPerDay/railUpkeep",
+    "/rail/tiles",
 ];
 
 /// 前の observe と比べる数を、`/money` を `money`、`/demand/Office` を `demand.Office` と読み替えた名前で集める。
@@ -1987,6 +2077,9 @@ fn watched_values(seen: &Value) -> Map<String, Value> {
     }
     if let Some(chunks) = seen.pointer("/land/ownedChunks").and_then(Value::as_array) {
         out.insert("land.ownedChunks".into(), json!(chunks.len()));
+    }
+    if let Some(stations) = seen.pointer("/rail/stations").and_then(Value::as_array) {
+        out.insert("rail.stations".into(), json!(stations.len()));
     }
     out
 }

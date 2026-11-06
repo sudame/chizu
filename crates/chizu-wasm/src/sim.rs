@@ -858,6 +858,8 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
             "その向きに、横断歩道を置ける道路の腕がない（高速道路には置かない）"
         }
         DenyReason::CrosswalkUnchanged => "横断歩道はもうその状態になっている",
+        DenyReason::RailTooSharp => "線路はノードで 45 度までしか曲げられない",
+        DenyReason::RailTooManyBranches => "線路の分岐は 1 つのノードに 1 つまで",
     }
 }
 

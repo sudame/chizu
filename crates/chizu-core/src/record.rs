@@ -43,10 +43,12 @@
 //! | 9 | `UpgradeRoad` | from `TilePos`、to `TilePos`、kind `u8` |
 //! | 10 | `SetCrosswalk` | index `u32`、generation `u16`、arm `u8`（`Heading` の値）、on `u8`（0 か 1） |
 //! | 11 | `SetParkingFee` | fee `u16` |
+//! | 12 | `BuildRail` | from `TilePos`、to `TilePos` |
 //!
 //! 形式を変えるときは版を上げる。種類の番号は使い回さない。種類を足すだけなら、古い記録はそのまま
 //! 読めるので版は上げない。`PaintZone` の区画に低密度の住宅（5）を足したときも、同じ理由で版を上げていない。
-//! 1 は前から住宅で、いまは高密度の住宅と読む。
+//! 1 は前から住宅で、いまは高密度の住宅と読む。`BuildRail`（12）と、`PlaceBuilding` の駅（施設の種類 5）を足したときも
+//! 同じ理由で版を上げていない。
 
 use core::fmt;
 
@@ -447,6 +449,11 @@ fn encode_command(w: &mut Writer, c: &Command) {
             w.u8(11);
             w.u16(fee);
         }
+        Command::BuildRail { from, to } => {
+            w.u8(12);
+            w.tile(from);
+            w.tile(to);
+        }
     }
 }
 
@@ -509,6 +516,10 @@ fn decode_command(r: &mut Reader<'_>) -> Result<Command, DecodeError> {
             Command::SetCrosswalk { node, arm, on }
         }
         11 => Command::SetParkingFee { fee: r.u16()? },
+        12 => Command::BuildRail {
+            from: r.tile()?,
+            to: r.tile()?,
+        },
         other => return Err(DecodeError::UnknownCommand(other)),
     };
     Ok(c)
@@ -623,6 +634,15 @@ mod tests {
             Command::SetParkingFee {
                 fee: MAX_PARKING_FEE,
             },
+            Command::BuildRail {
+                from: TilePos::new(20, -3),
+                to: TilePos::new(26, 3),
+            },
+            Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: TilePos::new(-30, 12),
+                rotation: 0,
+            },
         ]
     }
 
@@ -732,9 +752,23 @@ mod tests {
         assert!(invalid_command(&[11, 51, 0])); // 駐車場の料金 51
         assert!(CommandLog::decode(&single(0, 0, &[11, 50, 0])).is_ok());
         assert_eq!(
-            CommandLog::decode(&single(0, 0, &[12])),
-            Err(DecodeError::UnknownCommand(12))
+            CommandLog::decode(&single(0, 0, &[13])),
+            Err(DecodeError::UnknownCommand(13))
         );
+        assert!(invalid(&[
+            4, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        ])); // 施設の種類 6
+        // 線路は道路と同じく、縦横か 45 度の斜めの直線だけを読む。
+        let rail = |to: (i64, i64)| {
+            let mut c = vec![12];
+            for v in [0, 0, to.0, to.1] {
+                c.extend_from_slice(&i64::to_le_bytes(v));
+            }
+            c
+        };
+        assert!(CommandLog::decode(&single(0, 0, &rail((3, -3)))).is_ok());
+        assert!(invalid_command(&rail((2, 1))));
+        assert!(invalid_command(&rail((0, 0))));
         // 腕の向きは 0〜7、on は 0 か 1 だけを読む。
         let crosswalk = |arm: u8, on: u8| {
             let mut c = vec![10];
@@ -964,14 +998,14 @@ mod tests {
         assert_eq!(
             stats,
             ReplayStats {
-                applied: 7,
+                applied: 8,
                 not_implemented: 0,
                 rejected: 0,
-                denied: 5,
+                denied: 6,
                 denied_by: {
                     let mut by = [0; DenyReason::ALL.len()];
                     by[DenyReason::NotJunction.index()] = 2;
-                    by[DenyReason::NoRoadAccess.index()] = 1;
+                    by[DenyReason::NoRoadAccess.index()] = 2;
                     by[DenyReason::NothingToBulldoze.index()] = 1;
                     by[DenyReason::NotAdjacent.index()] = 1;
                     by
@@ -1028,7 +1062,7 @@ mod tests {
             rect.clone().prop_map(|area| Command::Bulldoze { area }),
             (small_rect, proptest::option::of(paint_zone))
                 .prop_map(|(area, zone)| Command::PaintZone { area, zone }),
-            (1_u8..=4, tile, any::<u8>()).prop_map(|(k, at, rotation)| Command::PlaceBuilding {
+            (1_u8..=5, tile, any::<u8>()).prop_map(|(k, at, rotation)| Command::PlaceBuilding {
                 kind: ServiceKind::from_code(k).unwrap(),
                 at,
                 rotation,
@@ -1070,6 +1104,17 @@ mod tests {
                 }
             ),
             (0..=MAX_PARKING_FEE).prop_map(|fee| Command::SetParkingFee { fee }),
+            (
+                -200_i64..200,
+                -200_i64..200,
+                -1_i64..=1,
+                -1_i64..=1,
+                1_i64..=1_100
+            )
+                .prop_map(|(x, y, sx, sy, n)| Command::BuildRail {
+                    from: TilePos::new(x, y),
+                    to: TilePos::new(x + sx * n, y + sy * n),
+                }),
         ]
     }
 

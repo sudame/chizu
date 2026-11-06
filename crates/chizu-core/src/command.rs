@@ -167,6 +167,8 @@ pub enum ServiceKind {
     ParkingLot = 3,
     /// 共同の駐車場ビル（立体駐車場）。
     ParkingGarage = 4,
+    /// 鉄道の駅。置くのは施設と同じ `PlaceBuilding` だが、施設の一覧には入れず、線路の網（`Rail`）に持つ。
+    Station = 5,
 }
 
 impl ServiceKind {
@@ -176,6 +178,7 @@ impl ServiceKind {
             2 => Some(ServiceKind::WaterPump),
             3 => Some(ServiceKind::ParkingLot),
             4 => Some(ServiceKind::ParkingGarage),
+            5 => Some(ServiceKind::Station),
             _ => None,
         }
     }
@@ -333,6 +336,11 @@ pub enum Command {
         to: TilePos,
         kind: RoadKind,
     },
+    /// `from` から `to` へ、複線の線路を引く。直線の形と長さの上限は道路と同じである。
+    BuildRail {
+        from: TilePos,
+        to: TilePos,
+    },
 }
 
 /// コマンドの値が受け付ける範囲の外にある。
@@ -407,9 +415,9 @@ impl Command {
     /// コマンドが指すマスとチャンクが、すべて [`WORLD_LIMIT`] の範囲の中か。
     fn in_world(&self) -> bool {
         match *self {
-            Command::BuildRoad { from, to, .. } | Command::UpgradeRoad { from, to, .. } => {
-                from.in_world() && to.in_world()
-            }
+            Command::BuildRoad { from, to, .. }
+            | Command::UpgradeRoad { from, to, .. }
+            | Command::BuildRail { from, to } => from.in_world() && to.in_world(),
             Command::Bulldoze { area } | Command::PaintZone { area, .. } => area.in_world(),
             Command::PlaceBuilding { at, .. } => at.in_world(),
             Command::BuyChunk { coord } => coord.in_world(),
@@ -457,9 +465,9 @@ impl Command {
                     Err(InvalidCommand::ParkingFeeTooHigh(fee))
                 }
             }
-            Command::BuildRoad { from, to, .. } | Command::UpgradeRoad { from, to, .. } => {
-                Line::between(from, to).map(|_| ())
-            }
+            Command::BuildRoad { from, to, .. }
+            | Command::UpgradeRoad { from, to, .. }
+            | Command::BuildRail { from, to } => Line::between(from, to).map(|_| ()),
             Command::PlaceBuilding { rotation, .. } => {
                 if rotation <= 3 {
                     Ok(())
@@ -604,6 +612,16 @@ mod tests {
         assert_eq!(upgrade(0, 0, 2, 1), road(0, 0, 2, 1));
         assert_eq!(upgrade(0, 0, max + 1, 0), road(0, 0, max + 1, 0));
         assert_eq!(upgrade(-3, 0, i64::MAX, 0), Err(InvalidCommand::OutOfWorld));
+        // 線路も道路と同じ直線の決まりで確かめる。
+        let rail = |fx, fy, tx, ty| {
+            let (from, to) = (TilePos::new(fx, fy), TilePos::new(tx, ty));
+            Command::BuildRail { from, to }.validate()
+        };
+        assert_eq!(rail(3, 3, -2, -2), Ok(()));
+        assert_eq!(rail(1, 2, 1, 2), road(1, 2, 1, 2));
+        assert_eq!(rail(0, 0, 2, 1), road(0, 0, 2, 1));
+        assert_eq!(rail(0, 0, max + 1, 0), road(0, 0, max + 1, 0));
+        assert_eq!(rail(-3, 0, i64::MAX, 0), Err(InvalidCommand::OutOfWorld));
         for (fx, tx) in [(-3, i64::MAX), (i64::MIN, i64::MAX)] {
             assert_eq!(
                 road(fx, 0, tx, 0),

@@ -15,6 +15,7 @@ use crate::happiness::{CitizenContext, update_citizen};
 use crate::id::{BuildingId, CitizenId, TripId};
 use crate::movement::{Mover, SidewalkPos, Trips};
 use crate::network::{Line, Network, TILE_MM, road_cost};
+use crate::rail::{Rail, rail_cost};
 use crate::rng::{RngPurpose, mix_words};
 use crate::routing::{AstarRouter, BAND_TICKS, Delays, GraphError};
 use crate::schedule::bucket_at;
@@ -108,10 +109,14 @@ pub enum DenyReason {
     NoCrosswalkArm = 18,
     /// 腕の横断歩道が、もうその状態になっている。
     CrosswalkUnchanged = 19,
+    /// 線路が、ノードで 45 度より大きく向きを変える。
+    RailTooSharp = 20,
+    /// 線路のノードに集まる線路が 3 本（分岐 1 つ）を超える。
+    RailTooManyBranches = 21,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 20] = [
+    pub const ALL: [DenyReason; 22] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -132,6 +137,8 @@ impl DenyReason {
         DenyReason::RoadKindUnchanged,
         DenyReason::NoCrosswalkArm,
         DenyReason::CrosswalkUnchanged,
+        DenyReason::RailTooSharp,
+        DenyReason::RailTooManyBranches,
     ];
 
     pub fn index(self) -> usize {
@@ -173,8 +180,10 @@ pub struct World {
     /// 世帯ごとの、車を置く枠。
     car_places: CarPlaces,
     buildings: Buildings,
-    /// プレイヤーが置いた公共の施設。置いた順に並ぶ。
+    /// プレイヤーが置いた公共の施設。置いた順に並ぶ。駅は入れず、`rail` に持つ。
     facilities: Vec<Facility>,
+    /// 線路の網と駅。
+    rail: Rail,
     /// 建物の需要か施設が変わり、電気と水道の届き方を判定し直す必要がある。
     supply_dirty: bool,
     lots: growth::LotFronts,
@@ -305,6 +314,7 @@ impl World {
             car_places: CarPlaces::default(),
             buildings: Buildings::with_seed(seed),
             facilities: Vec::new(),
+            rail: Rail::new(),
             supply_dirty: false,
             lots: Default::default(),
             next_seq: 0,
@@ -321,7 +331,8 @@ impl World {
         world
     }
 
-    /// マスの使い道を網に合わせて書き直し、変えたチャンクの版を上げる。メモリにないチャンクのマスは飛ばす。
+    /// マスの使い道を道路と線路の網に合わせて書き直し、変えたチャンクの版を上げる。メモリにないチャンクのマスは飛ばす。
+    /// 道路が通れば道路、駅の敷地なら駅、線路が通れば線路、どれでもなければ空きにする。
     fn sync_road_tiles(&mut self, tiles: impl IntoIterator<Item = TilePos>) {
         let mut edits = BTreeMap::<ChunkCoord, Vec<(usize, TileUse)>>::new();
         for t in tiles {
@@ -331,6 +342,12 @@ impl World {
             let (lx, ly) = t.local();
             let u = if self.network.is_road_tile(t) {
                 TileUse::Road
+            } else if self.rail.is_unused() {
+                TileUse::Empty
+            } else if self.rail.station_at(t).is_some() {
+                TileUse::Station
+            } else if self.rail.is_rail_tile(t) {
+                TileUse::Rail
             } else {
                 TileUse::Empty
             };
@@ -345,8 +362,8 @@ impl World {
             chunk.edit_layer(Layer::Ground, |tiles| {
                 for (i, u) in list {
                     tiles.occupancy[i] = u;
-                    // 道路を引いたマスの区画は消える。
-                    if u == TileUse::Road {
+                    // 道路か線路を引いたマスの区画は消える。
+                    if u != TileUse::Empty {
                         tiles.zone[i] = None;
                     }
                 }
@@ -416,11 +433,12 @@ impl World {
                     if tiles.zone[idx] != zone {
                         unpainted = true;
                         match tiles.occupancy[idx] {
-                            TileUse::Building | TileUse::Facility => {
+                            TileUse::Building | TileUse::Facility | TileUse::Station => {
                                 partly = true;
                                 blocked_by_building += 1;
                             }
-                            TileUse::Road => {}
+                            // 線路のマスも、道路のマスと同じく区画を載せる所ではない。
+                            TileUse::Road | TileUse::Rail => {}
                             TileUse::Empty => {
                                 partly = true;
                                 blocked_otherwise += 1;
@@ -548,10 +566,15 @@ impl World {
             return ApplyOutcome::Denied(reason);
         }
         if line.tiles().any(|t| {
-            self.tile_state(t)
-                .is_some_and(|(_, u)| u == TileUse::Facility)
+            self.tile_state(t).is_some_and(|(_, u)| {
+                matches!(u, TileUse::Facility | TileUse::Rail | TileUse::Station)
+            })
         }) {
             return ApplyOutcome::Denied(DenyReason::Occupied);
+        }
+        // 踏切はまだないので、線路とマスの角で交わる道路も断る。
+        if self.rail.crosses_corner(&line) {
+            return ApplyOutcome::Denied(DenyReason::CornerCrossing);
         }
         let cost = road_cost(kind, &line);
         if self.money < cost {
@@ -564,6 +587,50 @@ impl World {
         self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
         self.refresh_buildings();
         ApplyOutcome::Applied
+    }
+
+    /// 線路を引く。土地と所持金は道路と同じく確かめる。道路のマスと、駅と施設のマスは通れない。
+    /// 駅のマスは、駅の線路の端のマスで線路を始めるか終えるときだけ通れる。建物のマスを通れば、その建物は取り壊す。
+    fn build_rail(&mut self, from: TilePos, to: TilePos) -> ApplyOutcome {
+        let Ok(line) = Line::between(from, to) else {
+            return ApplyOutcome::Rejected;
+        };
+        if let Err(reason) = line.tiles().try_for_each(|t| self.check_buildable(t)) {
+            return ApplyOutcome::Denied(reason);
+        }
+        let blocked = (0..=line.len).any(|k| {
+            let t = line.tile(k);
+            match self.tile_state(t).map(|(_, u)| u) {
+                Some(TileUse::Road | TileUse::Facility) => true,
+                Some(TileUse::Station) => {
+                    !((k == 0 || k == line.len) && self.rail.is_station_end(t))
+                }
+                Some(TileUse::Empty | TileUse::Building | TileUse::Rail) | None => false,
+            }
+        });
+        if blocked {
+            return ApplyOutcome::Denied(DenyReason::Occupied);
+        }
+        // 踏切はまだないので、道路とマスの角で交わる線路も断る。
+        if self.network.crosses_corner(&line) {
+            return ApplyOutcome::Denied(DenyReason::CornerCrossing);
+        }
+        let cost = rail_cost(&line);
+        if self.money < cost {
+            return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
+        }
+        if let Err(reason) = self.rail.build_rail(&line) {
+            return ApplyOutcome::Denied(reason);
+        }
+        self.money = self.money - cost;
+        self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
+        self.refresh_buildings();
+        ApplyOutcome::Applied
+    }
+
+    /// 線路の網と駅。
+    pub fn rail(&self) -> &Rail {
+        &self.rail
     }
 
     /// 直線と同じ 1 歩を通る道路の区間を、区間ごと `kind` に変える。費用は区間ごとの建設費の差額で、
@@ -599,15 +666,17 @@ impl World {
     // 施設と建物も道路と同じく、長方形にかかれば取り除く。建物の下の区画は残すので、需要があればまた建つ。
     fn bulldoze(&mut self, area: TileRect) -> ApplyOutcome {
         let cleared = self.bulldoze_facilities(area) + self.bulldoze_buildings(area);
+        let rail = self.rail.bulldoze(area);
         let removed = match self.network.bulldoze(area) {
             Ok(removed) => removed,
-            Err(_) if cleared > 0 => Vec::new(),
+            Err(_) if cleared > 0 || !rail.is_empty() => Vec::new(),
             Err(reason) => return ApplyOutcome::Denied(reason),
         };
         self.sync_road_tiles(
             removed
                 .iter()
                 .flat_map(|l| l.tiles().collect::<Vec<_>>())
+                .chain(rail.tiles())
                 .collect::<Vec<_>>(),
         );
         // 消した道路にだけ面していた区画も消える。
@@ -822,6 +891,7 @@ impl World {
             Command::BuyChunk { coord } => self.buy_chunk(coord),
             Command::BuildRoad { from, to, kind } => self.build_road(from, to, kind),
             Command::UpgradeRoad { from, to, kind } => self.upgrade_road(from, to, kind),
+            Command::BuildRail { from, to } => self.build_rail(from, to),
             Command::Bulldoze { area } => self.bulldoze(area),
             Command::PaintZone { area, zone } => self.paint_zone(area, zone),
             Command::PlaceBuilding { kind, at, rotation } => self.place_service(kind, at, rotation),
@@ -905,6 +975,18 @@ impl World {
 
 impl StateHash for World {
     fn write_state(&self, h: &mut StateHasher) {
+        self.write_state_without_rail(h);
+        // 線路も駅も置いたことのない街は、鉄道を入れる前と同じハッシュになるよう、鉄道の欄を書かない。
+        if !self.rail.is_unused() {
+            h.write(&1_u8);
+            h.write(&self.rail);
+        }
+    }
+}
+
+impl World {
+    /// 状態ハッシュに書く欄のうち、鉄道のほかのもの。
+    pub(crate) fn write_state_without_rail(&self, h: &mut StateHasher) {
         h.write(&self.seed);
         h.write(&self.tick);
         h.write(&self.speed.multiplier());
@@ -959,10 +1041,12 @@ mod tests {
             | DenyReason::NoRoadToChange
             | DenyReason::RoadKindUnchanged
             | DenyReason::NoCrosswalkArm
-            | DenyReason::CrosswalkUnchanged => DenyReason::ALL.contains(&r),
+            | DenyReason::CrosswalkUnchanged
+            | DenyReason::RailTooSharp
+            | DenyReason::RailTooManyBranches => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 20);
+        assert_eq!(DenyReason::ALL.len(), 22);
     }
     use crate::command::MAX_TAX_PERMILLE;
 

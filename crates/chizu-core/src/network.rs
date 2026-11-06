@@ -65,7 +65,7 @@ pub trait ArenaId: Copy {
 macro_rules! impl_arena_id {
     ($($t:ty),*) => {
         $(
-            impl ArenaId for $t {
+            impl $crate::network::ArenaId for $t {
                 fn from_parts(index: u32, generation: u16) -> Self {
                     Self { index, generation }
                 }
@@ -74,8 +74,8 @@ macro_rules! impl_arena_id {
                 }
             }
 
-            impl StateHash for $t {
-                fn write_state(&self, h: &mut StateHasher) {
+            impl $crate::state_hash::StateHash for $t {
+                fn write_state(&self, h: &mut $crate::state_hash::StateHasher) {
                     h.write(&self.index);
                     h.write(&self.generation);
                 }
@@ -84,18 +84,20 @@ macro_rules! impl_arena_id {
     };
 }
 
+pub(crate) use impl_arena_id;
+
 impl_arena_id!(NodeId, SegmentId, LaneId);
 
 /// 世代つきの添え字で引く表。空き番号は後入れ先出しで使い回す。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Arena<I, T> {
+pub(crate) struct Arena<I, T> {
     slots: Vec<(u16, Option<T>)>,
     free: Vec<u32>,
     _id: PhantomData<I>,
 }
 
 impl<I: ArenaId, T> Arena<I, T> {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Arena {
             slots: Vec::new(),
             free: Vec::new(),
@@ -103,7 +105,7 @@ impl<I: ArenaId, T> Arena<I, T> {
         }
     }
 
-    fn insert(&mut self, value: T) -> I {
+    pub(crate) fn insert(&mut self, value: T) -> I {
         if let Some(index) = self.free.pop() {
             let slot = &mut self.slots[index as usize];
             slot.1 = Some(value);
@@ -114,7 +116,7 @@ impl<I: ArenaId, T> Arena<I, T> {
         I::from_parts(index, 0)
     }
 
-    fn get(&self, id: I) -> Option<&T> {
+    pub(crate) fn get(&self, id: I) -> Option<&T> {
         let (index, generation) = id.parts();
         match self.slots.get(index as usize) {
             Some((g, Some(v))) if *g == generation => Some(v),
@@ -122,7 +124,7 @@ impl<I: ArenaId, T> Arena<I, T> {
         }
     }
 
-    fn get_mut(&mut self, id: I) -> Option<&mut T> {
+    pub(crate) fn get_mut(&mut self, id: I) -> Option<&mut T> {
         let (index, generation) = id.parts();
         match self.slots.get_mut(index as usize) {
             Some((g, Some(v))) if *g == generation => Some(v),
@@ -130,7 +132,7 @@ impl<I: ArenaId, T> Arena<I, T> {
         }
     }
 
-    fn remove(&mut self, id: I) -> Option<T> {
+    pub(crate) fn remove(&mut self, id: I) -> Option<T> {
         self.get(id)?;
         let (index, _) = id.parts();
         let slot = &mut self.slots[index as usize];
@@ -140,7 +142,12 @@ impl<I: ArenaId, T> Arena<I, T> {
         slot.1.take()
     }
 
-    fn iter(&self) -> impl Iterator<Item = (I, &T)> {
+    /// 一度も入れたことがないか。消した値の空き番号が残っていれば偽である。
+    pub(crate) fn is_unused(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (I, &T)> {
         self.slots.iter().enumerate().filter_map(|(i, (g, v))| {
             let index = u32::try_from(i).expect("ID の添え字が u32 に収まらない");
             v.as_ref().map(|v| (I::from_parts(index, *g), v))
@@ -700,6 +707,23 @@ impl Network {
             })
     }
 
+    /// 隣り合うマス `p` と `q` のあいだの 1 歩を、どれかの区間が通るか。
+    fn shares_step(&self, p: TilePos, q: TilePos) -> bool {
+        self.segments_through(p).iter().any(|s| {
+            self.segment_line(*s)
+                .is_some_and(|l| l.position_of(q).is_some())
+        })
+    }
+
+    /// 斜めの直線 `line` が、どれかの斜めの区間とマスの角で交わるか。線路を引くときに道路と比べるのに使う。
+    pub(crate) fn crosses_corner(&self, line: &Line) -> bool {
+        line.is_diagonal()
+            && (0..line.len).any(|k| {
+                let (p, q) = (line.tile(k), line.tile(k + 1));
+                self.shares_step(TilePos::new(q.x, p.y), TilePos::new(p.x, q.y))
+            })
+    }
+
     /// 道路を引けるか確かめる。マスが建設できる土地かは呼ぶ側で確かめる。
     pub(crate) fn check_road(&self, line: &Line) -> Result<(), DenyReason> {
         for t in line.tiles() {
@@ -713,12 +737,7 @@ impl Network {
                 }
             }
         }
-        let shares_step = |p: TilePos, q: TilePos| {
-            self.segments_through(p).iter().any(|s| {
-                self.segment_line(*s)
-                    .is_some_and(|l| l.position_of(q).is_some())
-            })
-        };
+        let shares_step = |p: TilePos, q: TilePos| self.shares_step(p, q);
         for k in 0..line.len {
             let (p, q) = (line.tile(k), line.tile(k + 1));
             if shares_step(p, q) {
