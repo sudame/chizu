@@ -3,14 +3,15 @@
 import { validCityStats } from "./city-stats.ts";
 
 export type RoadKindName = "Small" | "Medium" | "Large";
-/** 施設の種類。ServiceKind::ALL の順で、service_table の並びと同じである。 */
-export type ServiceName = "PowerPlant" | "WaterPump" | "ParkingLot" | "ParkingGarage";
+/** 施設の種類。ServiceKind::ALL の順に駅を続けた並びで、service_table の並びと同じである。 */
+export type ServiceName = "PowerPlant" | "WaterPump" | "ParkingLot" | "ParkingGarage" | "Station";
 /** 施設の種類の順（ServiceKind の値は 1 から数える）。 */
 export const SERVICE_NAMES: readonly ServiceName[] = [
   "PowerPlant",
   "WaterPump",
   "ParkingLot",
   "ParkingGarage",
+  "Station",
 ];
 /** 共同の駐車場か。 */
 export const isParking = (service: ServiceName): boolean =>
@@ -18,7 +19,7 @@ export const isParking = (service: ServiceName): boolean =>
 /** 施設の種類の値（ServiceKind の値）。 */
 export const serviceCode = (service: ServiceName): number => SERVICE_NAMES.indexOf(service) + 1;
 /** chizu-wasm の finance の数の個数。 */
-export const FINANCE_LENGTH = 16;
+export const FINANCE_LENGTH = 17;
 
 /** chizu-wasm の carless の、固定の並びの個数。そのあとに世帯の多い区切りの `[x, y, 世帯の数]` が続く。 */
 export const CARLESS_FIXED = 6;
@@ -54,6 +55,8 @@ export type CommandMessage =
       toX: number;
       toY: number;
     }
+  /** 線路を (fromX, fromY) から (toX, toY) の直線に引く。駅の線路は駅を置くと同時にできる。 */
+  | { kind: "BuildRail"; fromX: number; fromY: number; toX: number; toY: number }
   | { kind: "Bulldoze"; minX: number; minY: number; maxX: number; maxY: number }
   | {
       kind: "PaintZone";
@@ -82,6 +85,10 @@ export type Outcome = "Applied" | "AppliedPartly" | "Denied" | "Rejected" | "Not
 
 /** 区間 1 本の数の個数。chizu-wasm の road_segments と同じ。 */
 export const SEGMENT_STRIDE = 5;
+/** 線路 1 本の数の個数。chizu-wasm の rail_tracks と同じ。 */
+export const RAIL_TRACK_STRIDE = 5;
+/** 駅 1 つの数の個数。chizu-wasm の rail_stations と同じ。 */
+export const RAIL_STATION_STRIDE = 6;
 /** 建物 1 つの数の個数。chizu-wasm の buildings と同じ。 */
 export const BUILDING_STRIDE = 7;
 
@@ -194,6 +201,8 @@ export type MainToWorker =
   | { kind: "probe-service"; service: ServiceName; x: number; y: number }
   /** マス (x, y) にある建物か施設の様子を中核に問い合わせる。 */
   | { kind: "inspect"; query: InspectQuery }
+  /** 線路を (x0, y0) から (x1, y1) に引けるかと建設費を、状態を変えずに中核に問い合わせる。 */
+  | { kind: "probe-rail"; x0: number; y0: number; x1: number; y1: number }
   /** 長方形 (x0, y0)-(x1, y1) を取り壊したときに消えるものを、状態を変えずに中核に問い合わせる。 */
   | { kind: "bulldoze-preview"; x0: number; y0: number; x1: number; y1: number }
   /** フィードバックに添える状態と記録を求める。 */
@@ -251,6 +260,24 @@ export type WorkerToMain =
       /** 共同の駐車場の届く範囲の中の、車を持てない世帯の数。ほかの施設は 0。 */
       carless: number;
     }
+  /**
+   * probe-rail の答え。x0〜y1 は問い合わせの写しで、reason は引けない理由の文（引けるなら null）、
+   * cost は建設費（直線の形が正しくないときは 0）。
+   */
+  | {
+      kind: "rail-probe";
+      x0: number;
+      y0: number;
+      x1: number;
+      y1: number;
+      reason: string | null;
+      cost: number;
+    }
+  /**
+   * 線路と駅の形。線路や駅が変わったときだけ、全体を送り直す。配列は移譲して送る。
+   * tracks は chizu-wasm の rail_tracks、stations は rail_stations である。
+   */
+  | { kind: "rail"; revision: number; tracks: Float64Array; stations: Float64Array }
   /** inspect の答え。query は問い合わせの写しで、info は chizu-wasm の inspect の数。何もなければ空。 */
   | { kind: "inspect"; query: InspectQuery; info: number[] }
   /** bulldoze-preview の答え。x0〜y1 は問い合わせの写しで、info は chizu-wasm の bulldoze_preview の数。 */
@@ -468,6 +495,23 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
         isInspectQuery(v.query) &&
         Array.isArray(v.info) &&
         v.info.every((n) => typeof n === "number")
+      );
+    case "rail":
+      return (
+        typeof v.revision === "number" &&
+        v.tracks instanceof Float64Array &&
+        v.tracks.length % RAIL_TRACK_STRIDE === 0 &&
+        v.stations instanceof Float64Array &&
+        v.stations.length % RAIL_STATION_STRIDE === 0
+      );
+    case "rail-probe":
+      return (
+        Number.isInteger(v.x0) &&
+        Number.isInteger(v.y0) &&
+        Number.isInteger(v.x1) &&
+        Number.isInteger(v.y1) &&
+        (v.reason === null || typeof v.reason === "string") &&
+        typeof v.cost === "number"
       );
     case "bulldoze-preview":
       return (

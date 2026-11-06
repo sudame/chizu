@@ -4,6 +4,7 @@ import { GLYPH_PATHS, GLYPH_SCALE } from "./map/facility-symbols.ts";
 import { HIGHWAY_CODE } from "./map/lanes.ts";
 import { CAR_COLORS, WALKER_COLOR } from "./map/mover-colors.ts";
 import { type FacilityGlyph, facilityStyle } from "./map/palette.ts";
+import { RAIL_FAR_COLOR, RAIL_MID_COLOR } from "./map/rail.ts";
 import {
   BOLT_SHAPE,
   buildingColor,
@@ -54,6 +55,7 @@ const FACILITIES: [number, string][] = [
   [2, "浄水場"],
   [3, "平面の駐車場"],
   [4, "駐車場ビル"],
+  [5, "駅"],
 ];
 
 const ROADS: [number, string][] = [
@@ -110,6 +112,10 @@ export function legendSections(): LegendSection[] {
         const style = roadStyle(kind);
         return { label, color: cssColor(style.asphalt), border: cssColor(style.edge) };
       }),
+    },
+    {
+      title: "鉄道（駅は公共施設の丸い記号）",
+      items: [{ label: "線路", color: cssColor(RAIL_MID_COLOR), border: cssColor(RAIL_FAR_COLOR) }],
     },
     {
       title: "移動体",

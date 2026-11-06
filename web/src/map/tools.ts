@@ -18,6 +18,8 @@ export const MAX_ROAD_TILES = 1024;
 export type Tool =
   | { kind: "none" }
   | { kind: "road"; road: RoadKindName }
+  /** 線路を、始点と終点のマスを押して直線に引く。 */
+  | { kind: "rail" }
   /** なぞった直線が通る既存の道路を、区間ごと road の種類に変える。 */
   | { kind: "upgrade"; road: RoadKindName }
   | { kind: "bulldoze" }
@@ -92,6 +94,13 @@ export function roadCost(table: RoadCostTable, kind: RoadKindName, from: Tile, t
 export function buildRoadCommand(kind: RoadKindName, from: Tile, to: Tile): CommandMessage {
   return { kind: "BuildRoad", road: kind, fromX: from.x, fromY: from.y, toX: to.x, toY: to.y };
 }
+
+export function buildRailCommand(from: Tile, to: Tile): CommandMessage {
+  return { kind: "BuildRail", fromX: from.x, fromY: from.y, toX: to.x, toY: to.y };
+}
+
+/** 駅まで歩く範囲（マス）。chizu-core の設計（docs/design.md の 3.10）の `STATION_WALK_RADIUS` と同じ。 */
+export const STATION_WALK_RADIUS = 64;
 
 export function upgradeRoadCommand(kind: RoadKindName, from: Tile, to: Tile): CommandMessage {
   return { kind: "UpgradeRoad", road: kind, fromX: from.x, fromY: from.y, toX: to.x, toY: to.y };
@@ -221,6 +230,7 @@ export function parseServiceTable(table: ArrayLike<number>): Record<ServiceName,
     WaterPump: info(1),
     ParkingLot: info(2),
     ParkingGarage: info(3),
+    Station: info(4),
   };
 }
 

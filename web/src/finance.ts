@@ -1,4 +1,4 @@
-// 収支のパネル。区画の種類ごとの税収、共同の駐車場の料金の収入、道路と施設の維持費、1 日あたりの差し引きを出し、
+// 収支のパネル。区画の種類ごとの税収、共同の駐車場の料金の収入、道路と施設と鉄道の維持費、1 日あたりの差し引きを出し、
 // 税率と駐車場の料金を上げ下げできる。
 // DOM に触るのは setupFinance だけで、数の読み方と文言は Vitest で確かめられる。
 
@@ -21,8 +21,8 @@ export const RATE_STEP_PERMILLE = 10;
 /** ボタン 1 回で動かす駐車場の料金。 */
 export const FEE_STEP = 1;
 
-/** 維持費の行の数。道路、発電所、浄水場、駐車場。 */
-const EXPENSE_ROWS = 4;
+/** 維持費の行の数。道路、発電所、浄水場、駐車場、鉄道。 */
+const EXPENSE_ROWS = 5;
 
 /** chizu-wasm の finance を読んだもの。金額はどれも 1 日あたり。 */
 export type Finance = {
@@ -37,6 +37,8 @@ export type Finance = {
   waterUpkeep: number;
   /** 共同の駐車場の維持費。 */
   parkingUpkeep: number;
+  /** 鉄道の維持費。駅と、駅の外の線路の分である。 */
+  railUpkeep: number;
   /** 共同の駐車場の料金（借りた枠 1 つあたりの 1 日の額）。 */
   parkingFee: number;
   /** 料金の上限。 */
@@ -56,7 +58,7 @@ export function parseFinance(values: ArrayLike<number>): Finance | null {
   const at = (i: number) => values[i] ?? 0;
   const taxes = [at(5), at(6), at(7), at(8)];
   const income = taxes.reduce((a, b) => a + b, 0) + at(15);
-  const expenses = at(9) + at(10) + at(11) + at(12);
+  const expenses = at(9) + at(10) + at(11) + at(12) + at(16);
   return {
     maxPermille: at(0),
     permille: [at(1), at(2), at(3), at(4)],
@@ -65,6 +67,7 @@ export function parseFinance(values: ArrayLike<number>): Finance | null {
     powerUpkeep: at(10),
     waterUpkeep: at(11),
     parkingUpkeep: at(12),
+    railUpkeep: at(16),
     parkingFee: at(13),
     maxParkingFee: at(14),
     parkingFees: at(15),
@@ -162,6 +165,7 @@ export function financeRows(finance: Finance): {
       { label: "発電所の維持費", value: formatSigned(-finance.powerUpkeep) },
       { label: "浄水場の維持費", value: formatSigned(-finance.waterUpkeep) },
       { label: "駐車場の維持費", value: formatSigned(-finance.parkingUpkeep) },
+      { label: "鉄道の維持費", value: formatSigned(-finance.railUpkeep) },
     ],
     net: { label: "差し引き", value: formatSigned(finance.net) },
   };
