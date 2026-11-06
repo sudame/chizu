@@ -24,7 +24,8 @@ use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
-    Ends, SidewalkPos, Trip, Trips, candidates, car, junction, lane_shift, make_trip, plan, pos,
+    Ends, RailCrossings, SidewalkPos, Trip, Trips, candidates, car, junction, lane_shift, make_trip,
+    plan, pos,
 };
 use crate::building::{Building, Buildings, LANE_WIDTH_MM, ParkingCut, SLOT_WIDTH_MM};
 use crate::clock::TICKS_PER_DAY;
@@ -1310,6 +1311,7 @@ impl Trips {
         net: &Network,
         router: &mut AstarRouter,
         done: Vec<usize>,
+        rail: &RailCrossings,
     ) -> Vec<usize> {
         let mut ended = Vec::new();
         let mut legs: [Vec<(usize, SidewalkPos, SidewalkPos, Then)>; 2] = Default::default();
@@ -1377,7 +1379,7 @@ impl Trips {
                 self.rows[i] = Some(t);
                 // 出発と同じく、空いた車線に置き、前の車と重なるなら下げ、空きがなければ待たせる。
                 if let Some(ix) = ix.as_mut() {
-                    car::place(&mut self.rows, net, ix, i, &zones, &entering);
+                    car::place(&mut self.rows, net, ix, i, &zones, rail, &entering);
                 }
                 let t = self.rows[i].as_mut().expect("置いた主体がない");
                 t.blend = Some(lane_shift::Blend {

@@ -224,20 +224,27 @@ impl Entering {
 /// 車 2 台ぶんより後ろへは下げない。どの車線にも空きがなければ、車線の外（駐車場の中）で待たせて `false` を返す。
 /// `ix` は行 `i` を除いた車線の上の車で、置いたら行 `i` を足す。
 /// `jay` は車のリンクごとの、区間の途中の衝突区間の真ん中の位置で、車がその区間にかかる位置には置かない。
+/// 踏切 `rail` にも、開いていても閉じていても、体がかかる位置には置かない。
 pub(super) fn place(
     rows: &mut [Option<Trip>],
     net: &Network,
     ix: &mut LaneIndex,
     i: usize,
     jay: &BTreeMap<LinkId, Vec<u32>>,
+    rail: &RailCrossings,
     entering: &Entering,
 ) -> bool {
     let t = rows[i].as_mut().expect("置く車がない");
     let lanes: Vec<LaneId> = net.link_lanes(t.link()).collect();
     let zones = jay.get(&t.link()).map_or(&[][..], Vec::as_slice);
+    let spans: SmallVec<[(u32, u32); 2]> = rail
+        .on_link(t.link(), t.link_len.0)
+        .iter()
+        .map(|c| (c.near, c.far))
+        .collect();
     let nearest = t.offset.0.saturating_sub(2 * SPACING);
     let found = ix.by_count(&lanes).into_iter().find_map(|l| {
-        let at = room_clear_of(ix, l, t.offset, zones)?;
+        let at = room_clear_of(ix, l, t.offset, zones, &spans)?;
         (at.0 >= nearest || !entering.guards(l)).then_some((l, at))
     });
     match found {
@@ -641,23 +648,48 @@ fn jay_line(z: u32) -> u32 {
     z.saturating_sub(crossing::JAY_HALF_MM + JAY_STOP_GAP)
 }
 
-/// 車線 `lane` で、位置 `at` から後ろへ下げていき、ほかの車とも、衝突区間 `zones` とも重ならない最初の位置。
+/// 車線 `lane` で、位置 `at` から後ろへ下げていき、ほかの車とも、衝突区間 `zones` とも、踏切 `rail` とも
+/// 重ならない最初の位置。`rail` は踏切の手前の端と向こうの端で、開いていても閉じていても、体が踏切にかかる
+/// 位置には置かず、閉じた踏切で止まる位置まで下げる。踏切の中に置いた車は、閉じた踏切でも止まらずに
+/// 踏切を通り、列車とぶつかりかけるためである。
 fn room_clear_of(
     ix: &LaneIndex,
     lane: LaneId,
     at: LaneOffset,
     zones: &[u32],
+    rail: &[(u32, u32)],
 ) -> Option<LaneOffset> {
+    let half = CAR_LENGTH / 2;
+    // 真ん中がこの範囲（両端を含まない）にあれば重なるとみなし、3 つ目の位置まで下げる。
+    let keep_out = zones
+        .iter()
+        .map(|z| {
+            (
+                jay_line(*z),
+                z.saturating_add(crossing::JAY_HALF_MM) + CAR_LENGTH,
+                jay_line(*z),
+            )
+        })
+        .chain(rail.iter().map(|(near, far)| {
+            (
+                near.saturating_sub(half),
+                far.saturating_add(half),
+                jay_line(rail_crossing::zone_of(*near)),
+            )
+        }))
+        .collect::<SmallVec<[(u32, u32, u32); 4]>>();
     let mut p = ix.room_behind(lane, at)?;
     // 下げるたびに前の衝突区間より手前へ移るので、衝突区間の数より多くは回らない。
-    for _ in 0..=zones.len() {
-        let hit = zones.iter().rev().find(|z| {
-            jay_line(**z) < p.0 && z.saturating_add(crossing::JAY_HALF_MM) + CAR_LENGTH > p.0
-        });
-        let Some(z) = hit else {
+    for _ in 0..=keep_out.len() {
+        let hit = keep_out
+            .iter()
+            .filter(|(lo, hi, _)| *lo < p.0 && p.0 < *hi)
+            .map(|k| k.2)
+            .max();
+        let Some(back) = hit else {
             return Some(p);
         };
-        p = ix.room_behind(lane, LaneOffset(jay_line(*z)))?;
+        p = ix.room_behind(lane, LaneOffset(back))?;
     }
     Some(p)
 }
@@ -1224,7 +1256,7 @@ pub(super) fn step(
         let mut ix = LaneIndex::of(rows, net, None);
         let entering = Entering::of(rows, net, conn);
         for i in waiting {
-            if !place(rows, net, &mut ix, i, &occupied.zones, &entering) {
+            if !place(rows, net, &mut ix, i, &occupied.zones, rail, &entering) {
                 still_waiting.push(i);
             }
         }
