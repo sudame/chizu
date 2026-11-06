@@ -291,6 +291,11 @@ export type WorkerToMain =
    */
   | { kind: "rail-stats"; tick: number; stats: Float64Array }
   /**
+   * 日が変わった tick の、乗り降りの積み上げ（chizu-wasm の rail_tally）。「今日の乗り降り」の起点になる。
+   * rail-stats は約 1 秒ごとなので、その値を起点にすると日の頭の数秒が抜ける。tick は日の頭ちょうどである。
+   */
+  | { kind: "rail-day"; tick: number; tally: Float64Array }
+  /**
    * probe-rail の答え。x0〜y1 は問い合わせの写しで、reason は引けない理由の文（引けるなら null）、
    * cost は建設費（直線の形が正しくないときは 0）。
    */
@@ -532,6 +537,8 @@ export function isWorkerToMain(value: unknown): value is WorkerToMain {
       );
     case "rail-stats":
       return Number.isInteger(v.tick) && v.stats instanceof Float64Array;
+    case "rail-day":
+      return Number.isInteger(v.tick) && v.tally instanceof Float64Array;
     case "inspect":
       return (
         isInspectQuery(v.query) &&

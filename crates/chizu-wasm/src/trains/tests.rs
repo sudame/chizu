@@ -223,6 +223,24 @@ fn rail_stats_lists_stations_and_lines_in_the_documented_strides() {
 }
 
 #[test]
+fn rail_tally_matches_the_cumulative_counts_in_rail_stats() {
+    use crate::sim::{RAIL_STATS_HEADER, RAIL_STATS_STATION};
+    let mut sim = shuttle(1);
+    sim.advance(50);
+    let stats = sim.rail_stats();
+    let tally = sim.rail_tally();
+    assert_eq!(tally.len(), 1 + 2 * 4);
+    assert_eq!(tally[0], stats[2]);
+    for k in 0..2 {
+        let st = &stats[RAIL_STATS_HEADER + k * RAIL_STATS_STATION..][..RAIL_STATS_STATION];
+        let row = &tally[1 + k * 4..][..4];
+        // 添え字と世代、乗った人と降りた人の積み上げが同じ
+        assert_eq!(&row[..2], &st[..2]);
+        assert_eq!(&row[2..], &st[10..12]);
+    }
+}
+
+#[test]
 fn station_probe_gives_the_door_for_the_rotations_that_can_be_placed() {
     let world = World::new_with_money(0, Money(1_000_000_000)).with_unlimited_land();
     let mut sim = Sim::from_parts(world, CommandLog::new());

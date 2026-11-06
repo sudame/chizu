@@ -106,18 +106,48 @@ export function stationKey(s: { index: number; generation: number }): string {
   return `${s.index}.${s.generation}`;
 }
 
+/** chizu-wasm の rail_tally の見出しの数と、駅 1 つの数の個数。 */
+export const RAIL_TALLY_HEADER = 1;
+export const RAIL_TALLY_STATION = 4;
+
 /** 乗った人と降りた人の、その日の数。 */
 export type DayRides = { boarded: number; alighted: number };
 
 /**
  * 駅ごとの、その日の乗り降りの数。中核が持つのは始まりからの積み上げだけなので、日が変わった最初の値を控えて差を取る。
- * 開いたときの途中の日は、開いてからの数になる（`fullDay` が偽）。tick が戻ったら（読み込み、新しい街）控えを捨てる。
+ * 起点は、Worker が日の変わり目の tick で送る積み上げ（`markDay`）である。届く前の途中の日は、開いてからの数になる（`fullDay` が偽）。
+ * 別の街になるときは `reset` で控えを捨てる。tick が戻ったときも捨てる。
  */
 export class RideDays {
   #day = -1;
   #lastTick = -1;
   #base = new Map<string, DayRides>();
   #fullDay = false;
+
+  /** 控えを捨てる。別の街（読み込み、新しい街）になるときに呼ぶ。 */
+  reset(): void {
+    this.#day = -1;
+    this.#lastTick = -1;
+    this.#base = new Map();
+    this.#fullDay = false;
+  }
+
+  /** 日が変わった tick の積み上げ（chizu-wasm の rail_tally）を、その日の起点にする。 */
+  markDay(tick: number, tally: ArrayLike<number>): void {
+    const base = new Map<string, DayRides>();
+    for (
+      let i = RAIL_TALLY_HEADER;
+      i + RAIL_TALLY_STATION <= tally.length;
+      i += RAIL_TALLY_STATION
+    ) {
+      const key = stationKey({ index: tally[i] ?? 0, generation: tally[i + 1] ?? 0 });
+      base.set(key, { boarded: tally[i + 2] ?? 0, alighted: tally[i + 3] ?? 0 });
+    }
+    this.#base = base;
+    this.#day = Math.floor(tick / TICKS_PER_DAY);
+    this.#lastTick = tick;
+    this.#fullDay = true;
+  }
 
   update(stats: RailStats): void {
     const day = Math.floor(stats.tick / TICKS_PER_DAY);

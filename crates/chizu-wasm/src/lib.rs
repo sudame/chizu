@@ -245,6 +245,11 @@ impl Simulation {
         self.0.rail_stats()
     }
 
+    /// 日の変わり目に控える、乗り降りの積み上げ。並びは `Sim::rail_tally` のとおりである。
+    pub fn rail_tally(&self) -> Vec<f64> {
+        self.0.rail_tally()
+    }
+
     /// 駅を間口のマス (x, y) に置いたときの、向き 0〜3 ごとの `[出入口の x, y, 徒歩圏の世帯, 車を持てない世帯]`。
     /// 置けない向きは null。
     pub fn station_probe(&self, x: f64, y: f64) -> Result<js_sys::Array, JsError> {

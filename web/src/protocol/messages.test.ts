@@ -46,6 +46,9 @@ describe("isWorkerToMain", () => {
     expect(isWorkerToMain(stats)).toBe(true);
     expect(isWorkerToMain({ ...stats, tick: 1.5 })).toBe(false);
     expect(isWorkerToMain({ ...stats, stats: [0, 0, 0, 0] })).toBe(false);
+    const day = { kind: "rail-day", tick: 7200, tally: new Float64Array(1) };
+    expect(isWorkerToMain(day)).toBe(true);
+    expect(isWorkerToMain({ ...day, tally: [0] })).toBe(false);
     const inspect = { kind: "inspect", query: { kind: "tile", x: 3, y: -4 }, info: [] };
     expect(isWorkerToMain(inspect)).toBe(true);
     expect(isWorkerToMain({ ...inspect, info: [2, 1, 1200, 1200] })).toBe(true);

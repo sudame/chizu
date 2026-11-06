@@ -23,6 +23,7 @@ import { isParking, OVERVIEW_LENGTH, serviceCode } from "./protocol/messages.ts"
 import { layout } from "./protocol/snapshot.ts";
 import { startSimulation } from "./save/worker-side.ts";
 import { stepBudget, tickRate } from "./speed.ts";
+import { TICKS_PER_DAY } from "./utility-trend.ts";
 
 const SUM_N = 10_000_000;
 const FRAME_MS = 1000 / 60;
@@ -247,6 +248,35 @@ function sendRailStats(sim: Simulation, now: number, force = false): void {
   reply({ kind: "rail-stats", tick: sim.current_tick(), stats }, [stats.buffer]);
 }
 
+// 日が変わった tick の乗り降りの積み上げ。画面の「今日の乗り降り」の起点になる。
+// rail_stats は約 1 秒ごとなので、その値を起点にすると日の頭の数秒（時間を速めるほど長い）が抜ける。
+// 日の変わり目で進める数を区切り、ちょうどの tick で軽い積み上げだけを送る。駅がなければ送らない
+function sendRailDay(sim: Simulation): void {
+  const tally = sim.rail_tally();
+  if (tally.length > 1) {
+    reply({ kind: "rail-day", tick: sim.current_tick(), tally }, [tally.buffer]);
+  }
+}
+
+/** `ticks` だけ進める。日の変わり目をまたぐときは、そこで区切って `sendRailDay` を呼ぶ。 */
+function advanceByDay(sim: Simulation, ticks: number): void {
+  let left = ticks;
+  while (left > 0) {
+    const tick = sim.current_tick();
+    const chunk = Math.min(left, TICKS_PER_DAY - (tick % TICKS_PER_DAY));
+    sim.advance(chunk);
+    const after = sim.current_tick();
+    if (after === tick) {
+      // 止まっていて進まない
+      return;
+    }
+    left -= chunk;
+    if (after % TICKS_PER_DAY === 0) {
+      sendRailDay(sim);
+    }
+  }
+}
+
 // 人口と幸福度は建物の表が変わらなくても動く。住民の数だけ数え直すので、間引いて送る。
 // 一時停止中は街が進まないので、最初の 1 回のあとは送らない。最初の 1 回を画面は基準にする
 const OVERVIEW_INTERVAL_MS = 500;
@@ -285,7 +315,7 @@ function run(sim: Simulation): {
     const step = stepBudget(budget, now - last, rate, paused, MAX_BACKLOG_SECONDS);
     budget = step.budget;
     last = now;
-    sim.advance(step.ticks);
+    advanceByDay(sim, step.ticks);
     sendMoverPaths(sim);
     sim.publish();
     sendOutcomes(sim);

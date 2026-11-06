@@ -222,7 +222,6 @@ const toolMessage = element<HTMLElement>("#tool-message");
 const toolButtons = [...document.querySelectorAll<HTMLButtonElement>("button[data-tool]")];
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
-setupSaves(worker, element<HTMLElement>("#controls"));
 setupDemandFactors();
 
 function send(message: MainToWorker): void {
@@ -348,6 +347,12 @@ let lineMeshesLast: { far: Geometry; near: Geometry } | null = null;
 let railStats: RailStats | null = null;
 const rideDays = new RideDays();
 const gaveUpWindow = new GaveUpWindow();
+// 別の街になるので、駅の乗り降りと歩いた人の控えは前の街のものを捨てる
+setupSaves(worker, element<HTMLElement>("#controls"), () => {
+  rideDays.reset();
+  gaveUpWindow.reset();
+  railStats = null;
+});
 // 路線の道具の途中の状態。路線を作るコマンドを送った時点で知っていた路線を覚え、できた路線を見分ける
 let lineDraft: LineDraft = EMPTY_DRAFT;
 const LOOPED_NOTICE = "環状にした路線は、これ以上駅を足せない";
@@ -1723,6 +1728,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     mapCanvas.dataset.railCrossings = String(crossings.length);
     mapCanvas.dataset.railLines = String(railLines.length);
     mapCanvas.dataset.railRevision = String(message.revision);
+    return;
+  }
+  if (message.kind === "rail-day") {
+    rideDays.markDay(message.tick, message.tally);
     return;
   }
   if (message.kind === "rail-stats") {
