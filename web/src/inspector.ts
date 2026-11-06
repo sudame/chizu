@@ -163,6 +163,7 @@ const SERVICE_LABEL: Record<ServiceName, string> = {
   WaterPump: "浄水場",
   ParkingLot: "平面の駐車場",
   ParkingGarage: "駐車場ビル",
+  Station: "駅",
 };
 
 const n = (v: number) => v.toLocaleString("ja-JP");

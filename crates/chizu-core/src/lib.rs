@@ -47,7 +47,8 @@ pub use network::{
     SegmentId, SegmentKind, TILE_MM, road_change_cost,
 };
 pub use rail::{
-    RAIL_BLOCK_MAX_TILES, Rail, RailNode, RailNodeId, Station, StationId, Track, TrackId, rail_cost,
+    Block, LineId, RAIL_BLOCK_MAX_TILES, Rail, RailLine, RailNode, RailNodeId, RailTally, Station,
+    StationId, Step, StepKind, Track, TrackId, Train, TrainId, TrainState, rail_cost,
 };
 pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, SeqGap, replay};
 pub use rng::{Pcg32, RngPurpose, mix_words, rng};

@@ -8,6 +8,7 @@ const MENUS: Record<string, string> = {
   upgrade: "road",
   zone: "zone",
   service: "service",
+  rail: "rail",
   signal: "signal",
   crosswalk: "signal",
 };

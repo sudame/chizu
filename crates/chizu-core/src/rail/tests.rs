@@ -642,3 +642,26 @@ fn the_state_hash_skips_an_unused_rail() {
     used.write_state_without_rail(&mut h);
     assert_ne!(used.state_hash(), h.finish());
 }
+
+/// 画面が引く前に使う `check_build_rail` は、状態を変えず、適用と同じ答えを返す。
+#[test]
+fn check_build_rail_agrees_with_applying() {
+    let mut w = street();
+    let hash = w.state_hash();
+    let free = line(0, 3, 40, 3);
+    assert_eq!(w.check_build_rail(&free), Ok(rail_cost(&free)));
+    // 道路のマスを通る線路と、お金が足りない街の線路は、適用と同じ理由で断る
+    let across = line(5, 5, 5, 15);
+    assert_eq!(w.check_build_rail(&across), Err(DenyReason::Occupied));
+    let broke = World::new_with_money(0, Money(1_000));
+    assert_eq!(
+        broke.check_build_rail(&free),
+        Err(DenyReason::NotEnoughMoney)
+    );
+    assert_eq!(w.state_hash(), hash);
+    assert_eq!(
+        rail(&mut w, (5, 5), (5, 15)),
+        ApplyOutcome::Denied(DenyReason::Occupied)
+    );
+    assert_eq!(rail(&mut w, (0, 3), (40, 3)), ApplyOutcome::Applied);
+}

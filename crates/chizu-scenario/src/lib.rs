@@ -3,12 +3,171 @@
 use chizu_core::citizens::draw_household;
 use chizu_core::routing::{ROUTE_VARIANTS, RouteRequest};
 use chizu_core::{
-    CHUNK_SIDE, ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network, Population,
-    RngPurpose, RoadKind, ServiceKind, Tick, TilePos, TileRect, World, ZoneKind, rng,
+    ApplyOutcome, CHUNK_SIDE, ChunkCoord, Command, LaneMode, Line, LinkId, Money, Network,
+    Population, Rail, RngPurpose, RoadKind, ServiceKind, Tick, TilePos, TileRect, World, ZoneKind,
+    rng,
 };
 use chizu_core::{LaneOffset, SidewalkPos};
 
 pub mod perf;
+
+/// [`rail_trains_city`] の路線の数。街に置ける路線の上限である。
+pub const RAIL_BENCH_LINES: usize = 64;
+
+/// [`rail_trains_city`] の路線ごとの列車の本数。64 本の路線と合わせて 512 本にする。
+pub const RAIL_BENCH_TRAINS: u8 = 8;
+
+/// 1 組の幅（マス）。
+const RAIL_UNIT_WIDTH: i64 = 230;
+
+/// 1 組の高さ（マス）。北の駅のホームから南の道路までの 14 行と、間の 4 行である。
+const RAIL_UNIT_HEIGHT: i64 = 18;
+
+/// 分岐と共有する区間のある 2 本の路線を 1 組にして、`lines / 2` 組並べた街。路線ごとに [`RAIL_BENCH_TRAINS`] 本を
+/// 走らせるよう決めてある（上限は 8 本）。
+///
+/// 1 組は、南の道路に面した駅 W、M、E を東西に並べ、M と E のあいだの分岐から北東へ分かれて駅 N へ向かう線路を
+/// 引いたものである。路線は W–M–E と W–M–N で、W、W–M の線路、M、M から分岐までの線路を共有する。
+/// 分岐から E と N までは長い線路で、どちらの路線にも待てる所が 9 つある。
+/// 原点のまわりの 17×17 チャンクを買い、水辺のない所を左上から順に探して置く。
+pub fn rail_trains_city(seed: u64, lines: usize) -> World {
+    const R: i32 = 8;
+    assert!(lines.is_multiple_of(2), "路線は 2 本ずつ置く");
+    let mut w = World::new_with_money(seed, Money(i64::MAX / 4)).with_unlimited_land();
+    // 買った土地に辺で接するチャンクしか買えないので、内側から外へ買い広げる。
+    for ring in 2..=R {
+        for cy in -ring..=ring {
+            for cx in -ring..=ring {
+                if cx.abs().max(cy.abs()) == ring {
+                    w.apply(&Command::BuyChunk {
+                        coord: ChunkCoord::new(cx, cy),
+                    });
+                }
+            }
+        }
+    }
+    for cy in -R..=R {
+        for cx in -R..=R {
+            w.apply(&Command::BuyChunk {
+                coord: ChunkCoord::new(cx, cy),
+            });
+        }
+    }
+    let side = CHUNK_SIDE as i64;
+    let (min, max) = (-i64::from(R) * side, (i64::from(R) + 1) * side - 1);
+    let mut made = 0;
+    let mut y = min + RAIL_UNIT_HEIGHT;
+    while made < lines && y <= max {
+        let mut x = min;
+        while made < lines && x + RAIL_UNIT_WIDTH <= max {
+            let land = (x..=x + RAIL_UNIT_WIDTH).all(|tx| {
+                (y - RAIL_UNIT_HEIGHT + 4..=y).all(|ty| w.is_buildable(TilePos::new(tx, ty)))
+            });
+            if land && place_rail_pair(&mut w, x, y) {
+                made += 2;
+                x += RAIL_UNIT_WIDTH + 4;
+            } else {
+                x += 8;
+            }
+        }
+        y += RAIL_UNIT_HEIGHT;
+    }
+    assert_eq!(made, lines, "路線を置ききれない");
+    w
+}
+
+/// `x` から東へ、y の道路に面した駅 W、M、E と、y − 10 の道路に面した駅 N、線路を置き、W–M–E と W–M–N の
+/// 路線を作る。置けなければ偽を返す。
+fn place_rail_pair(w: &mut World, x: i64, y: i64) -> bool {
+    let e = x + RAIL_UNIT_WIDTH - 3;
+    let station = |east: i64, row: i64| Command::PlaceBuilding {
+        kind: ServiceKind::Station,
+        at: TilePos::new(east, row + 1),
+        rotation: 2,
+    };
+    let rail = |from: (i64, i64), to: (i64, i64)| Command::BuildRail {
+        from: TilePos::new(from.0, from.1),
+        to: TilePos::new(to.0, to.1),
+    };
+    let road = |from: i64, to: i64, row: i64| Command::BuildRoad {
+        from: TilePos::new(from, row),
+        to: TilePos::new(to, row),
+        kind: RoadKind::Small,
+    };
+    let (south, north) = (y - 2, y - 12);
+    let commands = [
+        road(x, x + RAIL_UNIT_WIDTH, y),
+        road(x + 73, x + RAIL_UNIT_WIDTH, y - 10),
+        station(x + 12, south),
+        station(x + 42, south),
+        station(e, south),
+        station(e, north),
+        rail((x + 12, south), (x + 33, south)),
+        rail((x + 42, south), (e - 9, south)),
+        // 分岐から北東へ 10 マス進み、北の駅へ東へ向かう。
+        rail((x + 60, south), (x + 70, north)),
+        rail((x + 70, north), (e - 9, north)),
+    ];
+    if !commands.iter().all(|c| w.apply(c) == ApplyOutcome::Applied) {
+        return false;
+    }
+    let at = |tx, row| {
+        w.rail()
+            .station_at(TilePos::new(tx, row))
+            .expect("駅がない")
+    };
+    let (sw, sm, se, sn) = (
+        at(x + 12, south),
+        at(x + 42, south),
+        at(e, south),
+        at(e, north),
+    );
+    for end in [se, sn] {
+        if w.apply(&Command::CreateLine { from: sw, to: sm }) != ApplyOutcome::Applied {
+            return false;
+        }
+        let (line, _) = w.rail().lines().last().expect("路線がない");
+        let rest = [
+            Command::ExtendLine { line, station: end },
+            Command::SetLineTrains {
+                line,
+                trains: RAIL_BENCH_TRAINS,
+            },
+        ];
+        if !rest.iter().all(|c| w.apply(c) == ApplyOutcome::Applied) {
+            return false;
+        }
+    }
+    true
+}
+
+/// [`rail_trains_city`] の線路の網を、列車がすべて現れるまで回し、さらにふだんの走り方になるまで
+/// [`RAIL_BENCH_WARMUP`] tick 回したもの。
+pub fn rail_trains_running(seed: u64, lines: usize) -> Rail {
+    let w = rail_trains_city(seed, lines);
+    let mut rail = w.rail().clone();
+    let want = lines * usize::from(RAIL_BENCH_TRAINS);
+    let mut tick = w.tick();
+    for _ in 0..50_000 {
+        rail.step(tick);
+        tick = tick.next();
+        if rail.train_count() == want {
+            break;
+        }
+    }
+    assert_eq!(rail.train_count(), want, "列車が出そろわない");
+    for _ in 0..RAIL_BENCH_WARMUP {
+        rail.step(tick);
+        tick = tick.next();
+    }
+    assert_eq!(rail.train_count(), want, "列車が消えた");
+    assert_eq!(rail.tally().deadlock, 0, "行き詰まった");
+    rail
+}
+
+/// 列車が出そろってから、測り始めるまでに回す tick。出そろった直後は、駅で間を空けて待つ列車が
+/// 同じ tick に出るので、ふだんより重い。
+pub const RAIL_BENCH_WARMUP: u64 = 3_000;
 
 pub use chizu_core::citizens::MAX_HOUSEHOLD_SIZE;
 

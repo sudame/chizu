@@ -113,10 +113,20 @@ pub enum DenyReason {
     RailTooSharp = 20,
     /// 線路のノードに集まる線路が 3 本（分岐 1 つ）を超える。
     RailTooManyBranches = 21,
+    /// 路線の駅へ、途中で向きを変えずに線路で届かない。
+    RailNoRoute = 22,
+    /// 指した駅がない。
+    NoSuchStation = 23,
+    /// 指した路線がない。
+    NoSuchLine = 24,
+    /// 路線の数（64）か、路線の駅の数（32）の上限に届いている。環状にした路線にも、もう駅を足せない。
+    LineLimit = 25,
+    /// 駅がもう路線に入っている（環状にするために最初の駅を指すときを除く）。
+    StationInLine = 26,
 }
 
 impl DenyReason {
-    pub const ALL: [DenyReason; 22] = [
+    pub const ALL: [DenyReason; 27] = [
         DenyReason::NotOwned,
         DenyReason::Water,
         DenyReason::NotEnoughMoney,
@@ -139,6 +149,11 @@ impl DenyReason {
         DenyReason::CrosswalkUnchanged,
         DenyReason::RailTooSharp,
         DenyReason::RailTooManyBranches,
+        DenyReason::RailNoRoute,
+        DenyReason::NoSuchStation,
+        DenyReason::NoSuchLine,
+        DenyReason::LineLimit,
+        DenyReason::StationInLine,
     ];
 
     pub fn index(self) -> usize {
@@ -601,9 +616,23 @@ impl World {
         let Ok(line) = Line::between(from, to) else {
             return ApplyOutcome::Rejected;
         };
-        if let Err(reason) = line.tiles().try_for_each(|t| self.check_buildable(t)) {
+        let cost = match self.check_build_rail(&line) {
+            Ok(cost) => cost,
+            Err(reason) => return ApplyOutcome::Denied(reason),
+        };
+        if let Err(reason) = self.rail.build_rail(&line) {
             return ApplyOutcome::Denied(reason);
         }
+        self.money = self.money - cost;
+        self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
+        self.refresh_buildings();
+        ApplyOutcome::Applied
+    }
+
+    /// 線路を引けるかを、状態を変えずに調べる。引けるなら建設費を返す。
+    /// 画面が引く前に理由と費用を示すために公開してあり、`BuildRail` の適用と同じ順で調べる。
+    pub fn check_build_rail(&self, line: &Line) -> Result<Money, DenyReason> {
+        line.tiles().try_for_each(|t| self.check_buildable(t))?;
         let blocked = (0..=line.len).any(|k| {
             let t = line.tile(k);
             match self.tile_state(t).map(|(_, u)| u) {
@@ -615,23 +644,18 @@ impl World {
             }
         });
         if blocked {
-            return ApplyOutcome::Denied(DenyReason::Occupied);
+            return Err(DenyReason::Occupied);
         }
         // 踏切はまだないので、道路とマスの角で交わる線路も断る。
-        if self.network.crosses_corner(&line) {
-            return ApplyOutcome::Denied(DenyReason::CornerCrossing);
+        if self.network.crosses_corner(line) {
+            return Err(DenyReason::CornerCrossing);
         }
-        let cost = rail_cost(&line);
+        let cost = rail_cost(line);
         if self.money < cost {
-            return ApplyOutcome::Denied(DenyReason::NotEnoughMoney);
+            return Err(DenyReason::NotEnoughMoney);
         }
-        if let Err(reason) = self.rail.build_rail(&line) {
-            return ApplyOutcome::Denied(reason);
-        }
-        self.money = self.money - cost;
-        self.sync_road_tiles(line.tiles().collect::<Vec<_>>());
-        self.refresh_buildings();
-        ApplyOutcome::Applied
+        self.rail.check_rail(line)?;
+        Ok(cost)
     }
 
     /// 線路の網と駅。
@@ -898,6 +922,14 @@ impl World {
             Command::BuildRoad { from, to, kind } => self.build_road(from, to, kind),
             Command::UpgradeRoad { from, to, kind } => self.upgrade_road(from, to, kind),
             Command::BuildRail { from, to } => self.build_rail(from, to),
+            Command::CreateLine { from, to } => {
+                outcome(self.rail.create_line(from, to).map(|_| ()))
+            }
+            Command::ExtendLine { line, station } => outcome(self.rail.extend_line(line, station)),
+            Command::RemoveLine { line } => outcome(self.rail.remove_line(line)),
+            Command::SetLineTrains { line, trains } => {
+                outcome(self.rail.set_line_trains(line, trains))
+            }
             Command::Bulldoze { area } => self.bulldoze(area),
             Command::PaintZone { area, zone } => self.paint_zone(area, zone),
             Command::PlaceBuilding { kind, at, rotation } => self.place_service(kind, at, rotation),
@@ -951,6 +983,7 @@ impl World {
             .trips
             .step(&self.network, &mut self.router.router, tick);
         self.end_commutes(ended);
+        self.rail.step(tick);
         self.grow_buildings();
         self.update_economy();
         self.tick = tick.next();
@@ -976,6 +1009,14 @@ impl World {
         let mut h = StateHasher::new();
         self.write_state(&mut h);
         h.finish()
+    }
+}
+
+/// 断る理由つきの結果を、コマンドの結果にする。
+fn outcome(r: Result<(), DenyReason>) -> ApplyOutcome {
+    match r {
+        Ok(()) => ApplyOutcome::Applied,
+        Err(reason) => ApplyOutcome::Denied(reason),
     }
 }
 
@@ -1049,10 +1090,15 @@ mod tests {
             | DenyReason::NoCrosswalkArm
             | DenyReason::CrosswalkUnchanged
             | DenyReason::RailTooSharp
-            | DenyReason::RailTooManyBranches => DenyReason::ALL.contains(&r),
+            | DenyReason::RailTooManyBranches
+            | DenyReason::RailNoRoute
+            | DenyReason::NoSuchStation
+            | DenyReason::NoSuchLine
+            | DenyReason::LineLimit
+            | DenyReason::StationInLine => DenyReason::ALL.contains(&r),
         };
         assert!(DenyReason::ALL.into_iter().all(listed));
-        assert_eq!(DenyReason::ALL.len(), 22);
+        assert_eq!(DenyReason::ALL.len(), 27);
     }
     use crate::command::MAX_TAX_PERMILLE;
 

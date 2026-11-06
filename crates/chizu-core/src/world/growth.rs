@@ -1732,6 +1732,18 @@ mod tests {
                 w.rail().rail_tile_count() - after.rail().rail_tile_count(),
                 "{area:?}"
             );
+            // 塗るマスの一覧は、数と同じ長さで、消えたあとにはどの区間や線路も通らない
+            assert_eq!(preview.removed_road_tiles.len() as u64, preview.road_tiles);
+            assert_eq!(preview.removed_rail_tiles.len() as u64, preview.rail_tiles);
+            for t in &preview.removed_road_tiles {
+                assert!(
+                    after.network().segments_through(*t).is_empty(),
+                    "{area:?} {t:?}"
+                );
+            }
+            for t in &preview.removed_rail_tiles {
+                assert!(after.rail().tracks_through(*t).is_empty(), "{area:?} {t:?}");
+            }
             assert_eq!(
                 preview.stations.len(),
                 w.rail().stations().count() - after.rail().stations().count(),

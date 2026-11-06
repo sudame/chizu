@@ -4,8 +4,8 @@
 //! 中核にコマンドの種類や欄を足したとき、ここがコンパイルで止まって直し忘れに気づけるようにするためである。
 
 use chizu_core::{
-    ChunkCoord, Command, Heading, MAX_PARKING_FEE, MAX_TAX_PERMILLE, NodeId, RoadKind, ServiceKind,
-    SimSpeed, TilePos, TileRect, Zone, ZoneKind,
+    ChunkCoord, Command, Heading, LineId, MAX_PARKING_FEE, MAX_TAX_PERMILLE, NodeId, RoadKind,
+    ServiceKind, SimSpeed, StationId, TilePos, TileRect, Zone, ZoneKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -90,11 +90,28 @@ mirror_enum!(
     }
 );
 
+/// 世代つきの ID（ノード、駅、路線）。
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct NodeJson {
     index: u32,
     generation: u16,
+}
+
+fn station_id(NodeJson { index, generation }: NodeJson) -> StationId {
+    StationId { index, generation }
+}
+
+fn line_id(NodeJson { index, generation }: NodeJson) -> LineId {
+    LineId { index, generation }
+}
+
+fn station_json(StationId { index, generation }: StationId) -> NodeJson {
+    NodeJson { index, generation }
+}
+
+fn line_json(LineId { index, generation }: LineId) -> NodeJson {
+    NodeJson { index, generation }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -149,6 +166,21 @@ enum CommandJson {
     BuildRail {
         from: [i64; 2],
         to: [i64; 2],
+    },
+    CreateLine {
+        from: NodeJson,
+        to: NodeJson,
+    },
+    ExtendLine {
+        line: NodeJson,
+        station: NodeJson,
+    },
+    RemoveLine {
+        line: NodeJson,
+    },
+    SetLineTrains {
+        line: NodeJson,
+        trains: u8,
     },
 }
 
@@ -253,6 +285,21 @@ impl From<Command> for CommandJson {
                 from: tile_json(from),
                 to: tile_json(to),
             },
+            Command::CreateLine { from, to } => CommandJson::CreateLine {
+                from: station_json(from),
+                to: station_json(to),
+            },
+            Command::ExtendLine { line, station } => CommandJson::ExtendLine {
+                line: line_json(line),
+                station: station_json(station),
+            },
+            Command::RemoveLine { line } => CommandJson::RemoveLine {
+                line: line_json(line),
+            },
+            Command::SetLineTrains { line, trains } => CommandJson::SetLineTrains {
+                line: line_json(line),
+                trains,
+            },
         }
     }
 }
@@ -318,6 +365,21 @@ impl CommandJson {
                 from: tile(from),
                 to: tile(to),
             },
+            CommandJson::CreateLine { from, to } => Command::CreateLine {
+                from: station_id(from),
+                to: station_id(to),
+            },
+            CommandJson::ExtendLine { line, station } => Command::ExtendLine {
+                line: line_id(line),
+                station: station_id(station),
+            },
+            CommandJson::RemoveLine { line } => Command::RemoveLine {
+                line: line_id(line),
+            },
+            CommandJson::SetLineTrains { line, trains } => Command::SetLineTrains {
+                line: line_id(line),
+                trains,
+            },
         })
     }
 }
@@ -371,6 +433,12 @@ fn explain_out_of_range(value: &Value) -> Option<String> {
             SimSpeed::MAX.multiplier().into(),
         ),
         "PlaceBuilding" => int_field("rotation", "建物の向き", 0, 3),
+        "SetLineTrains" => int_field(
+            "trains",
+            "列車の本数",
+            0,
+            chizu_core::rail::line::MAX_LINE_TRAINS.into(),
+        ),
         _ => None,
     }
 }
@@ -403,6 +471,10 @@ mod tests {
             json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"SW","on":false}),
             json!({"type":"BuildRail","from":[0,1],"to":[5,6]}),
             json!({"type":"PlaceBuilding","kind":"Station","at":[4,4],"rotation":2}),
+            json!({"type":"CreateLine","from":{"index":0,"generation":0},"to":{"index":1,"generation":0}}),
+            json!({"type":"ExtendLine","line":{"index":0,"generation":0},"station":{"index":2,"generation":1}}),
+            json!({"type":"RemoveLine","line":{"index":0,"generation":0}}),
+            json!({"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":16}),
         ];
         for c in &cases {
             assert!(parse(c).is_ok(), "{c}");
@@ -515,6 +587,39 @@ mod tests {
                 at: t(7, -8),
                 rotation: 1,
             },
+            Command::CreateLine {
+                from: StationId {
+                    index: 1,
+                    generation: 2,
+                },
+                to: StationId {
+                    index: 3,
+                    generation: 0,
+                },
+            },
+            Command::ExtendLine {
+                line: LineId {
+                    index: 4,
+                    generation: 1,
+                },
+                station: StationId {
+                    index: 5,
+                    generation: 6,
+                },
+            },
+            Command::RemoveLine {
+                line: LineId {
+                    index: 7,
+                    generation: 8,
+                },
+            },
+            Command::SetLineTrains {
+                line: LineId {
+                    index: 9,
+                    generation: 0,
+                },
+                trains: 16,
+            },
         ];
         // 種類ごとに 1 つはあることを、ワイルドカードなしの match で確かめる。
         #[deny(clippy::wildcard_enum_match_arm)]
@@ -532,9 +637,13 @@ mod tests {
                 Command::SetCrosswalk { .. } => 9,
                 Command::SetParkingFee { .. } => 10,
                 Command::BuildRail { .. } => 11,
+                Command::CreateLine { .. } => 12,
+                Command::ExtendLine { .. } => 13,
+                Command::RemoveLine { .. } => 14,
+                Command::SetLineTrains { .. } => 15,
             }
         }
-        let mut seen = [false; 12];
+        let mut seen = [false; 16];
         for c in commands {
             seen[kind(&c)] = true;
             let json = to_json(c);
@@ -610,6 +719,9 @@ mod tests {
             json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"Up","on":false}),
             json!({"type":"BuildRail","from":[0,1]}),
             json!({"type":"BuildRail","from":[0,1],"to":[5,1],"kind":"Small"}),
+            json!({"type":"CreateLine","from":{"index":0,"generation":0}}),
+            json!({"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":-1}),
+            json!({"type":"SetLineTrains","line":{"index":0,"generation":0},"trains":256}),
         ];
         for c in &cases {
             assert!(parse(c).is_err(), "{c}");

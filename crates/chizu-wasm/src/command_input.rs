@@ -56,7 +56,10 @@ impl fmt::Display for InputError {
             ),
             InputError::BadInteger(name) => write!(f, "{name} が範囲の中の整数でない"),
             InputError::BadRoadKind => write!(f, "road は Small、Medium、Large のどれかで指定する"),
-            InputError::BadService => write!(f, "service は PowerPlant か WaterPump で指定する"),
+            InputError::BadService => write!(
+                f,
+                "service は PowerPlant、WaterPump、ParkingLot、ParkingGarage、Station のどれかで指定する"
+            ),
             InputError::BadBool(name) => write!(f, "{name} が真偽値でない"),
             InputError::NoNode => write!(f, "そのマスに交差点がない"),
             InputError::BadArm => write!(f, "腕の向き dx、dy は -1、0、1 の 8 方向で指定する"),
@@ -167,12 +170,17 @@ pub fn parse(
                 max: tile(&field, "maxX", "maxY")?,
             },
         }),
+        "BuildRail" => Ok(Command::BuildRail {
+            from: tile(&field, "fromX", "fromY")?,
+            to: tile(&field, "toX", "toY")?,
+        }),
         "PlaceBuilding" => {
             let kind = match field("service") {
                 Field::Text(t) if t == "PowerPlant" => ServiceKind::PowerPlant,
                 Field::Text(t) if t == "WaterPump" => ServiceKind::WaterPump,
                 Field::Text(t) if t == "ParkingLot" => ServiceKind::ParkingLot,
                 Field::Text(t) if t == "ParkingGarage" => ServiceKind::ParkingGarage,
+                Field::Text(t) if t == "Station" => ServiceKind::Station,
                 _ => return Err(InputError::BadService),
             };
             let rotation = integer(&field, "rotation")
@@ -477,6 +485,28 @@ mod tests {
     }
 
     #[test]
+    fn accepts_build_rail() {
+        let rail = object(&[
+            ("kind", Field::Text("BuildRail".into())),
+            ("fromX", Field::Number(1.0)),
+            ("fromY", Field::Number(2.0)),
+            ("toX", Field::Number(9.0)),
+            ("toY", Field::Number(2.0)),
+        ]);
+        assert_eq!(
+            rail,
+            Ok(Command::BuildRail {
+                from: TilePos::new(1, 2),
+                to: TilePos::new(9, 2),
+            })
+        );
+        assert_eq!(
+            object(&[("kind", Field::Text("BuildRail".into()))]),
+            Err(InputError::BadInteger("fromX"))
+        );
+    }
+
+    #[test]
     fn accepts_place_building() {
         let place = |service: &str, rotation: f64| {
             object(&[
@@ -493,6 +523,14 @@ mod tests {
                 kind: ServiceKind::WaterPump,
                 at: TilePos::new(-3, 7),
                 rotation: 2,
+            })
+        );
+        assert_eq!(
+            place("Station", 1.0),
+            Ok(Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: TilePos::new(-3, 7),
+                rotation: 1,
             })
         );
         assert_eq!(place("Park", 0.0), Err(InputError::BadService));
