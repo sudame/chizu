@@ -123,7 +123,7 @@ pub enum DenyReason {
     LineLimit = 25,
     /// 駅がもう路線に入っている（環状にするために最初の駅を指すときを除く）。
     StationInLine = 26,
-    /// 路線を作るか延ばすと、ほかの路線の待てる所が足りなくなり、その路線の本数の上限が 0 になる（走れなくなる）。
+    /// 路線を作るか延ばすと、共有の区画の待てる所の枠をほかの路線に分けきれず、その路線の本数の上限が 0 になる（走れなくなる）。
     LineStarvesOther = 27,
     /// 線路が高速道路を横切る。踏切は高速道路に置かない。
     HighwayCrossing = 28,
@@ -773,9 +773,10 @@ impl World {
         self.seed
     }
 
-    /// 書き出しに入れない、種から写した値を作り直す。書き出しから読み戻したあとに呼ぶ。
+    /// 書き出しに入れない、種から写した値と、状態から作り直せる値を作り直す。書き出しから読み戻したあとに呼ぶ。
     pub(crate) fn restore_derived(&mut self) {
         self.buildings.set_seed(self.seed);
+        self.rail.restore_plans();
     }
 
     /// 次に進める tick。これまでに進めた tick 数でもある。
