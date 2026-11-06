@@ -569,6 +569,29 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
     let upkeep = &o["financesPerDay"]["facilityUpkeep"];
     assert_eq!(upkeep["ParkingLot"], 96);
     assert_eq!(upkeep["ParkingGarage"], 2400);
+    // 道路に面している間は、前の道路がない駐車場はない。
+    assert_eq!(o["parking"]["lotsNotOnRoad"]["count"], 0);
+    assert_eq!(o["parking"]["lotsNotOnRoad"]["lots"], serde_json::json!([]));
+    // 前の道路を消すと、その駐車場の数と場所が出て、sharedLots には残る。
+    let bulldoze = write(
+        &dir.join("b.json"),
+        r#"[{"type":"Bulldoze","area":[[9,0],[18,0]]}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &bulldoze]));
+    assert_eq!(acted["results"][0]["outcome"], "Applied", "{acted}");
+    let o = json(&cli(&["agent", "observe", d]));
+    let off = &o["parking"]["lotsNotOnRoad"];
+    assert_eq!(off["count"], 2, "{off}");
+    let lots = off["lots"].as_array().unwrap();
+    assert_eq!(lots[0]["kind"], "ParkingLot");
+    assert_eq!(lots[0]["at"], serde_json::json!([17, 1]));
+    assert_eq!(lots[1]["kind"], "ParkingGarage");
+    assert_eq!(lots[1]["at"], serde_json::json!([9, -4]));
+    assert_eq!(o["parking"]["sharedLots"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        o["sinceLastObserve"]["changes"]["parking.lotsNotOnRoad.count"]["delta"],
+        2
+    );
 }
 
 /// 駅を置いて線路を引くと、observe の rail と map に出る。取り壊すと bulldozed に駅と線路のマスが出る。
