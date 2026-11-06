@@ -194,9 +194,18 @@ impl Trip {
         }
     }
 
-    /// 行き先の建物の駐車場が満車で、近くのほかの建物の駐車場に停めに向かっているか。
-    /// 押さえた駐車場の建物の出入口が、行き先の出入口と違えば、ほかの建物の駐車場である。
-    pub fn parks_elsewhere(&self, net: &Network, buildings: &crate::building::Buildings) -> bool {
+    /// 行き先の建物の駐車場に停められず、近くのほかの建物の駐車場か、共同の駐車場の外来の枠に停めに
+    /// 向かっているか。押さえた駐車場の建物の出入口が、行き先の出入口と違えば、ほかの建物の駐車場である。
+    /// 世帯が借りた枠は、家に帰って停める車（行き先が運転する人の家 `home`）だけ数えない。職場などが満車で
+    /// 借りた枠に回る車は数える（`Trips` の `parked_elsewhere` の数え方と同じ決まり）。
+    /// 駐車場が取り壊されていれば、もう向かう先の駐車場はないので数えない。
+    pub fn parks_elsewhere(
+        &self,
+        net: &Network,
+        buildings: &crate::building::Buildings,
+        facilities: &[crate::service::Facility],
+        home: Option<crate::id::BuildingId>,
+    ) -> bool {
         let Some((lot, to)) = (match self.then {
             parking::Then::Arrive => None,
             parking::Then::Drive { lot, to, .. } | parking::Then::Walk { lot, to } => {
@@ -206,14 +215,18 @@ impl Trip {
             return false;
         };
         match lot {
-            // 駐車場の建物が取り壊されていれば、もう向かう先の駐車場はないので数えない。
             parking::LotId::Building(lot) => buildings
                 .get(lot)
                 .is_some_and(|b| building_spot(net, b) != Some(to)),
             // 共同の駐車場の外来の枠は、建物の駐車場ではない所である。
-            parking::LotId::Shared(_) => true,
-            // 借りた枠に停めるのは、ふつう家に帰る車である。
-            parking::LotId::Rented(_) => false,
+            parking::LotId::Shared(c) => parking::shared_facility(facilities, c).is_some(),
+            // 家に帰って借りた枠に停めるのは、行き先の駐車場に停められなかったのではない。
+            parking::LotId::Rented(c) => {
+                parking::shared_facility(facilities, c).is_some()
+                    && !home
+                        .and_then(|h| buildings.get(h))
+                        .is_some_and(|b| building_spot(net, b) == Some(to))
+            }
         }
     }
 

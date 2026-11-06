@@ -348,9 +348,9 @@ fn cars_sent_to_another_lot_are_told_apart_until_they_park() {
         if a.is_none() && b.is_none() {
             break;
         }
-        assert!(!a.is_some_and(|t| t.parks_elsewhere(&s.net, &s.buildings)));
+        assert!(!a.is_some_and(|t| t.parks_elsewhere(&s.net, &s.buildings, &[], None)));
         if let Some(t) = b {
-            seen.push((t.mode(), t.parks_elsewhere(&s.net, &s.buildings)));
+            seen.push((t.mode(), t.parks_elsewhere(&s.net, &s.buildings, &[], None)));
         }
         s.step();
     }
@@ -940,11 +940,11 @@ fn a_car_bound_for_a_removed_building_is_not_counted_as_parking_elsewhere() {
     let id = s.drive(home, shop).unwrap();
     s.board(&[id]);
     let t = s.trips.get(id).unwrap();
-    assert!(!t.parks_elsewhere(&s.net, &s.buildings));
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[], None));
     s.buildings.remove(shop);
     s.trips.forget_lots(&s.buildings);
     let t = s.trips.get(id).unwrap();
-    assert!(!t.parks_elsewhere(&s.net, &s.buildings));
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[], None));
 }
 
 #[test]
@@ -1546,6 +1546,79 @@ fn a_car_heading_to_a_removed_shared_lot_does_not_park() {
     s.run(to_shared);
     let lot = s.trips.shared_lot(c);
     assert_eq!((lot.rented, lot.visitors), (1, Lot::default()));
+}
+
+/// 家に帰って借りた枠に停める車は、`parked_elsewhere` の積み上げにも、車ごとの `parks_elsewhere` にも数えない。
+/// 職場が満車で借りた枠に回る車と、外来の枠に回る車は、どちらにも数える。外来の枠は、その駐車場が取り壊されれば
+/// `parks_elsewhere` は数えなくなる。
+#[test]
+fn parking_elsewhere_is_counted_alike_by_the_tally_and_by_each_trip() {
+    let (mut s, ids) = Street::new(&[50, 5, 30, 28]);
+    let (home, work, filler, visitor) = (ids[0], ids[1], ids[2], ids[3]);
+    let facilities = [shared_lot(&s, 8)];
+    let c = facilities[0].area.min;
+    s.trips
+        .set_rented(&std::collections::BTreeMap::from([(c, 1)]));
+    // 職場の駐車場を埋める。
+    let (net, router) = (&s.net, &mut s.router);
+    let sites = (&s.buildings, facilities.as_slice());
+    s.trips
+        .spawn_drive(net, router, sites, (filler, work), Tick::ZERO)
+        .unwrap();
+    let h = Household { home };
+    let start = |s: &mut Street, ends| {
+        let request = CommuteRequest {
+            place: Some(CarPlace::Shared(c)),
+            ..h.request(0, ends)
+        };
+        let (net, router) = (&s.net, &mut s.router);
+        let sites = (&s.buildings, facilities.as_slice());
+        s.trips
+            .start_commutes(net, router, sites, &[request], Tick::ZERO)[0]
+            .expect("移動を作れない")
+    };
+    let elsewhere = |s: &Street, id, home| {
+        s.trips
+            .get(id)
+            .unwrap()
+            .parks_elsewhere(&s.net, &s.buildings, &facilities, home)
+    };
+    // 職場が満車で借りた枠に回る車は数える。
+    let before = s.trips.parking_tally().parked_elsewhere;
+    let out = start(&mut s, (home, work));
+    assert_eq!(
+        s.trips.get(out).unwrap().parking_lot(),
+        Some(LotId::Rented(c))
+    );
+    assert!(elsewhere(&s, out, Some(home)));
+    assert_eq!(s.trips.parking_tally().parked_elsewhere, before + 1);
+    s.trips.cancel(out);
+    // 家に帰って借りた枠に停める車は数えない。
+    let before = s.trips.parking_tally().parked_elsewhere;
+    let back = start(&mut s, (work, home));
+    assert_eq!(
+        s.trips.get(back).unwrap().parking_lot(),
+        Some(LotId::Rented(c))
+    );
+    assert!(!elsewhere(&s, back, Some(home)));
+    assert_eq!(s.trips.parking_tally().parked_elsewhere, before);
+    s.trips.cancel(back);
+    // 借りていない車は外来の枠に回り、積み上げにも数える。
+    let (net, router) = (&s.net, &mut s.router);
+    let sites = (&s.buildings, facilities.as_slice());
+    let v = s
+        .trips
+        .spawn_drive(net, router, sites, (visitor, work), Tick::ZERO)
+        .unwrap();
+    assert_eq!(
+        s.trips.get(v).unwrap().parking_lot(),
+        Some(LotId::Shared(c))
+    );
+    assert!(elsewhere(&s, v, None));
+    assert_eq!(s.trips.parking_tally().parked_elsewhere, before + 1);
+    // 駐車場が取り壊されたら数えない。
+    let t = s.trips.get(v).unwrap();
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[], None));
 }
 
 /// 共同の駐車場 A に向かう車が、A を取り壊して同じ角に置き直した B に、あとから向かった別の車の枠を横取りしない。
