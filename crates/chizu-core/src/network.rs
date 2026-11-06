@@ -913,9 +913,8 @@ impl Network {
         Ok(())
     }
 
-    /// 長方形にかかる道路の区間を消し、つながりのなくなったノードも消す。消した区間の直線を返す。
-    /// 高速道路は消さない。消すものがなければ網を変えずにエラーを返す。
-    pub fn bulldoze(&mut self, area: TileRect) -> Result<Vec<Line>, DenyReason> {
+    /// 長方形にかかり、[`Network::bulldoze`] が消す区間。高速道路は含まない。網は変えない。
+    pub fn bulldoze_targets(&self, area: TileRect) -> BTreeSet<SegmentId> {
         let mut targets = BTreeSet::new();
         for (coord, list) in &self.index {
             if !chunk_overlaps(*coord, area) {
@@ -932,6 +931,13 @@ impl Network {
                 }
             }
         }
+        targets
+    }
+
+    /// 長方形にかかる道路の区間を消し、つながりのなくなったノードも消す。消した区間の直線を返す。
+    /// 高速道路は消さない。消すものがなければ網を変えずにエラーを返す。
+    pub fn bulldoze(&mut self, area: TileRect) -> Result<Vec<Line>, DenyReason> {
+        let targets = self.bulldoze_targets(area);
         let mut removed = Vec::new();
         for s in &targets {
             removed.push(self.segment_line(*s).expect("区間がない"));

@@ -57,6 +57,8 @@ export const PREVIEW_LINE_COLOR = hex(BLUE, 0.18);
 export const BULLDOZE_FILL_COLOR = hex(RED, 0.25);
 /** 取り壊す範囲の縁。 */
 export const BULLDOZE_EDGE_COLOR = hex(RED, 1);
+/** 取り壊すと実際に消える道路の区間、施設、建物の塗り。範囲の塗りより濃くする。 */
+export const BULLDOZE_REACH_FILL_COLOR = hex(RED, 0.45);
 /** 区画を塗れるマスと、買える土地の塗り。 */
 export const HINT_FILL_COLOR = hex(BLUE, 0.1);
 /** 買える土地の縁。 */

@@ -338,6 +338,12 @@ self.addEventListener("message", async (event: MessageEvent<MainToWorker>) => {
         reply({ kind: "inspect", query, info: [...info] });
         break;
       }
+      case "bulldoze-preview": {
+        const { x0, y0, x1, y1 } = message;
+        const info = [...sim.bulldoze_preview(x0, y0, x1, y1)];
+        reply({ kind: "bulldoze-preview", x0, y0, x1, y1, info });
+        break;
+      }
       case "feedback": {
         const commands = sim.encode_log().buffer as ArrayBuffer;
         reply({ kind: "feedback", state: sim.feedback_state(), commands }, [commands]);
