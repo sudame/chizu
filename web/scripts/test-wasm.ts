@@ -970,6 +970,26 @@ try {
   await page.mouse.up();
   await page.keyboard.press("Escape");
   await page.locator('button[data-tool="bulldoze"]').click();
+  // 止めた街で 1 マスを取り壊した直後は、もうない区間を塗り続けず、新しい見積もり（消えるものなし）に変わる
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=true]")).waitFor({ timeout: TIMEOUT_MS });
+  await page.mouse.move(oneTile.x, oneTile.y, { steps: 2 });
+  await page.waitForFunction(
+    () => Number(document.querySelector<HTMLElement>("#map")?.dataset.bulldozeRoadTiles ?? 0) > 1,
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  const beforeClick = await outcomeCount();
+  await page.mouse.click(oneTile.x, oneTile.y);
+  await nextOutcome(beforeClick);
+  await page.waitForFunction(
+    () => document.querySelector<HTMLElement>("#map")?.dataset.bulldozeRoadTiles === "0",
+    undefined,
+    { timeout: TIMEOUT_MS },
+  );
+  check(true, "止めた街で取り壊した直後に、見積もりが新しい街のものに変わる");
+  await page.locator("#pause").click();
+  await hud.and(page.locator("[data-paused=false]")).waitFor({ timeout: TIMEOUT_MS });
   const beforeBulldoze = await outcomeCount();
   await page.mouse.move(cx - 100, cy - 20);
   await page.mouse.down();

@@ -971,6 +971,8 @@ function cancelTool(): void {
 
 function selectTool(next: Tool, button: HTMLButtonElement): void {
   tool = next;
+  bulldozeSent = "";
+  bulldozeShown = null;
   for (const b of toolButtons) {
     b.setAttribute("aria-pressed", String(b === button));
   }
@@ -1403,7 +1405,10 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     sentCommands.delete(message.id);
     // 街が変わったので、施設を置けるかを問い合わせ直す
     probeSent = "";
-    if (tool.kind === "service") {
+    // 取り壊しで消えるものも、街が変わったので古い見積もりを捨てて問い合わせ直す
+    bulldozeSent = "";
+    bulldozeShown = null;
+    if (tool.kind === "service" || tool.kind === "bulldoze") {
       updatePreview();
     }
     if (
