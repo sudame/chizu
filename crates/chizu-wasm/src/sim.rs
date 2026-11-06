@@ -682,7 +682,11 @@ impl Sim {
     /// `[添え字, 世代, 環状か, 決めた本数, 本数の上限, 走らせる本数, 止まっているか, 運転間隔(tick。なければ 0), 1 周の見込み(tick),
     /// 駅の数, 線路の数, 待てる所の数, 理由に挙げる路線の数, 終点で折り返せる本数,
     /// 終点で折り返せる本数を決めている終点のホームの数（決めている終点がなければ 0）, その駅の敷地の min の x, y,
-    /// そのホームで折り返すほかの路線の数]` の 18 個の数に、駅ごとの `[敷地の min の x, y]` と、
+    /// そのホームで折り返すほかの路線の数,
+    /// 上限を決めているもの（0 は決めているものなし、1 は待てる所の数、2 は共有の区画の分け前）,
+    /// 2 のとき、区画の枠, 路線の分, 枠を分けるほかの路線の数,
+    /// 折り返せる本数を区画の分け直しで抑えているか（0 か 1）, 1 のとき、区画の枠, 路線の分, 枠を分けるほかの路線の数]`
+    /// の 26 個の数に、駅ごとの `[敷地の min の x, y]` と、
     /// 線路ごとの `[a の x, y, b の x, y]` と、理由に挙げる路線ごとの `[添え字, 世代]` を続けて返す。
     /// 理由に挙げる路線は、上限が 0 の路線が進路を共有するほかの路線である。上限が 0 でなければ 0 本にする。
     /// 線路は進路に出てくるものを、重ならないよう最初に出てきた順に並べる。駅は路線の順である。
@@ -717,6 +721,23 @@ impl Sim {
             } else {
                 &[]
             };
+            let (cap_kind, cap_zone) = match &capacity.cap_limit {
+                None => (0.0, None),
+                Some(chizu_core::CapLimit::WaitPlaces) => (1.0, None),
+                Some(chizu_core::CapLimit::Zone(z)) => (2.0, Some(z)),
+            };
+            let zone_numbers = |z: Option<&chizu_core::ZoneShare>| {
+                z.map_or([0.0; 3], |z| {
+                    [
+                        f64::from(z.room),
+                        f64::from(z.share),
+                        z.shared_with.len() as f64,
+                    ]
+                })
+            };
+            let [cap_room, cap_share, cap_others] = zone_numbers(cap_zone);
+            let turn_zone = capacity.turn_zone.as_ref();
+            let [turn_room, turn_share, turn_others] = zone_numbers(turn_zone);
             out.extend([
                 f64::from(id.index),
                 f64::from(id.generation),
@@ -736,6 +757,14 @@ impl Sim {
                 limit_at[0] as f64,
                 limit_at[1] as f64,
                 limit.map_or(0.0, |t| t.shared_with.len() as f64),
+                cap_kind,
+                cap_room,
+                cap_share,
+                cap_others,
+                f64::from(u8::from(turn_zone.is_some())),
+                turn_room,
+                turn_share,
+                turn_others,
             ]);
             out.extend(stations.iter().flatten().map(|v| *v as f64));
             out.extend(tracks.iter().flatten().map(|v| *v as f64));
@@ -1892,7 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn rail_lines_carry_the_wait_places_and_no_reason_when_the_cap_is_positive() {
+    fn rail_lines_carry_the_wait_places_and_the_cap_limit_when_the_cap_is_positive() {
         let world =
             World::new_with_money(0, chizu_core::Money(1_000_000_000)).with_unlimited_land();
         let mut sim = Sim::from_parts(world, CommandLog::new());
@@ -1930,8 +1959,11 @@ mod tests {
         assert_eq!(data[13], f64::from(c.turn_cap));
         // 両端の駅でホーム 2 つに列車が入れるので、折り返せる本数は上限より小さくなく、決めている終点はない
         assert_eq!(&data[14..18], &[0.0; 4]);
-        // 見出し 18 個、駅 2 つ、線路 n 本のあとに理由の路線が続かない
-        assert_eq!(data.len(), 18 + 4 + data[10] as usize * 4);
+        // 上限は待てる所の数で決まり、区画の分け前は出ない。折り返せる本数を区画の分で抑えてもいない
+        assert_eq!(data[18], 1.0);
+        assert_eq!(&data[19..26], &[0.0; 7]);
+        // 見出し 26 個、駅 2 つ、線路 n 本のあとに理由の路線が続かない
+        assert_eq!(data.len(), 26 + 4 + data[10] as usize * 4);
     }
 
     #[test]

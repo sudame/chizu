@@ -10,6 +10,7 @@ import {
   moveMinutes,
   type RailLineInfo,
   stationChain,
+  type ZoneShare,
 } from "./map/lines.ts";
 import type { Tile } from "./map/roads.ts";
 import type { CommandMessage } from "./protocol/messages.ts";
@@ -66,6 +67,27 @@ export function turnLimitReason(line: RailLineInfo, nameOf: (station: Tile) => s
   return `${head}${platforms}${shared}`;
 }
 
+/** 区画の枠の分け方を言う文。 */
+function zoneShareText(z: ZoneShare): string {
+  const others = z.sharedLines > 0 ? ` を ${z.sharedLines + 1} 本の路線で分け、` : "、";
+  return `共有する所に止まれる列車の枠 ${z.room}${others}この路線の分は ${z.share}`;
+}
+
+/**
+ * 上限が決めた本数より小さいとき、その上限を決めているものの文。待てる所の数か、共有の区画の枠の分け前を言う。
+ * 区画の分け直しで折り返せる本数を分までに抑えているときは、その分け前を言う。
+ */
+export function capLimitReason(line: RailLineInfo): string {
+  const c = line.capLimit;
+  if (c === null) {
+    return `走らせられるのは ${line.cap} 本まで`;
+  }
+  if (c.kind === "zone") {
+    return `${zoneShareText(c)}なので、走らせられるのは ${line.cap} 本まで（増やしても区画の手前で待つだけ）`;
+  }
+  return `待てる所が ${line.waitPlaces} 個なので、走らせられるのは ${line.cap} 本まで`;
+}
+
 /** 路線 1 本の一覧の行に出す文。 */
 export function lineRow(line: RailLineInfo, nameOf: (station: Tile) => string): LineRow {
   let warning = "";
@@ -74,7 +96,16 @@ export function lineRow(line: RailLineInfo, nameOf: (station: Tile) => string): 
   } else if (line.cap === 0) {
     warning = `列車を走らせられない（本数の上限が 0）。${capZeroReason(line)}`;
   } else if (line.trains > line.allowed) {
-    const why = line.turnCap < line.cap ? `。${turnLimitReason(line, nameOf)}` : "";
+    let why = "";
+    if (line.turnCap < line.cap) {
+      const zone = line.turnLimit === null && line.turnZone !== null ? line.turnZone : null;
+      why =
+        zone !== null
+          ? `。${zoneShareText(zone)}なので、走らせるのは ${line.turnCap} 本まで`
+          : `。${turnLimitReason(line, nameOf)}`;
+    } else if (line.trains > line.cap) {
+      why = `。${capLimitReason(line)}`;
+    }
     warning = `決めた本数 ${line.trains} のうち、走らせるのは ${line.allowed} 本${why}`;
   }
   return {

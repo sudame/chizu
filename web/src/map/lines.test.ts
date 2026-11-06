@@ -35,6 +35,10 @@ function encode(
     turnCap?: number;
     /** 折り返せる本数を決めている終点の [ホームの数, 駅の x, y, 分け合う路線の数]。 */
     turnLimit?: [number, number, number, number];
+    /** 上限を決めているものの [種類(0 なし、1 待てる所、2 区画の分け前), 区画の枠, 路線の分, 分け合う路線の数]。 */
+    capLimit?: [number, number, number, number];
+    /** 折り返せる本数を区画の分で抑えているときの [区画の枠, 路線の分, 分け合う路線の数]。 */
+    turnZone?: [number, number, number];
   } = {},
 ) {
   const trains = opts.trains ?? 2;
@@ -57,6 +61,8 @@ function encode(
       opts.shared?.length ?? 0,
       turnCap,
       ...(opts.turnLimit ?? [0, 0, 0, 0]),
+      ...(opts.capLimit ?? [0, 0, 0, 0]),
+      ...(opts.turnZone ? [1, ...opts.turnZone] : [0, 0, 0, 0]),
     ],
     ...[0, 0, 30, 0],
     ...[3, 5, 25, 5],
@@ -178,6 +184,34 @@ describe("路線の一覧", () => {
     expect(w2).toContain("終点の西駅で折り返せるのは 4 本まで");
     expect(w2).toContain("ホーム 2 つを交互に使っても足りない");
     expect(w2).not.toContain("分け合って");
+  });
+
+  test("上限で抑えているときは、待てる所の数か区画の分け前を理由に出す", () => {
+    const [waits] = parseLines(
+      encode(0, { trains: 5, cap: 3, waitPlaces: 4, capLimit: [1, 0, 0, 0] }),
+    );
+    const [zone] = parseLines(encode(0, { trains: 5, cap: 2, capLimit: [2, 3, 1, 2] }));
+    const [free] = parseLines(encode(0, { trains: 5, cap: 5 }));
+    if (!waits || !zone || !free) throw new Error("読めない");
+    expect(waits.capLimit).toEqual({ kind: "waitPlaces" });
+    expect(zone.capLimit).toEqual({ kind: "zone", room: 3, share: 1, sharedLines: 2 });
+    expect(free.capLimit).toBeNull();
+    const w1 = lineRow(waits, () => "").warning;
+    expect(w1).toContain("走らせるのは 3 本");
+    expect(w1).toContain("待てる所が 4 個なので、走らせられるのは 3 本まで");
+    const w2 = lineRow(zone, () => "").warning;
+    expect(w2).toContain("枠 3 を 3 本の路線で分け、この路線の分は 1");
+    expect(w2).toContain("走らせられるのは 2 本まで");
+  });
+
+  test("区画の分け直しで折り返せる本数を抑えているが、終点の理由がないときは、分け前を出す", () => {
+    const [line] = parseLines(encode(0, { trains: 6, cap: 5, turnCap: 2, turnZone: [4, 2, 1] }));
+    if (!line) throw new Error("読めない");
+    expect(line.turnLimit).toBeNull();
+    expect(line.turnZone).toEqual({ room: 4, share: 2, sharedLines: 1 });
+    const w = lineRow(line, () => "").warning;
+    expect(w).toContain("枠 4 を 2 本の路線で分け、この路線の分は 2");
+    expect(w).toContain("走らせるのは 2 本まで");
   });
 
   test("ほかの路線が折り返すホームを通り抜けて抑えられているときは、終点と言わない", () => {

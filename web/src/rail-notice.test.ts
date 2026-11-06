@@ -24,6 +24,8 @@ const line = (over: Partial<RailLineInfo> = {}): RailLineInfo => ({
   allowed: 2,
   turnCap: 16,
   turnLimit: null,
+  capLimit: null,
+  turnZone: null,
   stopped: false,
   headway: 300,
   roundTrip: 600,
