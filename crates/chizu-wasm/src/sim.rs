@@ -32,7 +32,7 @@ pub const CARLESS_AREAS: usize = 10;
 
 /// [`Sim::rail_stats`] の先頭の見出しの数と、駅 1 つ、路線 1 本の数の個数。画面の側の `RAIL_STATS_*` と合わせる。
 pub const RAIL_STATS_HEADER: usize = 4;
-pub const RAIL_STATS_STATION: usize = 13;
+pub const RAIL_STATS_STATION: usize = 14;
 pub const RAIL_STATS_LINE: usize = 8;
 
 /// [`Sim::city_stats`] が返す数のうち、固定の並びの個数。そのあとに需要の内訳が続く。

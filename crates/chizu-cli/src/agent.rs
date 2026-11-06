@@ -549,9 +549,10 @@ act の結果:
       beyondDepth 道路から 6 マスを超えた奥（道路のない所を含む）、notFronted 道路から 6 マス以内だが、間口から続かない空き
       （道路の端の外、間口との間に塗れないマスを挟んだ、別の種類の区画の奥など）。
   コマンドで走れなくなった（stopped になったか cap が 0 になった）路線があれば haltedLines が付く。
-    路線ごとの id、stopped、capBefore と capAfter（コマンドの前と後の cap）、capReason（observe の rail.lines と同じ）。
+    路線ごとの id、stopped、cap と capAfter（コマンドの前と後の cap）、capReason（observe の rail.lines と同じ）。
   走れるまま cap が下がった路線があれば loweredLines が付く（道路のコマンドで踏切ができ、線路が割れて待てる所が減ったときなど）。
-    路線ごとの id、capBefore、capAfter、waitPlaces（待てる所の数）、shortSpanCount（待てる所になれない短い線路の数）。
+    路線ごとの line（id）、cap（前の cap）、capAfter（後の cap）、waitPlaces（待てる所の数）、shortSpanCount（待てる所になれない短い線路の数）。
+    LineStarvesSelf で断ったときの loweredLines と同じ形である。
     BuildRoad と UpgradeRoad の結果にも付く。できた踏切は crossings に出る。
   コマンドで路線そのものが消えたら（駅の取り壊しなど。RemoveLine も含む）、removedLines にその id の並びが付く。
   コマンドで列車が消えたら removedTrains にその数が付く（上限が下がった、路線が止まった、進路が変わって先を押さえ直せないなど）。
@@ -2427,7 +2428,12 @@ fn attach_recent_riders(seen: &mut Value, saved: &Saved) {
                 generation: u16::try_from(generation?).ok()?,
             };
             w.rail().station(id)?;
-            let was = w.rail().ride_tally().station_counts.get(&id).map_or(0, |c| c.0);
+            let was = w
+                .rail()
+                .ride_tally()
+                .station_counts
+                .get(&id)
+                .map_or(0, |c| c.0);
             Some(boarded?.saturating_sub(was))
         });
         st["recentBoarded"] = json!(recent);
@@ -2440,9 +2446,7 @@ const SHORT_SPAN_LIST: usize = 16;
 
 /// 走れる（止まっておらず、上限が 0 でない）路線と、路線ごとの列車の数。コマンドの前後で比べるのに使う。
 /// 値は、走れるか、列車の数、本数の上限。
-fn line_states(
-    world: &World,
-) -> std::collections::BTreeMap<chizu_core::LineId, (bool, usize, u8)> {
+fn line_states(world: &World) -> std::collections::BTreeMap<chizu_core::LineId, (bool, usize, u8)> {
     let rail = world.rail();
     rail.lines()
         .map(|(id, l)| {
@@ -2469,7 +2473,7 @@ fn note_line_changes(
             json!({
                 "id": id_json(id.index, id.generation),
                 "stopped": l.stopped,
-                "capBefore": cap,
+                "cap": cap,
                 "capAfter": l.cap(),
                 "capReason": cap_reason(rail, *id),
             })
@@ -2483,8 +2487,8 @@ fn note_line_changes(
             (*runs && now < was).then(|| {
                 let c = rail.line_capacity(*id);
                 json!({
-                    "id": id_json(id.index, id.generation),
-                    "capBefore": was,
+                    "line": id_json(id.index, id.generation),
+                    "cap": was,
                     "capAfter": now,
                     "waitPlaces": c.as_ref().map(|c| c.wait_places),
                     "shortSpanCount": c.as_ref().map(|c| c.short_spans.len()),
@@ -3395,7 +3399,7 @@ mod tests {
             )
         );
         assert!(out.get("removedTrains").is_none() && out.get("removedLines").is_none());
-        assert_eq!(halted[0]["capBefore"], 3);
+        assert_eq!(halted[0]["cap"], 3);
         assert_eq!(halted[0]["capAfter"], 0);
         assert!(out.get("loweredLines").is_none());
         // 走れるまま上限が下がった路線は loweredLines に出る
@@ -3406,8 +3410,11 @@ mod tests {
         note_line_changes(&mut out, &w, &before);
         let lowered = out["loweredLines"].as_array().unwrap();
         assert_eq!(lowered.len(), 1, "{out}");
-        assert_eq!(lowered[0]["id"], id_json(lines[0].index, lines[0].generation));
-        assert_eq!(lowered[0]["capBefore"], cap + 2);
+        assert_eq!(
+            lowered[0]["line"],
+            id_json(lines[0].index, lines[0].generation)
+        );
+        assert_eq!(lowered[0]["cap"], cap + 2);
         assert_eq!(lowered[0]["capAfter"], cap);
         assert!(out.get("haltedLines").is_none());
     }

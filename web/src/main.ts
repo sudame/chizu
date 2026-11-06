@@ -194,7 +194,7 @@ import {
   type ZoneName,
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
-import { RecentRides, GaveUpWindow, railNotices } from "./rail-notice.ts";
+import { GaveUpWindow, RecentRides, railNotices } from "./rail-notice.ts";
 import { parseRoadProbe, type RoadProbe, roadProbeText } from "./road-probe.ts";
 import { setupSaves } from "./save/main-side.ts";
 import { setupScaleBar } from "./scale-bar.ts";
@@ -467,7 +467,10 @@ function rebuildTransit(): void {
 }
 /** 鉄道の知らせを出し直す。 */
 function updateRailNotices(): void {
-  noticeCenter.set("rail", railNotices(railLines, railStats, gaveUpWindow.perDay(), stationLabel, recentRides));
+  noticeCenter.set(
+    "rail",
+    railNotices(railLines, railStats, gaveUpWindow.perDay(), stationLabel, recentRides),
+  );
 }
 function updateDemandTheme(): void {
   if (renderer !== null) {

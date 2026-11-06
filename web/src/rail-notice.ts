@@ -128,7 +128,11 @@ export class RecentRides {
   boardedIn(station: { index: number; generation: number }): number | null {
     const latest = this.#latest;
     const base = this.#samples[0];
-    if (latest === null || base === undefined || base.tick > latest.tick - UNUSED_DAYS * TICKS_PER_DAY) {
+    if (
+      latest === null ||
+      base === undefined ||
+      base.tick > latest.tick - UNUSED_DAYS * TICKS_PER_DAY
+    ) {
       return null;
     }
     const key = stationKey(station);
@@ -148,8 +152,7 @@ export function overlapPermille(s: StationStat): number {
 }
 
 const near = (a: StationStat, b: StationStat) =>
-  (a.door.x - b.door.x) ** 2 + (a.door.y - b.door.y) ** 2 <=
-  (2 * STATION_WALK_RADIUS) ** 2;
+  (a.door.x - b.door.x) ** 2 + (a.door.y - b.door.y) ** 2 <= (2 * STATION_WALK_RADIUS) ** 2;
 
 /**
  * 徒歩圏が隣の駅と大きく重なり、その隣の駅より使われていない駅と、そのときの隣の駅。

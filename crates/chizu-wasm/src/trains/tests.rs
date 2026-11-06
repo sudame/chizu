@@ -289,8 +289,11 @@ fn road_probe_matches_what_building_the_road_does() {
     };
     assert_eq!(probed, expected);
     // 線路のない街と、道路のコマンド以外は空
-    assert!(Sim::new(0).road_probe(&Command::SetSimSpeed {
-        speed: chizu_core::SimSpeed::NORMAL
-    })
-    .is_empty());
+    assert!(
+        Sim::new(0)
+            .road_probe(&Command::SetSimSpeed {
+                speed: chizu_core::SimSpeed::NORMAL
+            })
+            .is_empty()
+    );
 }

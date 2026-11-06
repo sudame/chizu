@@ -2605,7 +2605,7 @@ fn act_reports_a_lowered_cap_and_observe_shows_recent_riders() {
     assert_eq!(lowered.len(), 1, "{acted}");
     assert_eq!(lowered[0]["crossings"], serde_json::json!([[46, 8]]));
     let line = &lowered[0]["loweredLines"][0];
-    assert_eq!(line["capBefore"], 3, "{line}");
+    assert_eq!(line["cap"], 3, "{line}");
     assert_eq!(line["capAfter"], 1, "{line}");
     assert!(line["shortSpanCount"].as_u64().unwrap() > 0, "{line}");
     assert!(lowered[0].get("haltedLines").is_none());
