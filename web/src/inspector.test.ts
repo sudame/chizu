@@ -118,7 +118,7 @@ describe("describeInspect", () => {
         { label: "維持費", value: "96 / 日" },
       ],
     });
-    const garage = parseInspect(pad([2, 4, 0, 2880, 240, 0, 0, 0]));
+    const garage = parseInspect(pad([2, 4, 0, 2400, 240, 0, 0, 0]));
     expect(describeInspect(garage as NonNullable<typeof garage>).title).toBe("駐車場ビル");
     // 供給量の行は、発電所と浄水場だけに出す
     const labels = describeInspect(garage as NonNullable<typeof garage>).rows.map((r) => r.label);

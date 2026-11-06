@@ -347,6 +347,9 @@ impl World {
                 arrived.push(id);
             }
         }
+        for id in &arrived {
+            self.return_stranded_car(*id);
+        }
         self.switch_places(arrived);
         self.drop_stale_errands();
     }

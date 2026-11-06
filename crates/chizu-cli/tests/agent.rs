@@ -568,7 +568,7 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
     assert_eq!(o["facilities"]["ParkingGarage"], 1);
     let upkeep = &o["financesPerDay"]["facilityUpkeep"];
     assert_eq!(upkeep["ParkingLot"], 96);
-    assert_eq!(upkeep["ParkingGarage"], 2880);
+    assert_eq!(upkeep["ParkingGarage"], 2400);
 }
 
 /// 駅を置いて線路を引くと、observe の rail と map に出る。取り壊すと bulldozed に駅と線路のマスが出る。

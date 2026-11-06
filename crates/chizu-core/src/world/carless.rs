@@ -522,8 +522,10 @@ mod tests {
             .collect()
     }
 
-    /// 車を持てない世帯の住民は駐車場の点が 30 で、共同の駐車場を借りると上がる。料金を基準より上げると、
-    /// 借りている住民の点が下がる。
+    /// 車を持てない世帯の住民は駐車場の点が 30 で、共同の駐車場を借りると上がる。料金を初期値の 10 から 0 に
+    /// 下げると、借りている住民の点が上がる。20 に上げると、どの住民の点も 10 のときより上がらず、少なくとも
+    /// 1 人は下がる（蓄えのない世帯は 10 ですでに下げ幅が最大なので、10 と 20 で同じ点になる）。0 から 20 に
+    /// 上げると、どの住民の点も下がる。
     #[test]
     fn the_parking_score_follows_the_place_and_the_fee() {
         use crate::happiness::PARKING_CARLESS;
@@ -559,17 +561,48 @@ mod tests {
             "車を持てない住民の点が 30 でない"
         );
 
+        // 料金 0 なら高さで下げないので、借りている住民の点は初期値の料金のときより上がる
+        assert_eq!(
+            w.apply(&Command::SetParkingFee { fee: 0 }),
+            ApplyOutcome::Applied
+        );
+        let free = parking_scores(&w);
+        for (id, (r, was)) in rented.iter().filter(|(_, (r, _))| *r) {
+            let (still, now) = free[id];
+            assert!(still && *r);
+            assert!(
+                now > *was,
+                "料金を 0 にしても {id:?} の点が {was} から {now}"
+            );
+        }
+
         // 料金を上げても見直しまでは枠を返さないので、同じ住民が借りたまま点だけが下がる
         assert_eq!(
             w.apply(&Command::SetParkingFee { fee: 20 }),
             ApplyOutcome::Applied
         );
         let raised = parking_scores(&w);
-        for (id, (r, was)) in rented.iter().filter(|(_, (r, _))| *r) {
+        for (id, (r, was)) in free.iter().filter(|(_, (r, _))| *r) {
             let (still, now) = raised[id];
             assert!(still && *r);
             assert!(now < *was, "料金を上げても {id:?} の点が {was} から {now}");
         }
+        // 初期値の 10 から 20 に上げても、点の上がる住民はおらず、下がる住民がいる
+        let mut lowered = 0;
+        for (id, (_, was)) in rented.iter().filter(|(_, (r, _))| *r) {
+            let (_, now) = raised[id];
+            assert!(
+                now <= *was,
+                "料金を 10 から 20 に上げて {id:?} の点が {was} から {now}"
+            );
+            if now < *was {
+                lowered += 1;
+            }
+        }
+        assert!(
+            lowered > 0,
+            "料金を 10 から 20 に上げても、点の下がる住民がいない"
+        );
         set_home_spaces_limit(None);
     }
 

@@ -11,7 +11,7 @@
 //! - 暮らし向き：職があるか（働く年齢でなければ問わない）、世帯の蓄え、住宅の税率。
 
 use crate::building::{Building, Buildings};
-use crate::car_place::{BASE_SHARED_LOT_FEE, CarPlace, CarPlaces, fee_cap};
+use crate::car_place::{CarPlace, CarPlaces, fee_cap};
 use crate::citizens::{
     CitizenChange, CitizenRow, HAPPINESS_MAX, HappinessParts, Population, WORKING_AGES,
 };
@@ -146,20 +146,16 @@ pub fn parking_far_penalty(home: TilePos, lot: TilePos) -> u64 {
     over.min(span) * PARKING_FAR_PENALTY / span
 }
 
-/// 共同の駐車場の料金の高さで下げる点数。料金 `fee` が基準の料金（[`BASE_SHARED_LOT_FEE`]）以下なら 0 で、
-/// 蓄え `savings` の世帯が払える上限（[`fee_cap`]）で [`PARKING_FEE_PENALTY`] になるまで一様に増やす。
+/// 共同の駐車場の料金の高さで下げる点数。料金 `fee` が 0 なら 0 で、蓄え `savings` の世帯が払える上限
+/// （[`fee_cap`]）で [`PARKING_FEE_PENALTY`] になるまで一様に増やす。
 /// 上限を超えた世帯は 1 日 1 回の見直しで枠を返すが、それまでは上限と同じだけ下げる。
 pub fn parking_fee_penalty(fee: u16, savings: Money) -> u64 {
-    let over = (i64::from(fee) - BASE_SHARED_LOT_FEE).max(0);
-    if over == 0 {
-        return 0;
-    }
-    let span = fee_cap(savings) - BASE_SHARED_LOT_FEE;
-    if span <= 0 || over >= span {
+    let fee = u64::from(fee);
+    let cap = u64::try_from(fee_cap(savings)).expect("払える上限は正の値");
+    if fee >= cap {
         return PARKING_FEE_PENALTY;
     }
-    u64::try_from(over).expect("正の値") * PARKING_FEE_PENALTY
-        / u64::try_from(span).expect("正の値")
+    fee * PARKING_FEE_PENALTY / cap
 }
 
 /// 駐車場の点数。自宅の枠があれば満点、共同の駐車場を借りていれば満点から遠さと高さを引き、
@@ -352,19 +348,25 @@ mod tests {
     }
 
     #[test]
-    fn the_fee_penalty_reaches_its_max_at_the_cap() {
+    fn the_fee_penalty_grows_from_zero_to_the_cap() {
         let half = Money(SAVINGS_FOR_FULL_BONUS.0 / 2);
         let cap = fee_cap(half);
+        assert_eq!(cap, 30);
+        // 料金 0 なら下げない。初期値の 10 から下がる
         assert_eq!(parking_fee_penalty(0, half), 0);
-        assert_eq!(parking_fee_penalty(10, half), 0);
+        assert_eq!(parking_fee_penalty(10, half), 10);
+        assert_eq!(parking_fee_penalty(15, half), 15);
         assert_eq!(parking_fee_penalty(cap as u16, half), 30);
         assert_eq!(parking_fee_penalty(50, half), 30);
-        // 基準の料金と上限のあいだでは一様に増える
-        let mid = (10 + cap) / 2;
-        assert_eq!(parking_fee_penalty(mid as u16, half), 15);
+        // 料金を上げるほど下がり、下げるほど上がる
+        for fee in 0..50 {
+            assert!(parking_fee_penalty(fee, half) <= parking_fee_penalty(fee + 1, half));
+        }
         // 蓄えの多い世帯ほど、同じ料金で下がる点が小さい
         assert!(parking_fee_penalty(20, Money(90_000)) < parking_fee_penalty(20, Money(10_000)));
-        // 蓄えのない世帯は基準の料金までしか払えず、それを超えれば上限と同じだけ下げる
+        // 蓄えのない世帯は 10 までしか払えず、10 で上限と同じだけ下がる
+        assert_eq!(parking_fee_penalty(5, Money::ZERO), 15);
+        assert_eq!(parking_fee_penalty(10, Money::ZERO), 30);
         assert_eq!(parking_fee_penalty(11, Money::ZERO), 30);
     }
 
@@ -379,7 +381,8 @@ mod tests {
             100
         );
         assert_eq!(parking_score(None, home, None, 10, half), PARKING_CARLESS);
-        assert_eq!(parking_score(shared, home, lot, 10, half), 80);
+        assert_eq!(parking_score(shared, home, lot, 0, half), 80);
+        assert_eq!(parking_score(shared, home, lot, 10, half), 70);
         assert_eq!(parking_score(shared, home, lot, 50, half), 50);
         // 範囲の端で上限の料金なら、車を持てない世帯と同じ点になる
         let edge = Some(TilePos::new(32, 0));

@@ -317,7 +317,7 @@ export function setupFinance(
   const feeRow = make("div", "", "finance-row");
   feeRow.dataset.parkingFee = "";
   feeRow.title =
-    "共同の駐車場の、借りた枠 1 台あたりの 1 日の料金。世帯は蓄えに応じて 10〜49 まで払い、超えると借りない。借りている世帯も 1 日 1 回の見直しで返す。10 より高いと、借りている世帯の幸福度も下がる。";
+    "共同の駐車場の、借りた枠 1 台あたりの 1 日の料金。世帯は蓄えに応じて 10〜49 まで払い、超えると借りない。借りている世帯も 1 日 1 回の見直しで返す。料金が高いほど、借りている世帯の幸福度が下がる（0 なら下がらない）。";
   const feeMinus = make("button", "−");
   const feePlus = make("button", "＋");
   feeMinus.type = "button";
