@@ -148,6 +148,7 @@ pub(crate) struct LinePlan {
     /// 自分だけの区間ごとの、待てる所の数。
     pub(crate) runs: Vec<u32>,
     /// 通る共有の区画ごとの、この路線の列車が押さえた範囲の終わりを置ける数（区画の枠のうち、この路線の分）。
+    /// 本数 0 の路線は、枠に上限のある区画では 0 である。
     pub(crate) quota: BTreeMap<u16, u32>,
 }
 
@@ -158,12 +159,28 @@ impl RailLine {
     ///   空いた待てる所の手前の列車がいつも進める。終点の両方のホームは、折り返したあとの要素だけが待てる所なので
     ///   1 つに数える。
     /// - 自分だけの区間が 1 つの路線は、その区間の待てる所の数。区間が 2 つ以上なら、区間の待てる所の数の和 − 1。
-    ///   さらに、通る共有の区画の枠のうち、この路線の分で運べる本数までにする（`flow_cap`）。
-    /// - 自分だけの待てる所を持たない路線（区間運転など）は、通る共有の区画の枠のうち、この路線の分。
+    ///   さらに、通る共有の区画の枠のうち、この路線の見込みの分で運べる本数までにする。
+    /// - 自分だけの待てる所を持たない路線（区間運転など）は、通る共有の区画の枠のうち、この路線の見込みの分。
     ///
-    /// 待てる所が 2 つ未満の路線と、止まった路線と、通る区画の枠の分け前が 0 の路線は 0 である。
+    /// 区画の枠は、本数 1 以上の路線で分ける。見込みの分は、本数 1 以上の路線ではいまの分で、本数 0 の路線では、
+    /// 本数を 1 以上にしたとしたら配られる分である。走らせる前に、何本まで走るかを見せるためである。
+    ///
+    /// 待てる所が 2 つ未満の路線と、止まった路線と、通る区画の枠の見込みの分が 0 の路線は 0 である。
     pub fn cap(&self) -> u8 {
         self.plan.cap
+    }
+
+    /// 止まっておらず、本数が 1 以上か。ほかの路線のコマンドで上限が 0 になるのを断るとき、守るのはこの路線である。
+    /// 本数 0 の路線は、共有の区画の枠を使わない（`LinePlan`）。
+    pub(crate) fn wants_trains(&self) -> bool {
+        !self.stopped && self.trains > 0
+    }
+
+    /// 列車を走らせ続けられないか。止まった路線と、上限が 0 の路線と、通る共有の区画のどれかで分が 0 の路線である。
+    /// 分が 0 の区画には入れないので、残した列車は区画の手前で止まり続ける。分が 0 になるのは、本数 0 の路線が
+    /// 枠に上限のある区画を通るときと、見込みの分が 0 で上限も 0 の路線だけである。
+    pub(crate) fn cannot_run(&self) -> bool {
+        self.stopped || self.cap() == 0 || self.plan.quota.values().any(|q| *q == 0)
     }
 
     /// 走らせる本数。遊ぶ人が決めた本数を、行き詰まりを防ぐ上限に抑えたものである。
@@ -349,16 +366,76 @@ fn strong_components(edges: &[BTreeSet<usize>], into: &[Vec<usize>]) -> Vec<u16>
         .collect()
 }
 
-/// 路線ごとの待てる所の区分けと本数の上限（`LinePlan`）を求める。`lines` は（路線、進路、止まっているか）の並びである。
+/// 路線のコマンドで変える路線 1 本の、変えたあとの形。断るかを、状態を変えずに確かめるのに使う。
+struct LineChange {
+    id: LineId,
+    path: Vec<Step>,
+    stopped: bool,
+    trains: u8,
+}
+
+/// `make_plans` に渡す路線 1 本。
+#[derive(Clone, Copy)]
+struct PlanLine<'a> {
+    id: LineId,
+    path: &'a [Step],
+    stopped: bool,
+    /// 遊ぶ人が決めた本数（[`RailLine::trains`]）。
+    trains: u8,
+}
+
+/// 進路の 1 周の時間の見込みと、そのうち押さえた範囲の終わりを共有の区画ごとに置く時間（tick）。
+///
+/// 時間は [`RailLine::round_trip_ticks`] と同じ見込みである。列車は、先頭がいる要素から先で最初の待てる所まで
+/// 押さえるので、要素の時間は、その要素から先で最初の待てる所の区画に数える。
+fn zone_ticks(p: &[Step], zone: &[Option<u16>]) -> (u64, BTreeMap<u16, u64>) {
+    let n = p.len();
+    let ticks = |s: &Step| s.run_ticks() + s.stop_ticks();
+    let total: u64 = p.iter().map(ticks).sum();
+    let mut in_zone = BTreeMap::<u16, u64>::new();
+    // 後ろから 2 周たどり、要素ごとに、そこから先で最初の待てる所の区画を求める。
+    let mut next: Option<Option<u16>> = None;
+    for d in (0..2 * n).rev() {
+        let i = d % n;
+        if p[i].wait {
+            next = Some(zone[i]);
+        }
+        if d < n
+            && let Some(Some(z)) = next
+        {
+            *in_zone.entry(z).or_default() += ticks(&p[i]);
+        }
+    }
+    (total, in_zone)
+}
+
+/// 区画の枠 `room` を、区画を使う路線 `users`（（自分だけの待てる所を持つか、路線）の順）で等しく分けたときの、
+/// `user` の分。余りは並びの順に 1 つずつ配る。
+///
+/// 余りを自分だけの待てる所を持たない路線（区間運転など）から先に配るのは、これらの路線の上限は分そのもので、
+/// 余りの 1 つが列車 1 本になるためである。自分だけの区間を持つ路線は、分が 1 でも区間の数まで列車を置ける。
+fn split_zone(room: u32, users: &[(bool, LineId)], user: (bool, LineId)) -> u32 {
+    let n = u32::try_from(users.len()).expect("路線が多すぎる");
+    let i = u32::try_from(
+        users
+            .iter()
+            .position(|u| *u == user)
+            .expect("区画を使う路線にない"),
+    )
+    .expect("路線が多すぎる");
+    room / n + u32::from(i < room % n)
+}
+
+/// 路線ごとの待てる所の区分けと本数の上限（`LinePlan`）を求める。
 ///
 /// 共有の区画の枠（押さえた範囲の終わりを区画に置ける列車の数）は、区画の中の待てる所だけを通る輪のうち、
 /// いちばん短いものの長さ − 1 である。区画の中に輪がなければ上限はない（`u32::MAX`）。走らない路線は、共有の数えに入れない。
-fn make_plans(lines: &[(LineId, &[Step], bool)]) -> BTreeMap<LineId, LinePlan> {
-    let running = || lines.iter().filter(|(_, p, stopped)| runnable(p, *stopped));
+fn make_plans(lines: &[PlanLine]) -> BTreeMap<LineId, LinePlan> {
+    let running = || lines.iter().filter(|l| runnable(l.path, l.stopped));
     let mut uses = BTreeMap::<Vertex, u32>::new();
     let mut waits = BTreeSet::<Vertex>::new();
-    for (_, p, _) in running() {
-        for s in p.iter() {
+    for l in running() {
+        for s in l.path {
             *uses.entry(vertex(s)).or_default() += 1;
             if s.wait {
                 waits.insert(vertex(s));
@@ -371,7 +448,8 @@ fn make_plans(lines: &[(LineId, &[Step], bool)]) -> BTreeMap<LineId, LinePlan> {
     // 共有の待てる所 a にいる列車が、次の待てる所まで押さえるときに通る、ほかの共有の待てる所 b への辺。
     // b に止まっている列車がいれば、a の列車はその列車を待つ。
     let mut edges = vec![BTreeSet::<usize>::new(); nodes.len()];
-    for (_, p, _) in running() {
+    for l in running() {
+        let p = l.path;
         let n = p.len();
         for i in 0..n {
             let Some(&a) = index.get(&vertex(&p[i])).filter(|_| p[i].wait) else {
@@ -431,11 +509,14 @@ fn make_plans(lines: &[(LineId, &[Step], bool)]) -> BTreeMap<LineId, LinePlan> {
         .map(|g| if *g == u32::MAX { u32::MAX } else { g - 1 })
         .collect();
     let mut plans = BTreeMap::new();
-    for (k, p, stopped) in lines {
+    // 自分だけの区間を持つ路線の、1 周の時間と区画ごとの時間。
+    let mut times = BTreeMap::<LineId, (u64, BTreeMap<u16, u64>)>::new();
+    for l in lines {
+        let (k, p) = (l.id, l.path);
         let n = p.len();
-        if !runnable(p, *stopped) {
+        if !runnable(p, l.stopped) {
             plans.insert(
-                *k,
+                k,
                 LinePlan {
                     cap: 0,
                     zone: vec![None; n],
@@ -459,7 +540,7 @@ fn make_plans(lines: &[(LineId, &[Step], bool)]) -> BTreeMap<LineId, LinePlan> {
             // 共有の待てる所がなければ、路線の輪だけを見る。
             let places = wait_places(p.iter().filter(|s| s.wait)).len() as u64;
             plans.insert(
-                *k,
+                k,
                 LinePlan {
                     cap: clamp_cap(places - 1),
                     zone,
@@ -508,8 +589,11 @@ fn make_plans(lines: &[(LineId, &[Step], bool)]) -> BTreeMap<LineId, LinePlan> {
             [only] => clamp_cap(u64::from(*only)),
             many => clamp_cap(many.iter().map(|r| u64::from(*r)).sum::<u64>() - 1),
         };
+        if !runs.is_empty() {
+            times.insert(k, zone_ticks(p, &zone));
+        }
         plans.insert(
-            *k,
+            k,
             LinePlan {
                 cap,
                 zone,
@@ -519,81 +603,76 @@ fn make_plans(lines: &[(LineId, &[Step], bool)]) -> BTreeMap<LineId, LinePlan> {
             },
         );
     }
-    // 区画の枠を、区画を使う路線で分ける。路線の列車は、自分の路線の分の枠だけを使う。ほかの路線の列車が枠を
-    // 取り続けて、ある路線の列車がいつまでも区画に入れなくなるのを防ぐためである。自分だけの待てる所を持たない
-    // 路線（区間運転など）の列車は、いつも区画の中にいて枠を持ち続けるので、分けた枠がそのまま本数の上限になる。
-    // そこで、枠を等しく分けた余りは、これらの路線から先に配る。区画の中に輪がなければ、枠に上限はない。
+    let trains: BTreeMap<LineId, u8> = lines.iter().map(|l| (l.id, l.trains)).collect();
+    // 区画の枠を、区画を使う路線のうち本数が 1 以上の路線で等しく分ける（`split_zone`）。路線の列車は、自分の
+    // 路線の分の枠だけを使う。本数 0 の路線（使っていない路線）の分は 0 である。上限は、その路線の本数を 1 以上に
+    // したとしたら配られる分（見込みの分）から決める。本数 1 以上の路線では、いまの分と同じである。
+    let mut potential = BTreeMap::<(LineId, u16), u32>::new();
     for (z, zone_cap) in zone_caps.iter().enumerate() {
         let z16 = u16::try_from(z).expect("共有の区画が多すぎる");
-        let touches = |plan: &LinePlan| plan.zone.contains(&Some(z16));
         let mut users: Vec<(bool, LineId)> = plans
             .iter()
-            .filter(|(_, p)| touches(p))
+            .filter(|(_, p)| p.zone.contains(&Some(z16)))
             .map(|(k, p)| (!p.runs.is_empty(), *k))
             .collect();
         users.sort();
-        let room = u64::from(*zone_cap);
-        let n = users.len() as u64;
-        for (i, (through, k)) in users.iter().enumerate() {
-            let share = if *zone_cap == u32::MAX {
-                u32::MAX
+        let active: Vec<(bool, LineId)> = users
+            .iter()
+            .filter(|(_, k)| trains[k] > 0)
+            .copied()
+            .collect();
+        for user in &users {
+            let k = user.1;
+            let (share, seen) = if *zone_cap == u32::MAX {
+                (u32::MAX, u32::MAX)
+            } else if trains[&k] > 0 {
+                let share = split_zone(*zone_cap, &active, *user);
+                (share, share)
             } else {
-                u32::try_from(room / n + u64::from((i as u64) < room % n)).expect("枠があふれた")
+                let mut with = active.clone();
+                with.push(*user);
+                with.sort();
+                (0, split_zone(*zone_cap, &with, *user))
             };
-            let plan = plans.get_mut(k).expect("路線がない");
-            plan.quota.insert(z16, share);
-            if !through {
-                plan.cap = clamp_cap(u64::from(share));
-            } else if share == 0 {
-                plan.cap = 0;
+            plans
+                .get_mut(&k)
+                .expect("路線がない")
+                .quota
+                .insert(z16, share);
+            potential.insert((k, z16), seen);
+        }
+    }
+    for l in lines {
+        let plan = plans.get_mut(&l.id).expect("路線がない");
+        let mine = potential.range((l.id, 0)..=(l.id, u16::MAX));
+        match times.get(&l.id) {
+            // 自分だけの待てる所を持たない路線の列車は、いつも区画の中にいて枠を持ち続けるので、見込みの分が
+            // そのまま上限になる。進路がすべて 1 つの輪の上にあるので、通る区画は 1 つである。
+            None if plan.runs.is_empty() && !plan.quota.is_empty() => {
+                plan.cap = mine
+                    .map(|(_, q)| clamp_cap(u64::from(*q)))
+                    .min()
+                    .unwrap_or(0);
+            }
+            None => {}
+            // 自分だけの区間を持つ路線は、通る区画の枠のうち自分の見込みの分で運べる本数までにする。区画 z の分が q で、
+            // 列車が 1 周のうち押さえた範囲の終わりを z に置く時間が t_z、1 周の時間が t なら、z を通れるのは t_z の
+            // あいだに q 本で、1 周で運べるのは q × t ÷ t_z 本の分である。これより多く走らせても、増えた列車は区画の
+            // 手前の自分だけの区間で枠を待つだけで、運べる量は増えず、維持費だけがかかる（#356）。
+            Some((total, in_zone)) => {
+                let mut cap = plan.cap;
+                for ((_, z), q) in mine {
+                    if *q == 0 {
+                        cap = 0;
+                    } else if *q != u32::MAX {
+                        cap = cap.min(clamp_cap((u64::from(*q) * total).div_ceil(in_zone[z])));
+                    }
+                }
+                plan.cap = cap;
             }
         }
     }
-    for (k, p, _) in lines {
-        let plan = plans.get_mut(k).expect("路線がない");
-        if !plan.runs.is_empty() && plan.cap > 0 {
-            plan.cap = plan.cap.min(flow_cap(p, plan));
-        }
-    }
     plans
-}
-
-/// 自分だけの区間を持つ路線を、通る区画の枠のうち自分の路線の分で運べる量より多く走らせない本数。
-///
-/// 区画の枠は、押さえた範囲の終わりを区画に置く列車の数を抑える。区画 z の分が q で、列車が 1 周のうち押さえた
-/// 範囲の終わりを z に置く時間が t_z、1 周の時間が t なら、z を通れるのは t_z のあいだに q 本で、1 周で運べるのは
-/// q × t ÷ t_z 本の分である。これより多く走らせても、増えた列車は区画の手前の自分だけの区間で枠を待つだけで、
-/// 運べる量は増えず、維持費だけがかかる。そこで、枠に上限のある区画ごとに q × t ÷ t_z を切り上げた本数を求め、
-/// いちばん小さいものを返す。
-///
-/// 時間は [`RailLine::round_trip_ticks`] と同じ見込みである。列車は、先頭がいる要素から先で最初の待てる所まで
-/// 押さえるので、要素の時間は、その要素から先で最初の待てる所の区画に数える。
-fn flow_cap(p: &[Step], plan: &LinePlan) -> u8 {
-    let n = p.len();
-    let ticks = |s: &Step| s.run_ticks() + s.stop_ticks();
-    let total: u64 = p.iter().map(ticks).sum();
-    let mut in_zone = BTreeMap::<u16, u64>::new();
-    // 後ろから 2 周たどり、要素ごとに、そこから先で最初の待てる所の区画を求める。
-    let mut next: Option<Option<u16>> = None;
-    for d in (0..2 * n).rev() {
-        let i = d % n;
-        if p[i].wait {
-            next = Some(plan.zone[i]);
-        }
-        if d < n
-            && let Some(Some(z)) = next
-        {
-            *in_zone.entry(z).or_default() += ticks(&p[i]);
-        }
-    }
-    in_zone
-        .iter()
-        .filter_map(|(z, t)| {
-            let q = u64::from(*plan.quota.get(z)?);
-            (q != u64::from(u32::MAX)).then(|| (q * total).div_ceil(*t))
-        })
-        .min()
-        .map_or(MAX_LINE_TRAINS, clamp_cap)
 }
 
 /// 路線の本数の上限と、その内訳。読み取り用で、状態には持たない。
@@ -670,38 +749,53 @@ impl Rail {
             .collect()
     }
 
-    /// コマンド `command`（`CreateLine`、`ExtendLine`、`InsertLineStation`）が `LineStarvesOther` で断られるなら、そのせいで上限が 0 に
-    /// なる路線のうち、ID のいちばん小さいもの。断られないコマンドと、路線のコマンドでないものは `None`。状態を変えない。
+    /// コマンド `command`（`CreateLine`、`ExtendLine`、`InsertLineStation`、`SetLineTrains`）が `LineStarvesOther` で
+    /// 断られるなら、そのせいで上限が 0 になる路線のうち、ID のいちばん小さいもの。断られないコマンドと、路線の
+    /// コマンドでないものは `None`。状態を変えない。
     pub fn starved_by_command(&self, command: &crate::command::Command) -> Option<LineId> {
-        let (id, path) = self.command_path(command)?;
-        self.starved_by(id, &path)
+        let change = self.command_change(command)?;
+        self.starved_in(change.id, &self.plans_with(&change))
     }
 
-    /// コマンド `command`（`CreateLine`、`ExtendLine`、`InsertLineStation`）を受け付けたとしたら上限が下がる、ほかの
-    /// 路線と、その前と後の上限（ID の順）。止まった路線は数えない。`LineStarvesSelf` で断った理由を見せるのに使う。
-    /// 路線のコマンドでないものと、進路を選べないものは空である。状態を変えない。
+    /// コマンド `command`（`CreateLine`、`ExtendLine`、`InsertLineStation`、`SetLineTrains`）を受け付けたとしたら
+    /// 上限が下がる、ほかの路線と、その前と後の上限（ID の順）。止まった路線と本数 0 の路線は数えない。`LineStarvesSelf` で断った
+    /// 理由を見せるのに使う。路線のコマンドでないものと、進路を選べないものは空である。状態を変えない。
     pub fn lowered_by_command(&self, command: &crate::command::Command) -> Vec<(LineId, u8, u8)> {
-        let Some((id, path)) = self.command_path(command) else {
+        let Some(change) = self.command_change(command) else {
             return Vec::new();
         };
-        let plans = self.plans_with(id, &path);
+        let plans = self.plans_with(&change);
         self.lines
             .iter()
-            .filter(|(l, line)| *l != id && !line.stopped && plans[l].cap < line.cap())
+            .filter(|(l, line)| *l != change.id && line.wants_trains() && plans[l].cap < line.cap())
             .map(|(l, line)| (l, line.cap(), plans[&l].cap))
             .collect()
     }
 
-    /// 路線のコマンドで進路を変える路線（新しく作る路線なら、作ったときに付く ID）と、変えたあとの進路。
+    /// 路線のコマンドで変わる路線（新しく作る路線なら、作ったときに付く ID）と、変えたあとの進路と本数。
     /// 路線のコマンドでないものと、駅か路線がないもの、進路を選べないものは `None`。
-    fn command_path(&self, command: &crate::command::Command) -> Option<(LineId, Vec<Step>)> {
+    fn command_change(&self, command: &crate::command::Command) -> Option<LineChange> {
         use crate::command::Command;
+        let keep = |id: LineId, path: Vec<Step>| {
+            let l = self.lines.get(id).expect("路線がない");
+            LineChange {
+                id,
+                path,
+                stopped: false,
+                trains: l.trains,
+            }
+        };
         match command {
             Command::CreateLine { from, to } => {
                 self.stations.get(*from)?;
                 self.stations.get(*to)?;
                 let path = self.plan(&[*from, *to], false)?;
-                Some((self.lines.next_id(), path))
+                Some(LineChange {
+                    id: self.lines.next_id(),
+                    path,
+                    stopped: false,
+                    trains: 0,
+                })
             }
             Command::ExtendLine { line, station } => {
                 let l = self.lines.get(*line)?;
@@ -712,7 +806,7 @@ impl Rail {
                     stations.push(*station);
                 }
                 let path = self.plan(&stations, closes)?;
-                Some((*line, path))
+                Some(keep(*line, path))
             }
             Command::InsertLineStation {
                 line,
@@ -728,56 +822,83 @@ impl Rail {
                 let mut stations = l.stations.clone();
                 stations.insert(at, *station);
                 let path = self.plan(&stations, l.looped)?;
-                Some((*line, path))
+                Some(keep(*line, path))
+            }
+            Command::SetLineTrains { line, trains } => {
+                let l = self.lines.get(*line)?;
+                Some(LineChange {
+                    id: *line,
+                    path: l.path.clone(),
+                    stopped: l.stopped,
+                    trains: (*trains).min(MAX_LINE_TRAINS),
+                })
             }
             _ => None,
         }
     }
 
-    /// 路線 `id`（新しく作る路線なら、作ったときに付く ID）の進路を `path` にしたときの、すべての路線の区分け。
-    fn plans_with(&self, id: LineId, path: &[Step]) -> BTreeMap<LineId, LinePlan> {
-        let input: Vec<(LineId, &[Step], bool)> = self
+    /// 路線を `change` のとおりに変えたとしたときの、すべての路線の区分け。
+    fn plans_with(&self, change: &LineChange) -> BTreeMap<LineId, LinePlan> {
+        let input: Vec<PlanLine> = self
             .lines
             .iter()
-            .filter(|(l, _)| *l != id)
-            .map(|(l, line)| (l, line.path.as_slice(), line.stopped))
-            .chain([(id, path, false)])
+            .filter(|(l, _)| *l != change.id)
+            .map(|(id, l)| PlanLine {
+                id,
+                path: &l.path,
+                stopped: l.stopped,
+                trains: l.trains,
+            })
+            .chain([PlanLine {
+                id: change.id,
+                path: &change.path,
+                stopped: change.stopped,
+                trains: change.trains,
+            }])
             .collect();
         make_plans(&input)
     }
 
     /// 区分けを `plans` にしたとき、上限が 0 でなかったのに 0 になる、路線 `id` のほかの路線のうち、ID のいちばん
-    /// 小さいもの。止まった路線は数えない。
+    /// 小さいもの。止まった路線と、本数 0 の路線（使っていない路線）は数えない。
     fn starved_in(&self, id: LineId, plans: &BTreeMap<LineId, LinePlan>) -> Option<LineId> {
         self.lines
             .iter()
             .filter(|(l, _)| *l != id)
-            .find(|(l, line)| !line.stopped && line.cap() > 0 && plans[l].cap == 0)
+            .find(|(l, line)| line.wants_trains() && line.cap() > 0 && plans[l].cap == 0)
             .map(|(l, _)| l)
     }
 
-    /// 路線 `id` の進路を `path` にしたとき、上限が 0 になるほかの路線のうち、ID のいちばん小さいもの。
-    fn starved_by(&self, id: LineId, path: &[Step]) -> Option<LineId> {
-        self.starved_in(id, &self.plans_with(id, path))
-    }
-
-    /// 路線 `id` の進路を `path` にするのを断る理由。ほかの路線の上限を 0 にするなら `LineStarvesOther`、
-    /// 路線 `id` そのものの上限が 0 で、ほかの路線の上限を下げるなら `LineStarvesSelf` である。後者は、作っても
+    /// 路線を `change` のとおりに変えるのを断る理由。ほかの路線の上限を 0 にするなら `LineStarvesOther`、
+    /// 変える路線そのものの上限が 0 で、ほかの路線の上限を下げるなら `LineStarvesSelf` である。後者は、作っても
     /// 走らない路線のために、ほかの路線の列車が消えるだけで、遊ぶ人に得がない。
-    fn deny_path(&self, id: LineId, path: &[Step]) -> Result<(), DenyReason> {
-        let plans = self.plans_with(id, path);
-        if self.starved_in(id, &plans).is_some() {
+    /// 断らなければ、変えたあとの区分けを返す。
+    fn deny_change(&self, change: &LineChange) -> Result<BTreeMap<LineId, LinePlan>, DenyReason> {
+        let plans = self.plans_with(change);
+        if self.starved_in(change.id, &plans).is_some() {
             return Err(DenyReason::LineStarvesOther);
         }
         let lowers_other = self
             .lines
             .iter()
-            .filter(|(l, _)| *l != id)
-            .any(|(l, line)| !line.stopped && plans[&l].cap < line.cap());
-        if plans[&id].cap == 0 && lowers_other {
+            .filter(|(l, _)| *l != change.id)
+            .any(|(l, line)| line.wants_trains() && plans[&l].cap < line.cap());
+        if plans[&change.id].cap == 0 && lowers_other {
             return Err(DenyReason::LineStarvesSelf);
         }
-        Ok(())
+        Ok(plans)
+    }
+
+    /// 路線 `id` の進路を `path` にするのを断る理由（[`Rail::deny_change`]）。本数は変えない。
+    fn deny_path(&self, id: LineId, path: &[Step]) -> Result<(), DenyReason> {
+        let trains = self.lines.get(id).map_or(0, |l| l.trains);
+        self.deny_change(&LineChange {
+            id,
+            path: path.to_vec(),
+            stopped: false,
+            trains,
+        })
+        .map(|_| ())
     }
 
     /// すべての路線の待てる所の印と区分け（`LinePlan`）を作り直す。
@@ -788,10 +909,15 @@ impl Rail {
                 s.wait = is_wait(s);
             }
         }
-        let input: Vec<(LineId, &[Step], bool)> = self
+        let input: Vec<PlanLine> = self
             .lines
             .iter()
-            .map(|(id, l)| (id, l.path.as_slice(), l.stopped))
+            .map(|(id, l)| PlanLine {
+                id,
+                path: &l.path,
+                stopped: l.stopped,
+                trains: l.trains,
+            })
             .collect();
         for (id, plan) in make_plans(&input) {
             self.lines.get_mut(id).expect("路線がない").plan = plan;
@@ -799,8 +925,26 @@ impl Rail {
     }
 
     /// 書き出しから読み戻したあとに、待てる所の区分けを作り直す。
+    ///
+    /// 前の規則で書いた保存データでは、作り直した区分けで走らせ続けられない路線に列車が残ることがある。
+    /// その列車は、読み戻した状態を保存したときと同じに保つため、ここでは消さず、次の tick に
+    /// [`Rail::step_with`] が消す。
     pub(crate) fn restore_plans(&mut self) {
         self.replan();
+    }
+
+    /// 走らせ続けられない路線（[`RailLine::cannot_run`]）の列車を消す。
+    pub(crate) fn drop_unrunnable_trains(&mut self) {
+        let lines = &self.lines;
+        let gone: Vec<_> = self
+            .trains
+            .iter()
+            .filter(|(_, t)| lines.get(t.line).is_none_or(RailLine::cannot_run))
+            .map(|(id, _)| id)
+            .collect();
+        for id in gone {
+            self.drop_train(id);
+        }
     }
 
     /// 線路 `t` を向き `d` に進むときに入るノードと出るノード。
@@ -989,21 +1133,12 @@ impl Rail {
         )
     }
 
-    /// すべての路線の待てる所の区分けと上限（`LinePlan`）を決め直し、止まった路線と、上限が 0 になった
-    /// 路線の列車を消す。消えた列車の押さえていた閉塞は、それで返る。残った列車は [`Rail::settle_trains`] で
-    /// 続けられる形に直す。
+    /// すべての路線の待てる所の区分けと上限（`LinePlan`）を決め直し、走らせ続けられない路線
+    /// （[`RailLine::cannot_run`]）の列車を消す。消えた列車の押さえていた閉塞は、それで返る。残った列車は
+    /// [`Rail::settle_trains`] で続けられる形に直す。
     fn mark_waits(&mut self) {
         self.replan();
-        let lines = &self.lines;
-        let gone: Vec<_> = self
-            .trains
-            .iter()
-            .filter(|(_, t)| lines.get(t.line).is_none_or(|l| l.stopped || l.cap() == 0))
-            .map(|(id, _)| id)
-            .collect();
-        for id in gone {
-            self.drop_train(id);
-        }
+        self.drop_unrunnable_trains();
         self.settle_trains();
         self.settle_riders();
     }
@@ -1121,9 +1256,40 @@ impl Rail {
     }
 
     /// 路線を走らせる列車の本数を決める。減らした分は、終点で折り返す列車から消える。
+    ///
+    /// 共有の区画の枠は本数で分けるので、本数を変えると、区画を一緒に使うほかの路線の上限と枠の分が変わる。
+    /// ほかの路線の上限を 0 にするなら `LineStarvesOther`、この路線の上限が 0 なのにほかの路線の上限を下げるなら
+    /// `LineStarvesSelf` で断る（[`Rail::deny_change`]）。区分けが変わったら、枠を超えた列車をすぐに消す（[`Rail::mark_waits`]）。
     pub(crate) fn set_line_trains(&mut self, id: LineId, trains: u8) -> Result<(), DenyReason> {
-        let line = self.lines.get_mut(id).ok_or(DenyReason::NoSuchLine)?;
-        line.trains = trains.min(MAX_LINE_TRAINS);
+        let line = self.lines.get(id).ok_or(DenyReason::NoSuchLine)?;
+        let trains = trains.min(MAX_LINE_TRAINS);
+        if trains == line.trains {
+            return Ok(());
+        }
+        let change = LineChange {
+            id,
+            path: line.path.clone(),
+            stopped: line.stopped,
+            trains,
+        };
+        let plans = self.deny_change(&change)?;
+        self.lines.get_mut(id).expect("路線がない").trains = trains;
+        let same = self.lines.iter().all(|(l, line)| line.plan == plans[&l]);
+        if !same {
+            // 枠の分を本数に合わせて分け直したので、本数を超えた列車を終点まで残すと、減った分の枠を待って
+            // 止まる（本数 0 なら分が 0 で、区画に入れない）。ID の大きい列車から、すぐに消す。
+            let allowed = usize::from(plans[&id].cap.min(trains));
+            let extra: Vec<_> = self
+                .trains()
+                .filter(|(_, t)| t.line == id)
+                .map(|(tid, _)| tid)
+                .skip(allowed)
+                .collect();
+            for tid in extra {
+                self.drop_train(tid);
+            }
+            self.mark_waits();
+        }
         Ok(())
     }
 

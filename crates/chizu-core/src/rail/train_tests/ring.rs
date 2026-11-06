@@ -172,10 +172,12 @@ fn pick(r: &mut Xorshift, n: usize) -> usize {
 }
 
 /// [`ring_world`] に路線を 2〜5 本（駅 2〜4 つ、3 分の 1 は環状、本数 1〜16）置き、1,000 tick ごとに線路を分ける、
-/// 枝を取り壊す、本数を変える、路線を延ばす、作る、取り除くのどれかをして、12,000 tick 回す。
+/// 枝を取り壊す、本数を変える、路線を延ばす、作る、取り除くのどれかをして、12,000 tick 回す。`zero` なら、始めに
+/// 置く路線の 3 分の 1 を本数 0（使っていない路線）にする。
 fn ring_fuzz(
     seed: u64,
     crossing: bool,
+    zero: bool,
     limit: u64,
     waited: u32,
     watch: &mut Watch,
@@ -210,10 +212,12 @@ fn ring_fuzz(
                 station: chosen[0],
             });
         }
-        let _ = w.apply(&Command::SetLineTrains {
-            line: id,
-            trains: 1 + r.below(16) as u8,
-        });
+        let trains = if zero && r.below(3) == 0 {
+            0
+        } else {
+            1 + r.below(16) as u8
+        };
+        let _ = w.apply(&Command::SetLineTrains { line: id, trains });
         ids.push(id);
     }
     for tick in 0..12_000u64 {
@@ -273,7 +277,7 @@ fn ring_fuzz(
 #[test]
 fn trains_on_a_ring_with_shared_terminals_keep_departing() {
     for seed in [11, 58, 377, 390] {
-        ring_fuzz(seed, false, 3_000, 1_000, &mut Watch::default()).unwrap();
+        ring_fuzz(seed, false, false, 3_000, 1_000, &mut Watch::default()).unwrap();
     }
 }
 
@@ -281,14 +285,22 @@ fn trains_on_a_ring_with_shared_terminals_keep_departing() {
 #[test]
 fn trains_on_a_ring_with_crossings_keep_departing() {
     for seed in [0, 1, 2] {
-        ring_fuzz(seed, true, 3_000, 3_000, &mut Watch::default()).unwrap();
+        ring_fuzz(seed, true, false, 3_000, 3_000, &mut Watch::default()).unwrap();
+    }
+}
+
+/// 本数 0 の路線（区画の枠の分が 0）がまざっても、閉塞が重ならず、備えが働かず、列車が駅を出続ける（#344）。
+#[test]
+fn trains_on_a_ring_with_unused_lines_keep_departing() {
+    for seed in [0, 1, 2] {
+        ring_fuzz(seed, false, true, 3_000, 3_000, &mut Watch::default()).unwrap();
     }
 }
 
 /// 環状の線路のファズを `RING_FROM` から `RING_N` 種回し、閉塞の重なりか panic、備え、`RING_LIMIT` tick 駅を
 /// 出ないか `RING_WAITED`（既定は `RING_LIMIT`）tick 続けて先を待つ列車か、上限が 1 以上なのに `RING_LIMIT` tick
 /// 列車がいない路線があった種と、続けて待った長さが 1,000 tick 以上になった種の数、駅を出た数の和を出す。
-/// `RING_CROSSING` があれば踏切を置く。手で回す。
+/// `RING_CROSSING` があれば踏切を置き、`RING_ZERO` があれば始めに置く路線の 3 分の 1 を本数 0 にする。手で回す。
 #[test]
 #[ignore = "長いファズは手で回す"]
 fn ring_fuzz_many() {
@@ -302,6 +314,7 @@ fn ring_fuzz_many() {
     let n = env("RING_N", 50);
     let limit = env("RING_LIMIT", 3_000);
     let crossing = std::env::var("RING_CROSSING").is_ok();
+    let zero = std::env::var("RING_ZERO").is_ok();
     // `RING_SEEDS`（コンマ区切り）があれば、その種だけを回す。
     let seeds: Vec<u64> = match std::env::var("RING_SEEDS") {
         Ok(v) => v.split(',').map(|s| s.trim().parse().unwrap()).collect(),
@@ -315,7 +328,7 @@ fn ring_fuzz_many() {
     for seed in seeds {
         let mut watch = Watch::default();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            ring_fuzz(seed, crossing, limit, waited, &mut watch)
+            ring_fuzz(seed, crossing, zero, limit, waited, &mut watch)
         }));
         long_waits += u32::from(watch.most_waited >= 1_000);
         most = most.max(watch.most_waited);
