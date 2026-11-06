@@ -867,7 +867,7 @@ impl Sim {
         };
         let before_caps = caps(&self.world);
         let before: std::collections::BTreeSet<TilePos> = self.world.rail().crossings().collect();
-        let mut after_world = self.world.clone();
+        let mut after_world = self.world.rail_probe_copy();
         if after_world.apply(command) != chizu_core::ApplyOutcome::Applied {
             return Vec::new();
         }

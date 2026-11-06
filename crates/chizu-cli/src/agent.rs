@@ -54,6 +54,7 @@ act と advance は、記録を再生したハッシュが state.json の stateH
 agent new で作ったセッションには、再生の途中の街を replay-cache.bin に置き、次の呼び出しはそこから続きを再生する。
 正しい記録は state.json と commands.rec で、キャッシュは消してもよい。chizu-cli を作り直したときや、
 記録の先頭と合わないとき、壊れているときは、捨てて種から再生し直す。
+observe は、駅の直近の乗る人のために、3 日前の街を replay-cache-past.bin に置く（これも消してよい）。
 <commands.json> に - を渡すと標準入力から読む。中身はコマンドの配列か、コマンド 1 つである。
 map と export のほかのサブコマンドは、結果を 1 行の JSON で標準出力に書く。observe の time.day は画面と同じく 1 から数える。
 
@@ -2402,9 +2403,11 @@ fn overlap_permille(shared: u32, households: u32) -> Option<u64> {
 const RECENT_RIDE_DAYS: u64 = 3;
 
 /// observe の駅に `recentBoarded`（直近 [`RECENT_RIDE_DAYS`] 日に乗った人の数）と `recentDays` を足す。
-/// 中核が持つのは始まりからの積み上げだけなので、その日数前まで記録を再生した街との差を取る。
+/// 中核が持つのは始まりからの積み上げだけなので、その日数前の街との差を取る。
+/// セッションでは、その日数前（日の変わり目）の街を `replay-cache-past.bin` に置き、次からはそこから続きを再生する。
+/// 再生の長さは前の observe からの間隔で決まり、記録の長さには比例しない。セッションでない（人間のフィードバックなど）ときは何も書かず、先頭から再生する。
 /// 街がまだその日数たっていないか、その駅がまだなかったときは `recentBoarded` が null になる。駅がなければ再生しない。
-fn attach_recent_riders(seen: &mut Value, saved: &Saved) {
+fn attach_recent_riders(seen: &mut Value, saved: &Saved, dir: &Path, keep: bool) {
     let window = RECENT_RIDE_DAYS * TICKS_PER_DAY;
     let Some(stations) = seen
         .pointer_mut("/rail/stations")
@@ -2413,11 +2416,10 @@ fn attach_recent_riders(seen: &mut Value, saved: &Saved) {
     else {
         return;
     };
-    let past = saved.tick.checked_sub(window).map(|target| {
-        let mut world = World::new(saved.seed);
-        replay(&mut world, &saved.log, target);
-        world
-    });
+    let past = saved
+        .tick
+        .checked_sub(window)
+        .map(|target| world_at_past(saved, dir, target, keep));
     for st in stations {
         let index = st.pointer("/id/index").and_then(Value::as_u64);
         let generation = st.pointer("/id/generation").and_then(Value::as_u64);
@@ -2439,6 +2441,29 @@ fn attach_recent_riders(seen: &mut Value, saved: &Saved) {
         st["recentBoarded"] = json!(recent);
         st["recentDays"] = json!(RECENT_RIDE_DAYS);
     }
+}
+
+/// tick `target` の街を作る。`keep` のときは、過去の街のキャッシュを使い、日の変わり目の街に置き直す。
+fn world_at_past(saved: &Saved, dir: &Path, target: u64, keep: bool) -> World {
+    let cache = cache::build_key()
+        .map(|key| Cache::named(dir, key, cache::PAST_CACHE_FILE))
+        .filter(|_| keep);
+    let loaded = cache
+        .as_ref()
+        .and_then(|c| c.load(saved.seed, &saved.log, target));
+    let from = loaded.as_ref().map(|w| w.tick().0);
+    let mut world = loaded.unwrap_or_else(|| World::new(saved.seed));
+    if let Some(cache) = &cache {
+        let day = target - target % TICKS_PER_DAY;
+        let start = world.tick().0;
+        if from.is_none_or(|f| day > f) {
+            replay(&mut world, &saved.log, day - start);
+            cache.store(&cache.encode(&world, &saved.log));
+        }
+    }
+    let start = world.tick().0;
+    replay(&mut world, &saved.log, target - start);
+    world
 }
 
 /// `capReason` の `shortSpans` に載せる線路の数の上限。
@@ -3237,7 +3262,12 @@ pub fn run(args: &[String]) -> Result<String, String> {
         ["observe", dir] => {
             let (_lock, world, before, is_session) = open_for_read(Path::new(dir), true)?;
             let mut seen = observe(&world, &before);
-            attach_recent_riders(&mut seen, &read_saved(Path::new(dir))?);
+            attach_recent_riders(
+                &mut seen,
+                &read_saved(Path::new(dir))?,
+                Path::new(dir),
+                is_session,
+            );
             let last = read_last_observe(Path::new(dir), is_session);
             let history = attach_utility_trends(&mut seen, last.as_ref());
             seen["sinceLastObserve"] =
@@ -3872,6 +3902,50 @@ mod tests {
         assert_eq!(cached.world.state_hash(), world.state_hash());
         assert_eq!(cached.before, before);
         assert!(cached.checkpoint.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 過去の街のキャッシュを使って作った街は、種から再生した街と同じになる。
+    /// キャッシュは日の変わり目に置かれ、tick が進んでコマンドが足されても使える。
+    #[test]
+    fn past_world_from_cache_matches_full_replay() {
+        let seed = 7;
+        let dir = std::env::temp_dir().join(format!("chizu-agent-past-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut log = CommandLog::new();
+        log.record(
+            chizu_core::Tick(0),
+            chizu_core::Command::BuildRoad {
+                from: TilePos::new(0, 10),
+                to: TilePos::new(20, 10),
+                kind: chizu_core::RoadKind::Small,
+            },
+        )
+        .unwrap();
+        let day = TICKS_PER_DAY;
+        let mut tick = 0;
+        for target in [day + 123, day * 2 + 5, day * 2 + 400] {
+            tick = tick.max(target + 100);
+            let saved = saved_at(seed, tick, &log);
+            let got = world_at_past(&saved, &dir, target, true);
+            let mut fresh = World::new(seed);
+            replay(&mut fresh, &log, target);
+            assert_eq!(got, fresh, "target {target}");
+            log.record(
+                chizu_core::Tick(tick),
+                chizu_core::Command::SetTaxRate {
+                    zone: chizu_core::ZoneKind::Residential,
+                    permille: 120,
+                },
+            )
+            .unwrap();
+        }
+        let key = cache::build_key().unwrap();
+        let past = Cache::named(&dir, key, cache::PAST_CACHE_FILE);
+        let w = past
+            .load(seed, &log, day * 2 + 400)
+            .expect("キャッシュがない");
+        assert_eq!(w.tick().0, day * 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -46,3 +46,50 @@ export function roadProbeText(probe: RoadProbe | null): string {
   );
   return `${made}、${lines.join("、")}`;
 }
+
+/**
+ * 道路の見積もりの問い合わせの出し入れ。Worker への問い合わせは街の写しを作るので、答えを待つあいだは次を送らず、
+ * 届いてから最新の 1 件だけを送る（取り壊しの見積もりと同じ形）。
+ * 街が変わったとき（コマンドの結果が届いたとき）と道具を変えたときは `reset` で、古い答えと送った印を捨てる。
+ * 捨てる前に送った問い合わせの答えは、届いても見せない。
+ */
+export class RoadProbeGate {
+  private epoch = 0;
+  private sent = "";
+  private waiting = false;
+  private shown: { key: string; probe: RoadProbe | null } | null = null;
+
+  /** 問い合わせの印。同じコマンドでも、捨てたあとは別の印になる。 */
+  keyOf(command: unknown): string {
+    return `${this.epoch}:${JSON.stringify(command)}`;
+  }
+
+  /** 送るべきなら true。待っているあいだと、同じ印を送り済みのときは false。 */
+  shouldSend(key: string): boolean {
+    if (key === this.sent || this.waiting) {
+      return false;
+    }
+    this.sent = key;
+    this.waiting = true;
+    return true;
+  }
+
+  /** 答えが届いた。捨てたあとに届いた古い答えは見せない。 */
+  receive(key: string, probe: RoadProbe | null): void {
+    this.waiting = false;
+    if (key.startsWith(`${this.epoch}:`)) {
+      this.shown = { key, probe };
+    }
+  }
+
+  /** 印が `key` の答え。まだ届いていなければ null。 */
+  answer(key: string): RoadProbe | null {
+    return this.shown?.key === key ? this.shown.probe : null;
+  }
+
+  reset(): void {
+    this.epoch += 1;
+    this.sent = "";
+    this.shown = null;
+  }
+}

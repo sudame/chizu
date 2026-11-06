@@ -195,7 +195,7 @@ import {
 } from "./protocol/messages.ts";
 import { type SnapshotHeader, SnapshotReader } from "./protocol/snapshot.ts";
 import { GaveUpWindow, RecentRides, railNotices } from "./rail-notice.ts";
-import { parseRoadProbe, type RoadProbe, roadProbeText } from "./road-probe.ts";
+import { parseRoadProbe, RoadProbeGate, roadProbeText } from "./road-probe.ts";
 import { setupSaves } from "./save/main-side.ts";
 import { setupScaleBar } from "./scale-bar.ts";
 import { BAR_SPEEDS, describeSpeed, nearestSpeed } from "./speed.ts";
@@ -793,9 +793,9 @@ let bulldozeWaiting = false;
 // 線路を引けるかと建設費の、中核の答え。引く直線が変わるたびに Worker に問い合わせる
 let railShown: { key: string; reason: string | null; cost: number } | null = null;
 let railSent = "";
-// 道路を引いたときの踏切と路線の上限への響きの、中核の答え。道路の直線が変わるたびに Worker に問い合わせる
-let roadProbeShown: { key: string; probe: RoadProbe | null } | null = null;
-let roadProbeSent = "";
+// 道路を引いたときの踏切と路線の上限への響きの、中核の答え。道路の直線が変わるたびに Worker に問い合わせ、
+// 答えを待つあいだは次を送らない。街が変わったときと道具を変えたときは捨てる
+const roadProbe = new RoadProbeGate();
 // 最後に問い合わせた tick。カーソルが動かなくても、街の数字が届いたときに共同の駐車場の円の中の数を問い合わせ直す
 let probeAskedTick = 0;
 let money = 0;
@@ -1196,12 +1196,11 @@ function roadProbeSuffix(command: CommandMessage): string {
     delete mapCanvas.dataset.roadLowered;
     return "";
   }
-  const key = JSON.stringify(command);
-  if (key !== roadProbeSent) {
-    roadProbeSent = key;
+  const key = roadProbe.keyOf(command);
+  if (roadProbe.shouldSend(key)) {
     send({ kind: "probe-road", key, command });
   }
-  const probe = roadProbeShown?.key === key ? roadProbeShown.probe : null;
+  const probe = roadProbe.answer(key);
   // test:wasm が読む
   mapCanvas.dataset.roadCrossings = String(probe?.crossings ?? 0);
   mapCanvas.dataset.roadLowered = (probe?.lowered ?? [])
@@ -1333,6 +1332,7 @@ function selectTool(next: Tool, button: HTMLButtonElement): void {
   tool = next;
   bulldozeSent = "";
   bulldozeShown = null;
+  roadProbe.reset();
   for (const b of toolButtons) {
     b.setAttribute("aria-pressed", String(b === button));
   }
@@ -1792,7 +1792,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     return;
   }
   if (message.kind === "road-probe") {
-    roadProbeShown = { key: message.key, probe: parseRoadProbe(message.info) };
+    roadProbe.receive(message.key, parseRoadProbe(message.info));
     updatePreview();
     return;
   }
@@ -1893,8 +1893,7 @@ worker.addEventListener("message", (event: MessageEvent<unknown>) => {
     // 引けるかも、街が変わったので古い答えを捨てて問い合わせ直す
     railSent = "";
     railShown = null;
-    roadProbeSent = "";
-    roadProbeShown = null;
+    roadProbe.reset();
     if (tool.kind === "service" || tool.kind === "bulldoze" || tool.kind === "rail") {
       updatePreview();
     }

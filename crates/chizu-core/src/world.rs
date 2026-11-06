@@ -1116,6 +1116,44 @@ impl World {
         Ok(())
     }
 
+    /// 道路や線路のコマンドを試し打ちするための、軽い写し。
+    /// 道路と線路の網、土地とマスの使い道、線路、所持金、施設だけを写し、住民、建物、移動、経路探索の表は空にする。
+    /// 道路を引いたときの踏切と路線の上限は網と線路だけで決まるので、`apply` の結果の線路はこの写しでも `World` 全体を写したときと同じになる。
+    /// 時間は進められず、建物や住民を見る問い合わせも正しくないので、`apply` した線路を読む以外には使わない。
+    pub fn rail_probe_copy(&self) -> World {
+        World {
+            seed: self.seed,
+            tick: self.tick,
+            speed: self.speed,
+            money: self.money,
+            tax_permille: self.tax_permille,
+            parking_fee: self.parking_fee,
+            chunks: self.chunks.clone(),
+            chunks_bought: self.chunks_bought,
+            milestone: self.milestone,
+            unlimited_land: self.unlimited_land,
+            ledger_carry: 0,
+            network: self.network.clone(),
+            population: Population::default(),
+            car_places: CarPlaces::default(),
+            buildings: Buildings::with_seed(self.seed),
+            facilities: self.facilities.clone(),
+            rail: self.rail.clone(),
+            supply_dirty: false,
+            lots: Default::default(),
+            next_seq: self.next_seq,
+            trips: Trips::default(),
+            delays: Delays::default(),
+            errands: Default::default(),
+            traffic: Default::default(),
+            migration_totals: Default::default(),
+            router: RouterSlot {
+                router: AstarRouter::new(&Network::new()),
+            },
+            planner: Default::default(),
+        }
+    }
+
     /// 状態ハッシュ。表は決まった順番で書き出す。
     pub fn state_hash(&self) -> u64 {
         let mut h = StateHasher::new();
