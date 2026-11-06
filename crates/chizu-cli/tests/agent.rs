@@ -571,6 +571,72 @@ fn act_places_shared_parking_and_observe_and_map_show_it() {
     assert_eq!(upkeep["ParkingGarage"], 2880);
 }
 
+/// 駅を置いて線路を引くと、observe の rail と map に出る。取り壊すと bulldozed に駅と線路のマスが出る。
+#[test]
+fn act_builds_rail_and_a_station_and_observe_and_map_show_them() {
+    let dir = session("agent-rail");
+    let d = dir.to_str().unwrap();
+    cli(&["agent", "new", d, "0"]);
+    let cmds = write(
+        &dir.join("r.json"),
+        r#"[{"type":"BuildRoad","from":[0,10],"to":[40,10],"kind":"Small"},
+            {"type":"PlaceBuilding","kind":"Station","at":[12,9],"rotation":2},
+            {"type":"BuildRail","from":[12,8],"to":[16,8]},
+            {"type":"BuildRail","from":[16,8],"to":[16,0]},
+            {"type":"BuildRail","from":[20,0],"to":[20,20]}]"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &cmds]));
+    let outcomes: Vec<(&str, Option<&str>)> = acted["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["outcome"].as_str().unwrap(), r["reason"].as_str()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("Applied", None),
+            ("Applied", None),
+            ("Applied", None),
+            ("Denied", Some("RailTooSharp")),
+            ("Denied", Some("Occupied")),
+        ],
+        "{acted}"
+    );
+    let o = json(&cli(&["agent", "observe", d]));
+    let rail = &o["rail"];
+    assert_eq!(rail["tiles"], 4, "{rail}");
+    assert_eq!(rail["tracks"], 1, "{rail}");
+    assert_eq!(
+        rail["deadEnds"],
+        serde_json::json!([[3, 8], [16, 8]]),
+        "{rail}"
+    );
+    let stations = rail["stations"].as_array().unwrap();
+    assert_eq!(stations.len(), 1, "{rail}");
+    assert_eq!(stations[0]["ends"], serde_json::json!([[3, 8], [12, 8]]));
+    assert_eq!(stations[0]["area"], serde_json::json!([[3, 7], [12, 9]]));
+    assert_eq!(stations[0]["facesRoad"], true);
+    // 駅 800 と、4 マスの線路 6000 の 1%。
+    assert_eq!(o["financesPerDay"]["railUpkeep"], 860);
+    let map = cli(&["agent", "map", d, "2", "8", "17", "8"]);
+    assert_eq!(grid_rows(&map, 1, 16), [".EEEEEEEEEETTTT."], "{map}");
+    let gone = write(
+        &dir.join("b.json"),
+        r#"{"type":"Bulldoze","area":[[5,7],[5,7]]}"#,
+    );
+    let acted = json(&cli(&["agent", "act", d, &gone]));
+    let removed = &acted["results"][0]["bulldozed"];
+    assert_eq!(removed["stations"], 1, "{acted}");
+    assert_eq!(removed["railTiles"], 9, "{acted}");
+    let o = json(&cli(&["agent", "observe", d]));
+    assert_eq!(o["rail"]["stations"], serde_json::json!([]));
+    assert_eq!(
+        o["sinceLastObserve"]["changes"]["rail.stations"]["delta"],
+        -1
+    );
+}
+
 /// 大きすぎる縮尺は、あふれずに断る。
 #[test]
 fn map_refuses_huge_scale() {
@@ -1190,7 +1256,7 @@ fn map_marks_buildings_without_water_only() {
 
 /// 凡例を除いた、地図の本体の行。
 fn map_body(text: &str) -> String {
-    text.lines().skip(12).collect::<Vec<_>>().join("\n")
+    text.lines().skip(14).collect::<Vec<_>>().join("\n")
 }
 
 fn town_map(d: &str, x: i64, y: i64) -> String {

@@ -11,6 +11,7 @@ pub mod id;
 pub mod jobs;
 pub mod movement;
 pub mod network;
+pub mod rail;
 pub mod record;
 pub mod rng;
 pub mod round;
@@ -44,6 +45,9 @@ pub use movement::{
 pub use network::{
     Dir, KindChange, Lane, LaneId, LaneMode, Line, LinkId, Network, Node, NodeControl, Segment,
     SegmentId, SegmentKind, TILE_MM, road_change_cost,
+};
+pub use rail::{
+    RAIL_BLOCK_MAX_TILES, Rail, RailNode, RailNodeId, Station, StationId, Track, TrackId, rail_cost,
 };
 pub use record::{CommandLog, DecodeError, RecordedCommand, ReplayStats, SeqGap, replay};
 pub use rng::{Pcg32, RngPurpose, mix_words, rng};

@@ -535,9 +535,10 @@ impl Sim {
 
     /// 長方形を取り壊したときに消えるものを、状態を変えずに求める。範囲が世界の外なら空。
     ///
-    /// 先頭から、消える道路のマスの数、施設の数、建物の数、家をなくす世帯の数、道路の区間の数が続き、
-    /// 区間ごとに `[始点の x, 始点の y, 終点の x, 終点の y]`、施設ごとに `[min の x, min の y, max の x, max の y]`、
-    /// 建物ごとに同じ 4 つが、この順に並ぶ。
+    /// 先頭から、消える道路のマスの数、施設の数、建物の数、家をなくす世帯の数、道路の区間の数、
+    /// 線路のマスの数、駅の数、線路の数が続き、区間ごとに `[始点の x, 始点の y, 終点の x, 終点の y]`、
+    /// 施設ごとに `[min の x, min の y, max の x, max の y]`、建物ごとと駅ごとに同じ 4 つ、
+    /// 線路ごとに区間と同じ 4 つが、この順に並ぶ。
     pub fn bulldoze_preview(&self, a: TilePos, b: TilePos) -> Vec<f64> {
         let area = chizu_core::TileRect::from_corners(a, b);
         if !area.in_world() {
@@ -550,13 +551,20 @@ impl Sim {
             p.buildings.len() as f64,
             p.displaced_households as f64,
             p.segments.len() as f64,
+            p.rail_tiles as f64,
+            p.stations.len() as f64,
+            p.tracks.len() as f64,
         ];
         for l in &p.segments {
             let (s, e) = (l.start, l.end());
             out.extend([s.x, s.y, e.x, e.y].map(|v| v as f64));
         }
-        for r in p.facilities.iter().chain(&p.buildings) {
+        for r in p.facilities.iter().chain(&p.buildings).chain(&p.stations) {
             out.extend([r.min.x, r.min.y, r.max.x, r.max.y].map(|v| v as f64));
+        }
+        for l in &p.tracks {
+            let (s, e) = (l.start, l.end());
+            out.extend([s.x, s.y, e.x, e.y].map(|v| v as f64));
         }
         out
     }
@@ -886,6 +894,8 @@ pub fn deny_text(reason: DenyReason) -> &'static str {
             "その向きに、横断歩道を置ける道路の腕がない（高速道路には置かない）"
         }
         DenyReason::CrosswalkUnchanged => "横断歩道はもうその状態になっている",
+        DenyReason::RailTooSharp => "線路はノードで 45 度までしか曲げられない",
+        DenyReason::RailTooManyBranches => "線路の分岐は 1 つのノードに 1 つまで",
     }
 }
 
@@ -1397,14 +1407,38 @@ mod tests {
         sim.submit(road((10, 10), (30, 10))).unwrap();
         let before = sim.world().network().road_tile_count();
         let p = sim.bulldoze_preview(TilePos::new(20, 10), TilePos::new(20, 10));
-        // 道路のマス、施設、建物、家をなくす世帯、区間の数の順で、区間は両端のマスで指す
-        assert_eq!(&p[..5], &[21.0, 0.0, 0.0, 0.0, 1.0]);
-        assert_eq!(&p[5..9], &[10.0, 10.0, 30.0, 10.0]);
-        assert_eq!(p.len(), 9);
+        // 道路のマス、施設、建物、家をなくす世帯、区間、線路のマス、駅、線路の数の順で、区間は両端のマスで指す
+        assert_eq!(&p[..8], &[21.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(&p[8..12], &[10.0, 10.0, 30.0, 10.0]);
+        assert_eq!(p.len(), 12);
         // 見積もりでは街は変わらず、世界の外は空を返す
         assert_eq!(sim.world().network().road_tile_count(), before);
         let far = TilePos::new(1 << 40, 0);
         assert!(sim.bulldoze_preview(far, far).is_empty());
+    }
+
+    #[test]
+    fn bulldoze_preview_lists_the_rail_and_the_station() {
+        let mut sim = Sim::new(0);
+        sim.submit(road((0, 10), (30, 10))).unwrap();
+        // 敷地は x 3〜12、y 7〜9 で、駅の線路は y = 8 の x 3〜12 である
+        sim.submit(Command::PlaceBuilding {
+            kind: ServiceKind::Station,
+            at: TilePos::new(12, 9),
+            rotation: 2,
+        })
+        .unwrap();
+        sim.submit(Command::BuildRail {
+            from: TilePos::new(12, 8),
+            to: TilePos::new(20, 8),
+        })
+        .unwrap();
+        assert_eq!(sim.world().rail().tracks().count(), 2);
+        let p = sim.bulldoze_preview(TilePos::new(5, 7), TilePos::new(15, 8));
+        // 駅と、範囲にかかる駅の線路と外の線路が消える。線路のマスは x 3〜20 の 18 マス
+        assert_eq!(&p[..8], &[0.0, 0.0, 0.0, 0.0, 0.0, 18.0, 1.0, 2.0]);
+        assert_eq!(&p[8..12], &[3.0, 7.0, 12.0, 9.0]);
+        assert_eq!(p.len(), 8 + 4 * 3);
     }
 
     #[test]

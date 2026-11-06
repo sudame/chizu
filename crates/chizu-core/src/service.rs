@@ -25,6 +25,8 @@ use crate::tile::{TilePos, TileRect};
 use crate::units::Money;
 
 impl ServiceKind {
+    /// 施設の一覧（`World::facilities`）に入る種類。駅（[`ServiceKind::Station`]）は線路の網に持つので入れない。
+    /// 施設の種類ごとの表は、この長さで作り、[`ServiceKind::index`] で引く。
     pub const ALL: [ServiceKind; 4] = [
         ServiceKind::PowerPlant,
         ServiceKind::WaterPump,
@@ -38,7 +40,7 @@ impl ServiceKind {
     /// 共同の駐車場。
     pub const PARKING: [ServiceKind; 2] = [ServiceKind::ParkingLot, ServiceKind::ParkingGarage];
 
-    /// `ALL` の中での位置。施設の種類ごとの表の添え字に使う。
+    /// `ALL` の中での位置。施設の種類ごとの表の添え字に使う。駅は `ALL` に入らないので、`ALL.len()` になる。
     pub fn index(self) -> usize {
         self as usize - 1
     }
@@ -48,7 +50,7 @@ impl ServiceKind {
         match self {
             ServiceKind::PowerPlant => Some(0),
             ServiceKind::WaterPump => Some(1),
-            ServiceKind::ParkingLot | ServiceKind::ParkingGarage => None,
+            ServiceKind::ParkingLot | ServiceKind::ParkingGarage | ServiceKind::Station => None,
         }
     }
 
@@ -64,6 +66,7 @@ impl ServiceKind {
             ServiceKind::WaterPump => Money(25_000),
             ServiceKind::ParkingLot => Money(3_000),
             ServiceKind::ParkingGarage => Money(72_000),
+            ServiceKind::Station => Money(40_000),
         }
     }
 
@@ -74,6 +77,7 @@ impl ServiceKind {
             ServiceKind::WaterPump => Money(600),
             ServiceKind::ParkingLot => Money(96),
             ServiceKind::ParkingGarage => Money(2_880),
+            ServiceKind::Station => Money(800),
         }
     }
 
@@ -82,6 +86,7 @@ impl ServiceKind {
         match self {
             ServiceKind::PowerPlant | ServiceKind::ParkingGarage => (4, 4),
             ServiceKind::WaterPump | ServiceKind::ParkingLot => (2, 2),
+            ServiceKind::Station => (crate::rail::STATION_FRONTAGE, crate::rail::STATION_DEPTH),
         }
     }
 
@@ -90,14 +95,14 @@ impl ServiceKind {
         match self {
             ServiceKind::PowerPlant => 3_600,
             ServiceKind::WaterPump => 3_000,
-            ServiceKind::ParkingLot | ServiceKind::ParkingGarage => 0,
+            ServiceKind::ParkingLot | ServiceKind::ParkingGarage | ServiceKind::Station => 0,
         }
     }
 
     /// 共同の駐車場の台数。平面は 1 マスに 3 台、駐車場ビルはそれを 5 層に積む。ほかの施設は 0。
     pub fn parking_spaces(self) -> u32 {
         match self {
-            ServiceKind::PowerPlant | ServiceKind::WaterPump => 0,
+            ServiceKind::PowerPlant | ServiceKind::WaterPump | ServiceKind::Station => 0,
             ServiceKind::ParkingLot => 12,
             ServiceKind::ParkingGarage => 240,
         }

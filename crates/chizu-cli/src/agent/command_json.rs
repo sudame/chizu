@@ -85,7 +85,8 @@ mirror_enum!(
         PowerPlant,
         WaterPump,
         ParkingLot,
-        ParkingGarage
+        ParkingGarage,
+        Station
     }
 );
 
@@ -144,6 +145,10 @@ enum CommandJson {
         from: [i64; 2],
         to: [i64; 2],
         kind: RoadKindJson,
+    },
+    BuildRail {
+        from: [i64; 2],
+        to: [i64; 2],
     },
 }
 
@@ -244,6 +249,10 @@ impl From<Command> for CommandJson {
                 to: tile_json(to),
                 kind: kind.into(),
             },
+            Command::BuildRail { from, to } => CommandJson::BuildRail {
+                from: tile_json(from),
+                to: tile_json(to),
+            },
         }
     }
 }
@@ -305,6 +314,10 @@ impl CommandJson {
                 to: tile(to),
                 kind: kind.into(),
             },
+            CommandJson::BuildRail { from, to } => Command::BuildRail {
+                from: tile(from),
+                to: tile(to),
+            },
         })
     }
 }
@@ -343,6 +356,8 @@ mod tests {
             json!({"type":"SetParkingFee","fee":30}),
             json!({"type":"UpgradeRoad","from":[0,1],"to":[5,1],"kind":"Large"}),
             json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"SW","on":false}),
+            json!({"type":"BuildRail","from":[0,1],"to":[5,6]}),
+            json!({"type":"PlaceBuilding","kind":"Station","at":[4,4],"rotation":2}),
         ];
         for c in &cases {
             assert!(parse(c).is_ok(), "{c}");
@@ -446,6 +461,15 @@ mod tests {
                 on: false,
             },
             Command::SetParkingFee { fee: 50 },
+            Command::BuildRail {
+                from: t(-5, 1),
+                to: t(5, -9),
+            },
+            Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: t(7, -8),
+                rotation: 1,
+            },
         ];
         // 種類ごとに 1 つはあることを、ワイルドカードなしの match で確かめる。
         #[deny(clippy::wildcard_enum_match_arm)]
@@ -462,9 +486,10 @@ mod tests {
                 Command::UpgradeRoad { .. } => 8,
                 Command::SetCrosswalk { .. } => 9,
                 Command::SetParkingFee { .. } => 10,
+                Command::BuildRail { .. } => 11,
             }
         }
-        let mut seen = [false; 11];
+        let mut seen = [false; 12];
         for c in commands {
             seen[kind(&c)] = true;
             let json = to_json(c);
@@ -477,7 +502,7 @@ mod tests {
         for z in Zone::ALL {
             assert_eq!(Zone::from(PaintZoneJson::from(z)), z);
         }
-        for k in ServiceKind::ALL {
+        for k in ServiceKind::ALL.into_iter().chain([ServiceKind::Station]) {
             assert_eq!(ServiceKind::from(ServiceJson::from(k)), k);
         }
         for r in [RoadKind::Small, RoadKind::Medium, RoadKind::Large] {
@@ -501,6 +526,8 @@ mod tests {
             json!({"type":"SetParkingFee","fee":-1}),
             json!({"type":"SetParkingFee"}),
             json!({"type":"SetCrosswalk","node":{"index":3,"generation":1},"arm":"Up","on":false}),
+            json!({"type":"BuildRail","from":[0,1]}),
+            json!({"type":"BuildRail","from":[0,1],"to":[5,1],"kind":"Small"}),
         ];
         for c in &cases {
             assert!(parse(c).is_err(), "{c}");

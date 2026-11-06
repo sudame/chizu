@@ -67,7 +67,9 @@ fn add_facility(w: &mut World, kind: ServiceKind) {
     let (at, rotation) = match kind {
         ServiceKind::PowerPlant => (TilePos::new(-56 + 4 * i, -41), 2),
         ServiceKind::WaterPump => (TilePos::new(-55 + 2 * i, -39), 0),
-        ServiceKind::ParkingLot | ServiceKind::ParkingGarage => unreachable!("駐車場は置かない"),
+        ServiceKind::ParkingLot | ServiceKind::ParkingGarage | ServiceKind::Station => {
+            unreachable!("駐車場と駅は置かない")
+        }
     };
     apply(w, Command::PlaceBuilding { kind, at, rotation });
 }

@@ -24,10 +24,12 @@ const HIGHWAY: u8 = 4;
 pub const LEGEND: &str = "\
 凡例（重なったときは上のものを出す）
   P W L G  公共施設（P 発電所、W 浄水場、L 平面の共同の駐車場、G 駐車場ビル）
+  E        駅（駅の中の線路のマスも E にする）
   S s      信号のある交差点（s は横断歩道を外した腕がある。--layer traffic では混み具合の文字を先に出す）
   Z Y      信号のない交差点。Z は高速道路でないどの腕にも横断歩道があり、Y は横断歩道を外した腕がある
            （--layer traffic では混み具合の文字を先に出す）
   H 1 2 3  道路（H 高速道路、1 2 3 は Small Medium Large）
+  T        線路（複線。駅の外のマス）
   =        私道の通るマス（私道の敷地の住宅の、端の列。私道の脇の枠もこの列にある。駐車場と建物より先に出す）
   p        建物の駐車場に切り欠いたマス（建物より先に出す。前面の帯のように 1 マスの一部だけの切り欠きも p にする）
   * ^ %    電気か水が届いていない建物（* 電気だけ、^ 水だけ、% 両方。R D C I O の代わりに出す）
@@ -98,6 +100,10 @@ struct Cell {
     /// 通る区間の混み具合の最大。交通の層でだけ入れる。
     congestion: Option<Congestion>,
     facility: [u32; ServiceKind::ALL.len()],
+    /// 駅のマスの数。
+    station: u32,
+    /// 線路が通るマスの数（駅の中を除く）。
+    rail: u32,
     /// 共同の駐車場の埋まり具合の段階（0〜3）の最大。駐車場の層でだけ入れる。
     lot_fill: Option<u8>,
     /// 車を持てない世帯のいる住宅のマスの数。駐車場の層でだけ入れる。
@@ -159,11 +165,12 @@ fn facility_letter(k: ServiceKind) -> char {
         ServiceKind::WaterPump => 'W',
         ServiceKind::ParkingLot => 'L',
         ServiceKind::ParkingGarage => 'G',
+        ServiceKind::Station => 'E',
     }
 }
 
 impl Cell {
-    /// 載せる文字。公共施設、信号、横断歩道のある交差点（この 2 つは交通の層では道路のあと）、道路、私道、駐車場、建物、区画、水辺、買っていない土地、空きマスの順に選び、
+    /// 載せる文字。公共施設、駅、信号、横断歩道のある交差点（この 2 つは交通の層では道路のあと）、道路、線路、私道、駐車場、建物、区画、水辺、買っていない土地、空きマスの順に選び、
     /// 同じ種類の中では数の多いものを選ぶ（道路は種類の大きいもの）。
     fn glyph(&self) -> char {
         if let Some(i) = argmax(&self.facility) {
@@ -172,6 +179,9 @@ impl Cell {
                 Some(level) if kind.is_parking() => fill_glyph(level),
                 _ => facility_letter(kind),
             };
+        }
+        if self.station > 0 {
+            return facility_letter(ServiceKind::Station);
         }
         // 交通の層では、道路の混み具合を信号より先に出す。
         if self.signal && self.congestion.is_none() {
@@ -188,6 +198,9 @@ impl Cell {
                     .congestion
                     .map_or(char::from(b'0' + k), congestion_glyph);
             }
+        }
+        if self.rail > 0 {
+            return 'T';
         }
         // 私道と駐車場に切り欠いたマスは、建物より先に出す。セルの中で建物のマスより少なければ、建物を出す。
         if self.lane > 0 && self.lane + self.lot >= self.building.iter().sum::<u32>() {
@@ -400,6 +413,27 @@ pub fn render(
     }
     for f in world.facilities() {
         grid.each_tile_in(f.area, |cell, _| cell.facility[f.kind.index()] += 1);
+    }
+    let rail = world.rail();
+    for (_, s) in rail.stations() {
+        grid.each_tile_in(s.area, |cell, _| cell.station += 1);
+    }
+    for (id, track) in rail.tracks() {
+        if track.station.is_some() {
+            continue;
+        }
+        for t in rail
+            .track_line(id)
+            .into_iter()
+            .flat_map(|l| l.tiles().collect::<Vec<_>>())
+        {
+            // 駅の端のノードのマスは駅の中なので、駅の外の線路にも数えない。
+            if rail.station_at(t).is_none()
+                && let Some(cell) = grid.cell_mut(t)
+            {
+                cell.rail += 1;
+            }
+        }
     }
     if layer == MapLayer::Parking {
         // 画面の「駐車場」のレイヤー（chizu-wasm の layers）と同じ割合の段階にする
@@ -746,6 +780,39 @@ mod tests {
         }
         assert!(lanes > 0 && rest > 0, "{lanes} {rest}");
         assert!(LEGEND.contains("  =  "), "{LEGEND}");
+    }
+
+    /// 線路は T、駅は E で出す。駅の端のノードのマスは駅の中なので E である。凡例にも載る。
+    #[test]
+    fn rails_and_stations_are_drawn() {
+        use chizu_core::{ApplyOutcome, Command, RoadKind};
+        let t = TilePos::new;
+        let mut w = World::new(0);
+        for c in [
+            Command::BuildRoad {
+                from: t(0, 10),
+                to: t(40, 10),
+                kind: RoadKind::Small,
+            },
+            Command::PlaceBuilding {
+                kind: ServiceKind::Station,
+                at: t(12, 9),
+                rotation: 2,
+            },
+            Command::BuildRail {
+                from: t(12, 8),
+                to: t(16, 8),
+            },
+        ] {
+            assert_eq!(w.apply(&c), ApplyOutcome::Applied, "{c:?}");
+        }
+        let row = TileRect::from_corners(t(2, 8), t(17, 8));
+        let glyphs: String = glyphs_of(&w, row, MapLayer::Terrain).into_iter().collect();
+        assert_eq!(glyphs, ".EEEEEEEEEETTTT.");
+        assert!(
+            LEGEND.contains("  E  ") && LEGEND.contains("  T  "),
+            "{LEGEND}"
+        );
     }
 
     #[test]
