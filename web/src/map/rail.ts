@@ -151,6 +151,149 @@ function stationOutline(
   );
 }
 
+type End = "a" | "b";
+
+/**
+ * 線路のつなぎ目。ノードに線路がちょうど 2 本あって向きが変わるところ（曲がり角）では、前後の線を
+ * 曲がりの二等分線でそろえて切り、道床もレールも 1 本の帯につなぐ（マイター継ぎ）。
+ * 曲がり角でないノードは、端の形だけを決める。
+ */
+class Joints {
+  readonly #tracks: readonly RailTrack[];
+  readonly #nodes = new Map<string, { track: number; end: End }[]>();
+
+  constructor(tracks: readonly RailTrack[]) {
+    this.#tracks = tracks;
+    tracks.forEach((t, track) => {
+      for (const end of ["a", "b"] as const) {
+        const key = Joints.key(t[end]);
+        const list = this.#nodes.get(key) ?? [];
+        list.push({ track, end });
+        this.#nodes.set(key, list);
+      }
+    });
+  }
+
+  static key(t: Tile): string {
+    return `${t.x},${t.y}`;
+  }
+
+  /** 線路 i の、ノードから遠ざかる向きの単位ベクトル。 */
+  #outward(track: number, end: End): [number, number] {
+    const t = this.#tracks[track];
+    if (t === undefined) {
+      return [0, 0];
+    }
+    const [from, to] = end === "a" ? [t.a, t.b] : [t.b, t.a];
+    const len = Math.hypot(to.x - from.x, to.y - from.y);
+    return len === 0 ? [0, 0] : [(to.x - from.x) / len, (to.y - from.y) / len];
+  }
+
+  /** 曲がり角なら、通る向きの内積と外積、通る向きで先に来る端を返す。 */
+  #bend(
+    track: number,
+    end: End,
+  ): { c: number; cross: number; incoming: boolean; len: number } | null {
+    const t = this.#tracks[track];
+    if (t === undefined) {
+      return null;
+    }
+    const ends = this.#nodes.get(Joints.key(t[end]));
+    if (ends?.length !== 2) {
+      return null;
+    }
+    const [e0, e1] = ends;
+    if (e0 === undefined || e1 === undefined || e0.track === e1.track) {
+      return null;
+    }
+    const u0 = this.#outward(e0.track, e0.end);
+    const u1 = this.#outward(e1.track, e1.end);
+    // 端 0 から入って端 1 へ出る向き
+    const d1 = [-u0[0], -u0[1]] as const;
+    const c = d1[0] * u1[0] + d1[1] * u1[1];
+    if (c > 1 - 1e-9 || c < -1 + 1e-9) {
+      return null;
+    }
+    const cross = d1[0] * u1[1] - d1[1] * u1[0];
+    const self = e0.track === track && e0.end === end;
+    const len = Math.hypot(t.b.x - t.a.x, t.b.y - t.a.y);
+    return { c, cross, incoming: self, len };
+  }
+
+  /**
+   * 線路 i の `end` の端を、中心線から横に `offset`（`strip` と同じ向きが正）ずれた線のために縮める長さ（マス）。
+   * 負なら伸ばす。曲がり角でなければ null。
+   */
+  trim(track: number, end: End, offset: number): number | null {
+    const bend = this.#bend(track, end);
+    if (bend === null) {
+      return null;
+    }
+    // 通る向きと線路の向きが同じなら、横のずれの正負も同じ
+    const same = (end === "b") === bend.incoming;
+    const k = ((same ? 1 : -1) * offset * bend.cross) / (1 + bend.c);
+    const limit = bend.len / 2;
+    return Math.max(-limit, Math.min(limit, k));
+  }
+
+  /** 枕木が曲がりの二等分線を越えて、隣の線路の枕木と重ならないための縮める長さ。外側の端の横幅 `reach` から決める。 */
+  sleeperTrim(track: number, end: End, reach: number): number | null {
+    const bend = this.#bend(track, end);
+    if (bend === null) {
+      return null;
+    }
+    return Math.min((reach * Math.abs(bend.cross)) / (1 + bend.c), bend.len / 2);
+  }
+
+  /** 道床の面。曲がり角は二等分線で斜めに切り、行き止まりは半マス伸ばし、分岐は丸か四角で埋める。 */
+  bed(g: Geometry, track: number): void {
+    const t = this.#tracks[track];
+    if (t === undefined) {
+      return;
+    }
+    const dx = t.b.x - t.a.x;
+    const dy = t.b.y - t.a.y;
+    const len = Math.hypot(dx, dy);
+    if (len === 0) {
+      return;
+    }
+    const [ux, uy] = [dx / len, dy / len];
+    const [nx, ny] = [-uy, ux];
+    const corner = (end: End, side: number): [number, number] => {
+      const base = end === "a" ? t.a : t.b;
+      const sign = end === "a" ? 1 : -1;
+      const o = side * BED_HALF;
+      const k = this.trim(track, end, o);
+      const along = k ?? this.#capTrim(track, end);
+      return [base.x + 0.5 + nx * o + sign * ux * along, base.y + 0.5 + ny * o + sign * uy * along];
+    };
+    g.polygon([corner("a", 1), corner("a", -1), corner("b", -1), corner("b", 1)], RAIL_BED_COLOR);
+    for (const end of ["a", "b"] as const) {
+      const node = t[end];
+      const ends = this.#nodes.get(Joints.key(node)) ?? [];
+      if (ends.length < 3 && ends.length !== 0) {
+        continue;
+      }
+      // 3 本以上が集まるノードは、向きが集まる所を埋める
+      const allAxis = ends.every((e) =>
+        this.#outward(e.track, e.end).some((v) => Math.abs(v) < 1e-9),
+      );
+      if (allAxis) {
+        g.square(node, BED_HALF, RAIL_BED_COLOR, 0);
+      } else {
+        g.disc(node.x + 0.5, node.y + 0.5, BED_HALF, RAIL_BED_COLOR, 0);
+      }
+    }
+  }
+
+  /** 曲がり角でない端の、中心線に沿った伸ばし方（マスの、負なら縮める）。行き止まりは半マス伸ばす。 */
+  #capTrim(track: number, end: End): number {
+    const t = this.#tracks[track];
+    const ends = t === undefined ? undefined : this.#nodes.get(Joints.key(t[end]));
+    return ends?.length === 1 ? -BED_HALF : 0;
+  }
+}
+
 /** 線路と駅の頂点。線路も駅もなければ、どれも空である。 */
 export function railMeshes(
   tracks: readonly RailTrack[],
@@ -180,14 +323,15 @@ export function railMeshes(
   for (const { a, b } of tracks) {
     meshes.mid.strip(a, b, 0, DASH_HALF, RAIL_DASH_COLOR, DASH_MIN_PX, 0, 0, 0, DASH_PERIOD_PX);
   }
-  for (const { a, b, station } of tracks) {
-    meshes.bed.strip(a, b, 0, BED_HALF, RAIL_BED_COLOR, 0);
-    meshes.bed.square(a, BED_HALF, RAIL_BED_COLOR, 0);
-    meshes.bed.square(b, BED_HALF, RAIL_BED_COLOR, 0);
-    // 駅の線路は、両端が駅の敷地の端のマスの真ん中なので、敷地の端まで半マス伸ばす
-    const trim = station ? -0.5 : 0;
+  const joints = new Joints(tracks);
+  tracks.forEach((track, i) => {
+    const { a, b, station } = track;
+    joints.bed(meshes.bed, i);
     for (const side of [-1, 1]) {
       const lane = side * TRACK_OFFSET;
+      // 駅の線路は、両端が駅の敷地の端のマスの真ん中なので、敷地の端まで半マス伸ばす（曲がり角を除く）
+      const ext = station ? -0.5 : 0;
+      const sleeperJoint = (end: End) => joints.sleeperTrim(i, end, Math.abs(lane) + SLEEPER_HALF);
       meshes.sleepers.strip(
         a,
         b,
@@ -195,25 +339,26 @@ export function railMeshes(
         SLEEPER_HALF,
         RAIL_SLEEPER_COLOR,
         0,
-        trim,
-        trim,
+        sleeperJoint("a") ?? ext,
+        sleeperJoint("b") ?? ext,
         0,
         -SLEEPER_PERIOD,
       );
       for (const rail of [-1, 1]) {
+        const o = lane + rail * RAIL_OFFSET;
         meshes.rails.strip(
           a,
           b,
-          lane + rail * RAIL_OFFSET,
+          o,
           0,
           RAIL_RAIL_COLOR,
           RAIL_MIN_PX,
-          trim,
-          trim,
+          joints.trim(i, "a", o) ?? ext,
+          joints.trim(i, "b", o) ?? ext,
         );
       }
     }
-  }
+  });
   for (const st of stations) {
     const { frontage } = stationFrame(st);
     const half = frontage / 2;

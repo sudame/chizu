@@ -370,6 +370,24 @@ export class Geometry {
     v(bx, by, -1, along);
   }
 
+  /** ワールド座標の頂点を、最初の頂点から扇に三角形に分けて塗る凸の多角形。縮尺によらず世界の大きさで描く。 */
+  polygon(points: readonly (readonly [number, number])[], color: Color): void {
+    const first = points[0];
+    if (first === undefined) {
+      return;
+    }
+    for (let k = 1; k + 1 < points.length; k++) {
+      const p = points[k];
+      const q = points[k + 1];
+      if (p === undefined || q === undefined) {
+        continue;
+      }
+      this.#vertex(first[0], first[1], 0, 0, 0, 0, color);
+      this.#vertex(p[0], p[1], 0, 0, 0, 0, color);
+      this.#vertex(q[0], q[1], 0, 0, 0, 0, color);
+    }
+  }
+
   /** マスの中心に置く正方形。 */
   square(t: Tile, half: number, color: Color, min = MIN_PX, extra = 0): void {
     this.dot(t.x + 0.5, t.y + 0.5, half, color, min, extra);

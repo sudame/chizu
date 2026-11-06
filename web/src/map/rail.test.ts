@@ -112,3 +112,52 @@ describe("描く順", () => {
     expect(mid).toBeLessThan(1);
   });
 });
+
+describe("曲がり角のつなぎ目", () => {
+  // (0,0) から東へ (5,0)、そこから南東へ (8,3) の 45 度の曲がり
+  const bend = parseTracks([0, 0, 5, 0, 0, 5, 0, 8, 3, 0]);
+
+  // 道床の面の頂点を (x, y) の組で取り出す。頂点は 13 個の数で、先頭の 2 つが座標である
+  const points = (mesh: { build(): Float32Array }) => {
+    const data = mesh.build();
+    const out: [number, number][] = [];
+    for (let i = 0; i + 13 <= data.length; i += 13) {
+      out.push([data[i] ?? 0, data[i + 1] ?? 0]);
+    }
+    return out;
+  };
+
+  test("道床は曲がり角で、前後の帯が同じ二等分線の上で終わる", () => {
+    const m = railMeshes(bend, []);
+    const pts = points(m.bed);
+    // 帯 2 本で 2 三角形ずつ。曲がり角には丸も四角も足さない
+    expect(pts.length).toBe(2 * 6);
+    // (5.5, 0.5) の角: 外側（北）は 0.5 * tan(22.5 度) だけ伸び、内側（南）は同じだけ縮む
+    const t = Math.tan(Math.PI / 8) * 0.5;
+    const has = (x: number, y: number) =>
+      pts.some(([px, py]) => Math.abs(px - x) < 1e-5 && Math.abs(py - y) < 1e-5);
+    expect(has(5.5 + t, 0)).toBe(true);
+    expect(has(5.5 - t, 1)).toBe(true);
+  });
+
+  test("レールは曲がり角で、前後の線の端が同じ点で会う", () => {
+    const m = railMeshes(bend, []);
+    const pts = points(m.rails);
+    // 前の線の終わりの点（x が 5 付近）に、次の線の始まりの点が重なる
+    const near = (p: [number, number], q: [number, number]) =>
+      Math.abs(p[0] - q[0]) < 1e-5 && Math.abs(p[1] - q[1]) < 1e-5;
+    const first = pts.slice(0, 6 * 4);
+    const second = pts.slice(6 * 4);
+    const ends = first.filter(([x]) => x > 4);
+    const starts = second.filter(([x]) => x < 6);
+    expect(ends.length).toBeGreaterThan(0);
+    for (const e of ends) {
+      expect(starts.some((s) => near(s, e))).toBe(true);
+    }
+  });
+
+  test("まっすぐにつながる 2 本には、角も丸も足さない", () => {
+    const straight = parseTracks([0, 0, 5, 0, 0, 5, 0, 9, 0, 0]);
+    expect(points(railMeshes(straight, []).bed).length).toBe(2 * 6);
+  });
+});
