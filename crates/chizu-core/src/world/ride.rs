@@ -11,17 +11,26 @@ use serde::{Deserialize, Serialize};
 use super::World;
 use crate::id::TripId;
 use crate::movement::{Via, facility_spot};
+use crate::network::LaneMode;
 use crate::rail::ExitFrom;
-use crate::rail::choice::{RailPlanner, RideChoice};
+use crate::rail::choice::{RailPlanner, RideChoice, WalkTables};
+use crate::routing::Graph;
 
 /// 駅の組の表を置く所。状態に入れず、`World` どうしを比べるときも見ない。
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(super) struct PlannerSlot {
     #[serde(skip)]
     planner: Option<RailPlanner>,
+    /// 捨てた表が持っていた、駅まで歩く表。道路の網と駅の出入口が変わっていなければ、次に表を作るときに使い回す。
+    #[serde(skip)]
+    walks: Option<WalkTables>,
     /// 乗り換えの進路を表に入れない。乗り換えあり・なしを比べて測るときだけ使う。
     #[serde(skip)]
     no_transfers: bool,
+    /// 駅まで歩く表を作った回数。使い回したかを確かめるテストで使う。
+    #[cfg(test)]
+    #[serde(skip)]
+    walk_builds: u32,
 }
 
 impl PartialEq for PlannerSlot {
@@ -33,26 +42,61 @@ impl PartialEq for PlannerSlot {
 impl Eq for PlannerSlot {}
 
 impl PlannerSlot {
-    /// 表を捨てる。路線か線路か道路が変わったときに呼ぶ。
+    /// 表を捨てる。路線か線路か道路が変わったときに呼ぶ。駅まで歩く表は、使い回せるよう取っておく。
     pub(super) fn forget(&mut self) {
-        self.planner = None;
+        if let Some(p) = self.planner.take() {
+            self.walks = p.into_walks();
+        }
     }
 }
 
 impl World {
-    /// 駅の組の表を、路線があれば作っておく。
+    /// 駅の組の表を、路線があれば作っておく。道路の網が表を作ったときから変わっていれば（横断歩道を外すなど、
+    /// 表を捨てるコマンドのほかで変わったときも）、駅まで歩く表が変わるので作り直す。
+    ///
+    /// 駅まで歩く表は、道路の網の版と駅の出入口が前と同じなら使い回す。路線と本数だけを変えたときに、
+    /// 歩道を広げ直さないためである。表は網と出入口だけから決まるので、使い回しても作り直しても同じ表になる。
     fn ensure_planner(&mut self) {
         if self.rail.lines().next().is_none() {
-            self.planner.planner = None;
+            self.planner.forget();
             return;
         }
-        if self.planner.planner.is_none() {
-            self.planner.planner = Some(RailPlanner::build_with(
-                &self.rail,
-                &self.network,
-                !self.planner.no_transfers,
-            ));
+        let version = self.network.version();
+        if self
+            .planner
+            .planner
+            .as_ref()
+            .is_some_and(|p| p.net_version() != Some(version))
+        {
+            self.planner.forget();
         }
+        if self.planner.planner.is_some() {
+            return;
+        }
+        let mut planner =
+            RailPlanner::build_with(&self.rail, &self.network, !self.planner.no_transfers);
+        let reused = match self.planner.walks.take() {
+            Some(t) => planner.reuse_walks(t, version).is_ok(),
+            None => false,
+        };
+        if !reused {
+            // 経路探索のグラフが網に追いついていれば、その歩道のグラフを使う。追いついていなければ（コマンドの
+            // 直後に表を引いたとき）、同じ網から同じグラフを作る。どちらでも表は同じになる。
+            let router = &self.router.router;
+            let own;
+            let walk = if router.version() == version {
+                router.graph(LaneMode::Sidewalk)
+            } else {
+                own = Graph::build(&self.network, LaneMode::Sidewalk);
+                &own
+            };
+            planner = planner.with_walks(&self.network, walk);
+            #[cfg(test)]
+            {
+                self.planner.walk_builds += 1;
+            }
+        }
+        self.planner.planner = Some(planner);
     }
 
     /// 乗り換えの進路を駅の組の表に入れないようにする。乗り換えあり・なしを比べて測るときに使う。
@@ -60,6 +104,12 @@ impl World {
     pub(crate) fn disable_rail_transfers(&mut self) {
         self.planner.no_transfers = true;
         self.planner.forget();
+    }
+
+    /// 駅まで歩く表を作った回数。
+    #[cfg(test)]
+    pub(crate) fn walk_table_builds(&self) -> u32 {
+        self.planner.walk_builds
     }
 
     /// 駅の組の表をいま持っているか。表を捨てたかを確かめるテストで使う。

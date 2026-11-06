@@ -908,3 +908,39 @@ fn surely_connected_agrees_with_the_search_around_a_highway_exit() {
     assert!(!router.surely_connected(LaneMode::Car, out, back));
     assert!(astar(router.graph(LaneMode::Car), out, back, &mut s).is_none());
 }
+
+/// 入口が道のりの上限の中にある頂点への距離は、根からの A* の費用と同じになり、入口が上限を超える頂点は入らない。
+/// 辺を逆にたどった距離は、その頂点から根への A* の費用と同じになる。根の始めの距離を変えると、その分だけずれる。
+#[test]
+fn reach_within_matches_astar_in_both_directions() {
+    let n = grid(6);
+    let g = Graph::build(&n, LaneMode::Sidewalk);
+    let links: Vec<LinkId> = n.links().filter(|l| l.mode == LaneMode::Sidewalk).collect();
+    let mut s = Scratch::default();
+    for root in links.iter().step_by(5) {
+        let base = g.link_cost(*root).unwrap();
+        let limit = base + 40_000;
+        for (toward, extra) in [(Toward::Forward, 0), (Toward::Backward, 700)] {
+            let got = reach_within(&g, &[(*root, base + extra)], toward, limit + extra, &mut s);
+            assert!(
+                got.windows(2).all(|w| w[0].0 < w[1].0),
+                "リンクの順に並ばない"
+            );
+            for other in &links {
+                let want = match toward {
+                    Toward::Forward => find(&n, *root, *other),
+                    Toward::Backward => find(&n, *other, *root),
+                }
+                .map(|r| r.cost + extra);
+                let found = got.iter().find(|(l, _)| l == other).map(|(_, d)| *d);
+                let entry = |w: u64| w - g.link_cost(*other).unwrap();
+                match want {
+                    Some(w) if other == root || entry(w) <= limit + extra => {
+                        assert_eq!(found, Some(w), "{other:?}")
+                    }
+                    _ => assert_eq!(found, None, "{other:?}"),
+                }
+            }
+        }
+    }
+}

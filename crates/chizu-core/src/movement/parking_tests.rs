@@ -5,6 +5,7 @@ use crate::car_place::CarPlace;
 use crate::command::{RoadKind, Zone, ZoneKind};
 use crate::id::BuildingId;
 use crate::network::{Dir, Line};
+use crate::rail::choice::WalkEnd;
 use crate::rng::{RngPurpose, rng};
 use crate::service::Facility;
 use crate::state_hash::state_hash_of;
@@ -1825,8 +1826,8 @@ fn at_2km_the_cheaper_of_car_and_rail_wins() {
             let choice = RideChoice::from_parts(&planner, live, BTreeSet::new(), 5);
             let offer = choice
                 .offer(
-                    s.buildings.get(home).unwrap().front,
-                    s.buildings.get(work).unwrap().front,
+                    &WalkEnd::at(s.buildings.get(home).unwrap().front),
+                    &WalkEnd::at(s.buildings.get(work).unwrap().front),
                 )
                 .expect("鉄道の候補がない");
             assert_eq!(offer.board, station(0));
@@ -2059,7 +2060,7 @@ fn the_train_wins_only_when_strictly_cheaper() {
                 .flat_map(|a| (0..4_u32).map(move |b| [a, b]))
                 .find(|segs| {
                     rail_choice(&planner, line, segs)
-                        .offer(from_tile, to_tile)
+                        .offer(&WalkEnd::at(from_tile), &WalkEnd::at(to_tile))
                         .is_some_and(|o| o.cost == cost)
                 })
                 .expect("費用の合う区間の時間がない")
@@ -2081,6 +2082,91 @@ fn the_train_wins_only_when_strictly_cheaper() {
     }
 }
 
+/// 西の道路（x 0〜100）と東の道路（x 102〜260）を、北へ `detour` マス回る道でつないだ街。建物は `xs` に建てる。
+fn detour_street(xs: &[i64], detour: i64) -> (Street, Vec<BuildingId>) {
+    let (mut s, ids) = Street::with_roads(xs, &[(0, 100), (102, 260)]);
+    for (a, b) in [
+        ((100, 0), (100, -detour)),
+        ((100, -detour), (102, -detour)),
+        ((102, -detour), (102, 0)),
+    ] {
+        let line = Line::between(TilePos::new(a.0, a.1), TilePos::new(b.0, b.1)).unwrap();
+        s.net.build_road(&line, RoadKind::Small).unwrap();
+    }
+    s.router = AstarRouter::new(&s.net);
+    (s, ids)
+}
+
+/// 駅まで歩く時間は、直線ではなく歩道の経路で見積もる。駅が直線では近くても、道路が遠回りなら見積もりも長くなり、
+/// 鉄道を選んだ人が実際に駅まで歩いた時間と合う。
+#[test]
+fn the_walk_to_the_station_follows_the_sidewalks() {
+    // 家（x = 104）は東の道路に、乗る駅の出入口（x = 98）は西の道路にあり、北へ 20 マス回ってつながる。
+    let (mut s, ids) = detour_street(&[104, 250, 98, 240], 20);
+    let (home, work) = (ids[0], ids[1]);
+    let (planner, line, _) = rail_planner(&s, &[ids[2], ids[3]]);
+    let planner = planner.with_walks(&s.net, s.router.graph(LaneMode::Sidewalk));
+    let choice = rail_choice(&planner, line, &[1, 1]);
+    let end = |b: BuildingId| {
+        let bb = s.buildings.get(b).unwrap();
+        WalkEnd::new(&s.net, bb.front, building_spot(&s.net, bb).unwrap())
+    };
+    let offer = choice
+        .offer(&end(home), &end(work))
+        .expect("鉄道の候補がない");
+    // 東へ 2 マス、北へ 20 マス、西へ 2 マス、南へ 20 マス、西へ 2 マスほど歩く。直線の 6 マスよりずっと長い。
+    let straight = crate::rail::choice::walk_seconds(6 * 8_000);
+    assert!(offer.walk_to_board > 5 * straight, "{offer:?}");
+    // 鉄道を選ばせ、駅に着くまでの tick を見積もりと比べる。
+    let h = Household { home };
+    let mut r = h.request(0, (home, work));
+    r.owns_car = false;
+    r.place = None;
+    let id = start_with_rides(&mut s, r, &choice).expect("移動を作れない");
+    assert_eq!(mode_of(&s, id), "rail");
+    let mut ticks = 0_u64;
+    while s.trips.take_boarding().is_empty() {
+        s.step();
+        ticks += 1;
+        assert!(ticks < 2_000, "駅に着かない");
+    }
+    let gap = ticks.abs_diff(offer.walk_to_board);
+    assert!(
+        gap * 10 <= offer.walk_to_board,
+        "見積もり {}、歩いた {ticks}",
+        offer.walk_to_board
+    );
+}
+
+/// 歩道で駅に着けないか、着くまでの道のりが歩く表の上限より長い駅は、直線では徒歩圏でも候補にしない。
+#[test]
+fn a_station_beyond_the_walk_limit_is_not_offered() {
+    use crate::rail::choice::STATION_WALK_LIMIT_MM;
+    let limit_tiles = i64::try_from(STATION_WALK_LIMIT_MM / 8_000).unwrap();
+    for (detour, offered) in [
+        (Some(20), true),
+        (Some(limit_tiles / 2 + 1), false),
+        (None, false),
+    ] {
+        let (s, ids) = match detour {
+            Some(d) => detour_street(&[104, 250, 98, 240], d),
+            None => Street::with_roads(&[104, 250, 98, 240], &[(0, 100), (102, 260)]),
+        };
+        let (planner, line, _) = rail_planner(&s, &[ids[2], ids[3]]);
+        let planner = planner.with_walks(&s.net, s.router.graph(LaneMode::Sidewalk));
+        let choice = rail_choice(&planner, line, &[1, 1]);
+        let end = |b: BuildingId| {
+            let bb = s.buildings.get(b).unwrap();
+            WalkEnd::new(&s.net, bb.front, building_spot(&s.net, bb).unwrap())
+        };
+        assert_eq!(
+            choice.offer(&end(ids[0]), &end(ids[1])).is_some(),
+            offered,
+            "回り道 {detour:?}"
+        );
+    }
+}
+
 /// 鉄道を選んでも駅まで歩けなければ（駅の出入口が別の道路網にある）、行き先へ歩く。
 #[test]
 fn a_rider_who_cannot_reach_the_station_walks_instead() {
@@ -2091,7 +2177,7 @@ fn a_rider_who_cannot_reach_the_station_walks_instead() {
     let choice = rail_choice(&planner, line, &[100, 100]);
     let front = |b: BuildingId| s.buildings.get(b).unwrap().front;
     let offer = choice
-        .offer(front(home), front(work))
+        .offer(&WalkEnd::at(front(home)), &WalkEnd::at(front(work)))
         .expect("鉄道の候補がない");
     assert_eq!(offer.board.index, 0);
     let h = Household { home };

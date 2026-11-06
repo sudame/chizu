@@ -1,6 +1,7 @@
 //! テストとベンチマークに使う、種から決定論的に作る街。
 
 use chizu_core::citizens::draw_household;
+use chizu_core::network::TILE_MM;
 use chizu_core::rail::choice::{LineLive, LineShape, line_stops_of};
 use chizu_core::routing::{ROUTE_VARIANTS, RouteRequest};
 use chizu_core::{
@@ -189,6 +190,8 @@ pub struct RailChoiceInputs {
 /// 駅は 15 × 14 の格子（約 330m おき）から 200 個を選んで置く。路線は、ある駅から格子の隣の駅へ種で選んで
 /// 進み、まだ通っていない駅を 12〜32 個つないだもので、4 本に 1 本は環状にする。線路は引かず、路線の形
 /// （止まる所の並び）と、走っている本数（4〜8 本）と、区間の時間（40〜120 tick）だけを作る。
+/// 出入口の位置は、駅のマスにいちばん近い東西の通りの、東向きの歩道の上に置く（駅まで歩く表を作るため）。
+/// 駅のマス（徒歩圏を測る所）は格子のまま変えない。
 pub fn rail_choice_inputs(seed: u64) -> RailChoiceInputs {
     const COLS: i64 = 15;
     const ROWS: i64 = 14;
@@ -201,11 +204,12 @@ pub fn rail_choice_inputs(seed: u64) -> RailChoiceInputs {
         let i = i64::from(i);
         TilePos::new(6 + (i % COLS) * STEP, 6 + (i / COLS) * STEP)
     };
+    // `city_grid_100k` の通りは 12 マスおきで、東の端は x = 576 である。
     let doors = (0..RAIL_CHOICE_STATIONS)
         .map(|i| {
             let t = pos(i);
             let door = SidewalkPos {
-                tile: t,
+                tile: TilePos::new(t.x.min(575), (t.y + 6) / 12 * 12),
                 step: (1, 0),
                 along: LaneOffset(0),
             };
@@ -259,6 +263,30 @@ pub fn rail_choice_inputs(seed: u64) -> RailChoiceInputs {
         });
     }
     RailChoiceInputs { doors, lines, live }
+}
+
+/// `count` 件の、家から職場への移動の出発と行き先の、正面のマスと、出入口の歩道のリンクとその始まりからの距離。
+/// [`commute_requests`] の車のリンクと同じ区間、同じ向きの歩道のリンクの真ん中である。
+pub fn commute_doors(
+    seed: u64,
+    net: &Network,
+    count: u32,
+) -> Vec<[(TilePos, LinkId, LaneOffset); 2]> {
+    let mid = |l: LinkId| {
+        let line = net.segment_line(l.segment).expect("リンクがない");
+        let walk = LinkId {
+            mode: LaneMode::Sidewalk,
+            ..l
+        };
+        let along =
+            LaneOffset(u32::try_from(line.len / 2 * TILE_MM.unsigned_abs()).expect("長すぎる"));
+        let spot = SidewalkPos::on_any_link(net, walk, along).expect("歩道がない");
+        (spot.tile, walk, along)
+    };
+    commute_requests(seed, net, count, 8)
+        .into_iter()
+        .map(|r| [mid(r.from), mid(r.to)])
+        .collect()
 }
 
 /// `count` 件の、家から職場への移動の出発と行き先の建物の正面のマス。[`commute_requests`] のリンクの真ん中のマスである。

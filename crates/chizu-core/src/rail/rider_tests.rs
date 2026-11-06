@@ -232,6 +232,31 @@ fn commuters_ride_the_train_and_arrive() {
     );
 }
 
+/// 駅まで歩いて着いた人を駅ごとに数え、実際に歩いた時間と、手段を選んだときの見積もりを比べられる。見積もりは
+/// 歩く移動と同じ歩道の経路で測るので、ずれは通りを渡るときに待った分ほど（この街では 1 割あまり）に収まる。
+#[test]
+fn the_walk_to_each_station_is_measured_against_the_estimate() {
+    let (mut w, _, west, _) = rail_town(5, 3);
+    run(&mut w, 2 * crate::TICKS_PER_DAY);
+    let walks = w.rail().ride_tally().station_walks.clone();
+    let at_west = walks
+        .get(&west)
+        .copied()
+        .expect("西の駅まで歩いた人がいない");
+    assert!(at_west.walks > 50, "{at_west:?}");
+    let walked = at_west.average_walked().unwrap();
+    let gap = at_west.average_gap().unwrap();
+    assert!(walked > 0);
+    assert!(
+        gap.unsigned_abs() * 4 <= walked,
+        "歩いた平均 {walked}、ずれ {gap}"
+    );
+    // 乗り換えは歩いて着いた人に数えないので、歩いて着いた人は乗った回数を超えない。
+    let total: u64 = walks.values().map(|s| s.walks).sum();
+    let t = w.rail().ride_tally();
+    assert!(total <= t.boarded + t.gave_up + t.evicted + w.rail().rider_count() as u64);
+}
+
 /// 列車を走らせない路線は、手段の候補にならない。鉄道のない街と同じく、誰も駅へ向かわない。
 #[test]
 fn a_line_without_trains_is_not_a_choice() {
@@ -480,6 +505,7 @@ fn put_aboard(
             alight,
             transfer: None,
             to: door,
+            walk_estimate: 0,
         },
         leg: 0,
         door,
@@ -611,9 +637,13 @@ fn riders_left_behind_add_a_headway_to_the_wait() {
         })
         .expect("西の駅を出る列車がない");
     let planner = w.rail_planner().unwrap().clone();
-    let (from, to) = (station_door(&w, west).tile, station_door(&w, east).tile);
+    let end = |s| {
+        let door = station_door(&w, s);
+        choice::WalkEnd::new(w.network(), door.tile, door)
+    };
+    let (from, to) = (end(west), end(east));
     let before = choice::RideChoice::new(&planner, w.rail())
-        .offer(from, to)
+        .offer(&from, &to)
         .unwrap();
     let mut rail = w.rail().clone();
     let now = w.tick().0;
@@ -633,6 +663,7 @@ fn riders_left_behind_add_a_headway_to_the_wait() {
             alight: east,
             transfer: None,
             to: door,
+            walk_estimate: 0,
         };
         rail.add_rider(trip, crate::units::Tick(now), plan, door, now);
     }
@@ -641,7 +672,7 @@ fn riders_left_behind_add_a_headway_to_the_wait() {
     assert_eq!(rail.queues.get(&key).map_or(0, |q| q.len()), waiting + 100);
     assert!(rail.left_behind().contains(&key));
     let after = choice::RideChoice::new(&planner, &rail)
-        .offer(from, to)
+        .offer(&from, &to)
         .unwrap();
     let l = rail.line(line).unwrap();
     let running = rail.trains().filter(|(_, t)| t.line == line).count() as u64;
@@ -691,6 +722,49 @@ fn setting_trains_above_the_cap_keeps_the_table() {
         !w.has_rail_planner(),
         "走らせる本数が変わったのに表を捨てなかった"
     );
+}
+
+/// 駅まで歩く表は、路線と本数だけを変えたときは使い回し、道路の網が変わったとき（横断歩道を外したときも）は
+/// 作り直す。どちらでも、いまの網と駅から作った表と同じになる。
+#[test]
+fn walk_tables_are_reused_until_the_network_changes() {
+    let (mut w, [line, _], _) = transfer_town(3);
+    let fresh = |w: &World| {
+        let walk = crate::routing::Graph::build(w.network(), crate::network::LaneMode::Sidewalk);
+        choice::RailPlanner::build(w.rail(), w.network(), &walk)
+    };
+    let same = |w: &mut World| {
+        let want = fresh(w);
+        let got = w.rail_planner().unwrap().clone();
+        assert_eq!(got, want, "使い回した表が作り直した表と違う");
+    };
+    same(&mut w);
+    let built = w.walk_table_builds();
+    ok(w.apply(&Command::SetLineTrains { line, trains: 1 }));
+    assert!(!w.has_rail_planner());
+    same(&mut w);
+    assert_eq!(
+        w.walk_table_builds(),
+        built,
+        "路線だけを変えたのに作り直した"
+    );
+    // 道路を引くと作り直す。
+    ok(w.apply(&Command::BuildRoad {
+        from: at(-150, 0),
+        to: at(-150, -8),
+        kind: RoadKind::Small,
+    }));
+    same(&mut w);
+    assert_eq!(w.walk_table_builds(), built + 1);
+    // 横断歩道を外すコマンドは表を捨てないが、網の版が変わるので作り直す。
+    let node = w.network().node_at(at(-150, 0)).expect("交差点がない");
+    ok(w.apply(&Command::SetCrosswalk {
+        node,
+        arm: crate::command::Heading::E,
+        on: false,
+    }));
+    same(&mut w);
+    assert_eq!(w.walk_table_builds(), built + 2);
 }
 
 /// 乗り換える駅で待っている人（2 回目の乗車）と、乗り換える前の路線の列車に乗っていて、同じ路線へ乗り換える人。

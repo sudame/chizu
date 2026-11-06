@@ -21,10 +21,10 @@ use std::sync::Arc;
 use rayon::prelude::*;
 
 use astar::{Marks, extract, search_many};
-pub use astar::{Route, Scratch, Toward, astar, astar_variants, one_to_many};
+pub use astar::{Route, Scratch, Toward, astar, astar_variants, one_to_many, reach_within};
 pub use delay::Delays;
 pub use graph::{
-    Connector, Graph, GraphError, WALK_SPEED, connectors, speed_limit, try_connectors,
+    Connector, Graph, GraphError, WALK_SPEED, connectors, speed_limit, try_connectors, walk_ms,
 };
 
 use crate::network::{LaneMode, LinkId, Network};
