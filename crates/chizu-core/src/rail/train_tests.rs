@@ -968,6 +968,79 @@ fn a_short_turn_line_without_trains_leaves_the_zone_to_the_main_line() {
     assert_eq!(count(&w, outer), 5);
 }
 
+/// W–M–E を 1 本走らせ、E で折り返して M へ戻る途中（自分だけの区間）まで進めた街。
+fn outer_train_heading_back() -> (World, [StationId; 4], LineId) {
+    let (mut w, st) = two_line_world();
+    let outer = line_through(&mut w, &[st[0], st[1], st[2]]);
+    set_trains(&mut w, outer, 1);
+    let line = w.rail().line(outer).unwrap();
+    let east = line
+        .path
+        .iter()
+        .position(|s| s.kind == StepKind::Terminal && s.station == Some(st[2]))
+        .unwrap();
+    let east = u32::try_from(east).unwrap();
+    let len = line.len();
+    for _ in 0..20_000 {
+        w.step();
+        let found = w.rail().trains().any(|(_, t)| {
+            t.line == outer && t.state == TrainState::Running && t.pos > east && t.pos + 3 < len
+        });
+        if found {
+            return (w, st, outer);
+        }
+    }
+    panic!("M へ戻る途中の列車がない");
+}
+
+/// 本数 0 にした路線の列車は、区分けが変わらず終点まで残る。その途中で区画ができ、その路線の分が 0 になったら、
+/// 列車をすぐに消す。残すと、区画の手前で止まり続ける。
+#[test]
+fn a_zero_line_train_is_dropped_when_a_zone_shuts_it_out() {
+    let (mut w, st, outer) = outer_train_heading_back();
+    set_trains(&mut w, outer, 0);
+    assert_eq!(
+        w.rail().trains().filter(|(_, t)| t.line == outer).count(),
+        1
+    );
+    line_through(&mut w, &[st[0], st[1]]);
+    assert!(
+        w.rail()
+            .line(outer)
+            .unwrap()
+            .plan
+            .quota
+            .values()
+            .any(|q| *q == 0)
+    );
+    assert!(w.rail().trains().all(|(_, t)| t.line != outer));
+    run(&mut w, 3_000, 3_000);
+    assert!(w.rail().trains().all(|(_, t)| t.line != outer));
+}
+
+/// 前の規則で、本数 0 の路線が区画の分を持っていたときの保存データを読むと、読み直した区分けではその路線の分が
+/// 0 になる。そのとき残っている列車も、次の tick で消す。
+#[test]
+fn a_zero_line_train_from_an_old_save_is_dropped() {
+    let (mut w, st, outer) = outer_train_heading_back();
+    line_through(&mut w, &[st[0], st[1]]);
+    let mut rail = w.rail().clone();
+    // 本数だけを 0 にし、区分けを作り直す。読み込みの `restore_plans` と同じである。
+    rail.lines.get_mut(outer).unwrap().trains = 0;
+    rail.restore_plans();
+    assert!(
+        rail.line(outer)
+            .unwrap()
+            .plan
+            .quota
+            .values()
+            .any(|q| *q == 0)
+    );
+    assert_eq!(rail.trains().filter(|(_, t)| t.line == outer).count(), 1);
+    rail.step(w.tick());
+    assert!(rail.trains().all(|(_, t)| t.line != outer));
+}
+
 /// 同じ駅を並べた 2 つの路線（緩行と快速）と、途中の駅を通り過ぎる路線が走る。どちらの路線も進路のすべてを
 /// 共有するので、区画の枠（輪の待てる所の数 − 1）を 2 つの路線で分ける。
 #[test]

@@ -176,6 +176,13 @@ impl RailLine {
         !self.stopped && self.trains > 0
     }
 
+    /// 列車を走らせ続けられないか。止まった路線と、上限が 0 の路線と、通る共有の区画のどれかで分が 0 の路線である。
+    /// 分が 0 の区画には入れないので、残した列車は区画の手前で止まり続ける。分が 0 になるのは、本数 0 の路線が
+    /// 枠に上限のある区画を通るときと、見込みの分が 0 で上限も 0 の路線だけである。
+    pub(crate) fn cannot_run(&self) -> bool {
+        self.stopped || self.cap() == 0 || self.plan.quota.values().any(|q| *q == 0)
+    }
+
     /// 走らせる本数。遊ぶ人が決めた本数を、行き詰まりを防ぐ上限に抑えたものである。
     pub fn allowed(&self) -> u8 {
         self.trains.min(self.cap())
@@ -918,8 +925,26 @@ impl Rail {
     }
 
     /// 書き出しから読み戻したあとに、待てる所の区分けを作り直す。
+    ///
+    /// 前の規則で書いた保存データでは、作り直した区分けで走らせ続けられない路線に列車が残ることがある。
+    /// その列車は、読み戻した状態を保存したときと同じに保つため、ここでは消さず、次の tick に
+    /// [`Rail::step_with`] が消す。
     pub(crate) fn restore_plans(&mut self) {
         self.replan();
+    }
+
+    /// 走らせ続けられない路線（[`RailLine::cannot_run`]）の列車を消す。
+    pub(crate) fn drop_unrunnable_trains(&mut self) {
+        let lines = &self.lines;
+        let gone: Vec<_> = self
+            .trains
+            .iter()
+            .filter(|(_, t)| lines.get(t.line).is_none_or(RailLine::cannot_run))
+            .map(|(id, _)| id)
+            .collect();
+        for id in gone {
+            self.drop_train(id);
+        }
     }
 
     /// 線路 `t` を向き `d` に進むときに入るノードと出るノード。
@@ -1108,21 +1133,12 @@ impl Rail {
         )
     }
 
-    /// すべての路線の待てる所の区分けと上限（`LinePlan`）を決め直し、止まった路線と、上限が 0 になった
-    /// 路線の列車を消す。消えた列車の押さえていた閉塞は、それで返る。残った列車は [`Rail::settle_trains`] で
-    /// 続けられる形に直す。
+    /// すべての路線の待てる所の区分けと上限（`LinePlan`）を決め直し、走らせ続けられない路線
+    /// （[`RailLine::cannot_run`]）の列車を消す。消えた列車の押さえていた閉塞は、それで返る。残った列車は
+    /// [`Rail::settle_trains`] で続けられる形に直す。
     fn mark_waits(&mut self) {
         self.replan();
-        let lines = &self.lines;
-        let gone: Vec<_> = self
-            .trains
-            .iter()
-            .filter(|(_, t)| lines.get(t.line).is_none_or(|l| l.stopped || l.cap() == 0))
-            .map(|(id, _)| id)
-            .collect();
-        for id in gone {
-            self.drop_train(id);
-        }
+        self.drop_unrunnable_trains();
         self.settle_trains();
         self.settle_riders();
     }

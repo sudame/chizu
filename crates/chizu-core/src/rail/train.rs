@@ -713,6 +713,9 @@ impl Rail {
         if self.lines.is_unused() {
             return;
         }
+        // コマンドのあとは `mark_waits` が消しているので、ふだんは何もしない。前の規則で書いた保存データを
+        // 読んだときに残る列車を消す（`Rail::restore_plans`）。
+        self.drop_unrunnable_trains();
         self.give_up(tick.0);
         self.count_down();
         let mut held = self.occupancy();
