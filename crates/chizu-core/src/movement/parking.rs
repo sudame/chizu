@@ -47,13 +47,14 @@ pub(super) enum Then {
     /// 移動を終える。
     Arrive,
     /// 車に乗って `park_at` まで走り、駐車場 `lot` に停めて `to` まで歩く。
+    /// `lot` が `None` なのは、向かっていた共同の駐車場が取り壊されたときで、着いても停めずに消える。
     Drive {
         park_at: SidewalkPos,
-        lot: LotId,
+        lot: Option<LotId>,
         to: SidewalkPos,
     },
-    /// 車を駐車場 `lot` に停めて、`to` まで歩く。
-    Walk { lot: LotId, to: SidewalkPos },
+    /// 車を駐車場 `lot` に停めて、`to` まで歩く。`lot` が `None` のときは [`Then::Drive`] と同じ。
+    Walk { lot: Option<LotId>, to: SidewalkPos },
 }
 
 impl Then {
@@ -61,7 +62,21 @@ impl Then {
     pub(super) fn lot(&self) -> Option<LotId> {
         match self {
             Then::Arrive => None,
-            Then::Drive { lot, .. } | Then::Walk { lot, .. } => Some(*lot),
+            Then::Drive { lot, .. } | Then::Walk { lot, .. } => *lot,
+        }
+    }
+
+    /// 共同の駐車場 `corner` が取り壊されたので、そこへ向かう車は着いても停めないものにする。
+    /// 同じ角に置き直した駐車場は別の駐車場なので、前に押さえた空きの持ち主と取り違えない。
+    fn forget_shared_lot(&mut self, corner: TilePos) {
+        let gone = |lot: &mut Option<LotId>| {
+            if lot.and_then(LotId::shared_corner) == Some(corner) {
+                *lot = None;
+            }
+        };
+        match self {
+            Then::Arrive => {}
+            Then::Drive { lot, .. } | Then::Walk { lot, .. } => gone(lot),
         }
     }
 }
@@ -70,15 +85,33 @@ impl StateHash for Then {
     fn write_state(&self, h: &mut StateHasher) {
         match self {
             Then::Arrive => h.write(&0_u8),
-            Then::Drive { park_at, lot, to } => {
+            Then::Drive {
+                park_at,
+                lot: Some(lot),
+                to,
+            } => {
                 h.write(&1_u8);
                 h.write(park_at);
                 h.write(lot);
                 h.write(to);
             }
-            Then::Walk { lot, to } => {
+            Then::Walk { lot: Some(lot), to } => {
                 h.write(&2_u8);
                 h.write(lot);
+                h.write(to);
+            }
+            // 向かっていた駐車場がなくなった移動。駐車場のある移動と印を分ける。
+            Then::Drive {
+                park_at,
+                lot: None,
+                to,
+            } => {
+                h.write(&3_u8);
+                h.write(park_at);
+                h.write(to);
+            }
+            Then::Walk { lot: None, to } => {
+                h.write(&4_u8);
                 h.write(to);
             }
         }
@@ -375,7 +408,7 @@ impl Parking {
                     .checked_sub(1)
                     .expect("押さえていない空きを返した");
             }),
-            // 取り壊して同じ角に置き直した駐車場には、前に押さえた分が残っていない。
+            // 取り壊された駐車場へ向かう移動は `Then` の `lot` を `None` にしてあるので、ここへは来ない。念のため残っていない分は返さない。
             LotId::Shared(c) if self.shared_lot(c).visitors.reserved > 0 => {
                 self.update_shared(c, |s| s.visitors.reserved -= 1);
             }
@@ -400,7 +433,7 @@ impl Parking {
                 there
             }
             LotId::Shared(c) => {
-                // 取り壊して同じ角に置き直した駐車場には、前に押さえた空きがない。
+                // 取り壊された駐車場へ向かう移動は `lot` が `None` なので、ここへは来ない。念のため押さえた空きがなければ停めない。
                 let there = self.shared_lot(c).visitors.reserved > 0;
                 if there {
                     self.update_shared(c, |s| {
@@ -1004,6 +1037,9 @@ impl Trips {
     pub fn forget_shared_lot(&mut self, corner: TilePos) {
         self.parking.shared.remove(&corner);
         self.commuters.forget_cars_at(corner);
+        for t in self.rows.iter_mut().flatten() {
+            t.then.forget_shared_lot(corner);
+        }
     }
 
     /// 建物 `from` から建物 `to` へ、歩く → 車 → 歩く で向かう移動を作る。行き先の駐車場の空きは
@@ -1111,14 +1147,15 @@ impl Trips {
             .expect("作った主体がない")
             .then = Then::Drive {
             park_at,
-            lot,
+            lot: Some(lot),
             to: dest,
         };
         self.parking.reserve(lot);
         let tally = &mut self.parking_tally;
         tally.drives = tally.drives.saturating_add(1);
-        // 借りた枠は世帯の枠で、行き先の駐車場に停められなかったのではない（`Trip::parks_elsewhere` と同じ決まり）。
-        if !matches!(lot, LotId::Rented(_)) && lot != LotId::Building(to) {
+        // 家に帰って借りた枠に停めるのは、行き先の駐車場に停められなかったのではない。
+        let rented_home = matches!(lot, LotId::Rented(_)) && home == Some(to);
+        if lot != LotId::Building(to) && !rented_home {
             tally.parked_elsewhere = tally.parked_elsewhere.saturating_add(1);
             self.lot_misses.add(to, now.0 / TICKS_PER_DAY, |m| {
                 m.parked_elsewhere = m.parked_elsewhere.saturating_add(1);
@@ -1217,7 +1254,9 @@ impl Trips {
             .and_then(|(l, o)| SidewalkPos::on_link(net, l, o))
             .unwrap_or_else(|| t.position());
             let departed = t.departed;
-            self.parking.release(lot);
+            if let Some(lot) = lot {
+                self.parking.release(lot);
+            }
             let ends = from
                 .resolve_on(net, LaneMode::Sidewalk)
                 .zip(to.resolve_on(net, LaneMode::Sidewalk));
@@ -1255,11 +1294,18 @@ impl Trips {
                     let dest = t.dest;
                     let (index, generation) = self.slots.current(i).expect("着いた主体がない");
                     let trip = TripId { index, generation };
-                    if self.commuters.dropped(trip) {
-                        // 走っているあいだに世帯が車をなくした。停めずに消し、押さえた空きを返す。
-                        self.parking.release(lot);
-                    } else if self.parking.park(lot) {
-                        self.commuters.parked(trip, lot);
+                    match lot {
+                        // 向かっていた駐車場が取り壊された。押さえた空きも一緒になくなっている。
+                        None => {}
+                        Some(lot) if self.commuters.dropped(trip) => {
+                            // 走っているあいだに世帯が車をなくした。停めずに消し、押さえた空きを返す。
+                            self.parking.release(lot);
+                        }
+                        Some(lot) => {
+                            if self.parking.park(lot) {
+                                self.commuters.parked(trip, lot);
+                            }
+                        }
                     }
                     legs[1].push((i, dest, to, Then::Arrive));
                 }

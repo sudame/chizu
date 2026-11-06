@@ -511,7 +511,7 @@ fn a_car_that_waits_past_the_rescue_walks_instead() {
         let t = c.trips.rows[slot].as_mut().unwrap();
         t.waiting = true;
         t.then = Then::Walk {
-            lot: super::LotId::Building(lot),
+            lot: Some(super::LotId::Building(lot)),
             to,
         };
         t.stalled = junction::RESCUE;

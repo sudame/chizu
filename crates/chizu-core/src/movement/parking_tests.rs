@@ -152,6 +152,22 @@ impl Street {
     }
 }
 
+impl Street {
+    /// 車で走っている移動 `id` が車を降りて歩き出す（駐車場に着く）tick まで進める。
+    fn run_until_parked(&mut self, id: TripId) {
+        let mut drove = false;
+        for _ in 0..1_000 {
+            let mode = self.trips.get(id).expect("移動が終わった").mode();
+            drove |= mode == LaneMode::Car;
+            if drove && mode == LaneMode::Sidewalk {
+                return;
+            }
+            self.step();
+        }
+        panic!("着かない");
+    }
+}
+
 fn lot(s: &Street, b: BuildingId) -> (u32, u32) {
     let l = s.trips.lot(b);
     (l.parked, l.reserved)
@@ -332,9 +348,9 @@ fn cars_sent_to_another_lot_are_told_apart_until_they_park() {
         if a.is_none() && b.is_none() {
             break;
         }
-        assert!(!a.is_some_and(|t| t.parks_elsewhere(&s.net, &s.buildings, &[])));
+        assert!(!a.is_some_and(|t| t.parks_elsewhere(&s.net, &s.buildings, &[], None)));
         if let Some(t) = b {
-            seen.push((t.mode(), t.parks_elsewhere(&s.net, &s.buildings, &[])));
+            seen.push((t.mode(), t.parks_elsewhere(&s.net, &s.buildings, &[], None)));
         }
         s.step();
     }
@@ -924,11 +940,11 @@ fn a_car_bound_for_a_removed_building_is_not_counted_as_parking_elsewhere() {
     let id = s.drive(home, shop).unwrap();
     s.board(&[id]);
     let t = s.trips.get(id).unwrap();
-    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[]));
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[], None));
     s.buildings.remove(shop);
     s.trips.forget_lots(&s.buildings);
     let t = s.trips.get(id).unwrap();
-    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[]));
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[], None));
 }
 
 #[test]
@@ -1532,46 +1548,179 @@ fn a_car_heading_to_a_removed_shared_lot_does_not_park() {
     assert_eq!((lot.rented, lot.visitors), (1, Lot::default()));
 }
 
-/// 職場が満車で、世帯が借りた枠に回る車は、`parked_elsewhere` の積み上げにも、車ごとの `parks_elsewhere` にも数えない。
-/// 外来の枠に回る車は、どちらにも数え、その駐車場が取り壊されれば `parks_elsewhere` は数えなくなる。
+/// 家に帰って借りた枠に停める車は、`parked_elsewhere` の積み上げにも、車ごとの `parks_elsewhere` にも数えない。
+/// 職場が満車で借りた枠に回る車と、外来の枠に回る車は、どちらにも数える。外来の枠は、その駐車場が取り壊されれば
+/// `parks_elsewhere` は数えなくなる。
 #[test]
-fn rented_spaces_are_not_counted_as_parking_elsewhere_but_visitor_spaces_are() {
+fn parking_elsewhere_is_counted_alike_by_the_tally_and_by_each_trip() {
     let (mut s, ids) = Street::new(&[50, 5, 30, 28]);
     let (home, work, filler, visitor) = (ids[0], ids[1], ids[2], ids[3]);
     let facilities = [shared_lot(&s, 8)];
     let c = facilities[0].area.min;
     s.trips
         .set_rented(&std::collections::BTreeMap::from([(c, 1)]));
-    let sites = (&s.buildings, facilities.as_slice());
-    let (net, router) = (&s.net, &mut s.router);
     // 職場の駐車場を埋める。
+    let (net, router) = (&s.net, &mut s.router);
+    let sites = (&s.buildings, facilities.as_slice());
     s.trips
         .spawn_drive(net, router, sites, (filler, work), Tick::ZERO)
         .unwrap();
-    let before = s.trips.parking_tally().parked_elsewhere;
     let h = Household { home };
-    let request = CommuteRequest {
-        place: Some(CarPlace::Shared(c)),
-        ..h.request(0, (home, work))
+    let start = |s: &mut Street, ends| {
+        let request = CommuteRequest {
+            place: Some(CarPlace::Shared(c)),
+            ..h.request(0, ends)
+        };
+        let (net, router) = (&s.net, &mut s.router);
+        let sites = (&s.buildings, facilities.as_slice());
+        s.trips
+            .start_commutes(net, router, sites, &[request], Tick::ZERO)[0]
+            .expect("移動を作れない")
     };
-    let renter = s
-        .trips
-        .start_commutes(net, router, sites, &[request], Tick::ZERO)[0]
-        .expect("移動を作れない");
-    let t = s.trips.get(renter).unwrap();
-    assert_eq!(t.parking_lot(), Some(LotId::Rented(c)));
-    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &facilities));
+    let elsewhere = |s: &Street, id, home| {
+        s.trips
+            .get(id)
+            .unwrap()
+            .parks_elsewhere(&s.net, &s.buildings, &facilities, home)
+    };
+    // 職場が満車で借りた枠に回る車は数える。
+    let before = s.trips.parking_tally().parked_elsewhere;
+    let out = start(&mut s, (home, work));
+    assert_eq!(
+        s.trips.get(out).unwrap().parking_lot(),
+        Some(LotId::Rented(c))
+    );
+    assert!(elsewhere(&s, out, Some(home)));
+    assert_eq!(s.trips.parking_tally().parked_elsewhere, before + 1);
+    s.trips.cancel(out);
+    // 家に帰って借りた枠に停める車は数えない。
+    let before = s.trips.parking_tally().parked_elsewhere;
+    let back = start(&mut s, (work, home));
+    assert_eq!(
+        s.trips.get(back).unwrap().parking_lot(),
+        Some(LotId::Rented(c))
+    );
+    assert!(!elsewhere(&s, back, Some(home)));
     assert_eq!(s.trips.parking_tally().parked_elsewhere, before);
+    s.trips.cancel(back);
     // 借りていない車は外来の枠に回り、積み上げにも数える。
     let (net, router) = (&s.net, &mut s.router);
+    let sites = (&s.buildings, facilities.as_slice());
     let v = s
         .trips
         .spawn_drive(net, router, sites, (visitor, work), Tick::ZERO)
         .unwrap();
-    let t = s.trips.get(v).unwrap();
-    assert_eq!(t.parking_lot(), Some(LotId::Shared(c)));
-    assert!(t.parks_elsewhere(&s.net, &s.buildings, &facilities));
+    assert_eq!(
+        s.trips.get(v).unwrap().parking_lot(),
+        Some(LotId::Shared(c))
+    );
+    assert!(elsewhere(&s, v, None));
     assert_eq!(s.trips.parking_tally().parked_elsewhere, before + 1);
     // 駐車場が取り壊されたら数えない。
-    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[]));
+    let t = s.trips.get(v).unwrap();
+    assert!(!t.parks_elsewhere(&s.net, &s.buildings, &[], None));
+}
+
+/// 共同の駐車場 A に向かう車が、A を取り壊して同じ角に置き直した B に、あとから向かった別の車の枠を横取りしない。
+/// 先に着いた車は停めずに消え、B の押さえた空きはあとの車のものとして残る。
+#[test]
+fn a_car_heading_to_a_replaced_shared_lot_leaves_the_new_reservation() {
+    let (mut s, ids) = Street::new(&[50, 5, 48, 46]);
+    // 先に向かう車の出発点を、あとの車より共同の駐車場の近くにする。
+    let (from, shop, other, later) = (ids[0], ids[1], ids[3], ids[2]);
+    let facilities = [shared_lot(&s, 8)];
+    let c = facilities[0].area.min;
+    let sites = (&s.buildings, facilities.as_slice());
+    let (net, router) = (&s.net, &mut s.router);
+    // 店の駐車場を埋めて、あとの車を共同の駐車場に回す。
+    s.trips
+        .spawn_drive(net, router, sites, (from, shop), Tick::ZERO)
+        .unwrap();
+    let v1 = s
+        .trips
+        .spawn_drive(net, router, sites, (other, shop), Tick::ZERO)
+        .unwrap();
+    assert_eq!(
+        s.trips.get(v1).unwrap().parking_lot(),
+        Some(LotId::Shared(c))
+    );
+    // A を取り壊して、同じ角に B を置く。
+    s.trips.forget_shared_lot(c);
+    let (net, router) = (&s.net, &mut s.router);
+    let sites = (&s.buildings, facilities.as_slice());
+    let v2 = s
+        .trips
+        .spawn_drive(net, router, sites, (later, shop), Tick::ZERO)
+        .unwrap();
+    assert_eq!(
+        s.trips.get(v2).unwrap().parking_lot(),
+        Some(LotId::Shared(c))
+    );
+    let reserved = Lot {
+        parked: 0,
+        reserved: 1,
+    };
+    assert_eq!(s.trips.shared_lot(c).visitors, reserved);
+    // V1 が先に着いても、B には停まらず、V2 の押さえた空きもそのまま残る。
+    s.run_until_parked(v1);
+    assert_eq!(s.trips.get(v2).unwrap().mode(), LaneMode::Car);
+    assert_eq!(s.trips.shared_lot(c).visitors, reserved);
+    s.run(v2);
+    let parked = Lot {
+        parked: 1,
+        reserved: 0,
+    };
+    assert_eq!(s.trips.shared_lot(c).visitors, parked);
+}
+
+/// 世帯の車で共同の駐車場の外来の枠へ向かう途中に駐車場を取り壊して置き直しても、
+/// 世帯の車は B に停まらず、あとから向かった別の車の押さえた空きを横取りしない。
+#[test]
+fn a_household_car_heading_to_a_replaced_shared_lot_leaves_the_new_reservation() {
+    let (mut s, ids) = Street::new(&[50, 5, 48, 46]);
+    // 世帯の車の出発点を、あとの車より共同の駐車場の近くにする。
+    let (home, shop, other, later) = (ids[0], ids[1], ids[3], ids[2]);
+    let facilities = [shared_lot(&s, 8)];
+    let c = facilities[0].area.min;
+    let (net, router) = (&s.net, &mut s.router);
+    let sites = (&s.buildings, facilities.as_slice());
+    s.trips
+        .spawn_drive(net, router, sites, (home, shop), Tick::ZERO)
+        .unwrap();
+    let h = Household { home };
+    let request = h.request(0, (other, shop));
+    let v1 = s
+        .trips
+        .start_commutes(net, router, sites, &[request], Tick::ZERO)[0]
+        .expect("移動を作れない");
+    assert_eq!(
+        s.trips.get(v1).unwrap().parking_lot(),
+        Some(LotId::Shared(c))
+    );
+    assert_eq!(
+        s.trips.household_car(Household::ID),
+        Some(HouseholdCar::InUse(v1))
+    );
+    s.trips.forget_shared_lot(c);
+    let (net, router) = (&s.net, &mut s.router);
+    let v2 = s
+        .trips
+        .spawn_drive(net, router, sites, (later, shop), Tick::ZERO)
+        .unwrap();
+    assert_eq!(
+        s.trips.get(v2).unwrap().parking_lot(),
+        Some(LotId::Shared(c))
+    );
+    let reserved = Lot {
+        parked: 0,
+        reserved: 1,
+    };
+    s.run_until_parked(v1);
+    assert_eq!(s.trips.get(v2).unwrap().mode(), LaneMode::Car);
+    assert_eq!(s.trips.shared_lot(c).visitors, reserved);
+    s.run(v1);
+    s.trips.take_commuter(v1);
+    assert_eq!(s.trips.household_car(Household::ID), None);
+    s.run(v2);
+    assert_eq!(s.trips.shared_lot(c).visitors.parked, 1);
 }
