@@ -57,7 +57,10 @@ fn station(w: &mut World, east: (i64, i64)) -> StationId {
 /// y = 10 の道路の西（x 0〜12）と東（x 50〜66）の切れ端に面した駅 2 つ（駅の線路は y = 8 の x 3〜12 と
 /// x 55〜64）を、線路（x 12〜55）で結んだ街。線路の途中は道路から離れているので、縦の道路で横切れる。
 fn crossing_world() -> (World, StationId, StationId) {
-    let mut w = World::new_with_money(0, Money(1_000_000_000)).with_unlimited_land();
+    crossing_world_with(World::new_with_money(0, Money(1_000_000_000)).with_unlimited_land())
+}
+
+fn crossing_world_with(mut w: World) -> (World, StationId, StationId) {
     ok(road(&mut w, (0, 10), (12, 10)));
     ok(road(&mut w, (50, 10), (66, 10)));
     let a = station(&mut w, (12, 8));
@@ -331,5 +334,86 @@ fn measure_crossing() {
             r.passed_stuck,
             c
         );
+    }
+}
+
+/// [`crossing_world`] の西の駅の端（x = 12）のすぐ先の踏切（x = 13）を、北の住宅から南の工場へ通う車が通る街。
+/// 列車は西の駅を出るたびに、踏切のすぐ手前から走り出す。2 本なら、西の駅が空くのを待つ列車が、東から来て
+/// 踏切のすぐ手前（待てる所の先の端）で止まる。
+fn station_crossing_town(trains: u8) -> World {
+    // 種 6 の高速道路は、(20, -64) から北へ出る。
+    let seed = 6;
+    assert_eq!(crate::world::highway_line(seed).start, at(20, -64));
+    let (mut w, a, b) = crossing_world_with(
+        World::new_with_money(seed, Money(1_000_000_000)).with_unlimited_land(),
+    );
+    ok(road(&mut w, (20, -64), (20, -60)));
+    ok(road(&mut w, (20, -60), (-10, -60)));
+    ok(road(&mut w, (13, -60), (13, 60)));
+    assert_eq!(w.rail().crossings().collect::<Vec<_>>(), vec![at(13, 8)]);
+    for (area, zone) in [
+        (((14, -55), (19, 4)), crate::command::Zone::Residential),
+        (((7, -55), (12, 4)), crate::command::Zone::Residential),
+        (((14, 12), (19, 58)), crate::command::Zone::Industrial),
+        (((7, 14), (12, 58)), crate::command::Zone::Industrial),
+    ] {
+        let c = w.apply(&Command::PaintZone {
+            area: TileRect::from_corners(at(area.0.0, area.0.1), at(area.1.0, area.1.1)),
+            zone: Some(zone),
+        });
+        assert!(
+            matches!(c, ApplyOutcome::Applied | ApplyOutcome::AppliedPartly(_)),
+            "{c:?}"
+        );
+    }
+    for (kind, x) in [
+        (ServiceKind::PowerPlant, -5),
+        (ServiceKind::WaterPump, 5),
+        (ServiceKind::WaterPump, 8),
+    ] {
+        ok(w.apply(&Command::PlaceBuilding {
+            kind,
+            at: at(x, -61),
+            rotation: 2,
+        }));
+    }
+    ok(w.apply(&Command::CreateLine { from: a, to: b }));
+    let line = w.rail().lines().next().unwrap().0;
+    ok(w.apply(&Command::SetLineTrains { line, trains }));
+    w
+}
+
+/// 駅を出る列車も、先の閉塞を待って踏切のすぐ手前で止まっていた列車も、踏切を閉じてから 16 tick たつまで
+/// 踏切に入らない。閉じる前に踏切に入った車は抜けきれるので、列車とぶつかりかけることはない。
+#[test]
+fn trains_starting_next_to_a_crossing_wait_for_the_warning() {
+    let tile = at(13, 8);
+    for trains in [1, 2] {
+        let mut w = station_crossing_town(trains);
+        let mut on = false;
+        let mut entries = 0;
+        for _ in 0..3 * crate::TICKS_PER_DAY {
+            w.step();
+            let now = w.tick().0;
+            let was = on;
+            on = w.rail().crossings_under_trains().contains(&tile);
+            if on && !was {
+                entries += 1;
+                let since = w
+                    .rail()
+                    .closed_since(tile)
+                    .expect("列車がかかった踏切が開いている");
+                assert!(
+                    now - since >= CROSSING_WARN_TICKS.unsigned_abs(),
+                    "列車 {trains} 本：tick {since} に閉じた踏切に tick {now} に入った"
+                );
+            }
+        }
+        let tally = w.rail().crossing_tally();
+        assert!(entries > 10, "列車 {trains} 本：{entries}");
+        assert!(tally.wait > 0, "列車 {trains} 本：車が通らない {tally:?}");
+        assert_eq!(tally.overrun, 0, "列車 {trains} 本：{tally:?}");
+        assert!(tally.longest_closed <= 60, "列車 {trains} 本：{tally:?}");
+        assert_eq!(w.trips().rescues().teleported, 0, "列車 {trains} 本");
     }
 }

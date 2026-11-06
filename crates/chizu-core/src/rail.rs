@@ -186,8 +186,8 @@ pub struct Rail {
     tiles: BTreeMap<TilePos, SmallVec<[TrackId; 2]>>,
     /// 読み取り用の数。状態ハッシュには入れない。
     tally: RailTally,
-    /// 踏切のマスと、閉じていれば閉じた tick。踏切は道路と線路の網から作り直せ、閉じているかは列車の位置から
-    /// 決まるので、どちらも状態ハッシュには入れない。閉じた tick は、閉じていた長さを数えるためだけにある。
+    /// 踏切のマスと、閉じていれば閉じた tick。閉じた tick は、列車が踏切に入ってよいか（閉じてから
+    /// [`CROSSING_WARN_TICKS`] tick たったか）を決めるので、踏切があるときは状態ハッシュに入れる。
     crossings: BTreeMap<TilePos, Option<u64>>,
     /// 踏切の読み取り用の数。状態ハッシュには入れない。
     crossing_tally: CrossingTally,
@@ -701,6 +701,10 @@ impl StateHash for Rail {
         h.write(&self.stations);
         h.write(&self.lines);
         h.write(&self.trains);
+        // 踏切が閉じた tick は、列車が踏切に入ってよいかを決めるので入れる。踏切のない街のハッシュは変えない。
+        if !self.crossings.is_empty() {
+            h.write(&self.crossings);
+        }
     }
 }
 

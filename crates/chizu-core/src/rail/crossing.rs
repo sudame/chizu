@@ -15,6 +15,11 @@
 //!   進んだとして [`CROSSING_WARN_TICKS`] tick 以内に先頭が踏切に着く。駅に止まっている列車と、駅を出るのを
 //!   待つ列車は閉じない。
 //!
+//! 列車は、閉じてから [`CROSSING_WARN_TICKS`] tick たっていない踏切には入らない（警報が鳴ってから列車が来る）。
+//! 駅を出る列車と、先の閉塞を待って止まっていた列車は、踏切のすぐ手前から走り出せる。こうした列車は、
+//! 走り出すと上の 2 つ目の決まりで踏切を閉じ、閉じてから 16 tick たつまで手前で待つ。閉じた tick は踏切の表に
+//! 持ち、状態ハッシュに入れる。
+//!
 //! 列車の体は、先頭（進路の上の位置）から前へ半マス、後ろへ全長から半マスを引いた長さにかかるとみなす。
 //! 駅の線路の先の端のノードに先頭を止めた列車が、両端のノードから半マスずつ外へ延びるホームにちょうど収まる形である。
 
@@ -71,11 +76,22 @@ struct Ahead {
     tile: TilePos,
 }
 
-/// いまの速さ `v` から最高の速さまで加速して、`CROSSING_WARN_TICKS` tick で進む距離。
-fn warn_reach(v: i64) -> i64 {
-    (1..=CROSSING_WARN_TICKS)
+/// いまの速さ `v` から最高の速さまで加速して、`ticks` tick で進める距離。
+fn reach(v: i64, ticks: i64) -> i64 {
+    (1..=ticks)
         .map(|k| (v + k * TRAIN_ACCEL).min(TRAIN_MAX_SPEED))
         .sum()
+}
+
+/// 列車が押さえた範囲の中で、止まらずに進める先頭の位置（いまの先頭からの距離）。次に止まる駅の先へは進まない。
+fn run_limit(line: &RailLine, t: &Train) -> i64 {
+    let s = line.upcoming_stop(t);
+    line.distance_to_end(t, t.ahead.min(line.distance(t.pos, s)))
+}
+
+/// 踏切 `c` に列車の体がかかっているか。
+fn on_body(c: &Ahead) -> bool {
+    NOSE_MM > c.near && -BODY_BACK_MM < c.far
 }
 
 fn isqrt(v: i64) -> i64 {
@@ -239,14 +255,10 @@ impl Rail {
                 continue;
             };
             let running = t.state == TrainState::Running;
-            // 押さえた範囲の中で、止まらずに進める先頭の位置。
-            let limit = running.then(|| {
-                let s = line.upcoming_stop(t);
-                line.distance_to_end(t, t.ahead.min(line.distance(t.pos, s)))
-            });
-            let reach = warn_reach(t.speed);
+            let limit = running.then(|| run_limit(line, t));
+            let reach = reach(t.speed, CROSSING_WARN_TICKS);
             for c in Self::crossings_near(&by_track, line, t) {
-                let body = NOSE_MM > c.near && -BODY_BACK_MM < c.far;
+                let body = on_body(&c);
                 let coming = limit.is_some_and(|limit| {
                     c.near >= NOSE_MM && c.near - NOSE_MM <= reach && limit >= c.far + BODY_BACK_MM
                 });
@@ -258,11 +270,20 @@ impl Rail {
         closed
     }
 
-    /// 中に車か人がいる踏切 `occupied` の手前で止まりきれる、走っている列車と、先頭から止まる所までの距離。
-    /// 止まりきれない踏切はそのまま進み、その先の踏切で止まりきれれば、そこで止まる。
-    pub(super) fn crossing_stops(&self, occupied: &BTreeSet<TilePos>) -> BTreeMap<TrainId, i64> {
+    /// 走っている列車のうち、踏切の手前で止まる列車と、先頭から止まる所までの距離。止まるのは次の踏切の手前である。
+    /// - 中に車か人がいる踏切（`occupied`）の手前で、止まりきれるとき。止まりきれない踏切はそのまま進み、
+    ///   その先の踏切で止まりきれれば、そこで止まる。
+    /// - 押さえた範囲で抜けきれる踏切が、tick `now` までに [`CROSSING_WARN_TICKS`] tick 閉じていないうちに、
+    ///   先頭が踏切に入れてしまうとき（[`Rail::too_early`]）。駅を出る列車と、先の閉塞を待って止まっていた
+    ///   列車は、踏切のすぐ手前から走り出せるので、踏切を閉じてから入るまでここで待つ。待つあいだ、列車は
+    ///   踏切を閉じる見込みの中にいるので、踏切は閉じたままになる。
+    pub(super) fn crossing_stops(
+        &self,
+        now: u64,
+        occupied: &BTreeSet<TilePos>,
+    ) -> BTreeMap<TrainId, i64> {
         let mut stops = BTreeMap::new();
-        if occupied.is_empty() {
+        if self.crossings.is_empty() {
             return stops;
         }
         let by_track = self.crossings_by_track();
@@ -273,32 +294,62 @@ impl Rail {
             let Some(line) = self.lines.get(t.line) else {
                 continue;
             };
+            let limit = run_limit(line, t);
             let stop = Self::crossings_near(&by_track, line, t)
                 .into_iter()
-                .filter(|c| c.near >= NOSE_MM && occupied.contains(&c.tile))
-                .map(|c| c.near - NOSE_MM)
-                .find(|room| isqrt(2 * TRAIN_DECEL * room) >= t.speed - TRAIN_DECEL);
-            if let Some(room) = stop {
-                stops.insert(id, room);
+                .filter(|c| c.near >= NOSE_MM)
+                .find(|c| {
+                    let room = c.near - NOSE_MM;
+                    let full = occupied.contains(&c.tile)
+                        && isqrt(2 * TRAIN_DECEL * room) >= t.speed - TRAIN_DECEL;
+                    let early =
+                        limit >= c.far + BODY_BACK_MM && self.too_early(c.tile, now, t.speed, room);
+                    full || early
+                });
+            if let Some(c) = stop {
+                stops.insert(id, c.near - NOSE_MM);
             }
         }
         stops
     }
 
-    /// tick `now` の踏切を数える。`closed` はこの tick の頭に閉じた踏切、`occupied` は中に車か人がいる踏切、
-    /// `waits` は閉じた踏切の手前で止まっていた車の数である。列車を進めたあとに呼ぶ。
-    pub(crate) fn note_crossings(
-        &mut self,
-        now: u64,
-        closed: &BTreeSet<TilePos>,
-        occupied: &BTreeSet<TilePos>,
-        waits: u64,
-    ) {
+    /// 速さ `v` の列車が、手前の端まで `room` の踏切 `tile` に、閉じてから [`CROSSING_WARN_TICKS`] tick たつ前に
+    /// 入れてしまうか。踏切が閉じた tick を `s` とすると、先頭が入ってよいのは tick `s + 15` に進むときからで、
+    /// 体は tick `s + 16` の頭に踏切にかかる。まだ閉じていない踏切は、早くて次の tick に閉じるとみなす。
+    /// 列車の位置で閉じた踏切には、閉じたときに先頭が 16 tick で進める距離より遠くにいるので、この判定に
+    /// かからない。かかるのは、踏切のすぐ手前から走り出す列車である。
+    fn too_early(&self, tile: TilePos, now: u64, v: i64, room: i64) -> bool {
+        let warn = CROSSING_WARN_TICKS.unsigned_abs();
+        let ticks = match self.closed_since(tile) {
+            Some(since) => (since + warn - 1).saturating_sub(now),
+            None => warn,
+        };
+        reach(v, i64::try_from(ticks).expect("tick があふれた")) > room
+    }
+
+    /// 列車の体がかかっている踏切。
+    pub(super) fn crossings_under_trains(&self) -> BTreeSet<TilePos> {
+        let mut on = BTreeSet::new();
         if self.crossings.is_empty() {
-            return;
+            return on;
         }
+        let by_track = self.crossings_by_track();
+        for (_, t) in self.trains.iter() {
+            let Some(line) = self.lines.get(t.line) else {
+                continue;
+            };
+            for c in Self::crossings_near(&by_track, line, t) {
+                if on_body(&c) {
+                    on.insert(c.tile);
+                }
+            }
+        }
+        on
+    }
+
+    /// tick `now` の頭に閉じた踏切 `closed` を書き留め、閉じていた長さを数える。列車を進める前に呼ぶ。
+    pub(crate) fn mark_closed(&mut self, now: u64, closed: &BTreeSet<TilePos>) {
         let tally = &mut self.crossing_tally;
-        tally.wait = tally.wait.saturating_add(waits);
         for (tile, since) in &mut self.crossings {
             if closed.contains(tile) {
                 tally.closed_ticks = tally.closed_ticks.saturating_add(1);
@@ -311,22 +362,20 @@ impl Rail {
                 *since = None;
             }
         }
+    }
+
+    /// 踏切で待った車と、列車とぶつかりかけた回数を数える。`occupied` は中に車か人がいる踏切、
+    /// `waits` は閉じた踏切の手前で止まっていた車の数である。列車を進めたあとに呼ぶ。
+    pub(crate) fn note_crossings(&mut self, occupied: &BTreeSet<TilePos>, waits: u64) {
+        if self.crossings.is_empty() {
+            return;
+        }
+        self.crossing_tally.wait = self.crossing_tally.wait.saturating_add(waits);
         if occupied.is_empty() {
             return;
         }
-        let by_track = self.crossings_by_track();
-        let mut hit = BTreeSet::new();
-        for (_, t) in self.trains.iter() {
-            let Some(line) = self.lines.get(t.line) else {
-                continue;
-            };
-            for c in Self::crossings_near(&by_track, line, t) {
-                if NOSE_MM > c.near && -BODY_BACK_MM < c.far && occupied.contains(&c.tile) {
-                    hit.insert(c.tile);
-                }
-            }
-        }
+        let hit = self.crossings_under_trains().intersection(occupied).count();
         let tally = &mut self.crossing_tally;
-        tally.overrun = tally.overrun.saturating_add(hit.len() as u64);
+        tally.overrun = tally.overrun.saturating_add(hit as u64);
     }
 }

@@ -479,6 +479,7 @@ impl Rail {
     }
 
     /// 列車を 1 tick 進める。`occupied` は、車か人が中にいる踏切である。止まりきれる列車はその手前で止まる。
+    /// 閉じてから [`super::CROSSING_WARN_TICKS`] tick たっていない踏切にも、列車は入らない。
     pub fn step_with(&mut self, tick: Tick, occupied: &BTreeSet<TilePos>) {
         if self.lines.is_unused() {
             return;
@@ -486,7 +487,7 @@ impl Rail {
         self.count_down();
         let mut held = self.occupancy();
         let blocked = self.reserve(tick.0, &mut held);
-        let stops = self.crossing_stops(occupied);
+        let stops = self.crossing_stops(tick.0, occupied);
         self.run(&stops);
         // 新しい列車は、走っている列車が閉塞を押さえ終えてから出す。行き詰まりの輪から列車を消したとき、
         // 空いたホームを待っていた列車が、出直す列車より先に入れるようにするためである。

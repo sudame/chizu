@@ -232,7 +232,8 @@ impl World {
             return;
         };
         let (occupied, waits) = rail.traffic(&self.trips);
+        self.rail.mark_closed(tick.0, &closed);
         self.rail.step_with(tick, &occupied);
-        self.rail.note_crossings(tick.0, &closed, &occupied, waits);
+        self.rail.note_crossings(&occupied, waits);
     }
 }
