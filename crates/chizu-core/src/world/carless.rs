@@ -572,4 +572,49 @@ mod tests {
         }
         set_home_spaces_limit(None);
     }
+
+    /// 越してくる人が見込む駐車場の点は、家のある世帯の点の世帯ごとの平均である。家のある世帯がいなければ満点で、
+    /// みな車を持てなければ 30 になり、共同の駐車場を置くと上がる。見込みの幸福度はこの点と税率から決まる。
+    #[test]
+    fn newcomers_expect_the_parking_of_the_households_in_town() {
+        use crate::happiness::PARKING_CARLESS;
+        set_home_spaces_limit(Some(0));
+        let mut w = city(&[ZoneKind::Residential, ZoneKind::Industrial]);
+        assert_eq!(w.newcomer_parking(), 100, "世帯のいない街で満点でない");
+        let empty = w.newcomer_happiness();
+        run(&mut w, TICKS_PER_DAY);
+        assert!(housed(&w) > 0);
+        assert_eq!(w.newcomer_parking(), PARKING_CARLESS);
+        let carless = w.newcomer_happiness();
+        assert!(carless < empty, "{carless} は {empty} より低くない");
+
+        let command = Command::PlaceBuilding {
+            kind: ServiceKind::ParkingLot,
+            at: TilePos::new(-20, 9),
+            rotation: 2,
+        };
+        assert_eq!(w.apply(&command), ApplyOutcome::Applied);
+        assert!(renters(&w) > 0);
+        // 世帯ごとに、住民の点（世帯の全員が同じ）を 1 つずつ数えて平均する
+        let scores = parking_scores(&w);
+        let p = w.population();
+        let mut by_household: BTreeMap<crate::id::HouseholdId, u64> = BTreeMap::new();
+        for (id, (_, score)) in &scores {
+            let h = p.citizen(*id).unwrap().household;
+            let was = by_household.insert(h, u64::from(*score));
+            assert!(
+                was.is_none_or(|v| v == u64::from(*score)),
+                "世帯の中で点が違う"
+            );
+        }
+        let want = by_household.values().sum::<u64>() / by_household.len() as u64;
+        assert_eq!(u64::from(w.newcomer_parking()), want);
+        assert!(w.newcomer_parking() > PARKING_CARLESS);
+        // 見込みの幸福度は 7 点で 1 点しか動かないので、少し借りただけでは同じこともある
+        let tax = w.tax_permille[ZoneKind::Residential.index()];
+        let expect = crate::happiness::newcomer_happiness(tax, w.newcomer_parking());
+        assert_eq!(w.newcomer_happiness(), expect);
+        assert!(w.newcomer_happiness() >= carless);
+        set_home_spaces_limit(None);
+    }
 }

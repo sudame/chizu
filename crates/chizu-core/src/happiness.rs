@@ -16,7 +16,7 @@ use crate::citizens::{
     CitizenChange, CitizenRow, HAPPINESS_MAX, HappinessParts, Population, WORKING_AGES,
 };
 use crate::command::ZoneKind;
-use crate::id::CitizenId;
+use crate::id::{CitizenId, HouseholdId};
 use crate::network::TILE_MM;
 use crate::round;
 use crate::service::Facility;
@@ -201,15 +201,34 @@ pub fn total(h: HappinessParts) -> u8 {
     (sum / WEIGHTS.iter().sum::<u64>()).min(cap) as u8
 }
 
-/// 職を得て、電気と水道の届く家に住み、通勤が短く、自宅の枠がある、蓄えが上限の半分の働く年齢の人が越してきたときの幸福度。
-/// 移住する人は、この見込みで街を選ぶ。いまは住宅の税率だけで決まる。
-pub fn newcomer_happiness(tax_permille: u16) -> u8 {
+/// 職を得て、電気と水道の届く家に住み、通勤が短い、蓄えが上限の半分の働く年齢の人が越してきたときの幸福度。
+/// 移住する人は、この見込みで街を選ぶ。駐車場の点は、街の住宅の世帯の駐車場の点の平均 `parking`
+/// （[`crate::world::World::newcomer_parking`]）を見込む。車を持てない世帯の多い街ほど、越してくる人が減る。
+pub fn newcomer_happiness(tax_permille: u16, parking: u8) -> u8 {
     total(HappinessParts {
         commute: HAPPINESS_MAX,
         services: HAPPINESS_MAX,
-        parking: HAPPINESS_MAX,
+        parking,
         wealth: wealth_score(30, true, Money(SAVINGS_FOR_FULL_BONUS.0 / 2), tax_permille),
     })
+}
+
+/// 家 `home` に住む世帯 `household` の駐車場の点数（[`parking_score`]）。世帯の全員が同じ点になる。
+pub fn household_parking(ctx: &CitizenContext, household: HouseholdId, home: &Building) -> u8 {
+    let place = ctx.car_places.get(household);
+    let lot = match place {
+        Some(CarPlace::Shared(corner)) => ctx
+            .facilities
+            .iter()
+            .find(|f| f.kind.is_parking() && f.area.min == corner)
+            .map(|f| f.front),
+        _ => None,
+    };
+    let savings = ctx
+        .population
+        .household_money(household)
+        .unwrap_or(Money::ZERO);
+    parking_score(place, home.front, lot, ctx.parking_fee, savings)
 }
 
 /// 住民 1 人の 4 つの点数。
@@ -234,18 +253,7 @@ pub fn parts_of(ctx: &CitizenContext, row: &CitizenRow) -> HappinessParts {
         .household_money(row.household)
         .unwrap_or(Money::ZERO);
     // 家のない世帯は車を持てない世帯に数えないので、駐車場の点は満点にする。
-    let parking = home.map_or(HAPPINESS_MAX, |b| {
-        let place = ctx.car_places.get(row.household);
-        let lot = match place {
-            Some(CarPlace::Shared(corner)) => ctx
-                .facilities
-                .iter()
-                .find(|f| f.kind.is_parking() && f.area.min == corner)
-                .map(|f| f.front),
-            _ => None,
-        };
-        parking_score(place, b.front, lot, ctx.parking_fee, savings)
-    });
+    let parking = home.map_or(HAPPINESS_MAX, |b| household_parking(ctx, row.household, b));
     HappinessParts {
         commute,
         services,
@@ -297,9 +305,17 @@ mod tests {
 
     #[test]
     fn newcomers_expect_less_under_a_high_tax() {
-        assert_eq!(newcomer_happiness(100), 88);
-        assert_eq!(newcomer_happiness(200), 54);
-        assert_eq!(newcomer_happiness(300), 42);
+        assert_eq!(newcomer_happiness(100, HAPPINESS_MAX), 88);
+        assert_eq!(newcomer_happiness(200, HAPPINESS_MAX), 54);
+        assert_eq!(newcomer_happiness(300, HAPPINESS_MAX), 42);
+    }
+
+    #[test]
+    fn newcomers_expect_less_where_households_cannot_keep_a_car() {
+        // 街の世帯がみな車を持てなければ、見込みは 10 点下がる。
+        assert_eq!(newcomer_happiness(100, PARKING_CARLESS), 78);
+        assert_eq!(newcomer_happiness(100, 65), 83);
+        assert!(newcomer_happiness(200, PARKING_CARLESS) < newcomer_happiness(200, HAPPINESS_MAX));
     }
 
     #[test]

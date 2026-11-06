@@ -222,6 +222,10 @@ observe の人と車の欄（原因が交通にあるかを見分けるための
   migration      転入。wantingHouseholds 移住の処理（60 tick ごと）1 回で外から来ようとする世帯の数、
                  vacantHomes 外の世界と道路でつながった住宅の空き戸数、homelessHouseholds と homelessCitizens 家がなく空き家を待つ世帯と住民、
                  blockedHouseholds 来ようとしても空き家が足りず入れない世帯の数。
+                 newcomerHappiness 越してくる人の見込みの幸福度。職があり、電気と水道が届き、通勤が短い人として、
+                 住宅の税率と newcomerParking から決まり、出ていく境目（52）に近いほど wantingHouseholds が減る。
+                 newcomerParking 見込みの駐車場の点。家のある世帯の駐車場の点（population.happinessParts.parking と同じ式）を
+                 世帯ごとに平均した値で、車を持てない世帯が多いほど下がる。共同の駐車場を置くと上がる。
                  vacantHomes が 0 なのに wantingHouseholds があるときは、住宅が足りないか、外の世界とつながっていない。
 
 observe の population.happinessParts（幸福度の内訳）:
@@ -1282,6 +1286,8 @@ fn migration(m: MigrationOutlook) -> Value {
         homeless_households,
         homeless_citizens,
         blocked_households,
+        newcomer_happiness,
+        newcomer_parking,
     } = m;
     json!({
         "wantingHouseholds": wanting_households,
@@ -1289,6 +1295,8 @@ fn migration(m: MigrationOutlook) -> Value {
         "homelessHouseholds": homeless_households,
         "homelessCitizens": homeless_citizens,
         "blockedHouseholds": blocked_households,
+        "newcomerHappiness": newcomer_happiness,
+        "newcomerParking": newcomer_parking,
     })
 }
 
@@ -1889,6 +1897,8 @@ const WATCHED: &[&str] = &[
     "/migration/vacantHomes",
     "/migration/homelessHouseholds",
     "/migration/blockedHouseholds",
+    "/migration/newcomerHappiness",
+    "/migration/newcomerParking",
     "/demand/Residential",
     "/demand/Commercial",
     "/demand/Industrial",

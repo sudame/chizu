@@ -16,8 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::World;
 use crate::building::{BASE_RESIDENTIAL_DEMAND, CityStats, happiness_pull, residential_tax_pull};
-use crate::citizens::HappinessParts;
 use crate::citizens::{Activity, MAX_HOUSEHOLD_SIZE, ScheduleState, WORKING_AGES, draw_household};
+use crate::citizens::{HAPPINESS_MAX, HappinessParts};
 use crate::clock::TICKS_PER_DAY;
 use crate::command::ZoneKind;
 use crate::happiness;
@@ -130,6 +130,10 @@ pub struct MigrationOutlook {
     pub homeless_citizens: u64,
     /// 来ようとする世帯のうち、空き家が足りず入れない数。
     pub blocked_households: u64,
+    /// 越してくる人の見込みの幸福度（[`World::newcomer_happiness`]）。
+    pub newcomer_happiness: u8,
+    /// 越してくる人が見込む駐車場の点数（[`World::newcomer_parking`]）。
+    pub newcomer_parking: u8,
 }
 
 impl World {
@@ -224,6 +228,43 @@ impl World {
                 wealth: avg(sum[3]),
             },
         )
+    }
+
+    /// 越してくる人が見込む駐車場の点数。街の住宅に住む世帯の駐車場の点数（[`happiness::household_parking`]）を、
+    /// 世帯ごとに平均して端数を切り捨てる。自宅の枠がある、共同の駐車場を借りている、車を持てない、の分かれ方が
+    /// そのまま出る。点数は組ごとの更新で書いた値ではなく、いまの状態から求める。越してきたばかりの世帯は、まだ
+    /// 書かれていないためである。家のある世帯がいなければ満点にする。
+    pub fn newcomer_parking(&self) -> u8 {
+        let p = &self.population;
+        let ctx = happiness::CitizenContext {
+            seed: self.seed,
+            tick: self.tick,
+            population: p,
+            buildings: &self.buildings,
+            tax_permille: self.tax_permille,
+            car_places: &self.car_places,
+            facilities: &self.facilities,
+            parking_fee: self.parking_fee,
+        };
+        let (mut sum, mut housed) = (0_u64, 0_u64);
+        for h in p.household_ids() {
+            let Some(home) = p.home(h).flatten().and_then(|b| self.buildings.get(b)) else {
+                continue;
+            };
+            sum += u64::from(happiness::household_parking(&ctx, h, home));
+            housed += 1;
+        }
+        match housed {
+            0 => HAPPINESS_MAX,
+            n => (sum / n) as u8,
+        }
+    }
+
+    /// 越してくる人の見込みの幸福度（[`happiness::newcomer_happiness`]）。住宅の税率と
+    /// [`Self::newcomer_parking`] で決まる。
+    pub fn newcomer_happiness(&self) -> u8 {
+        let tax = self.tax_permille[ZoneKind::Residential.index()];
+        happiness::newcomer_happiness(tax, self.newcomer_parking())
     }
 
     /// いま職場にいる住民の数。移動している住民と、帰りに寄った店にいる住民は数えない。
@@ -466,13 +507,16 @@ impl World {
         let mut homes = vacant
             .into_iter()
             .flat_map(|(id, free)| (0..free).map(move |_| id));
+        // 外から来る数は、家を待っていた世帯を入れる前に求める。入れた直後の世帯はまだ車を置く枠を配られておらず、
+        // 見込みの駐車場の点（`newcomer_parking`）に車を持てない世帯として入ってしまうためである。
+        // observe の転入の様子（`migration_outlook`）とも、同じ状態から求めることになる。
+        let count = self.arrivals_per_interval(free);
         for h in staying {
             let Some(home) = homes.next() else {
                 return;
             };
             self.population.set_home(h, Some(home), self.tick);
         }
-        let count = self.arrivals_per_interval(free);
         for k in 0..count {
             let Some(home) = homes.next() else {
                 return;
@@ -507,8 +551,7 @@ impl World {
         let pull = u64::try_from(want).expect("正の需要") / MIGRANTS_PER_DEMAND;
         let count = MIGRANTS_PER_INTERVAL + pull + free / MIGRANTS_PER_VACANCY;
         // 越してきた人の見込みの幸福度が、出ていく境目に近いほど来る数を減らす。
-        let tax = self.tax_permille[ZoneKind::Residential.index()];
-        let margin = u64::from(happiness::newcomer_happiness(tax).saturating_sub(LEAVE_BELOW));
+        let margin = u64::from(self.newcomer_happiness().saturating_sub(LEAVE_BELOW));
         count * margin.min(APPEAL_FULL_MARGIN) / APPEAL_FULL_MARGIN
     }
 
@@ -534,6 +577,8 @@ impl World {
             homeless_households,
             homeless_citizens,
             blocked_households: wanting.saturating_sub(room),
+            newcomer_happiness: self.newcomer_happiness(),
+            newcomer_parking: self.newcomer_parking(),
         }
     }
 
