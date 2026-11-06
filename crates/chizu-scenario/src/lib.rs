@@ -21,7 +21,7 @@ pub const RAIL_BENCH_LINES: usize = 64;
 pub const RAIL_BENCH_TRAINS: u8 = 8;
 
 /// 1 組の幅（マス）。
-const RAIL_UNIT_WIDTH: i64 = 230;
+const RAIL_UNIT_WIDTH: i64 = 260;
 
 /// 1 組の高さ（マス）。北の駅のホームから南の道路までの 14 行と、間の 4 行である。
 const RAIL_UNIT_HEIGHT: i64 = 18;
@@ -29,12 +29,13 @@ const RAIL_UNIT_HEIGHT: i64 = 18;
 /// 分岐と共有する区間のある 2 本の路線を 1 組にして、`lines / 2` 組並べた街。路線ごとに [`RAIL_BENCH_TRAINS`] 本を
 /// 走らせるよう決めてある（上限は 8 本）。
 ///
-/// 1 組は、南の道路に面した駅 W、M、E を東西に並べ、M と E のあいだの分岐から北東へ分かれて駅 N へ向かう線路を
-/// 引いたものである。路線は W–M–E と W–M–N で、W、W–M の線路、M、M から分岐までの線路を共有する。
-/// 分岐から E と N までは長い線路で、どちらの路線にも待てる所が 9 つある。
-/// 原点のまわりの 17×17 チャンクを買い、水辺のない所を左上から順に探して置く。
+/// 1 組は、西と東の両側で線路が分かれる形である。真ん中の駅 M の両側に共有する線路があり、西は南の駅 V1 と
+/// 北の駅 V2、東は南の駅 E と北の駅 N へ、分岐で分かれる。路線は V1–M–E と V2–M–N で、M とその両側の線路を共有する。
+/// 4 つの終点はそれぞれ 1 本の路線だけが使う線路の先にあるので、ホームを 2 つ使えて、終点で折り返せる本数
+/// （`turn_cap`）が 8 本を上回る。終点を 2 本で分け合うと、折り返せる本数が足りずに列車が出そろわない（#375）。
+/// 原点のまわりの 21×21 チャンクを買い、水辺のない所を左上から順に探して置く。
 pub fn rail_trains_city(seed: u64, lines: usize) -> World {
-    const R: i32 = 8;
+    const R: i32 = 10;
     assert!(lines.is_multiple_of(2), "路線は 2 本ずつ置く");
     let mut w = World::new_with_money(seed, Money(i64::MAX / 4)).with_unlimited_land();
     // 買った土地に辺で接するチャンクしか買えないので、内側から外へ買い広げる。
@@ -79,7 +80,7 @@ pub fn rail_trains_city(seed: u64, lines: usize) -> World {
     w
 }
 
-/// `x` から東へ、y の道路に面した駅 W、M、E と、y − 10 の道路に面した駅 N、線路を置き、W–M–E と W–M–N の
+/// `x` から東へ、y の道路に面した駅 V1、M、E と、y − 10 の道路に面した駅 V2、N、線路を置き、V1–M–E と V2–M–N の
 /// 路線を作る。置けなければ偽を返す。
 fn place_rail_pair(w: &mut World, x: i64, y: i64) -> bool {
     let e = x + RAIL_UNIT_WIDTH - 3;
@@ -100,16 +101,21 @@ fn place_rail_pair(w: &mut World, x: i64, y: i64) -> bool {
     let (south, north) = (y - 2, y - 12);
     let commands = [
         road(x, x + RAIL_UNIT_WIDTH, y),
-        road(x + 73, x + RAIL_UNIT_WIDTH, y - 10),
+        road(x, x + 40, y - 10),
+        road(x + 121, x + RAIL_UNIT_WIDTH, y - 10),
         station(x + 12, south),
-        station(x + 42, south),
+        station(x + 12, north),
+        station(x + 90, south),
         station(e, south),
         station(e, north),
-        rail((x + 12, south), (x + 33, south)),
-        rail((x + 42, south), (e - 9, south)),
-        // 分岐から北東へ 10 マス進み、北の駅へ東へ向かう。
-        rail((x + 60, south), (x + 70, north)),
-        rail((x + 70, north), (e - 9, north)),
+        rail((x + 12, south), (x + 81, south)),
+        rail((x + 12, north), (x + 50, north)),
+        // 西の分岐。北西の線路が、南の線路へ東南東に10 マス進んで合わさる。
+        rail((x + 50, north), (x + 60, south)),
+        rail((x + 90, south), (e - 9, south)),
+        // 東の分岐。南の線路から北東へ 10 マス進み、北の駅へ東へ向かう。
+        rail((x + 108, south), (x + 118, north)),
+        rail((x + 118, north), (e - 9, north)),
     ];
     if !commands.iter().all(|c| w.apply(c) == ApplyOutcome::Applied) {
         return false;
@@ -119,19 +125,16 @@ fn place_rail_pair(w: &mut World, x: i64, y: i64) -> bool {
             .station_at(TilePos::new(tx, row))
             .expect("駅がない")
     };
-    let (sw, sm, se, sn) = (
-        at(x + 12, south),
-        at(x + 42, south),
-        at(e, south),
-        at(e, north),
-    );
-    for end in [se, sn] {
-        if w.apply(&Command::CreateLine { from: sw, to: sm }) != ApplyOutcome::Applied {
+    let (west_south, west_north, mid) = (at(x + 12, south), at(x + 12, north), at(x + 90, south));
+    let (east_south, east_north) = (at(e, south), at(e, north));
+    // 真ん中の M を通る共有の区間を挟んで、西と東の端がそれぞれ別々の終点になる。
+    for (from, to) in [(west_south, east_south), (west_north, east_north)] {
+        if w.apply(&Command::CreateLine { from, to: mid }) != ApplyOutcome::Applied {
             return false;
         }
         let (line, _) = w.rail().lines().last().expect("路線がない");
         let rest = [
-            Command::ExtendLine { line, station: end },
+            Command::ExtendLine { line, station: to },
             Command::SetLineTrains {
                 line,
                 trains: RAIL_BENCH_TRAINS,
@@ -782,6 +785,23 @@ mod tests {
             assert!(sizes[size] * 8 > households, "{size} 人の世帯 {sizes:?}");
         }
         assert!(minors > 0);
+    }
+
+    /// ベンチマークの列車がそろう前提。どの路線も、終点で折り返せる本数（`turn_cap`）などの上限に抑えられずに、
+    /// [`RAIL_BENCH_TRAINS`] 本を走らせられる。崩れると `rail_trains` が「列車が出そろわない」で落ちる。
+    #[test]
+    fn rail_bench_city_runs_every_requested_train() {
+        let w = rail_trains_city(1, RAIL_BENCH_LINES);
+        assert_eq!(w.rail().lines().count(), RAIL_BENCH_LINES);
+        for (id, line) in w.rail().lines() {
+            assert_eq!(
+                line.allowed(),
+                RAIL_BENCH_TRAINS,
+                "{id:?}: 上限 {}、折り返し {}",
+                line.cap(),
+                line.turn_cap()
+            );
+        }
     }
 
     #[test]
