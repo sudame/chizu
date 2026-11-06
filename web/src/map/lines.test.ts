@@ -135,6 +135,25 @@ describe("路線の一覧", () => {
     expect(lineRow(zero, name).canAdd).toBe(false);
   });
 
+  test("上限が 0 の路線と 0 でない路線が混ざった並びを続けて読む", () => {
+    const lines = parseLines([
+      ...encode(0),
+      ...encode(1, { cap: 0, shared: [[0, 0]] }),
+      ...encode(2),
+      ...encode(3, {
+        cap: 0,
+        shared: [
+          [0, 0],
+          [2, 0],
+        ],
+      }),
+    ]);
+    expect(lines.map((l) => l.index)).toEqual([0, 1, 2, 3]);
+    expect(lines.map((l) => l.sharedWith.length)).toEqual([0, 1, 0, 2]);
+    expect(lines[2]?.tracks).toHaveLength(1);
+    expect(lines[3]?.sharedWith[1]).toEqual({ index: 2, generation: 0 });
+  });
+
   test("上限が 0 の理由に、共有している路線の名前を出す", () => {
     const [shared] = parseLines(
       encode(2, {

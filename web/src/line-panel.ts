@@ -33,7 +33,7 @@ export type LineRow = {
 export function capZeroReason(line: RailLineInfo): string {
   const names = line.sharedWith.map((l) => lineName(l.index)).join("、");
   if (names !== "") {
-    return `この路線は${names}と進路を共有していて、待てる所がないので走れない（待てる所 ${line.waitPlaces}）`;
+    return `この路線は${names}と進路を共有していて、待てる所が足りないので走れない（待てる所 ${line.waitPlaces}、2 つ以上いる）`;
   }
   return `待てる所が足りないので走れない（待てる所 ${line.waitPlaces}、2 つ以上いる）`;
 }
