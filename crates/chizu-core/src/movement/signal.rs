@@ -12,8 +12,15 @@
 //! - 段階の軸に、交差点の手前まで来た車がいなければ、車の来ている次の軸に青を渡す。
 //!   空いた軸のために、ほかの軸の車を待たせない。段階の軸の青が終わる前に、車が来なくなった時点で
 //!   次へ渡すので、`GREEN` は青の上限になる。
-//! - ただし、ほかの軸の腕の横断歩道を渡ろうと待つ人がいれば、段階の軸の青を渡さない。その人は、
-//!   段階の軸が青のあいだに渡る番だからである。
+//! - ほかの軸の腕の横断歩道を渡ろうと待つ人は、段階の軸が青のあいだに渡る番である。ただし、信号の
+//!   ない交差点と同じく、来た車を先に通す。青を渡さないのは、その人が
+//!   [`PED_WAIT`](super::crossing::PED_WAIT) tick 以上待ったときだけである。
+//! - ほかの軸に車が来ていなければ、段階の軸の車と、ほかの軸の腕を渡ろうと待つ人のために、骨組みの黄と
+//!   全方向の赤のあいだも段階の軸を青のままにする。来ていない向きのために、車と人を止めない。
+//! - どの軸にも車が来ておらず、段階の軸の腕を渡ろうと待つ人だけがいれば、次の軸を青にして、その人を
+//!   渡らせる。押しボタンの信号と同じく、人の求めで青を渡し、その人が渡り終えるまで続ける。
+//! - 渡る腕の軸に車が来ていなければ、歩く人は骨組みの青の終わり際（[`WALK_CLEAR`]）でも渡り始める。
+//!   その軸が青になっても、待たせる車がいないからである。
 //! - 止まりきれない車のいる軸は、どの段階でも、その tick は黄にする。青をほかの軸へ移すのは、
 //!   ほかの軸に止まりきれない車がいなくなってからにする。どの車も赤では入らない。止まりきれない車が
 //!   2 つの軸にいれば、どちらも黄になり、どちらの車も入る（止まりきれない車は譲り合いでも止めない）。
@@ -67,6 +74,10 @@ pub struct AxisDemand {
     pub committed: bool,
     /// その軸の腕の横断歩道を、渡り始めようと待つ人がいる。
     pub walkers: bool,
+    /// その軸の腕の横断歩道を、いま渡っている人がいる。
+    pub crossing: bool,
+    /// そのうち、[`PED_WAIT`](super::crossing::PED_WAIT) tick 以上待った人がいる。
+    pub patient: bool,
 }
 
 /// tick を進める前の、信号のある交差点ごとの軸の様子。状態には持たず、tick ごとに作り直す。
@@ -135,6 +146,8 @@ pub struct SignalState {
     pub red_ticks: u32,
     /// 骨組みの周期で、いまの段階に入ってからの tick 数。
     pub elapsed: u64,
+    /// 軸ごとの、交差点の手前まで来た車がいるか。
+    pub cars: [bool; 4],
 }
 
 impl SignalState {
@@ -144,11 +157,12 @@ impl SignalState {
     }
 
     /// 軸 `axis` の腕の横断歩道を、歩く人が渡り始めてよいか。その腕の車が赤で、ほかの軸が青のあいだ、
-    /// 骨組みの段階の青が終わる [`WALK_CLEAR`] tick 前までである。
+    /// 骨組みの段階の青が終わる [`WALK_CLEAR`] tick 前までである。その腕の軸に車が来ていなければ、
+    /// 終わり際でも渡り始めてよい。
     pub fn walk(&self, axis: u8) -> bool {
         self.light_for(axis) == Light::Red
             && self.lights.contains(&Light::Green)
-            && self.elapsed + WALK_CLEAR < GREEN
+            && (!self.cars[usize::from(axis)] || self.elapsed + WALK_CLEAR < GREEN)
     }
 }
 
@@ -185,10 +199,12 @@ pub fn state(net: &Network, node: NodeId, now: Tick, demand: &Demand) -> Option<
     } else {
         Light::Red
     };
+    let d = demand.at(node);
     Some(SignalState {
-        lights: actuate(&order, phase, fixed, &demand.at(node)),
+        lights: actuate(&order, phase, fixed, &d),
         red_ticks: u32::try_from(cycle - GREEN).expect("赤の長さが u32 に収まらない"),
         elapsed: within,
+        cars: d.map(|a| a.cars),
     })
 }
 
@@ -200,14 +216,26 @@ fn actuate(order: &[u8], phase: usize, fixed: Light, d: &[AxisDemand; 4]) -> [Li
     let next = (1..order.len())
         .map(|j| order[(phase + j) % order.len()])
         .find(|a| at(*a).cars);
+    // 段階の軸でない腕を渡ろうと待つ人。その人は、段階の軸が青のあいだに渡る番である。
+    let others_walk = order.iter().any(|a| *a != own && at(*a).walkers);
+    let others_patient = order.iter().any(|a| *a != own && at(*a).patient);
     // 止まりきれない車を考えずに決めた、灯火を受ける軸と灯火。
-    let (lit, light) = if fixed != Light::Green {
+    let (lit, light) = match next {
         // 黄と赤の段階では、車の来ている次の軸へ早めに渡す。
-        next.map_or((own, fixed), |b| (b, Light::Green))
-    } else if at(own).cars || order.iter().any(|a| *a != own && at(*a).walkers) {
-        (own, Light::Green)
-    } else {
-        (next.unwrap_or(own), Light::Green)
+        Some(b) if fixed != Light::Green => (b, Light::Green),
+        // 段階の軸に車が来ていなければ、車の来ている次の軸へ渡す。ほかの軸の腕を渡ろうと待つ人は、
+        // 信号のない交差点と同じく来た車を先に通し、長く待った人がいるときだけ渡さない。
+        Some(b) if !at(own).cars && !others_patient => (b, Light::Green),
+        Some(_) => (own, Light::Green),
+        // ほかの軸に車が来ておらず、段階の軸の腕を渡ろうと待つ人だけがいれば、ほかの軸を青にして渡らせる。
+        // 渡り始めた人が渡り終えるまでは、移した青を続ける。灯火がその人の角に着くたびに戻らないようにする。
+        None if !at(own).cars && (at(own).walkers || at(own).crossing) && !others_walk => {
+            (order[(phase + 1) % order.len()], Light::Green)
+        }
+        // ほかの軸に車が来ていなければ、段階の軸の車と、ほかの軸の腕を渡る人のために、骨組みの黄と赤の
+        // あいだも段階の軸を青のままにする。
+        None if at(own).cars || others_walk || fixed == Light::Green => (own, Light::Green),
+        None => (own, fixed),
     };
     let mut lights = [Light::Red; 4];
     for &a in order {
