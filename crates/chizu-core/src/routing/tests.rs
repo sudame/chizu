@@ -814,6 +814,109 @@ fn delays_never_raise_a_link_cost_past_the_cap() {
     );
 }
 
+#[test]
+fn signal_wait_adds_to_queue_delays_but_not_to_measured_ones() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (20, 0), RoadKind::Small);
+    road(&mut n, (20, -10), (20, 10), RoadKind::Small);
+    let node = n.node_at(TilePos::new(20, 0)).unwrap();
+    n.set_signal(node, true).unwrap();
+    let car = LaneMode::Car;
+    let into = link(&n, (0, 0), (20, 0), car);
+    let away = link(&n, (20, 0), (0, 0), car);
+    let cross = link(&n, (20, -10), (20, 0), car);
+    let mut router = AstarRouter::new(&n);
+    let g = router.graph(car);
+    let free = g.link_cost(away).unwrap();
+    // 交わる軸に車が来なければ、待つのは黄と全方向の赤のあいだだけである。
+    let idle = 5 * 5 * 1_000 / 70;
+    assert_eq!(g.signal_wait(into), Some(idle));
+    assert_eq!(g.signal_wait(away), Some(0));
+    assert_eq!(g.link_cost(into), Some(free + idle));
+    assert_eq!(
+        router
+            .graph(LaneMode::Sidewalk)
+            .signal_wait(link(&n, (0, 0), (20, 0), LaneMode::Sidewalk)),
+        Some(0)
+    );
+    // 交わる軸の腕が忙しく、青を使い切ると、十字路と同じ見込みになる。信号へ向かうリンクにだけ足す。
+    let busy = |d: Delays| d.with_busy([(cross, 1_000)]);
+    let wait = 40 * 40 * 1_000 / 140;
+    router.set_delays(&busy(Delays::default()));
+    assert_eq!(router.graph(car).signal_wait(into), Some(wait));
+    assert_eq!(router.graph(car).link_cost(away), Some(free));
+    assert_eq!(router.graph(car).link_cost(into), Some(free + wait));
+    // 並んでいる台数から見積もった遅れには、待ちの見込みを足す。遅れの上限は見込みの手前で決める。
+    router.set_delays(&busy(Delays::from_sorted([(into, 5_000)])));
+    assert_eq!(router.graph(car).link_cost(into), Some(free + 5_000 + wait));
+    router.set_delays(&busy(Delays::from_sorted([(into, 100 * free)])));
+    assert_eq!(
+        router.graph(car).link_cost(into),
+        Some(graph::DELAY_CAP_TIMES * free + wait)
+    );
+    // 抜けた台数から測った遅れは信号で待った時間を含むので、見込みとの長いほうにする。
+    let measured = |ms| busy(Delays::from_rows([(into, Delay { ms, measured: true })]));
+    router.set_delays(&measured(wait / 2));
+    assert_eq!(router.graph(car).link_cost(into), Some(free + wait));
+    router.set_delays(&measured(wait + 3_000));
+    assert_eq!(router.graph(car).link_cost(into), Some(free + wait + 3_000));
+    // 信号を外すと、遅れはそのままに、見込みだけを除く。
+    n.set_signal(node, false).unwrap();
+    router.set_signals(&n);
+    assert_eq!(router.graph(car).signal_wait(into), Some(0));
+    router.set_delays(&busy(Delays::from_sorted([(into, 5_000)])));
+    assert_eq!(router.graph(car).link_cost(into), Some(free + 5_000));
+}
+
+#[test]
+fn busy_links_without_signals_keep_the_cached_routes() {
+    let n = grid(6);
+    let mut router = AstarRouter::new(&n);
+    router.route_batch(&requests(&n, 300));
+    let all = router.cached();
+    assert!(all > 0);
+    // 信号がなければ、忙しさは費用を変えないので、覚えた結果を捨てない。
+    let l = n.links().find(|l| l.mode == LaneMode::Car).unwrap();
+    router.set_delays(&Delays::default().with_busy([(l, 500)]));
+    assert_eq!(router.cached(), all);
+    assert_eq!(router.delays().busy().count(), 1);
+}
+
+#[test]
+fn placing_a_signal_drops_only_the_car_routes_it_may_change() {
+    let mut n = grid(6);
+    let mut router = AstarRouter::new(&n);
+    router.route_batch(&requests(&n, 300));
+    let walks = router
+        .cache
+        .keys()
+        .filter(|k| k.mode == LaneMode::Sidewalk)
+        .count();
+    let all = router.cached();
+    assert!(walks > 0 && walks < all);
+    // 交差点でないノードは信号を置けないので、何も変わらない。
+    router.set_signals(&n);
+    assert_eq!(router.cached(), all);
+    let (junction, _) = n.nodes().find(|(_, x)| x.segments.len() >= 3).unwrap();
+    n.set_signal(junction, true).unwrap();
+    router.set_signals(&n);
+    assert_eq!(router.cached(), walks, "歩く経路の覚えた結果は残す");
+    check_cached_size(&router);
+    // 網がグラフより新しければ、作り直すまで何もしない。
+    let version = router.version();
+    router.route_batch(&requests(&n, 300));
+    let cached = router.cached();
+    road(&mut n, (100, 100), (110, 100), RoadKind::Small);
+    n.set_signal(junction, false).unwrap();
+    router.set_signals(&n);
+    assert_eq!((router.version(), router.cached()), (version, cached));
+    router.rebuild(&n);
+    assert_eq!(
+        router.graph(LaneMode::Car),
+        AstarRouter::new(&n).graph(LaneMode::Car)
+    );
+}
+
 /// 覚えている結果の大きさが、残っている結果から数え直した値と同じであることを確かめる。
 fn check_cached_size(router: &AstarRouter) {
     let want: usize = router.cache.values().map(size_of_entry).sum();

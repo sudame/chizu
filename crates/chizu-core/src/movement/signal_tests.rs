@@ -2,6 +2,7 @@ use super::signal::{self, ALL_RED, Demand, GREEN, Light, PHASE, YELLOW};
 use super::*;
 use crate::command::{NodeId, RoadKind};
 use crate::network::Line;
+use crate::routing::Delays;
 
 fn road(n: &mut Network, from: (i64, i64), to: (i64, i64), kind: RoadKind) {
     let line = Line::between(TilePos::new(from.0, from.1), TilePos::new(to.0, to.1)).unwrap();
@@ -510,4 +511,147 @@ fn an_axis_with_a_car_that_cannot_stop_is_never_red() {
             "tick {t}"
         );
     }
+}
+
+/// 西の (-8, 4) から東の (48, 4) へ、北の y=0 と南の y=10 の 2 本の並行する道のどちらかを通って抜ける網。
+/// 北の道を通るほうが 4 マス短い。どちらの道にも 8 マスおきに横道が付き、T 字の交差点が 4 つずつある。
+/// 北の道の交差点を返す。
+fn parallel_roads() -> (Network, Vec<NodeId>) {
+    let mut n = Network::new();
+    road(&mut n, (-8, 4), (0, 4), RoadKind::Small);
+    road(&mut n, (40, 4), (48, 4), RoadKind::Small);
+    for y in [0, 10] {
+        road(&mut n, (0, y), (40, y), RoadKind::Small);
+    }
+    road(&mut n, (0, 0), (0, 10), RoadKind::Small);
+    road(&mut n, (40, 0), (40, 10), RoadKind::Small);
+    let mut north = Vec::new();
+    for x in [8, 16, 24, 32] {
+        road(&mut n, (x, 0), (x, -4), RoadKind::Small);
+        road(&mut n, (x, 10), (x, 14), RoadKind::Small);
+        north.push(n.node_at(TilePos::new(x, 0)).unwrap());
+    }
+    (n, north)
+}
+
+/// 西の道の上の 7 か所から東の道の上の 7 か所へ車を出し、北の道を通る車の数と、出した車の数を返す。
+fn drives_north(c: &mut Cars) -> (usize, usize) {
+    let (a, b) = (
+        c.net.node_at(TilePos::new(16, 0)).unwrap(),
+        c.net.node_at(TilePos::new(24, 0)).unwrap(),
+    );
+    let north = c
+        .net
+        .segments()
+        .find(|(_, s)| (s.a, s.b) == (a, b) || (s.a, s.b) == (b, a))
+        .expect("北の道がない")
+        .0;
+    let pairs: Vec<_> = (-7..0)
+        .flat_map(|x| (41..48).map(move |y| (at(x, 4, (1, 0), 0), at(y, 4, (1, 0), 0))))
+        .collect();
+    let ids = c.trips.spawn_drives(&c.net, &mut c.router, &pairs, c.now);
+    let routes: Vec<_> = ids
+        .iter()
+        .map(|id| {
+            c.trips
+                .get(id.expect("車を出せない"))
+                .unwrap()
+                .route()
+                .clone()
+        })
+        .collect();
+    let via_north = routes
+        .iter()
+        .filter(|r| r.links.iter().any(|l| l.segment == north))
+        .count();
+    (via_north, routes.len())
+}
+
+/// 北の道の交差点 `node` へ、北の横道から入るリンク。
+fn side_link(n: &Network, node: NodeId) -> LinkId {
+    let tile = n.node(node).unwrap().tile();
+    let top = n.node_at(TilePos::new(tile.x, tile.y - 4)).unwrap();
+    let (segment, s) = n
+        .segments()
+        .find(|(_, s)| (s.a, s.b) == (top, node) || (s.a, s.b) == (node, top))
+        .expect("横道がない");
+    LinkId {
+        segment,
+        dir: if s.b == node {
+            crate::network::Dir::Forward
+        } else {
+            crate::network::Dir::Backward
+        },
+        mode: LaneMode::Car,
+    }
+}
+
+#[test]
+fn cars_avoid_the_parallel_road_lined_with_busy_signals() {
+    let (n, north) = parallel_roads();
+    // 信号がなければ、どの車も短い北の道を選ぶ。
+    let mut c = Cars::new(n.clone(), 0);
+    let (via, all) = drives_north(&mut c);
+    assert_eq!(via, all);
+    // 北の道の交差点に信号を並べても、横道に車が来なければ、感応式の信号はほとんど待たせないので、北の道を選ぶ。
+    let version = c.net.version();
+    for node in &north {
+        c.net.set_signal(*node, true).unwrap();
+    }
+    assert_eq!(c.net.version(), version);
+    c.router.set_signals(&c.net);
+    assert_eq!(c.router.version(), version);
+    assert_eq!(drives_north(&mut c).0, all);
+    // 横道が忙しく、交わる軸が青を使い切ると、網を作り直さずに、どの車も南の道を選ぶ。
+    let mut side: Vec<LinkId> = north.iter().map(|x| side_link(&c.net, *x)).collect();
+    side.sort_unstable();
+    let busy = Delays::default().with_busy(side.iter().map(|l| (*l, 1_000)));
+    c.router.set_delays(&busy);
+    assert_eq!(drives_north(&mut c).0, 0);
+    // 信号の費用は、網から作り直したグラフに同じ忙しさを入れたものと同じである。
+    let mut fresh = AstarRouter::new(&c.net);
+    fresh.set_delays(&busy);
+    assert_eq!(c.router.graph(LaneMode::Car), fresh.graph(LaneMode::Car));
+    // 信号を外せば、横道が忙しくても北の道に戻る。
+    for node in &north {
+        c.net.set_signal(*node, false).unwrap();
+    }
+    c.router.set_signals(&c.net);
+    let mut plain = Cars::new(n, 0).router;
+    plain.set_delays(&busy);
+    assert_eq!(c.router.graph(LaneMode::Car), plain.graph(LaneMode::Car));
+    assert_eq!(drives_north(&mut c), (all, all));
+}
+
+#[test]
+fn the_expected_wait_follows_how_busy_the_other_axes_are() {
+    let (x, y) = (0_u8, 2_u8);
+    let cross = [true, false, true, false];
+    // 十字路の交わる軸が青を使い切ると、周期 70 tick のうち 40 tick が赤である。40 × 40 ÷ (2 × 70) tick。
+    let full = [1_000, 0, 1_000, 0];
+    assert_eq!(
+        signal::expected_wait_ms(cross, x, full),
+        40 * 40 * 1_000 / 140
+    );
+    // 自分の軸がどれだけ忙しくても、見込みは変わらない。
+    assert_eq!(
+        signal::expected_wait_ms(cross, x, [0, 0, 1_000, 0]),
+        40 * 40 * 1_000 / 140
+    );
+    // 交わる軸に車が来なければ、待つのは自分の軸の黄と全方向の赤のあいだだけである。5 × 5 ÷ (2 × 35) tick。
+    assert_eq!(
+        signal::expected_wait_ms(cross, x, [1_000, 0, 0, 0]),
+        5 * 5 * 1_000 / 70
+    );
+    // 交わる軸が周期の 1/7（10 tick）を要るなら、その段階は 1/3 に縮む。赤は 5 + 35 / 3 tick。
+    let some = signal::expected_wait_ms(cross, y, [143, 0, 0, 0]);
+    let red = 5_000 + 143 * 70 * 35 / 30;
+    assert_eq!(some, red * red / (2 * (red + 30_000)));
+    assert!(5 * 5 * 1_000 / 70 < some && some < 40 * 40 * 1_000 / 140);
+    // 軸 3 つで、ほかの 2 つの軸が青を使い切ると、周期 105 tick のうち 75 tick が赤である。
+    let three = [true, true, true, false];
+    assert_eq!(
+        signal::expected_wait_ms(three, x, [0, 1_000, 1_000, 0]),
+        75 * 75 * 1_000 / 210
+    );
 }

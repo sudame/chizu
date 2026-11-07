@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::congestion::MS_PER_TICK;
 use crate::command::NodeId;
 use crate::network::{Network, NodeControl};
 use crate::units::Tick;
@@ -166,20 +167,69 @@ impl SignalState {
     }
 }
 
-/// ノード `node` の信号の、tick `now` の段階。`demand` は tick `now` を進める前の様子である。
-/// 信号がないか、3 本以上の区間が集まる交差点でなければ `None`。
-pub fn state(net: &Network, node: NodeId, now: Tick, demand: &Demand) -> Option<SignalState> {
+/// 交差点 `node` に腕のある軸。3 本以上の区間が集まる交差点でなければ `None`。信号の有無は見ない。
+pub fn junction_axes(net: &Network, node: NodeId) -> Option<[bool; 4]> {
     let n = net.node(node)?;
-    if n.control != NodeControl::Signal || n.segments.len() < 3 {
+    if n.segments.len() < 3 {
         return None;
     }
     let mut axes = [false; 4];
     for s in &n.segments {
         axes[usize::from(axis(arm_step(net, node, *s)?))] = true;
     }
-    let order: Vec<u8> = (0..4_u8).filter(|a| axes[usize::from(*a)]).collect();
-    let count = u64::try_from(order.len()).expect("軸の数が u64 に収まらない");
-    let cycle = count * PHASE;
+    Some(axes)
+}
+
+/// 交差点 `node` の、区間 `segment` の腕の軸。
+pub fn arm_axis(net: &Network, node: NodeId, segment: crate::network::SegmentId) -> Option<u8> {
+    arm_step(net, node, segment).map(axis)
+}
+
+/// ノード `node` の信号が順に青にする軸。信号がないか、3 本以上の区間が集まる交差点でなければ `None`。
+fn signal_axes(net: &Network, node: NodeId) -> Option<Vec<u8>> {
+    if net.node(node)?.control != NodeControl::Signal {
+        return None;
+    }
+    let axes = junction_axes(net, node)?;
+    Some((0..4_u8).filter(|a| axes[usize::from(*a)]).collect())
+}
+
+/// 軸 `order` を順に青にする骨組みの周期（tick）。
+fn cycle_of(order: &[u8]) -> u64 {
+    u64::try_from(order.len()).expect("軸の数が u64 に収まらない") * PHASE
+}
+
+/// 信号のある交差点に、軸 `own` の腕から入る車が待つ時間の見込み（ms）。経路の費用に足す（設計 5.3）。
+/// `axes` は交差点に腕のある軸、`need` は軸ごとの、青が要る割合（千分率。[`crate::routing::Delays::busy`]）である。
+///
+/// 周期のどこに着くかが一様なら、腕が青でない長さ `赤` のあいだに着く割合は `赤 ÷ 周期` で、そのとき待つのは
+/// 平均 `赤 ÷ 2` なので、見込みは `赤 × 赤 ÷ (2 × 周期)` になる。感応式なので、ほかの軸は車が来ているあいだだけ
+/// 青を使う。そこで、ほかの軸が使う青を、骨組みの周期のうちその軸に要る割合から見積もり、`GREEN` で切る。
+/// その軸の段階の長さ（黄と全方向の赤を含む）は、使う青に比例して縮める。自分の軸の黄と全方向の赤は
+/// いつも赤に数え、自分の軸は青を使い切るものとする。ほかの軸がどれも青を使い切ると、十字路（軸 2 つ、周期
+/// 70 tick、赤 40 tick）で約 11 秒、軸 3 つで約 27 秒、軸 4 つで約 43 秒になり、ほかの軸に車がいなければ
+/// 0.4 秒ほどになる。同じ腕から曲がる向きはみな同じ灯火に従うので、見込みは曲がる向きによらない。
+pub fn expected_wait_ms(axes: [bool; 4], own: u8, need: [u64; 4]) -> u64 {
+    let count = u64::try_from(axes.iter().filter(|a| **a).count()).expect("軸の数");
+    let nominal = count * PHASE;
+    let mut red = (YELLOW + ALL_RED) * MS_PER_TICK;
+    for b in 0..4 {
+        if b == usize::from(own) || !axes[b] {
+            continue;
+        }
+        let used = (need[b].min(1_000) * nominal).min(GREEN * MS_PER_TICK);
+        red += used * PHASE / GREEN;
+    }
+    let cycle = red + GREEN * MS_PER_TICK;
+    red * red / (2 * cycle)
+}
+
+/// ノード `node` の信号の、tick `now` の段階。`demand` は tick `now` を進める前の様子である。
+/// 信号がないか、3 本以上の区間が集まる交差点でなければ `None`。
+pub fn state(net: &Network, node: NodeId, now: Tick, demand: &Demand) -> Option<SignalState> {
+    let n = net.node(node)?;
+    let order = signal_axes(net, node)?;
+    let cycle = cycle_of(&order);
     let tile = n.tile();
     let cycle_i = i64::try_from(cycle).expect("周期が i64 に収まらない");
     // マスの座標から決めるずらし。隣り合う交差点で、段階がそろいすぎないようにする。

@@ -22,7 +22,7 @@ use rayon::prelude::*;
 
 use astar::{Marks, extract, search_many};
 pub use astar::{Route, Scratch, Toward, astar, astar_variants, one_to_many, reach_within};
-pub use delay::Delays;
+pub use delay::{Delay, Delays};
 pub use graph::{
     Connector, Graph, GraphError, WALK_SPEED, connectors, speed_limit, try_connectors, walk_ms,
 };
@@ -252,13 +252,29 @@ impl AstarRouter {
         self.band
     }
 
-    /// 車のリンクの費用に足す遅れを `delays` にする。変わったら、覚えた車の結果を捨てる。
+    /// 車のリンクの費用に足す遅れを `delays` にする。費用が変わったら、覚えた車の結果を捨てる。
+    /// 信号のない街では、リンクの忙しさ（[`Delays::busy`]）が変わっても費用は変わらないので、捨てない。
     pub fn set_delays(&mut self, delays: &Delays) {
         if *delays == self.delays {
             return;
         }
         self.delays.clone_from(delays);
-        self.car.set_delays(delays);
+        if self.car.set_delays(delays) {
+            self.cache.retain(|r, _| r.mode != LaneMode::Car);
+            self.cache_size = self.cache.values().map(size_of_entry).sum();
+        }
+    }
+
+    /// 網 `net` のいまの信号を、車のリンクの費用に入れ直す。信号は網の版を上げずに置いたり外したりするので、
+    /// グラフは作り直さない。待ちの見込みが変わったら、遅れが変わったときと同じく覚えた車の結果を捨てる。
+    /// 走っている車の経路は探し直さない。グラフが網より古ければ何もしない。次に作り直すときに網の信号を読む。
+    pub fn set_signals(&mut self, net: &Network) {
+        if self.version != net.version()
+            || !self.car.set_signals(net)
+            || !self.car.set_delays(&self.delays)
+        {
+            return;
+        }
         self.cache.retain(|r, _| r.mode != LaneMode::Car);
         self.cache_size = self.cache.values().map(size_of_entry).sum();
     }

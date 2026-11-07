@@ -871,7 +871,8 @@ impl Network {
     }
 
     /// 交差点 `node` に信号を置くか、外す。3 本以上の区間が集まるノードでなければ置けない。
-    /// 信号は経路探索に効かないので、網の版は上げない。
+    /// 信号は経路探索のグラフの形を変えないので、網の版は上げない。待ちの見込みは、経路探索の側が
+    /// `AstarRouter::set_signals` で費用に入れ直す。
     pub fn set_signal(&mut self, node: NodeId, on: bool) -> Result<(), DenyReason> {
         let n = self.nodes.get_mut(node).ok_or(DenyReason::NotJunction)?;
         if on && n.segments.len() < 3 {

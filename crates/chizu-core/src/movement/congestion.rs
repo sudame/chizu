@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use super::{CAR_LENGTH, MIN_GAP, Trips, signal};
 use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId};
-use crate::routing::{BAND_TICKS, Delays};
+use crate::routing::{BAND_TICKS, Delay, Delays};
 use crate::units::Tick;
 
 /// 車 1 台が車線の上でふさぐ長さ（mm）。車の長さと、止まったときの最小の車間である。
@@ -148,18 +148,40 @@ impl Trips {
             };
             *queued.entry(link).or_insert(0) += 1;
         }
-        Delays::from_sorted(queued.into_iter().map(|(link, n)| {
+        let counted = |link: LinkId| net.segment(link.segment).is_some_and(|s| s.built < version);
+        // 忙しさは、抜けた台数を数えた時間のある、数え始める前からある区間だけで求める。
+        let busy: Vec<(LinkId, u64)> = counted_ms
+            .map(|ms| {
+                exits
+                    .iter()
+                    .filter(|(link, _)| counted(**link))
+                    .map(|(link, n)| {
+                        let lanes = net.link_lanes(*link).count().max(1) as u64;
+                        (
+                            *link,
+                            u64::from(*n) * QUEUE_MS_PER_CAR * 1_000 / (lanes * ms),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Delays::from_rows(queued.into_iter().map(|(link, n)| {
             let lanes = net.link_lanes(link).count().max(1) as u64;
             let floor = n * QUEUE_MS_PER_CAR / lanes;
-            let counted = net.segment(link.segment).is_some_and(|s| s.built < version);
+            let counted = counted(link);
             let measured = counted_ms
                 .filter(|_| counted && n > saturated_queue(net, link, lanes))
                 .map_or(0, |ms| {
                     let left = u64::from(exits.get(&link).copied().unwrap_or(0)).max(1);
                     n * (ms / left)
                 });
-            (link, floor.max(measured))
+            let delay = Delay {
+                ms: floor.max(measured),
+                measured: measured > floor,
+            };
+            (link, delay)
         }))
+        .with_busy(busy)
     }
 
     /// 車のいる区間の混み具合。区間の 2 つの向きのうち、混んでいるほうの段階を取る。
