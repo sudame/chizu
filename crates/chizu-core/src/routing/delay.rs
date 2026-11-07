@@ -36,10 +36,15 @@ impl Delays {
 
     /// リンクの順に並べた `(リンク, 遅れ（ms）)` から、並んでいる台数だけから見積もった遅れとして作る。
     pub fn from_sorted(rows: impl IntoIterator<Item = (LinkId, u64)>) -> Delays {
-        Delays::from_rows(
-            rows.into_iter()
-                .map(|(l, ms)| (l, Delay { ms, measured: false })),
-        )
+        Delays::from_rows(rows.into_iter().map(|(l, ms)| {
+            (
+                l,
+                Delay {
+                    ms,
+                    measured: false,
+                },
+            )
+        }))
     }
 
     /// リンク `link` の遅れ（ms）。

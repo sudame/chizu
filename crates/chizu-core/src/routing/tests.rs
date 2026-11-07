@@ -833,7 +833,12 @@ fn signal_wait_adds_to_queue_delays_but_not_to_measured_ones() {
     assert_eq!(g.signal_wait(into), Some(wait));
     assert_eq!(g.signal_wait(away), Some(0));
     assert_eq!(g.link_cost(into), Some(free + wait));
-    assert_eq!(router.graph(LaneMode::Sidewalk).signal_wait(link(&n, (0, 0), (20, 0), LaneMode::Sidewalk)), Some(0));
+    assert_eq!(
+        router
+            .graph(LaneMode::Sidewalk)
+            .signal_wait(link(&n, (0, 0), (20, 0), LaneMode::Sidewalk)),
+        Some(0)
+    );
     // 並んでいる台数から見積もった遅れには、待ちの見込みを足す。遅れの上限は見込みの手前で決める。
     router.set_delays(&Delays::from_sorted([(into, 5_000)]));
     assert_eq!(router.graph(car).link_cost(into), Some(free + 5_000 + wait));
@@ -885,7 +890,10 @@ fn placing_a_signal_drops_only_the_car_routes_it_may_change() {
     router.set_signals(&n);
     assert_eq!((router.version(), router.cached()), (version, cached));
     router.rebuild(&n);
-    assert_eq!(router.graph(LaneMode::Car), AstarRouter::new(&n).graph(LaneMode::Car));
+    assert_eq!(
+        router.graph(LaneMode::Car),
+        AstarRouter::new(&n).graph(LaneMode::Car)
+    );
 }
 
 /// 覚えている結果の大きさが、残っている結果から数え直した値と同じであることを確かめる。

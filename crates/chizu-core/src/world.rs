@@ -1394,10 +1394,16 @@ mod tests {
         assert_eq!(w.router.router.version(), version);
         let lit = w.router.router.graph(crate::network::LaneMode::Car).clone();
         assert_ne!(lit, free);
-        assert_eq!(&lit, AstarRouter::new(w.network()).graph(crate::network::LaneMode::Car));
+        assert_eq!(
+            &lit,
+            AstarRouter::new(w.network()).graph(crate::network::LaneMode::Car)
+        );
         // 書き出して読み戻した街も、同じ費用で探す。
         let back = World::from_snapshot(&w.to_snapshot()).unwrap();
-        assert_eq!(back.router.router.graph(crate::network::LaneMode::Car), &lit);
+        assert_eq!(
+            back.router.router.graph(crate::network::LaneMode::Car),
+            &lit
+        );
         assert_eq!(back.state_hash(), w.state_hash());
         let off = Command::SetSignal { node, on: false };
         assert_eq!(w.apply(&off), ApplyOutcome::Applied);

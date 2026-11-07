@@ -551,7 +551,13 @@ fn drives_north(c: &mut Cars) -> (usize, usize) {
     let ids = c.trips.spawn_drives(&c.net, &mut c.router, &pairs, c.now);
     let routes: Vec<_> = ids
         .iter()
-        .map(|id| c.trips.get(id.expect("車を出せない")).unwrap().route().clone())
+        .map(|id| {
+            c.trips
+                .get(id.expect("車を出せない"))
+                .unwrap()
+                .route()
+                .clone()
+        })
         .collect();
     let via_north = routes
         .iter()
@@ -584,7 +590,10 @@ fn cars_avoid_the_parallel_road_lined_with_signals() {
         c.net.set_signal(*node, false).unwrap();
     }
     c.router.set_signals(&c.net);
-    assert_eq!(c.router.graph(LaneMode::Car), Cars::new(n, 0).router.graph(LaneMode::Car));
+    assert_eq!(
+        c.router.graph(LaneMode::Car),
+        Cars::new(n, 0).router.graph(LaneMode::Car)
+    );
     assert_eq!(drives_north(&mut c), (all, all));
 }
 
