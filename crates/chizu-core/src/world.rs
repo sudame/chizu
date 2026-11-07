@@ -1106,7 +1106,7 @@ impl World {
 
     /// 車線に並んでいる車から、車のリンクごとの遅れを見積もり直し、経路探索の費用に入れる。
     fn estimate_delays(&mut self) {
-        self.delays = self.trips.queue_delays(&self.network);
+        self.delays = self.trips.queue_delays(&self.network, self.tick);
         self.router.router.set_delays(&self.delays);
     }
 

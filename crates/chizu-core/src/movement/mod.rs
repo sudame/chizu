@@ -699,6 +699,10 @@ pub struct Trips {
     /// 遅れを見積もるたびに 0 に戻す（[`Trips::queue_delays`]）。時間帯の途中で書き出した街を読み戻しても
     /// 同じ遅れになるよう、状態に入れる。
     exits: BTreeMap<LinkId, u32>,
+    /// `exits` を数え始めた tick。前に遅れを見積もった tick で、まだ見積もっていなければ街の始まりである。
+    counted_since: Tick,
+    /// `exits` を数え始めたときの網の版。これより後に足した区間は、数え始めた tick より後から数えている。
+    counted_version: u64,
     /// 駅の出入口に着いて休ませた移動。`World` が同じ tick のうちに取り出すので、書き出さない。
     #[serde(skip)]
     boarding: Vec<Boarding>,
@@ -1608,5 +1612,7 @@ impl StateHash for Trips {
             h.write(&(l.mode as u8));
             h.write(n);
         }
+        h.write(&self.counted_since.0);
+        h.write(&self.counted_version);
     }
 }

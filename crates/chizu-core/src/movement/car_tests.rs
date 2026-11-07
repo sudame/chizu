@@ -984,6 +984,28 @@ fn links_count_the_cars_that_left_them_until_delays_are_estimated() {
         BTreeMap::from([(first, 1)]),
         "抜けた台数がずれた"
     );
-    c.trips.queue_delays(&c.net);
+    estimate(&mut c, crate::routing::BAND_TICKS);
     assert!(c.trips.exits.is_empty());
+}
+
+#[test]
+fn a_car_leaving_a_dead_end_that_others_drove_into_adds_only_the_floor() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    estimate(&mut c, crate::routing::BAND_TICKS);
+    // 行き止まりの道に着いた車は、リンクの終わりを抜けないので抜けた台数に入らない。
+    let id = c.drive(at(1, 0, (1, 0), 0), at(9, 0, (1, 0), 0));
+    let link = c.trips.get(id).unwrap().link();
+    assert!((0..50).any(|_| c.step().contains(&id)), "着かなかった");
+    assert_eq!(c.trips.exits.get(&link), None);
+    // そこから出発したばかりの車が 1 台止まっていても、1 台が抜けるのに時間帯まるごとかかったとはみなさない。
+    c.drive(at(2, 0, (1, 0), 0), at(9, 0, (1, 0), 0));
+    let d = estimate(&mut c, 2 * crate::routing::BAND_TICKS);
+    assert_eq!(d.get(link), congestion::QUEUE_MS_PER_CAR);
+}
+
+/// 遅れを見積もる。`now` は見積もる tick である。
+fn estimate(c: &mut Cars, now: u64) -> crate::routing::Delays {
+    c.trips.queue_delays(&c.net, Tick(now))
 }
