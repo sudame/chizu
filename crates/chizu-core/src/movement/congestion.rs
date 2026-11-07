@@ -97,11 +97,20 @@ pub(super) const MS_PER_TICK: u64 = 1_000;
 /// 1 台あたりの時間で抜けられる台数である。
 pub(super) const SATURATED_PER_LANE: u64 = signal::GREEN * MS_PER_TICK / QUEUE_MS_PER_CAR;
 
+/// リンク `link`（車線 `lanes` 本）で、並んでいる車がこの台数より多ければ、さばききれていないとみなす。
+/// 1 回の青でさばけない台数（[`SATURATED_PER_LANE`] × 車線）にする。ただし短いリンクにはそれだけ並べないので、
+/// 並べる台数の上限が埋まった列もさばききれていないとみなす。止まった 1 台の偶然で決めないよう、2 台より少ない列は数えない。
+fn saturated_queue(net: &Network, link: LinkId, lanes: u64) -> u64 {
+    (SATURATED_PER_LANE * lanes)
+        .min(capacity_cars(net, link) - 1)
+        .max(1)
+}
+
 impl Trips {
     /// 車のリンクごとの、並んでいる車から見積もった遅れ。時間帯（[`BAND_TICKS`]）ごとに tick `now` で 1 回呼ぶ。
     ///
     /// 並んでいる車 1 台あたりの遅れは、ふつうは [`QUEUE_MS_PER_CAR`] を車線の数で割った長さにする。
-    /// ただし、1 回の青でさばききれない長さの列（車線 1 本あたり [`SATURATED_PER_LANE`] 台より多い）があるリンクでは、
+    /// ただし、1 回の青でさばききれない長さの列（[`saturated_queue`] 台より多い）があるリンクでは、
     /// 前に見積もってから 1 台がリンクの終わりを抜けて次のリンクへ移るのにかかった時間（数えた時間 ÷ 抜けた台数）が
     /// それより長ければ、その時間にする。抜けた車がいなければ 1 台抜けたものとする。リンクの先の交差点で
     /// 待たされるほど、抜ける台数が減り、遅れが長くなる。列が短いリンクで抜けた台数が少ないのは、さばけないからではなく
@@ -144,7 +153,7 @@ impl Trips {
             let floor = n * QUEUE_MS_PER_CAR / lanes;
             let counted = net.segment(link.segment).is_some_and(|s| s.built < version);
             let measured = counted_ms
-                .filter(|_| counted && n > SATURATED_PER_LANE * lanes)
+                .filter(|_| counted && n > saturated_queue(net, link, lanes))
                 .map_or(0, |ms| {
                     let left = u64::from(exits.get(&link).copied().unwrap_or(0)).max(1);
                     n * (ms / left)
@@ -372,5 +381,35 @@ mod tests {
         // 数え始めてからの時間がわからないので、時間帯まるごとで割らずに下限の見積もりにする。
         let d = estimate(&mut trips, &n, 2 * BAND_TICKS);
         assert_eq!(d.get(west), queued * QUEUE_MS_PER_CAR);
+    }
+
+    #[test]
+    fn a_short_link_filled_with_a_slow_queue_adds_the_measured_time_per_car() {
+        let mut n = Network::new();
+        // 4 マスの 1 車線には 4 台しか並べないので、1 回の青でさばけない列の長さには届かない。
+        let short = link_of(&mut n, (0, 0), (4, 0), RoadKind::Small);
+        link_of(&mut n, (4, 0), (10, 0), RoadKind::Small);
+        assert_eq!(capacity_cars(&n, short), 4);
+        let mut trips = Trips::default();
+        estimate(&mut trips, &n, BAND_TICKS);
+        // 並べるだけ並んで抜けが遅ければ、さばききれていないとみなし、測った時間を足す。
+        stopped_cars(&mut trips, &n, 0, 0..4, 8);
+        trips.exits.insert(short, 5);
+        let d = estimate(&mut trips, &n, 2 * BAND_TICKS);
+        assert_eq!(d.get(short), 4 * (BAND_TICKS * MS_PER_TICK / 5));
+    }
+
+    #[test]
+    fn a_short_quiet_link_with_a_stopped_car_adds_only_the_floor() {
+        let mut n = Network::new();
+        let short = link_of(&mut n, (0, 0), (2, 0), RoadKind::Small);
+        link_of(&mut n, (2, 0), (10, 0), RoadKind::Small);
+        assert_eq!(capacity_cars(&n, short), 2);
+        let mut trips = Trips::default();
+        estimate(&mut trips, &n, BAND_TICKS);
+        // 2 台しか並べない道でも、1 台止まっているだけでは、抜けた車が少なくても測った時間は使わない。
+        stopped_cars(&mut trips, &n, 0, 1..2, 8);
+        let d = estimate(&mut trips, &n, 2 * BAND_TICKS);
+        assert_eq!(d.get(short), QUEUE_MS_PER_CAR);
     }
 }
