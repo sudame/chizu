@@ -387,6 +387,8 @@ impl Graph {
             let Some((j, axis)) = self.vertex(link).and_then(|v| self.arm[v as usize]) else {
                 continue;
             };
+            // 読み戻した保存データの値が 1000 を超えていても、引き算が下にあふれないよう千分率に収める。
+            let busy = busy.min(1_000);
             let n = &mut need[j as usize][usize::from(axis)];
             *n = *n + busy - *n * busy / 1_000;
         }
