@@ -965,6 +965,8 @@ fn links_count_the_cars_that_left_them_until_delays_are_estimated() {
     road(&mut n, (0, 0), (10, 0), RoadKind::Small);
     road(&mut n, (10, 0), (20, 0), RoadKind::Small);
     let mut c = Cars::new(n);
+    // 数え始める前からある区間だけを、忙しさに数える。
+    estimate(&mut c, 0);
     let id = c.drive(at(2, 0, (1, 0), 0), at(15, 0, (1, 0), 0));
     let first = c.trips.get(id).unwrap().link();
     let mut last = first;
@@ -984,8 +986,14 @@ fn links_count_the_cars_that_left_them_until_delays_are_estimated() {
         BTreeMap::from([(first, 1)]),
         "抜けた台数がずれた"
     );
-    estimate(&mut c, crate::routing::BAND_TICKS);
+    let d = estimate(&mut c, crate::routing::BAND_TICKS);
     assert!(c.trips.exits.is_empty());
+    // 抜けた 1 台は、1 車線のリンクで、数えた時間帯のうち 4 秒を使った。
+    let window = crate::routing::BAND_TICKS * congestion::MS_PER_TICK;
+    assert_eq!(
+        d.busy().collect::<Vec<_>>(),
+        [(first, congestion::QUEUE_MS_PER_CAR * 1_000 / window)]
+    );
 }
 
 #[test]

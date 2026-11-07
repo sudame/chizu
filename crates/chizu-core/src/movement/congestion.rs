@@ -148,10 +148,27 @@ impl Trips {
             };
             *queued.entry(link).or_insert(0) += 1;
         }
+        let counted = |link: LinkId| net.segment(link.segment).is_some_and(|s| s.built < version);
+        // 忙しさは、抜けた台数を数えた時間のある、数え始める前からある区間だけで求める。
+        let busy: Vec<(LinkId, u64)> = counted_ms
+            .map(|ms| {
+                exits
+                    .iter()
+                    .filter(|(link, _)| counted(**link))
+                    .map(|(link, n)| {
+                        let lanes = net.link_lanes(*link).count().max(1) as u64;
+                        (
+                            *link,
+                            u64::from(*n) * QUEUE_MS_PER_CAR * 1_000 / (lanes * ms),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Delays::from_rows(queued.into_iter().map(|(link, n)| {
             let lanes = net.link_lanes(link).count().max(1) as u64;
             let floor = n * QUEUE_MS_PER_CAR / lanes;
-            let counted = net.segment(link.segment).is_some_and(|s| s.built < version);
+            let counted = counted(link);
             let measured = counted_ms
                 .filter(|_| counted && n > saturated_queue(net, link, lanes))
                 .map_or(0, |ms| {
@@ -164,6 +181,7 @@ impl Trips {
             };
             (link, delay)
         }))
+        .with_busy(busy)
     }
 
     /// 車のいる区間の混み具合。区間の 2 つの向きのうち、混んでいるほうの段階を取る。
