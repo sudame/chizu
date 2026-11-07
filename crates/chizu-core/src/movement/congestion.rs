@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use super::{CAR_LENGTH, MIN_GAP, Trips, signal};
 use crate::network::{Dir, LaneMode, LinkId, Network, SegmentId};
-use crate::routing::{BAND_TICKS, Delays};
+use crate::routing::{BAND_TICKS, Delay, Delays};
 use crate::units::Tick;
 
 /// 車 1 台が車線の上でふさぐ長さ（mm）。車の長さと、止まったときの最小の車間である。
@@ -148,7 +148,7 @@ impl Trips {
             };
             *queued.entry(link).or_insert(0) += 1;
         }
-        Delays::from_sorted(queued.into_iter().map(|(link, n)| {
+        Delays::from_rows(queued.into_iter().map(|(link, n)| {
             let lanes = net.link_lanes(link).count().max(1) as u64;
             let floor = n * QUEUE_MS_PER_CAR / lanes;
             let counted = net.segment(link.segment).is_some_and(|s| s.built < version);
@@ -158,7 +158,11 @@ impl Trips {
                     let left = u64::from(exits.get(&link).copied().unwrap_or(0)).max(1);
                     n * (ms / left)
                 });
-            (link, floor.max(measured))
+            let delay = Delay {
+                ms: floor.max(measured),
+                measured: measured > floor,
+            };
+            (link, delay)
         }))
     }
 

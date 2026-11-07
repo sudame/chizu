@@ -1044,7 +1044,10 @@ impl World {
             Command::PaintZone { area, zone } => self.paint_zone(area, zone),
             Command::PlaceBuilding { kind, at, rotation } => self.place_service(kind, at, rotation),
             Command::SetSignal { node, on } => match self.network.set_signal(node, on) {
-                Ok(()) => ApplyOutcome::Applied,
+                Ok(()) => {
+                    self.router.router.set_signals(&self.network);
+                    ApplyOutcome::Applied
+                }
                 Err(reason) => ApplyOutcome::Denied(reason),
             },
             Command::SetCrosswalk { node, arm, on } => {
@@ -1373,6 +1376,32 @@ mod tests {
         let n = w.network().node(node).unwrap();
         assert_eq!(n.segments.len(), 2);
         assert_eq!(n.control, crate::network::NodeControl::None);
+    }
+
+    #[test]
+    fn signals_reach_the_route_costs_without_a_rebuild_and_survive_a_snapshot() {
+        let mut w = World::new(0);
+        road(&mut w, (0, 5), (10, 5), RoadKind::Small);
+        road(&mut w, (5, 0), (5, 10), RoadKind::Small);
+        w.step();
+        let node = w.network().node_at(TilePos::new(5, 5)).unwrap();
+        let version = w.router.router.version();
+        assert_eq!(version, w.network().version());
+        let free = w.router.router.graph(crate::network::LaneMode::Car).clone();
+        let on = Command::SetSignal { node, on: true };
+        assert_eq!(w.apply(&on), ApplyOutcome::Applied);
+        // 網の版は上げず、グラフを作り直さずに費用だけを変える。網から作り直したグラフと同じになる。
+        assert_eq!(w.router.router.version(), version);
+        let lit = w.router.router.graph(crate::network::LaneMode::Car).clone();
+        assert_ne!(lit, free);
+        assert_eq!(&lit, AstarRouter::new(w.network()).graph(crate::network::LaneMode::Car));
+        // 書き出して読み戻した街も、同じ費用で探す。
+        let back = World::from_snapshot(&w.to_snapshot()).unwrap();
+        assert_eq!(back.router.router.graph(crate::network::LaneMode::Car), &lit);
+        assert_eq!(back.state_hash(), w.state_hash());
+        let off = Command::SetSignal { node, on: false };
+        assert_eq!(w.apply(&off), ApplyOutcome::Applied);
+        assert_eq!(w.router.router.graph(crate::network::LaneMode::Car), &free);
     }
 
     fn road(w: &mut World, from: (i64, i64), to: (i64, i64), kind: RoadKind) -> ApplyOutcome {

@@ -36,6 +36,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::congestion::MS_PER_TICK;
 use crate::command::NodeId;
 use crate::network::{Network, NodeControl};
 use crate::units::Tick;
@@ -166,9 +167,8 @@ impl SignalState {
     }
 }
 
-/// ノード `node` の信号の、tick `now` の段階。`demand` は tick `now` を進める前の様子である。
-/// 信号がないか、3 本以上の区間が集まる交差点でなければ `None`。
-pub fn state(net: &Network, node: NodeId, now: Tick, demand: &Demand) -> Option<SignalState> {
+/// ノード `node` の信号が順に青にする軸。信号がないか、3 本以上の区間が集まる交差点でなければ `None`。
+fn signal_axes(net: &Network, node: NodeId) -> Option<Vec<u8>> {
     let n = net.node(node)?;
     if n.control != NodeControl::Signal || n.segments.len() < 3 {
         return None;
@@ -177,9 +177,36 @@ pub fn state(net: &Network, node: NodeId, now: Tick, demand: &Demand) -> Option<
     for s in &n.segments {
         axes[usize::from(axis(arm_step(net, node, *s)?))] = true;
     }
-    let order: Vec<u8> = (0..4_u8).filter(|a| axes[usize::from(*a)]).collect();
-    let count = u64::try_from(order.len()).expect("軸の数が u64 に収まらない");
-    let cycle = count * PHASE;
+    Some((0..4_u8).filter(|a| axes[usize::from(*a)]).collect())
+}
+
+/// 軸 `order` を順に青にする骨組みの周期（tick）。
+fn cycle_of(order: &[u8]) -> u64 {
+    u64::try_from(order.len()).expect("軸の数が u64 に収まらない") * PHASE
+}
+
+/// 信号のある交差点 `node` を、腕から入る車が待つ時間の見込み（ms）。経路の費用に足す（設計 5.3）。
+/// 信号がなければ 0 である。
+///
+/// 骨組みの周期のどこに着くかが一様なら、1 つの腕が青でない長さ `赤` のあいだに着く割合は `赤 ÷ 周期` で、
+/// そのとき待つのは平均 `赤 ÷ 2` なので、見込みは `赤 × 赤 ÷ (2 × 周期)` になる。どの軸の青も同じ長さで、
+/// 同じ腕から曲がる向きはみな同じ灯火に従うので、見込みは腕にも曲がる向きにもよらず、軸の数だけで決まる。
+/// ほかの軸に車がいなければ早めに青を渡す（感応式）ので、実際の待ちはこれより短くなりうる。
+pub fn expected_wait_ms(net: &Network, node: NodeId) -> u64 {
+    let Some(order) = signal_axes(net, node) else {
+        return 0;
+    };
+    let cycle = cycle_of(&order);
+    let red = cycle - GREEN;
+    red * red * MS_PER_TICK / (2 * cycle)
+}
+
+/// ノード `node` の信号の、tick `now` の段階。`demand` は tick `now` を進める前の様子である。
+/// 信号がないか、3 本以上の区間が集まる交差点でなければ `None`。
+pub fn state(net: &Network, node: NodeId, now: Tick, demand: &Demand) -> Option<SignalState> {
+    let n = net.node(node)?;
+    let order = signal_axes(net, node)?;
+    let cycle = cycle_of(&order);
     let tile = n.tile();
     let cycle_i = i64::try_from(cycle).expect("周期が i64 に収まらない");
     // マスの座標から決めるずらし。隣り合う交差点で、段階がそろいすぎないようにする。

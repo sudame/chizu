@@ -4,6 +4,7 @@ use core::fmt;
 
 use crate::command::{NodeId, RoadKind};
 use crate::movement::crossing::{self, JAYWALK_DETOUR_MM};
+use crate::movement::signal;
 use crate::network::{Dir, LaneId, LaneMode, Line, LinkId, Network, SegmentId, SegmentKind};
 use crate::rng::{GOLDEN_GAMMA, RngPurpose, mix_words, mix64};
 use crate::tile::TilePos;
@@ -136,10 +137,14 @@ pub(crate) struct Edge {
 pub struct Graph {
     mode: LaneMode,
     links: Vec<LinkId>,
-    /// リンクを端から端まで通る費用（ms）。自由に走れたときの所要時間に、混み具合の遅れを足したもの。
+    /// リンクを端から端まで通る費用（ms）。自由に走れたときの所要時間に、混み具合の遅れと信号の待ちの見込みを
+    /// 足したもの（[`Graph::set_delays`]）。
     cost: Vec<u64>,
     /// 自由に走れたときの、リンクを端から端まで通る所要時間（ms）。
     free: Vec<u64>,
+    /// リンクの終わりの交差点の信号で待つ時間の見込み（ms）。信号がなければ 0 である。歩道では 0 にする。
+    /// 信号は網の版を上げずに置いたり外したりするので、グラフを作り直さずに書き換える（[`Graph::set_signals`]）。
+    signal_wait: Vec<u64>,
     /// 頂点ごとの、強く連結な成分の番号。
     component: Vec<u32>,
     /// 成分ごとの頂点の数。
@@ -277,13 +282,15 @@ impl Graph {
         }
         let (rev_start, rev_edges) = reverse(&edge_start, &edges);
         let (component, component_len) = components(&edge_start, &edges);
-        Ok(Graph {
+        let signal_wait = signal_waits(net, mode, &links)?;
+        let mut g = Graph {
             component,
             component_len,
             mode,
             links,
             free: cost.clone(),
             cost,
+            signal_wait,
             end_tile,
             street,
             edge_start,
@@ -291,7 +298,9 @@ impl Graph {
             rev_start,
             rev_edges,
             max_speed,
-        })
+        };
+        g.set_delays(&Delays::default());
+        Ok(g)
     }
 
     pub fn mode(&self) -> LaneMode {
@@ -319,18 +328,45 @@ impl Graph {
         mix64(self.street[v as usize] ^ salt)
     }
 
-    /// リンクの費用を、自由に走れたときの所要時間に `delays` の遅れを足したものにする。
-    /// 費用は自由に走れたときの所要時間の [`DELAY_CAP_TIMES`] 倍までに収める（設計 3.4）。
+    /// リンクの費用を、自由に走れたときの所要時間に、`delays` の遅れと信号の待ちの見込みを足したものにする（設計 5.3）。
+    /// 遅れは自由に走れたときの所要時間の [`DELAY_CAP_TIMES`] 倍までに収める（設計 3.4）。信号の待ちの見込みは
+    /// 混み具合によらない決まった長さなので、この上限の外で足す。ただし、抜けた台数から測った遅れ
+    /// （[`Delay::measured`](super::Delay::measured)）は信号で待った時間を含むので、見込みと長いほうだけにする。
     /// グラフにないリンクの遅れは捨てる。費用は下がらないので、ヒューリスティックは下限のままである。
     pub(crate) fn set_delays(&mut self, delays: &Delays) {
-        self.cost.clone_from(&self.free);
-        for (link, ms) in delays.iter() {
+        for v in 0..self.cost.len() {
+            self.cost[v] = self.free[v].saturating_add(self.signal_wait[v]);
+        }
+        for (link, d) in delays.iter() {
             if let Some(v) = self.vertex(link) {
                 let v = v as usize;
                 let cap = self.free[v].saturating_mul(DELAY_CAP_TIMES - 1);
-                self.cost[v] = self.free[v].saturating_add(ms.min(cap));
+                let queue = d.ms.min(cap);
+                let wait = self.signal_wait[v];
+                let extra = if d.measured {
+                    queue.max(wait)
+                } else {
+                    queue.saturating_add(wait)
+                };
+                self.cost[v] = self.free[v].saturating_add(extra);
             }
         }
+    }
+
+    /// 信号の待ちの見込みを、網 `net` のいまの信号から求め直す。変わったら `true` を返す。費用は変えないので、
+    /// 続けて [`Graph::set_delays`] を呼ぶ。グラフを作ったときと同じ版の網に使う。
+    pub(crate) fn set_signals(&mut self, net: &Network) -> bool {
+        let waits = signal_waits(net, self.mode, &self.links).expect("網の中身が食い違っている");
+        if waits == self.signal_wait {
+            return false;
+        }
+        self.signal_wait = waits;
+        true
+    }
+
+    /// リンク `link` の終わりの交差点の信号で待つ時間の見込み（ms）。
+    pub fn signal_wait(&self, link: LinkId) -> Option<u64> {
+        self.vertex(link).map(|v| self.signal_wait[v as usize])
     }
 
     /// リンク `from` の終わりからリンク `to` へ、必ず経路があると言えるか。同じ強く連結な成分にあれば
@@ -384,6 +420,17 @@ impl Graph {
         let speed = u64::try_from(self.max_speed.0).expect("速さが負");
         mm.checked_mul(1_000).expect("所要時間があふれた") / speed
     }
+}
+
+/// リンク `links` ごとの、リンクの終わりの交差点の信号で待つ時間の見込み（ms）。歩道は信号の待ちを費用に入れない。
+fn signal_waits(net: &Network, mode: LaneMode, links: &[LinkId]) -> Result<Vec<u64>, GraphError> {
+    links
+        .iter()
+        .map(|l| match mode {
+            LaneMode::Car => Ok(signal::expected_wait_ms(net, link_ends(net, *l)?.1)),
+            LaneMode::Sidewalk => Ok(0),
+        })
+        .collect()
 }
 
 /// 直線 `line` の向きと位置を混ぜた値。逆向きに引いた直線と、同じ直線の上にある別の区間も同じ値になる。
