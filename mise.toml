@@ -17,7 +17,7 @@ CHIZU_WASM_TEST_PROFILE = "{% if get_env(name='CI', default='') == '' %}{{ get_e
 biome = "2.6.4"
 jactionlint = "2.4.0"
 node = "26.13.0"
-pnpm = "12.16.1"
+pnpm = "12.17.0"
 ripgrep = "15.2.0"
 rumdl = "0.3.2"
 sccache = "0.19.0"
