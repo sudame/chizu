@@ -268,7 +268,7 @@ fn cars_pushed_off_a_narrowed_road_count_as_stopped_on_the_road() {
         .filter(|(_, t)| t.link() == link && t.speed.0 < congestion::QUEUED_BELOW)
         .count() as u64;
     assert_eq!(
-        c.trips.queue_delays(&c.net).get(link),
+        c.trips.queue_delays(&c.net, Tick::ZERO).get(link),
         on_link * congestion::QUEUE_MS_PER_CAR / c.net.link_lanes(link).count() as u64
     );
     c.run_until_empty(600);

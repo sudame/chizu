@@ -285,6 +285,9 @@ pub struct Segment {
     pub kind: SegmentKind,
     /// 車の車線（`a` から `b` へ、`b` から `a` へ）、歩道（同じ順）の順に並べる。
     pub lanes: Vec<LaneId>,
+    /// 区間を足したときの網の版（[`Network::version`]）。区間を足した変更を終えると版が上がるので、
+    /// 版が `v` だったときにあった区間は、この値が `v` より小さい。
+    pub built: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -624,6 +627,7 @@ impl Network {
             b,
             kind,
             lanes: Vec::new(),
+            built: self.version,
         });
         let mut lanes = Vec::new();
         let mut push = |mode, count| {
@@ -1056,6 +1060,7 @@ impl StateHash for Segment {
         h.write(&self.b);
         h.write(&self.kind.code());
         h.write(&self.lanes);
+        h.write(&self.built);
     }
 }
 

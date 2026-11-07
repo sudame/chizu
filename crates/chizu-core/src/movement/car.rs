@@ -1361,6 +1361,7 @@ fn check_lane(rows: &[Option<Trip>], lane: LaneId) {
 }
 
 /// 車を tick `now` から 1 tick 進め、着いた主体の行の番号を返す。`rail` の踏切の先に抜けきる空きがなければ、手前で止まる。
+/// リンクの終わりを抜けて次のリンクへ移った車を、それまでいたリンクごとに `exits` に数える。
 #[allow(clippy::too_many_arguments)]
 pub(super) fn step(
     rows: &mut [Option<Trip>],
@@ -1371,6 +1372,7 @@ pub(super) fn step(
     occupied: &crossing::Occupied,
     signals: &signal::Demand,
     rail: &RailCrossings,
+    exits: &mut BTreeMap<LinkId, u32>,
 ) -> Vec<usize> {
     // 出発を待っている車を、主体の番号の順に置き直す。
     let waiting: Vec<usize> = (0..rows.len())
@@ -1633,6 +1635,8 @@ pub(super) fn step(
         // 始まりのずれを、ノードを越える前にも同じに求められるようにするためである（`Trip::car_path`）。
         // リンクの始まりから移り始めれば、次の停止線までに移り終えるので、次の曲線の始まりはこのリンクの車線の上にある。
         let shown = t.shift_at(net, stop_line(net, t.link()));
+        let e = exits.entry(t.link()).or_insert(0);
+        *e = e.saturating_add(1);
         t.leg += 1;
         (t.waited, t.yielded, t.bound) = (0, 0, None);
         t.enter(net, place, Some(lane));

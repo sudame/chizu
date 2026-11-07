@@ -958,3 +958,54 @@ fn short_segments_jam_when_filled() {
     let seg = c.net.segments_through(TilePos::new(1, 0))[0];
     assert_eq!(levels.get(&seg), Some(&Congestion::Jammed));
 }
+
+#[test]
+fn links_count_the_cars_that_left_them_until_delays_are_estimated() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0), RoadKind::Small);
+    road(&mut n, (10, 0), (20, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    let id = c.drive(at(2, 0, (1, 0), 0), at(15, 0, (1, 0), 0));
+    let first = c.trips.get(id).unwrap().link();
+    let mut last = first;
+    let mut arrived = false;
+    for _ in 0..200 {
+        if c.step().contains(&id) {
+            arrived = true;
+            break;
+        }
+        last = c.trips.get(id).unwrap().link();
+    }
+    assert!(arrived);
+    assert_ne!(first, last);
+    // 次のリンクへ移った車は、いたリンクを抜けた車に数える。行き先に着いた車は、リンクの終わりを抜けないので数えない。
+    assert_eq!(
+        c.trips.exits,
+        BTreeMap::from([(first, 1)]),
+        "抜けた台数がずれた"
+    );
+    estimate(&mut c, crate::routing::BAND_TICKS);
+    assert!(c.trips.exits.is_empty());
+}
+
+#[test]
+fn a_car_leaving_a_dead_end_that_others_drove_into_adds_only_the_floor() {
+    let mut n = Network::new();
+    road(&mut n, (0, 0), (10, 0), RoadKind::Small);
+    let mut c = Cars::new(n);
+    estimate(&mut c, crate::routing::BAND_TICKS);
+    // 行き止まりの道に着いた車は、リンクの終わりを抜けないので抜けた台数に入らない。
+    let id = c.drive(at(1, 0, (1, 0), 0), at(9, 0, (1, 0), 0));
+    let link = c.trips.get(id).unwrap().link();
+    assert!((0..50).any(|_| c.step().contains(&id)), "着かなかった");
+    assert_eq!(c.trips.exits.get(&link), None);
+    // そこから出発したばかりの車が 1 台止まっていても、1 台が抜けるのに時間帯まるごとかかったとはみなさない。
+    c.drive(at(2, 0, (1, 0), 0), at(9, 0, (1, 0), 0));
+    let d = estimate(&mut c, 2 * crate::routing::BAND_TICKS);
+    assert_eq!(d.get(link), congestion::QUEUE_MS_PER_CAR);
+}
+
+/// 遅れを見積もる。`now` は見積もる tick である。
+fn estimate(c: &mut Cars, now: u64) -> crate::routing::Delays {
+    c.trips.queue_delays(&c.net, Tick(now))
+}
