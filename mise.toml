@@ -15,12 +15,12 @@ CHIZU_WASM_TEST_PROFILE = "{% if get_env(name='CI', default='') == '' %}{{ get_e
 # test:rust でテストを回す
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.149"
 biome = "2.6.4"
-jactionlint = "2.4.0"
-node = "26.13.0"
-pnpm = "12.16.1"
+jactionlint = "2.6.0"
+node = "26.13.1"
+pnpm = "12.23.0"
 ripgrep = "15.2.0"
-rumdl = "0.3.2"
-sccache = "0.19.0"
+rumdl = "0.3.6"
+sccache = "0.20.1"
 shellcheck = "0.11.0"
 # crates/chizu-wasm の wasm-bindgen と同じ版にする
 "github:wasm-bindgen/wasm-bindgen" = "0.2.130"
